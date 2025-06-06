@@ -1,89 +1,139 @@
 import cv2
 import random
+from ultralytics import YOLO
+import os
+import numpy as np
 
-def make_test_video():
-    # Create a shorter version of the video - random 10 seconds snippet
-    video_path = 'input/portland_vs_san_francisco_2024.mp4'
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        print("Error: Could not open video.")
+INPUT_FOLDER = "input"  # Change as needed
+YOLO_PLAYERS_MODEL = "yolo11l"  # Path to fine-tuned player/disc model
+YOLO_FIELD_MODEL = "yolo11n-seg"  # Path to fine-tuned field segmentation model
+YOLO_PLAYERS_MODEL_PATH = "player_disc_detection_" + YOLO_PLAYERS_MODEL + "/detection_finetune/weights/best.pt"
+YOLO_FIELD_MODEL_PATH = "field_finder_" + YOLO_FIELD_MODEL + "/segmentation_finetune/weights/best.pt"
+
+FIELD_CONF = 0.8
+PLAYER_CONF = 0.3
+
+def visualize_inference():
+    snippet_files = sorted([f for f in os.listdir(INPUT_FOLDER) if "snippet" in f])
+    if not snippet_files:
+        print("No snippet files found.")
         return
-    # Get the total number of frames and the frame rate
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    # Calculate the total number of frames for 10 seconds
-    snippet_frames = int(fps * 10)  # 10 seconds snippet
-    # Generate a random starting frame number
-    start_frame = random.randint(0, total_frames - snippet_frames)
-    # Set the video to the starting frame
-    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-    # Create a VideoWriter object to save the snippet
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Codec for .mp4
-    output_path = f'input/portland_vs_san_francisco_snippet_{start_frame}.mp4'
-    out = cv2.VideoWriter(output_path, fourcc, fps, (int(cap.get(3)), int(cap.get(4))))
-    # Read and write the frames for the snippet
-    for _ in range(snippet_frames):
-        ret, frame = cap.read()
-        if not ret:
-            print("Error: Could not read frame.")
-            break
-        out.write(frame)
-    # Release resources
-    cap.release()
-    out.release()
 
-def make_test_screenshot():
-    # Create an image randomly selected from the video
-    video_path = 'input/portland_vs_san_francisco_2024.mp4'
-    cap = cv2.VideoCapture(video_path)
+    yolo_players = YOLO(YOLO_PLAYERS_MODEL_PATH)  # Path to fine-tuned player/disc model
+    yolo_field = YOLO(YOLO_FIELD_MODEL_PATH)  # Path to fine-tuned field segmentation model
 
-    if not cap.isOpened():
-        print("Error: Could not open video.")
-        return  
-    # Get total number of frames in the video
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    # Generate a random frame number
-    random_frame_number = random.randint(0, total_frames - 1)
-    # Set the video to the random frame
-    cap.set(cv2.CAP_PROP_POS_FRAMES, random_frame_number)
-    # Read the frame
-    ret, frame = cap.read()
-    if not ret:
-        print("Error: Could not read frame.")
-        return
-    # Save the frame as a screenshot with frame number in the filename
-    cap.release()
-    screenshot_path = f'input/screenshot_frame_{random_frame_number}.jpg'
+    idx = 0
+    while 0 <= idx < len(snippet_files):
+        snippet_path = os.path.join(INPUT_FOLDER, snippet_files[idx])
+        cap = cv2.VideoCapture(snippet_path)
+        print(f"Processing: {snippet_files[idx]}")
 
-    cv2.imwrite(screenshot_path, frame)
-    print(f"Screenshot saved to {screenshot_path}")
-    # Display the screenshot
-    cv2.imshow('Screenshot', frame)
-    cv2.waitKey(0)
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-def main():
-    #read video file portland_vs_san_francisco_2024 in input folder and display it
+            # Detect players and discs
+            results_players = yolo_players(frame, imgsz=640, conf=PLAYER_CONF)
+            for box in results_players[0].boxes.xyxy:
+                x1, y1, x2, y2 = map(int, box)
+                # Get class_id and label before using them
+                if hasattr(results_players[0], "boxes") and hasattr(results_players[0].boxes, "cls"):
+                    class_id = int(results_players[0].boxes.cls[results_players[0].boxes.xyxy.tolist().index(box.tolist())])
+                    label = results_players[0].names[class_id] if hasattr(results_players[0], "names") else str(class_id)
+                else:
+                    class_id = 0
+                    label = "unknown"
+                # Add confidence if available
+                if hasattr(results_players[0].boxes, "conf"):
+                    conf = float(results_players[0].boxes.conf[results_players[0].boxes.xyxy.tolist().index(box.tolist())])
+                    label += f" {conf:.2f}"
+                
+                # Assign a unique color for each class
+                # Use HSV color space to generate visually distinct colors
+                num_classes = len(results_players[0].names) if hasattr(results_players[0], "names") else 10
+                hue = int(180 * class_id / max(num_classes, 1))
+                color_hsv = cv2.cvtColor(
+                    np.uint8([[[hue, 255, 255]]]), cv2.COLOR_HSV2BGR
+                )[0][0]
+                color = tuple(int(c) for c in color_hsv)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-    video_path = 'input/portland_vs_san_francisco_2024.mp4'
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        print("Error: Could not open video.")
-        return
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("End of video or error reading frame.")
-            break
-        cv2.imshow('Video', frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-    cap.release()
+            
+            # Semantic segmentation for field
+            
+            results_field = yolo_field(frame, imgsz=640, conf=FIELD_CONF)
+            if hasattr(results_field[0], "masks") and results_field[0].masks is not None:
+                masks = results_field[0].masks.data.cpu().numpy()
+                if hasattr(results_field[0], "boxes") and hasattr(results_field[0].boxes, "cls"):
+                    class_ids = results_field[0].boxes.cls.cpu().numpy().astype(int)
+                else:
+                    class_ids = [0] * len(masks)
+                if hasattr(results_field[0], "names"):
+                    class_names = results_field[0].names
+                else:
+                    class_names = {i: str(i) for i in range(10)}
+                for i, mask in enumerate(masks):
+                    class_id = class_ids[i] if i < len(class_ids) else 0
+                    hue = int(180 * class_id / max(len(class_names), 1))
+                    color_hsv = cv2.cvtColor(
+                        np.uint8([[[hue, 255, 255]]]), cv2.COLOR_HSV2BGR
+                    )[0][0]
+                    color = tuple(int(c) for c in color_hsv)
+                    overlay = frame.copy()
+                    # Resize mask to match frame size
+                    mask_resized = cv2.resize(mask, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_LINEAR)
+                    
+                    kernel = np.ones((10, 10), np.uint8)
+                    mask_resized = cv2.erode(mask_resized, kernel, iterations=2)
+                    mask_resized = cv2.dilate(mask_resized, kernel, iterations=2)
+
+                    mask_bool = mask_resized > 0.5
+
+                    contours, _ = cv2.findContours(mask_resized.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                    
+
+                    for contour in contours:
+                        # Simplify contours using approxPolyDP
+                        epsilon = 0.005 * cv2.arcLength(contour, True)
+                        simplified_contour = cv2.approxPolyDP(contour, epsilon, True)
+                        cv2.drawContours(frame, [simplified_contour], -1, color, 2)
+                    
+                    
+                    overlay[mask_bool] = (
+                        0.5 * overlay[mask_bool] + 0.5 * np.array(color)
+                    ).astype(np.uint8)
+                    frame = cv2.addWeighted(overlay, 0.4, frame, 0.6, 0)
+                    # Draw bounding box and label
+                    
+                    if hasattr(results_field[0], "boxes") and i < len(results_field[0].boxes.xyxy):
+                        x1, y1, x2, y2 = map(int, results_field[0].boxes.xyxy[i])
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                        label = class_names[class_id] if class_id in class_names else str(class_id)
+                        conf = float(results_field[0].boxes.conf[i])
+                        label += f" {conf:.2f}"
+                        cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            
+            
+            cv2.imshow("Inference", frame)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                cap.release()
+                cv2.destroyAllWindows()
+                return
+            elif key == ord('n'):
+                break
+            elif key == ord('b'):
+                idx = max(idx - 2, -1)  # -1 because idx will be incremented below
+                break
+
+        cap.release()
+        idx += 1
     cv2.destroyAllWindows()
-    
 
 if __name__ == "__main__":
-    #make_test_screenshot()
-    make_test_video()
-
+    visualize_inference()
 
 

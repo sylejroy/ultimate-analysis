@@ -1,85 +1,85 @@
 import cv2
 import os
 from ultralytics import YOLO
+import itertools
 
-# Load a pretrained YOLOv8 model
-model = YOLO('yolo11n.pt') # n, s, m, l, x in order of size
+# Path to your ultimate-analysis dataset in YOLO format
+DATASET_PATH = "training_data/player disc detection.v3i.yolov8/data.yaml"
+MODEL_STRING = 'yolo11l'  # base model to use & fine-tune
+MODEL_PATH = 'player_disc_detection_' + MODEL_STRING + '/detection_finetune/weights/best.pt'
 
-# Get a snippet video file from the input folder
-input_folder = 'input'
-video_files = [f for f in os.listdir(input_folder) 
-               if f.lower().endswith(('.mp4', '.avi', '.mov')) 
-               and 'snippet' in f.lower()]
+def train_model():
+    # Load a pre-trained YOLOv8 segmentation model
+    model = YOLO(MODEL_STRING + '.pt')
+    # Fine-tune the model on your ultimate-analysis dataset
+    model.train(
+        data=DATASET_PATH,
+        epochs=100,
+        imgsz=640,
+        batch=0.8,  # Set a reasonable batch size for most GPUs
+        patience=10,
+        project='player_disc_detection_' + MODEL_STRING,
+        name='detection_finetune'
+    )
+def visualize_results():
+    # Load the best model after training
+    best_model = YOLO(MODEL_PATH)
+    input_dir = "input"
+    # Gather all video files containing "snippet" in the name
+    video_files = [
+        f for f in os.listdir(input_dir)
+        if "snippet" in f and f.lower().endswith(('.mp4', '.avi', '.mov', '.mkv'))
+    ]
+    video_files.sort()  # Optional: sort for consistent order
 
-if not video_files:
-    raise FileNotFoundError("No video snippet files found in the input folder. "
-                          "Please ensure you have short video files with 'snippet' in their name.")
+    if not video_files:
+        print("No snippet videos found.")
+        return
 
-# Print available snippets and select the first one
-print("Available video snippets:")
-for i, file in enumerate(video_files):
-    print(f"{i+1}. {file}")
-video_path = os.path.join(input_folder, video_files[0])
-print(f"\nUsing: {video_files[0]}")
+    idx = 0
+    while True:
+        filename = video_files[idx]
+        video_path = os.path.join(input_dir, filename)
+        cap = cv2.VideoCapture(video_path)
+        print(f"Processing {video_path}...")
 
-# Open the video file
-video_capture = cv2.VideoCapture(video_path)
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-# Check if video opened successfully
-if not video_capture.isOpened():
-    print("Error: Could not open video file")
-    exit()
+            # Run inference on the frame
+            results = best_model.predict(frame, imgsz=640, conf=0.35)
+            best_model.predict()
 
-while True:
-    # Read a frame from the video
-    frame_read_success, frame = video_capture.read()
-    
-    # If frame is read correctly, frame_read_success is True
-    if not frame_read_success:
-        print("Can't receive frame (stream end?). Exiting ...")
-        break
-        
-    # Run object detection on the frame
-    results = model(frame)
-    
-    # Visualize results on the frame
-    for result in results:
-        boxes = result.boxes
-        for box in boxes:
-            # Get box coordinates
-            x1, y1, x2, y2 = box.xyxy.cpu().numpy()[0].astype(int)
-            
-            # Get class details
-            class_id = int(box.cls.cpu().numpy()[0])
-            conf = float(box.conf.cpu().numpy()[0])
-            class_name = model.names[class_id]
-            
-            # Calculate box dimensions
-            width = x2 - x1
-            height = y2 - y1
-            
-            # Draw rectangle
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            
-            # Prepare text with details
-            label = f'{class_name} {conf:.2f}'
-            dimensions = f'{width}x{height}'
-            
-            # Add background for text
-            (label_width, label_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
-            cv2.rectangle(frame, (x1, y1-label_height-5), (x1+label_width, y1), (0, 255, 0), -1)
-            
-            # Add text
-            cv2.putText(frame, label, (x1, y1-5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1)
-            cv2.putText(frame, dimensions, (x1, y2+15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            # Visualize results on the frame
+            annotated_frame = results[0].plot(line_width=1, font_size=0.2)
 
-    # Display the frame
-    cv2.imshow('Video Detection', frame)
-    
-    # Press 'q' to exit
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+            # Display the frame
+            cv2.imshow(f'Detection Results - {filename}', annotated_frame)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                cap.release()
+                cv2.destroyAllWindows()
+                return
+            elif key == ord('n'):  # 'n' for next video
+                break
+            elif key == ord('b'):  # 'b' for previous video
+                break
 
-# Release everything when done
-video_capture.release()
-cv2.destroyAllWindows()
+        cap.release()
+        cv2.destroyAllWindows()
+
+        # Handle navigation with 'n' and 'b'
+        if key == ord('n'):
+            idx = (idx + 1) % len(video_files)
+        elif key == ord('b'):
+            idx = (idx - 1) % len(video_files)
+        else:
+            # If not 'n', 'b', or 'q', stay on current video
+            pass
+
+
+if __name__ == "__main__":
+    #train_model()
+    visualize_results()

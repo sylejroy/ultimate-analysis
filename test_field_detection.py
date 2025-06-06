@@ -4,8 +4,7 @@ import os
 
 # Path to your dataset in YOLO format (should contain images, labels, and data.yaml)
 DATASET_PATH = "training_data/field finder.v2i.yolov8/data.yaml"
-VIDEO_PATH = "input/portland_vs_san_francisco_snippet_43857.mp4"
-MODEL_STRING = 'yolo11n-seg' # base model to use & fine-tune
+MODEL_STRING = 'yolo11x-seg' # base model to use & fine-tune
 MODEL_PATH = 'field_finder_' + MODEL_STRING + '/segmentation_finetune/weights/best.pt'
 
 def train_model():
@@ -14,40 +13,60 @@ def train_model():
     # Fine-tune the model on your dataset
     model.train(
         data=DATASET_PATH,
-        epochs=50,            # Adjust epochs as needed
+        epochs=70,            # Adjust epochs as needed
         imgsz=640,            # Image size
         batch=0.90,           # Adjust batch size based on your GPU
-        patience=10,          # Early stopping
+        patience=20,          # Early stopping
         project='field_finder_'+ MODEL_STRING,
         name='segmentation_finetune'
     )
 
 def visualize_results():
-    # Load the best model after training
+    # Find all video files containing "snippet" in the name
+    input_dir = "input"
+    video_files = [f for f in os.listdir(input_dir) if "snippet" in f and f.endswith('.mp4')]
+    video_files.sort()
+    if not video_files:
+        print("No snippet videos found.")
+        return
+
     best_model = YOLO(MODEL_PATH)
-    cap = cv2.VideoCapture(VIDEO_PATH)
+    idx = 0
 
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
+    while 0 <= idx < len(video_files):
+        video_path = os.path.join(input_dir, video_files[idx])
+        cap = cv2.VideoCapture(video_path)
+        print(f"Playing: {video_files[idx]} ({idx+1}/{len(video_files)})")
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            # Run inference on the frame
+            results = best_model.predict(frame, imgsz=640, conf=0.65)
+            annotated_frame = results[0].plot(line_width=1, font_size=0.2)
+            cv2.imshow('Segmentation Results', annotated_frame)
+            key = cv2.waitKey(1) & 0xFF
+
+            if key == ord('q'):
+                cap.release()
+                cv2.destroyAllWindows()
+                return
+            elif key == ord('n'):
+                idx += 1
+                break
+            elif key == ord('b'):
+                idx -= 1
+                break
+
+        cap.release()
+        cv2.destroyAllWindows()
+        # Clamp idx to valid range
+        if idx < 0:
+            idx = 0
+        if idx >= len(video_files):
             break
 
-        # Run inference on the frame
-        results = best_model.predict(frame, imgsz=640, conf=0.55)
-
-        # Visualize results on the frame
-        annotated_frame = results[0].plot()
-        print(results[0])
-
-        # Display the frame
-        cv2.imshow('YOLOv8 Segmentation Results', annotated_frame)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-# annotate training data
 def annotate_training_data():
     # Load the best model after training
     best_model = YOLO(MODEL_PATH)
@@ -63,9 +82,8 @@ def annotate_training_data():
         results[0].show()
 
 
+
 if __name__ == "__main__":
     # Uncomment as needed
-    #train_model()
+    #bqtrain_model()
     visualize_results()
-    #annotate_training_data()
-    #auto_annotate_training_data()

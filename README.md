@@ -60,7 +60,12 @@ pip3 install ultralytics
 - create functions to export random screenshots and video snippets from video to use for development
 
 05.06.25
+- use CUDA to speed up training of models
 - initial training data for field detection using semantic segmentation (annotated 45 images using Roboflow)
 - expanded training data to 100 images & used Roboflow to augment data - flip vertically & shear
 - https://app.roboflow.com/sylvain-5mcdp/field-finder/2
+- finetune yolov8m/n-seg models with this data
+- finetune yolo11n-seg - better performance seemingly than v8
 
+06.06.25
+- labelled more images on Roboflow for the player/disc detection dataset
