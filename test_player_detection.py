@@ -4,9 +4,9 @@ from ultralytics import YOLO
 import itertools
 
 # Path to your ultimate-analysis dataset in YOLO format
-DATASET_PATH = "training_data/player disc detection.v3i.yolov8/data.yaml"
+DATASET_PATH = "training_data/object_detection.v3i.yolov8/data.yaml"
 MODEL_STRING = 'yolo11l'  # base model to use & fine-tune
-MODEL_PATH = 'player_disc_detection_' + MODEL_STRING + '/detection_finetune/weights/best.pt'
+MODEL_PATH = 'object_detection_' + MODEL_STRING + '/finetune3/weights/best.pt'
 
 def train_model():
     # Load a pre-trained YOLOv8 segmentation model
@@ -14,23 +14,23 @@ def train_model():
     # Fine-tune the model on your ultimate-analysis dataset
     model.train(
         data=DATASET_PATH,
-        epochs=100,
-        imgsz=640,
+        epochs=400,
+        imgsz=960,
         batch=0.8,  # Set a reasonable batch size for most GPUs
-        patience=10,
-        project='player_disc_detection_' + MODEL_STRING,
-        name='detection_finetune'
+        patience=200,
+        project='object_detection_' + MODEL_STRING,
+        name='finetune'
     )
 def visualize_results():
     # Load the best model after training
     best_model = YOLO(MODEL_PATH)
-    input_dir = "input"
+    input_dir = "input/dev_data"
     # Gather all video files containing "snippet" in the name
     video_files = [
         f for f in os.listdir(input_dir)
         if "snippet" in f and f.lower().endswith(('.mp4', '.avi', '.mov', '.mkv'))
     ]
-    video_files.sort()  # Optional: sort for consistent order
+    #video_files.sort()  # Optional: sort for consistent order
 
     if not video_files:
         print("No snippet videos found.")
@@ -49,7 +49,7 @@ def visualize_results():
                 break
 
             # Run inference on the frame
-            results = best_model.predict(frame, imgsz=640, conf=0.35)
+            results = best_model.predict(frame, imgsz=960, conf=0.25)
             best_model.predict()
 
             # Visualize results on the frame

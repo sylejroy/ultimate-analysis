@@ -4,11 +4,11 @@ from ultralytics import YOLO
 import os
 import numpy as np
 
-INPUT_FOLDER = "input"  # Change as needed
+INPUT_FOLDER = "input/dev_data"  # Change as needed
 YOLO_PLAYERS_MODEL = "yolo11l"  # Path to fine-tuned player/disc model
-YOLO_FIELD_MODEL = "yolo11n-seg"  # Path to fine-tuned field segmentation model
-YOLO_PLAYERS_MODEL_PATH = "player_disc_detection_" + YOLO_PLAYERS_MODEL + "/detection_finetune/weights/best.pt"
-YOLO_FIELD_MODEL_PATH = "field_finder_" + YOLO_FIELD_MODEL + "/segmentation_finetune/weights/best.pt"
+YOLO_FIELD_MODEL = "yolo11m-seg"  # Path to fine-tuned field segmentation model
+YOLO_PLAYERS_MODEL_PATH = "finetune/object_detection_" + YOLO_PLAYERS_MODEL + "/finetune3/weights/best.pt"
+YOLO_FIELD_MODEL_PATH = "finetune/field_finder_" + YOLO_FIELD_MODEL + "/segmentation_finetune/weights/best.pt"
 
 FIELD_CONF = 0.8
 PLAYER_CONF = 0.3
@@ -34,7 +34,7 @@ def visualize_inference():
                 break
 
             # Detect players and discs
-            results_players = yolo_players(frame, imgsz=640, conf=PLAYER_CONF)
+            results_players = yolo_players(frame, imgsz=960, conf=PLAYER_CONF)
             for box in results_players[0].boxes.xyxy:
                 x1, y1, x2, y2 = map(int, box)
                 # Get class_id and label before using them
@@ -57,8 +57,8 @@ def visualize_inference():
                     np.uint8([[[hue, 255, 255]]]), cv2.COLOR_HSV2BGR
                 )[0][0]
                 color = tuple(int(c) for c in color_hsv)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1)
+                cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
 
             
             # Semantic segmentation for field
@@ -88,8 +88,8 @@ def visualize_inference():
                     kernel = np.ones((10, 10), np.uint8)
                     mask_resized = cv2.erode(mask_resized, kernel, iterations=2)
                     mask_resized = cv2.dilate(mask_resized, kernel, iterations=2)
-
-                    mask_bool = mask_resized > 0.5
+                    
+                    mask_bool = mask_resized > 0.1
 
                     contours, _ = cv2.findContours(mask_resized.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                     
@@ -104,16 +104,20 @@ def visualize_inference():
                     overlay[mask_bool] = (
                         0.5 * overlay[mask_bool] + 0.5 * np.array(color)
                     ).astype(np.uint8)
+
                     frame = cv2.addWeighted(overlay, 0.4, frame, 0.6, 0)
+
+                   
+
                     # Draw bounding box and label
                     
                     if hasattr(results_field[0], "boxes") and i < len(results_field[0].boxes.xyxy):
                         x1, y1, x2, y2 = map(int, results_field[0].boxes.xyxy[i])
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1)
                         label = class_names[class_id] if class_id in class_names else str(class_id)
                         conf = float(results_field[0].boxes.conf[i])
                         label += f" {conf:.2f}"
-                        cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                        cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
             
             
             cv2.imshow("Inference", frame)

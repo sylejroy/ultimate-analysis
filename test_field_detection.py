@@ -1,11 +1,12 @@
 from ultralytics import YOLO
 import cv2
 import os
+import yaml
 
 # Path to your dataset in YOLO format (should contain images, labels, and data.yaml)
-DATASET_PATH = "training_data/field finder.v2i.yolov8/data.yaml"
-MODEL_STRING = 'yolo11x-seg' # base model to use & fine-tune
-MODEL_PATH = 'field_finder_' + MODEL_STRING + '/segmentation_finetune/weights/best.pt'
+DATASET_PATH = "training_data/field finder.v4i.yolov8/data.yaml"
+MODEL_STRING = 'yolo11n-seg' # base model to use & fine-tune
+MODEL_PATH = 'finetune/field_finder_' + MODEL_STRING + '/segmentation_finetune/weights/best.pt'
 
 def train_model():
     # Load a pre-trained YOLOv8 segmentation model
@@ -13,17 +14,17 @@ def train_model():
     # Fine-tune the model on your dataset
     model.train(
         data=DATASET_PATH,
-        epochs=70,            # Adjust epochs as needed
+        epochs=50,            # Adjust epochs as needed
         imgsz=640,            # Image size
-        batch=0.90,           # Adjust batch size based on your GPU
-        patience=20,          # Early stopping
-        project='field_finder_'+ MODEL_STRING,
+        batch=0.8,           # Adjust batch size based on your GPU
+        patience=10,          # Early stopping
+        project='finetune/field_finder_'+ MODEL_STRING,
         name='segmentation_finetune'
     )
 
 def visualize_results():
     # Find all video files containing "snippet" in the name
-    input_dir = "input"
+    input_dir = "input/dev_data"
     video_files = [f for f in os.listdir(input_dir) if "snippet" in f and f.endswith('.mp4')]
     video_files.sort()
     if not video_files:
@@ -43,7 +44,15 @@ def visualize_results():
             if not ret:
                 break
             # Run inference on the frame
-            results = best_model.predict(frame, imgsz=640, conf=0.65)
+            # Find imgsz parameter in args.yaml if it exists
+            args_yaml_path = os.path.join(os.path.dirname(MODEL_PATH), 'args.yaml')
+            if os.path.exists(args_yaml_path):
+                with open(args_yaml_path, 'r') as f:
+                    args = yaml.safe_load(f)
+                imgsz = args.get('imgsz', 640)
+            else:
+                imgsz = 640
+            results = best_model.predict(frame, imgsz=960, conf=0.65)
             annotated_frame = results[0].plot(line_width=1, font_size=0.2)
             cv2.imshow('Segmentation Results', annotated_frame)
             key = cv2.waitKey(1) & 0xFF
@@ -85,5 +94,5 @@ def annotate_training_data():
 
 if __name__ == "__main__":
     # Uncomment as needed
-    #bqtrain_model()
+    #train_model()
     visualize_results()
