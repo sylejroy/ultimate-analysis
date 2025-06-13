@@ -4,11 +4,12 @@ from ultralytics import YOLO
 import os
 from deep_sort_realtime.deepsort_tracker import DeepSort
 from random import shuffle
+import pytesseract
 
 # Helper function to reset tracker
 def reset_tracker():
     global tracker
-    tracker = DeepSort(max_age=3)
+    tracker = DeepSort(max_age=10, embedder="mobilenet", n_init=5)
     draw_track_history.track_histories = {}  # Reset track histories
 
 def draw_yolo_detections(frame, detections):
@@ -65,44 +66,98 @@ def get_color(idx):
 
     # Estimate camera motion using feature matching and homography (perspective)
 
-def draw_motion_vector(frame, H):
-    """
-    Draws the camera motion vector on the frame using the homography matrix H.
-    The vector is drawn from the center of the frame to the transformed center.
-    """
-    if H is None:
-        return
+def estimate_camera_motion(frame1, frame2):
+    # Convert frames to grayscale
+    gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
+    gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
+
+    # Detect features in both frames
+    orb = cv2.ORB_create()
+    keypoints1, descriptors1 = orb.detectAndCompute(gray1, None)
+    keypoints2, descriptors2 = orb.detectAndCompute(gray2, None)
+
+    # Match features
+    matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
+    matches = matcher.match(descriptors1, descriptors2)
+    
+
+    # Calculate homography
+    src_pts = np.float32([keypoints1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
+    dst_pts = np.float32([keypoints2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
+    M, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+
+    return M
+
+# display the camera motion on the frame as an arrow
+def draw_camera_motion(frame, motion_matrix):
+    if motion_matrix is None:
+        return frame
+
+    # Define the center of the frame
     h, w = frame.shape[:2]
-    center = np.array([[w // 2, h // 2]], dtype=np.float32).reshape(-1, 1, 2)
-    center_transformed = 2*cv2.perspectiveTransform(center, H)
-    pt1 = tuple(center[0, 0].astype(int))
-    pt2 = tuple(center_transformed[0, 0].astype(int))
-    cv2.arrowedLine(frame, pt1, pt2, (255, 0, 0), 3, tipLength=0.2)
+    center = (w // 2, h // 2)
 
+    # Define a point to represent the motion direction
+    motion_point = np.array([[center[0] + 50, center[1]]], dtype=np.float32).reshape(-1, 1, 2)
 
-def estimate_camera_motion(prev_frame, curr_frame):
-    # Convert to grayscale
-    prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
-    curr_gray = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
-    # Detect ORB keypoints and descriptors
-    orb = cv2.ORB_create(1000)
-    kp1, des1 = orb.detectAndCompute(prev_gray, None)
-    kp2, des2 = orb.detectAndCompute(curr_gray, None)
-    if des1 is None or des2 is None or len(kp1) < 8 or len(kp2) < 8:
-        return None, None
-    # Match descriptors using BFMatcher
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-    matches = bf.match(des1, des2)
-    matches = sorted(matches, key=lambda x: x.distance)
-    if len(matches) < 8:
-        return None, None
-    # Extract matched keypoints
-    pts1 = np.float32([kp1[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
-    pts2 = np.float32([kp2[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
-    # Find homography (perspective transform)
-    H, mask = cv2.findHomography(pts1, pts2, cv2.RANSAC, 5.0)
-    inliers = mask.ravel().sum() if mask is not None else 0
-    return H, inliers
+    # Apply the motion matrix to the point
+    transformed_point = cv2.perspectiveTransform(motion_point, motion_matrix)
+
+    # Draw an arrow from the center to the transformed point
+    cv2.arrowedLine(frame, center, (int(transformed_point[0][0][0]), int(transformed_point[0][0][1])), (255, 0, 0), 2, tipLength=0.1)
+
+def ocr_numbers_in_tracks(frame, tracks):
+    """
+    For each confirmed track, crop the bounding box from the frame and use OCR to find numbers.
+    Returns a dict: {track_id: [numbers_found]}
+    """
+    results = {}
+    for track in tracks:
+        if not track.is_confirmed():
+            continue
+        ltrb = track.to_ltrb()
+        x1, y1, x2, y2 = map(int, ltrb)
+        # Ensure coordinates are within frame bounds
+        h, w = frame.shape[:2]
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = min(w, x2), min(h, y2)
+        if x2 <= x1 or y2 <= y1:
+            continue
+        crop = frame[y1:y2, x1:x2]
+        # Use pytesseract to extract text
+        ocr_result = pytesseract.image_to_string(crop, config='--psm 12 -c tessedit_char_whitelist=0123456789')
+        # Find all numbers in the OCR result
+        numbers = [int(s) for s in ocr_result.split() if s.isdigit()]
+        if numbers:
+            results[track.track_id] = numbers
+    return results
+
+def draw_ocr_numbers(frame, tracks, ocr_results):
+    """
+    Draws the OCR-detected numbers to the right of each confirmed track's bounding box.
+    """
+    for track in tracks:
+        if not track.is_confirmed():
+            continue
+        track_id = track.track_id
+        if track_id not in ocr_results:
+            continue
+        ltrb = track.to_ltrb()
+        x1, y1, x2, y2 = map(int, ltrb)
+        numbers = ocr_results[track_id]
+        text = ','.join(str(n) for n in numbers)
+        # Draw the text to the right of the bounding box
+        org = (x2 + 10, y1 + 20)
+        color = get_color(int(track_id))
+        cv2.putText(
+            frame,
+            f'OCR: {text}',
+            org,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            color,
+            2
+        )
 
 
 
@@ -187,11 +242,7 @@ while 0 <= idx < len(video_files):
 
         # Draw track history with unique colors
         draw_track_history(frame, tracks, history_length=300)
-        # Estimate camera motion
-        if 'prev_frame' in locals():
-            H, inliers = estimate_camera_motion(prev_frame, frame)
-            draw_motion_vector(frame, H)
-        prev_frame = frame.copy()
+
         cv2.imshow("YOLO + DeepSort Tracking", frame)
         key = cv2.waitKey(1) & 0xFF
         if key == ord('n'):
