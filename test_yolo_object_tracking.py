@@ -5,12 +5,15 @@ import os
 from deep_sort_realtime.deepsort_tracker import DeepSort
 from random import shuffle
 import pytesseract
+import imageio
 
 # Helper function to reset tracker
-def reset_tracker():
+def reset():
     global tracker
     tracker = DeepSort(max_age=10, embedder="mobilenet", n_init=5)
     draw_track_history.track_histories = {}  # Reset track histories
+    global frame_list
+    frame_list = []  # Reset frame list
 
 def draw_yolo_detections(frame, detections):
     # You may want to define your class names here or import them if available
@@ -169,7 +172,7 @@ input_dir = "input/dev_data"
 model = YOLO(weights_path)
 
 # Initialize DeepSort tracker
-reset_tracker()
+reset()
 
 # Get video files with 'snippet' in the name
 video_files = [os.path.join(input_dir, f) for f in os.listdir(input_dir)
@@ -243,18 +246,71 @@ while 0 <= idx < len(video_files):
         # Draw track history with unique colors
         draw_track_history(frame, tracks, history_length=300)
 
+        frame_list.append(frame)  # Store the frame for later use
+        
+        # Draw legend with keybinds in the top left corner
+        legend = [
+            "Keybinds:",
+            "n - Next video",
+            "b - Previous video",
+            "r - Reset tracker",
+            "q - Quit",
+            "Space - Pause/Unpause",
+        ]
+        # Draw opaque background for the legend
+        legend_width = 260
+        legend_height = 22 * len(legend) + 10
+        overlay = frame.copy()
+        cv2.rectangle(
+            overlay,
+            (5, 5),
+            (5 + legend_width, 5 + legend_height),
+            (40, 40, 40),
+            thickness=-1
+        )
+        alpha = 0.9
+        cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+
+        x, y0 = 10, 25
+        for i, line in enumerate(legend):
+            y = y0 + i * 22
+            cv2.putText(
+                frame,
+                line,
+                (x, y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7 if i == 0 else 0.6,
+                (255, 255, 255) if i == 0 else (200, 200, 200),
+                2 if i == 0 else 1,
+                cv2.LINE_AA
+            )
+        
+        
+        
         cv2.imshow("YOLO + DeepSort Tracking", frame)
+
+
+
         key = cv2.waitKey(1) & 0xFF
+        if key == ord(' '):  # Spacebar to pause
+            while True:
+                key2 = cv2.waitKey(0) & 0xFF
+                if key2 == ord(' '):  # Unpause on spacebar
+                    break
+                elif key2 == ord('q'):
+                    cap.release()
+                    cv2.destroyAllWindows()
+                    exit(0)
         if key == ord('n'):
             idx += 1
-            reset_tracker()
+            reset()
             break
         elif key == ord('b'):
             idx = max(0, idx - 1)
-            reset_tracker()
+            reset()
             break
         elif key == ord('r'):
-            reset_tracker()
+            reset()
         elif key == ord('q'):
             cap.release()
             cv2.destroyAllWindows()
