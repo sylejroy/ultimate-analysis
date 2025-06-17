@@ -41,3 +41,6 @@ pip3 install torch torchvision torchaudio --index-url https://download.pytorch.o
 ```
 pip3 install ultralytics
 ```
+
+## Current State Example:
+![YOLO + DeepSort Tracking Example](tracking_example.png)
