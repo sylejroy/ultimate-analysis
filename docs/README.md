@@ -41,6 +41,15 @@ pip3 install torch torchvision torchaudio --index-url https://download.pytorch.o
 ```
 pip3 install ultralytics
 ```
+## Demo Video
 
+You can view a sample analysis output in the following video:
+
+<video controls width="480">
+  <source src="docs/Recording%202025-07-02%20183445.mp4" type="video/mp4">
+  Your browser does not support the video tag.
+</video>
+
+Or [download/view the video directly](docs/Recording%202025-07-02%20183445.mp4).
 ## Current State Example:
 ![YOLO + DeepSort Tracking Example](tracking_example.png)

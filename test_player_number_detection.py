@@ -70,27 +70,27 @@ def run_object_and_digit_detection():
             
 
                     # Display every 10th cropped object in a separate frame, stretched by a factor of 10
-                    if (cap.get(cv2.CAP_PROP_POS_FRAMES) % 10) == 0:
-                        h, w = obj_crop.shape[:2]
-                        stretched_crop = cv2.resize(obj_crop, (w * 10, h * 10), interpolation=cv2.INTER_NEAREST)
-                        # Prepare the size text
-                        size_text = f"{x2 - x1}x{mid_y - y1}"
-                        # Put the size text in the bottom right corner
-                        text_size, _ = cv2.getTextSize(size_text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)
-                        text_x = stretched_crop.shape[1] - text_size[0] - 10
-                        text_y = stretched_crop.shape[0] - 10
-                        cv2.putText(
-                            stretched_crop,
-                            size_text,
-                            (text_x, text_y),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            1,
-                            (0, 255, 0),
-                            2
-                        )
-                        cv2.imshow('Cropped Object', stretched_crop)
-                        if cv2.waitKey(1) & 0xFF == ord('q'):
-                            break
+                    # if (cap.get(cv2.CAP_PROP_POS_FRAMES) % 10) == 0:
+                    #     h, w = obj_crop.shape[:2]
+                    #     stretched_crop = cv2.resize(obj_crop, (w * 10, h * 10), interpolation=cv2.INTER_NEAREST)
+                    #     # Prepare the size text
+                    #     size_text = f"{x2 - x1}x{mid_y - y1}"
+                    #     # Put the size text in the bottom right corner
+                    #     text_size, _ = cv2.getTextSize(size_text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)
+                    #     text_x = stretched_crop.shape[1] - text_size[0] - 10
+                    #     text_y = stretched_crop.shape[0] - 10
+                    #     cv2.putText(
+                    #         stretched_crop,
+                    #         size_text,
+                    #         (text_x, text_y),
+                    #         cv2.FONT_HERSHEY_SIMPLEX,
+                    #         1,
+                    #         (0, 255, 0),
+                    #         2
+                    #     )
+                    #     cv2.imshow('Cropped Object', stretched_crop)
+                    #     if cv2.waitKey(1) & 0xFF == ord('q'):
+                    #         break
 
                     # Run digit detection on the cropped object
                     digit_results = digit_model(obj_crop, verbose=False, imgsz=640, conf=0.5)
