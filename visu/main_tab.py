@@ -18,6 +18,8 @@ class MainTab(QWidget):
         self.video_files = []
         self.current_video_index = 0
         self.is_paused = False
+        self.tracks = []
+        self.track_histories = {}  # or whatever structure you use
         self.init_ui()
         self.init_shortcuts()  # <-- Add this line
 
@@ -36,9 +38,11 @@ class MainTab(QWidget):
         self.inference_checkbox = QCheckBox("Show Inference Results [I]")
         self.tracking_checkbox = QCheckBox("Show Inference Tracking [T]")
         self.jersey_checkbox = QCheckBox("Show Jersey Number Tracking [J]")
+        self.field_checkbox = QCheckBox("Show Field Segmentation [F]")
         right_layout.addWidget(self.inference_checkbox)
         right_layout.addWidget(self.tracking_checkbox)
         right_layout.addWidget(self.jersey_checkbox)
+        right_layout.addWidget(self.field_checkbox)
 
         # Play/Pause button with keybind
         self.play_pause_button = QPushButton("Play [Space]")
@@ -89,6 +93,8 @@ class MainTab(QWidget):
         QShortcut(QKeySequence(Qt.Key_T), self, lambda: self.tracking_checkbox.toggle())
         # J: Toggle Jersey Checkbox
         QShortcut(QKeySequence(Qt.Key_J), self, lambda: self.jersey_checkbox.toggle())
+        # F: Toggle Field Segmentation Checkbox
+        QShortcut(QKeySequence(Qt.Key_F), self, lambda: self.field_checkbox.toggle())
 
     def handle_inference_checkbox(self, state):
         if state == Qt.Checked:
@@ -155,6 +161,16 @@ class MainTab(QWidget):
 
         # --- Visualization step ---
         vis_frame = frame.copy()
+
+        # Field segmentation first (if enabled)
+        if self.field_checkbox.isChecked():
+            from processing.field_segmentation import run_field_segmentation
+            results = run_field_segmentation(frame)
+            mask = results[0].masks.data.cpu().numpy()
+            from field_segmentation_visualisation import draw_field_segmentation
+            vis_frame = draw_field_segmentation(vis_frame, mask)
+
+        # Then detection/tracking overlays
         if self.tracking_checkbox.isChecked():
             from tracking_visualisation import draw_track_history
             vis_frame = draw_track_history(vis_frame, self.tracks, self.detections)
@@ -188,12 +204,19 @@ class MainTab(QWidget):
         self.reset_tracker()  # Reset tracker when switching videos
 
     def reset_tracker(self):
-        reset_tracker()  # resets DeepSort tracker
+        self.reset_visualisation()
+        reset_tracker()  # resets tracker
         # Also reset the track histories used for visualization
-        from tracking_visualisation import draw_track_history
-        if hasattr(draw_track_history, "track_histories"):
-            draw_track_history.track_histories = {}
         print("Tracker and track histories reset.")
+
+    def reset_visualisation(self):
+        self.tracks = []
+        self.track_histories = {}
+        try:
+            from tracking_visualisation import reset_track_histories
+            reset_track_histories()
+        except ImportError:
+            pass
 
     def run_inference(self, frame):
         return run_inference(frame)

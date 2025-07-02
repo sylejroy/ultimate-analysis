@@ -64,3 +64,7 @@ def get_color(idx):
     np.random.seed(idx)
     color = tuple(int(x) for x in np.random.randint(0, 255, 3))
     return color
+
+def reset_track_histories():
+    if hasattr(draw_track_history, "track_histories"):
+        draw_track_history.track_histories = {}
