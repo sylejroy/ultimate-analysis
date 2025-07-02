@@ -4,8 +4,7 @@ from ultralytics import YOLO
 import os
 from deep_sort_realtime.deepsort_tracker import DeepSort
 from random import shuffle
-import pytesseract
-import imageio
+from ultralytics import YOLO as DigitYOLO
 
 # Helper function to reset tracker
 def reset():
@@ -109,59 +108,46 @@ def draw_camera_motion(frame, motion_matrix):
     # Draw an arrow from the center to the transformed point
     cv2.arrowedLine(frame, center, (int(transformed_point[0][0][0]), int(transformed_point[0][0][1])), (255, 0, 0), 2, tipLength=0.1)
 
-def ocr_numbers_in_tracks(frame, tracks):
-    """
-    For each confirmed track, crop the bounding box from the frame and use OCR to find numbers.
-    Returns a dict: {track_id: [numbers_found]}
-    """
-    results = {}
-    for track in tracks:
-        if not track.is_confirmed():
+def detect_and_draw_digits(frame, yolo_detections, digit_model_path="finetune/digit_detector/finetune/weights/best.pt"):
+    # Load digit detector model only once
+    if not hasattr(detect_and_draw_digits, "digit_model"):
+        detect_and_draw_digits.digit_model = DigitYOLO(digit_model_path)
+    digit_model = detect_and_draw_digits.digit_model
+    for det in yolo_detections:
+        (x, y, w, h), conf, cls = det
+        # Focus on the top half of the bounding box
+        top_half_y2 = y + h // 2
+        top_half = frame[y:top_half_y2, x:x + w]
+        if top_half.size == 0:
             continue
-        ltrb = track.to_ltrb()
-        x1, y1, x2, y2 = map(int, ltrb)
-        # Ensure coordinates are within frame bounds
-        h, w = frame.shape[:2]
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(w, x2), min(h, y2)
-        if x2 <= x1 or y2 <= y1:
-            continue
-        crop = frame[y1:y2, x1:x2]
-        # Use pytesseract to extract text
-        ocr_result = pytesseract.image_to_string(crop, config='--psm 12 -c tessedit_char_whitelist=0123456789')
-        # Find all numbers in the OCR result
-        numbers = [int(s) for s in ocr_result.split() if s.isdigit()]
-        if numbers:
-            results[track.track_id] = numbers
-    return results
-
-def draw_ocr_numbers(frame, tracks, ocr_results):
-    """
-    Draws the OCR-detected numbers to the right of each confirmed track's bounding box.
-    """
-    for track in tracks:
-        if not track.is_confirmed():
-            continue
-        track_id = track.track_id
-        if track_id not in ocr_results:
-            continue
-        ltrb = track.to_ltrb()
-        x1, y1, x2, y2 = map(int, ltrb)
-        numbers = ocr_results[track_id]
-        text = ','.join(str(n) for n in numbers)
-        # Draw the text to the right of the bounding box
-        org = (x2 + 10, y1 + 20)
-        color = get_color(int(track_id))
-        cv2.putText(
-            frame,
-            f'OCR: {text}',
-            org,
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            color,
-            2
-        )
-
+        # Run digit detector on the top half
+        digit_results = digit_model.predict(top_half, verbose=False, imgsz=256)[0]
+        digit_boxes = []
+        for box in digit_results.boxes:
+            dx1, dy1, dx2, dy2 = map(int, box.xyxy[0])
+            dconf = float(box.conf[0])
+            dcls = int(box.cls[0])
+            digit_boxes.append((dx1, dy1, dx2, dy2, dconf, dcls))
+        # Sort digits left to right
+        digit_boxes.sort(key=lambda b: b[0])
+        digits = [str(b[5]) for b in digit_boxes]
+        # Draw the top half bounding box
+        cv2.rectangle(frame, (x, y), (x + w, top_half_y2), (0, 255, 255), 2)
+        # Draw detected digits on the right side of the YOLO box
+        if digits:
+            text = "".join(digits)
+            text_x = x + w + 10
+            text_y = y + 25
+            cv2.putText(
+                frame,
+                text,
+                (text_x, text_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.0,
+                (0, 255, 255),
+                2,
+                cv2.LINE_AA
+            )
 
 
 # Paths
