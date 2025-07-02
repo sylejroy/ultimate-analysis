@@ -1,0 +1,6 @@
+/finetune
+/.venv
+/__pycache__
+/training_data
+/input/cropped_dataset
+/input/dataset
