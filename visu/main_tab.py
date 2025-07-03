@@ -1,17 +1,52 @@
 import os
 import time
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, QCheckBox, QPushButton
+    QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, QCheckBox, QPushButton, QDialog, QTableWidget, QTableWidgetItem
 )
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QPixmap, QImage, QKeySequence
-from PyQt5.QtWidgets import QShortcut
+from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QIcon
+from PyQt5.QtWidgets import QShortcut, QStyle
 
 from video_player import VideoPlayer
 from processing.inference import run_inference, set_detection_model
 from processing.tracking import run_tracking, reset_tracker
 from processing.field_segmentation import set_field_model  # <-- Add this import
 from processing.player_id import run_player_id
+
+class RuntimesDialog(QDialog):
+    def __init__(self, dev_runtimes_tab, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Processing & Visualisation Runtimes")
+        self.setMinimumWidth(400)
+        self.dev_runtimes_tab = dev_runtimes_tab
+        layout = QVBoxLayout()
+        # Create a new table to avoid widget reparenting issues
+        self.new_table = QTableWidget()
+        layout.addWidget(self.new_table)
+        self.setLayout(layout)
+        self.refresh_table()
+        # Timer for live updates
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.refresh_table)
+        self.timer.start(500)  # update every 500 ms
+
+    def refresh_table(self):
+        table = self.dev_runtimes_tab.table
+        self.new_table.setRowCount(table.rowCount())
+        self.new_table.setColumnCount(table.columnCount())
+        self.new_table.setHorizontalHeaderLabels([table.horizontalHeaderItem(i).text() for i in range(table.columnCount())])
+        for row in range(table.rowCount()):
+            for col in range(table.columnCount()):
+                item = table.item(row, col)
+                if item:
+                    self.new_table.setItem(row, col, QTableWidgetItem(item.text()))
+                else:
+                    self.new_table.setItem(row, col, QTableWidgetItem(""))
+        self.new_table.resizeColumnsToContents()
+
+    def closeEvent(self, event):
+        self.timer.stop()
+        super().closeEvent(event)
 
 class MainTab(QWidget):
     def __init__(self, dev_runtimes_tab=None):
@@ -46,36 +81,74 @@ class MainTab(QWidget):
         self.progress_bar.sliderMoved.connect(self.seek_video)
         right_layout.addWidget(self.progress_bar)
 
-        # Checkboxes with keybinds in labels
-        self.inference_checkbox = QCheckBox("Show Inference Results [I]")
-        self.tracking_checkbox = QCheckBox("Show Inference Tracking [T]")
-        self.player_id_checkbox = QCheckBox("Show Player Identification [J]")
-        self.field_checkbox = QCheckBox("Show Field Segmentation [F]")
-        right_layout.addWidget(self.inference_checkbox)
-        right_layout.addWidget(self.tracking_checkbox)
-        right_layout.addWidget(self.player_id_checkbox)
-        right_layout.addWidget(self.field_checkbox)
+        # --- Controls Section ---
+        controls_layout = QVBoxLayout()
 
-        # Play/Pause button with keybind
-        self.play_pause_button = QPushButton("Play [Space]")
-        self.play_pause_button.clicked.connect(self.toggle_play_pause)
-        right_layout.addWidget(self.play_pause_button)
+        # Checkboxes in a horizontal row
+        checkbox_row = QHBoxLayout()
+        self.inference_checkbox = QCheckBox("Inference [I]")
+        self.inference_checkbox.setChecked(True)
+        self.tracking_checkbox = QCheckBox("Tracking [T]")
+        self.tracking_checkbox.setChecked(True)
+        self.player_id_checkbox = QCheckBox("Player ID [J]")
+        self.field_checkbox = QCheckBox("Field [F]")
+        checkbox_row.addWidget(self.inference_checkbox)
+        checkbox_row.addWidget(self.tracking_checkbox)
+        checkbox_row.addWidget(self.player_id_checkbox)
+        checkbox_row.addWidget(self.field_checkbox)
+        controls_layout.addLayout(checkbox_row)
 
-        # Navigation buttons with keybinds
-        nav_layout = QHBoxLayout()
-        self.prev_button = QPushButton("Previous Video [←]")
+        # Play/Pause and navigation buttons in a row
+        nav_row = QHBoxLayout()
+        self.prev_button = QPushButton()
+        self.prev_button.setMinimumHeight(36)
+        # Always use unicode left arrow for prev
+        self.prev_button.setText("←")
+        self.prev_button.setIcon(QIcon())  # Remove any icon
+        self.prev_button.setToolTip("Prev [←]")
         self.prev_button.clicked.connect(self.prev_video)
-        nav_layout.addWidget(self.prev_button)
+        nav_row.addWidget(self.prev_button)
 
-        self.next_button = QPushButton("Next Video [→]")
+        self.play_pause_button = QPushButton()
+        self.play_pause_button.setMinimumHeight(36)
+        self.play_icon = QIcon.fromTheme("media-playback-start")
+        self.pause_icon = QIcon.fromTheme("media-playback-pause")
+        # Fallback to unicode if icon theme not found
+        if self.play_icon.isNull():
+            self.play_pause_button.setText("▶")
+        else:
+            self.play_pause_button.setIcon(self.play_icon)
+            self.play_pause_button.setText("")
+        self.play_pause_button.setToolTip("Play/Stop [Space]")
+        self.play_pause_button.clicked.connect(self.toggle_play_pause)
+        nav_row.addWidget(self.play_pause_button)
+
+        self.next_button = QPushButton()
+        self.next_button.setMinimumHeight(36)
+        # Always use unicode right arrow for next
+        self.next_button.setText("→")
+        self.next_button.setIcon(QIcon())  # Remove any icon
+        self.next_button.setToolTip("Next [→]")
         self.next_button.clicked.connect(self.next_video)
-        nav_layout.addWidget(self.next_button)
-        right_layout.addLayout(nav_layout)
+        nav_row.addWidget(self.next_button)
 
-        # Reset Tracker button with keybind
+        controls_layout.addLayout(nav_row)
+
+        # Utility buttons in a row
+        util_row = QHBoxLayout()
         self.reset_tracker_button = QPushButton("Reset Tracker [R]")
+        # self.reset_tracker_button.setFixedWidth(120)
         self.reset_tracker_button.clicked.connect(self.reset_tracker)
-        right_layout.addWidget(self.reset_tracker_button)
+        util_row.addWidget(self.reset_tracker_button)
+
+        self.show_runtimes_button = QPushButton("Runtimes")
+        # self.show_runtimes_button.setFixedWidth(90)
+        self.show_runtimes_button.clicked.connect(self.open_runtimes_dialog)
+        util_row.addWidget(self.show_runtimes_button)
+
+        controls_layout.addLayout(util_row)
+
+        right_layout.addLayout(controls_layout)
 
         layout.addWidget(self.video_list, 1)
         layout.addLayout(right_layout, 4)
@@ -173,11 +246,21 @@ class MainTab(QWidget):
         if self.timer.isActive():
             self.timer.stop()
             self.is_paused = True
-            self.play_pause_button.setText("Play")
+            # Set play icon or text
+            if hasattr(self, "play_icon") and not self.play_icon.isNull():
+                self.play_pause_button.setIcon(self.play_icon)
+                self.play_pause_button.setText("")
+            else:
+                self.play_pause_button.setText("▶")
         else:
             self.timer.start(30)  # ~30 FPS
             self.is_paused = False
-            self.play_pause_button.setText("Pause")
+            # Set stop icon or text
+            if hasattr(self, "pause_icon") and not self.pause_icon.isNull():
+                self.play_pause_button.setIcon(self.pause_icon)
+                self.play_pause_button.setText("")
+            else:
+                self.play_pause_button.setText("❚❚")  # Unicode for pause
 
     def next_frame(self):
         frame = self.player.get_next_frame()
@@ -337,3 +420,8 @@ class MainTab(QWidget):
                 self.video_label.setPixmap(pixmap.scaled(
                     self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
                 ))
+
+    def open_runtimes_dialog(self):
+        if self.dev_runtimes_tab is not None:
+            dlg = RuntimesDialog(self.dev_runtimes_tab, self)
+            dlg.exec_()
