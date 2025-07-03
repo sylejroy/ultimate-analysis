@@ -6,25 +6,25 @@ from PyQt5.QtGui import QPalette, QColor
 from PyQt5.QtCore import Qt
 from main_tab import MainTab
 from settings_tab import SettingsTab
-from dev_runtimes_tab import DevRuntimesTab
 from dev_video_preprocessing_tab import DevVideoPreprocessingTab
 from dev_yolo_training_tab import DevYoloTrainingTab
+from easyocr_tuning_tab import DevEasyOCRTuningTab
 
 class VisualizationApp(QTabWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Ultimate Analysis Visualization")
         self.showMaximized()
-        self.dev_runtimes_tab = DevRuntimesTab()
-        self.main_tab = MainTab(dev_runtimes_tab=self.dev_runtimes_tab)
+        self.main_tab = MainTab()  # No dev_runtimes_tab needed
         self.settings_tab = SettingsTab(main_tab=self.main_tab)
         self.addTab(self.main_tab, "Main")
         self.addTab(self.settings_tab, "Settings")
-        self.addTab(self.dev_runtimes_tab, "Dev-Runtimes")
         self.dev_video_preprocessing_tab = DevVideoPreprocessingTab()
         self.addTab(self.dev_video_preprocessing_tab, "Dev-Video Preprocessing")
         self.dev_yolo_training_tab = DevYoloTrainingTab()
         self.addTab(self.dev_yolo_training_tab, "Dev-YOLO Training")
+        self.easyocr_tuning_tab = DevEasyOCRTuningTab()
+        self.addTab(self.easyocr_tuning_tab, "EasyOCR Tuning")
         # Add more tabs as needed
 
 if __name__ == "__main__":

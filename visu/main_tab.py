@@ -14,53 +14,60 @@ from processing.field_segmentation import set_field_model  # <-- Add this import
 from processing.player_id import run_player_id
 
 class RuntimesDialog(QDialog):
-    def __init__(self, dev_runtimes_tab, parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Processing & Visualisation Runtimes")
-        self.setMinimumWidth(700)  # Increased width
-        self.setMinimumHeight(400) # Increased height
-        self.resize(900, 500)      # Set initial size larger
-        self.dev_runtimes_tab = dev_runtimes_tab
+        self.setMinimumWidth(700)
+        self.setMinimumHeight(400)
+        self.resize(900, 500)
         layout = QVBoxLayout()
-        # Create a new table to avoid widget reparenting issues
-        self.new_table = QTableWidget()
-        layout.addWidget(self.new_table)
+        self.table = QTableWidget()
+        layout.addWidget(self.table)
         self.setLayout(layout)
-        self.refresh_table()
-        # Timer for live updates
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_table)
-        self.timer.start(500)  # update every 500 ms
+        self.timer.start(500)
+        self.runtimes = {}  # {step: [list of runtimes]}
+        self.refresh_table()
+
+    def log_runtime(self, step, runtime_ms):
+        if step not in self.runtimes:
+            self.runtimes[step] = []
+        self.runtimes[step].append(runtime_ms)
+        if len(self.runtimes[step]) > 100:
+            self.runtimes[step] = self.runtimes[step][-100:]
+        self.refresh_table()
 
     def refresh_table(self):
-        table = self.dev_runtimes_tab.table
-        self.new_table.setRowCount(table.rowCount())
-        self.new_table.setColumnCount(table.columnCount())
-        self.new_table.setHorizontalHeaderLabels([table.horizontalHeaderItem(i).text() for i in range(table.columnCount())])
-        for row in range(table.rowCount()):
-            for col in range(table.columnCount()):
-                item = table.item(row, col)
-                if item:
-                    self.new_table.setItem(row, col, QTableWidgetItem(item.text()))
-                else:
-                    self.new_table.setItem(row, col, QTableWidgetItem(""))
-        self.new_table.resizeColumnsToContents()
+        self.table.setRowCount(0)
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels(["Step", "Last Runtime (ms)", "Average Runtime (ms)"])
+        for step, times in self.runtimes.items():
+            last = times[-1] if times else 0
+            avg = sum(times) / len(times) if times else 0
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(step))
+            self.table.setItem(row, 1, QTableWidgetItem(f"{last:.1f}"))
+            self.table.setItem(row, 2, QTableWidgetItem(f"{avg:.1f}"))
+        self.table.resizeColumnsToContents()
+        self.table.resizeRowsToContents()
 
     def closeEvent(self, event):
         self.timer.stop()
         super().closeEvent(event)
 
 class MainTab(QWidget):
-    def __init__(self, dev_runtimes_tab=None):
+    def __init__(self):
         super().__init__()
-        self.dev_runtimes_tab = dev_runtimes_tab
         self.video_folder = "input/dev_data"
         self.player = VideoPlayer()
         self.video_files = []
         self.current_video_index = 0
         self.is_paused = False
         self.tracks = []
-        self.track_histories = {}  # or whatever structure you use
+        self.track_histories = {}
+        self.runtimes_dialog = RuntimesDialog(self)
         self.init_ui()
         self.init_shortcuts()
 
@@ -283,8 +290,7 @@ class MainTab(QWidget):
         else:
             self.detections = []
         t1 = time.time()
-        if self.dev_runtimes_tab:
-            self.dev_runtimes_tab.log_runtime("Inference", (t1 - t0) * 1000)
+        self.log_runtime("Inference", (t1 - t0) * 1000)
 
         # --- Tracking step ---
         t2 = time.time()
@@ -293,8 +299,7 @@ class MainTab(QWidget):
         else:
             self.tracks = []
         t3 = time.time()
-        if self.dev_runtimes_tab:
-            self.dev_runtimes_tab.log_runtime("Tracking", (t3 - t2) * 1000)
+        self.log_runtime("Tracking", (t3 - t2) * 1000)
 
         # --- Field segmentation step ---
         t4 = time.time()
@@ -306,8 +311,7 @@ class MainTab(QWidget):
             from field_segmentation_visualisation import draw_field_segmentation
             vis_frame = draw_field_segmentation(vis_frame, mask)
         t5 = time.time()
-        if self.dev_runtimes_tab:
-            self.dev_runtimes_tab.log_runtime("Field Segmentation", (t5 - t4) * 1000)
+        self.log_runtime("Field Segmentation", (t5 - t4) * 1000)
 
         # --- Detection/Tracking overlays ---
         t6 = time.time()
@@ -318,8 +322,7 @@ class MainTab(QWidget):
             from detection_visualisation import draw_yolo_detections
             vis_frame = draw_yolo_detections(vis_frame, self.detections)
         t7 = time.time()
-        if self.dev_runtimes_tab:
-            self.dev_runtimes_tab.log_runtime("Overlay", (t7 - t6) * 1000)
+        self.log_runtime("Overlay", (t7 - t6) * 1000)
 
         # --- Player ID step ---
         t8 = time.time()
@@ -364,8 +367,7 @@ class MainTab(QWidget):
                                     digits
                                 )
         t9 = time.time()
-        if self.dev_runtimes_tab:
-            self.dev_runtimes_tab.log_runtime("Player ID", (t9 - t8) * 1000)
+        self.log_runtime("Player ID", (t9 - t8) * 1000)
 
         # --- Display step ---
         t10 = time.time()
@@ -377,8 +379,7 @@ class MainTab(QWidget):
             self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
         ))
         t11 = time.time()
-        if self.dev_runtimes_tab:
-            self.dev_runtimes_tab.log_runtime("Display", (t11 - t10) * 1000)
+        self.log_runtime("Display", (t11 - t10) * 1000)
 
     def next_video(self):
         if not self.video_files:
@@ -440,6 +441,9 @@ class MainTab(QWidget):
                 ))
 
     def open_runtimes_dialog(self):
-        if self.dev_runtimes_tab is not None:
-            dlg = RuntimesDialog(self.dev_runtimes_tab, self)
-            dlg.exec_()
+        self.runtimes_dialog.show()
+
+    def log_runtime(self, step, runtime_ms):
+        if not hasattr(self, "runtimes_dialog"):
+            return
+        self.runtimes_dialog.log_runtime(step, runtime_ms)
