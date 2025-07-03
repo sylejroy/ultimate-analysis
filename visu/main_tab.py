@@ -1,4 +1,5 @@
 import os
+import time
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, QCheckBox, QPushButton
 )
@@ -13,8 +14,9 @@ from processing.field_segmentation import set_field_model  # <-- Add this import
 from processing.player_id import run_player_id
 
 class MainTab(QWidget):
-    def __init__(self):
+    def __init__(self, dev_runtimes_tab=None):
         super().__init__()
+        self.dev_runtimes_tab = dev_runtimes_tab
         self.video_folder = "input/dev_data"
         self.player = VideoPlayer()
         self.video_files = []
@@ -172,53 +174,57 @@ class MainTab(QWidget):
             return
 
         # --- Inference step ---
+        t0 = time.time()
         if self.inference_checkbox.isChecked() or self.tracking_checkbox.isChecked():
             self.detections = self.run_inference(frame)
         else:
             self.detections = []
+        t1 = time.time()
+        if self.dev_runtimes_tab:
+            self.dev_runtimes_tab.log_runtime("Inference", (t1 - t0) * 1000)
 
         # --- Tracking step ---
+        t2 = time.time()
         if self.tracking_checkbox.isChecked():
             self.tracks = self.run_tracking(frame, self.detections)
         else:
             self.tracks = []
+        t3 = time.time()
+        if self.dev_runtimes_tab:
+            self.dev_runtimes_tab.log_runtime("Tracking", (t3 - t2) * 1000)
 
-        # --- Visualization step ---
+        # --- Field segmentation step ---
+        t4 = time.time()
         vis_frame = frame.copy()
-
-        # Field segmentation first (if enabled)
         if self.field_checkbox.isChecked():
             from processing.field_segmentation import run_field_segmentation
             results = run_field_segmentation(frame)
             mask = results[0].masks.data.cpu().numpy()
             from field_segmentation_visualisation import draw_field_segmentation
             vis_frame = draw_field_segmentation(vis_frame, mask)
+        t5 = time.time()
+        if self.dev_runtimes_tab:
+            self.dev_runtimes_tab.log_runtime("Field Segmentation", (t5 - t4) * 1000)
 
-        # Then detection/tracking overlays
+        # --- Detection/Tracking overlays ---
+        t6 = time.time()
         if self.tracking_checkbox.isChecked():
             from tracking_visualisation import draw_track_history
             vis_frame = draw_track_history(vis_frame, self.tracks, self.detections)
         elif self.inference_checkbox.isChecked():
             from detection_visualisation import draw_yolo_detections
             vis_frame = draw_yolo_detections(vis_frame, self.detections)
-
-        # Display
-        h, w, ch = vis_frame.shape
-        bytes_per_line = ch * w
-        qimg = QImage(vis_frame.data, w, h, bytes_per_line, QImage.Format_BGR888)
-        pixmap = QPixmap.fromImage(qimg)
-        self.video_label.setPixmap(pixmap.scaled(
-            self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
-        ))
+        t7 = time.time()
+        if self.dev_runtimes_tab:
+            self.dev_runtimes_tab.log_runtime("Overlay", (t7 - t6) * 1000)
 
         # --- Player ID step ---
-        # Only run if both tracking and detection are enabled
+        t8 = time.time()
         if self.player_id_checkbox.isChecked() and self.tracking_checkbox.isChecked() and self.inference_checkbox.isChecked():
             from player_id_visualisation import draw_player_id
             import numpy as np
             for track in self.tracks:
                 bbox = None
-                # Try common DeepSort bbox methods/attributes
                 if hasattr(track, "to_tlwh"):
                     bbox = track.to_tlwh()
                 elif hasattr(track, "to_ltrb"):
@@ -231,7 +237,6 @@ class MainTab(QWidget):
                     bbox = np.round(np.array(bbox)).astype(int)
                     if len(bbox) == 4:
                         x, y, w, h = bbox
-                        # Ensure bbox is within frame bounds
                         x, y = max(0, x), max(0, y)
                         w, h = max(1, w), max(1, h)
                         if y + h <= frame.shape[0] and x + w <= frame.shape[1]:
@@ -239,8 +244,12 @@ class MainTab(QWidget):
                             if obj_crop.size > 0:
                                 digit_str, digits = run_player_id(obj_crop)
                                 vis_frame = draw_player_id(vis_frame, (x, y, w, h), digit_str, digits)
+        t9 = time.time()
+        if self.dev_runtimes_tab:
+            self.dev_runtimes_tab.log_runtime("Player ID", (t9 - t8) * 1000)
 
-        # Now display vis_frame
+        # --- Display step ---
+        t10 = time.time()
         h, w, ch = vis_frame.shape
         bytes_per_line = ch * w
         qimg = QImage(vis_frame.data, w, h, bytes_per_line, QImage.Format_BGR888)
@@ -248,6 +257,9 @@ class MainTab(QWidget):
         self.video_label.setPixmap(pixmap.scaled(
             self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
         ))
+        t11 = time.time()
+        if self.dev_runtimes_tab:
+            self.dev_runtimes_tab.log_runtime("Display", (t11 - t10) * 1000)
 
     def next_video(self):
         if not self.video_files:
