@@ -1,14 +1,30 @@
 from ultralytics import YOLO
 
-# Load YOLO model once (global)
-weights_path = "finetune/object_detection_yolo11l/finetune3/weights/best.pt"
-model = YOLO(weights_path)
+# Global model and path
+model = None
+weights_path = None
+
+def load_model(path):
+    global model, weights_path
+    print(f"[DEBUG] Loading detection model from: {path}")
+    weights_path = path
+    model = YOLO(weights_path)
+
+# Load default model at startup
+load_model("finetune/object_detection_yolo11l/finetune3/weights/best.pt")
+
+def set_detection_model(path):
+    """Set and reload the detection model at runtime."""
+    print(f"[DEBUG] set_detection_model called with: {path}")
+    load_model(path)
 
 def run_inference(frame):
     """
     Runs YOLO inference on the given frame and returns detections in the format:
     [ ([x, y, w, h], conf, cls), ... ]
     """
+    if model is None:
+        raise RuntimeError("YOLO model is not loaded.")
     results = model.predict(frame, verbose=False, imgsz=960)[0]
     detections = []
     for box in results.boxes:
@@ -19,4 +35,4 @@ def run_inference(frame):
     return detections
 
 def get_class_names():
-    return model.names if hasattr(model, 'names') else {}
+    return model.names if model is not None and hasattr(model, 'names') else {}

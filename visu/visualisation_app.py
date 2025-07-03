@@ -11,7 +11,7 @@ class VisualizationApp(QTabWidget):
         self.setWindowTitle("Ultimate Analysis Visualization")
         self.showMaximized()
         self.main_tab = MainTab()
-        self.settings_tab = SettingsTab()
+        self.settings_tab = SettingsTab(main_tab=self.main_tab)  # Pass main_tab here!
         self.addTab(self.main_tab, "Main")
         self.addTab(self.settings_tab, "Settings")
         # Add more tabs as needed

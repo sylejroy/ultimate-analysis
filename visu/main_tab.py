@@ -7,8 +7,9 @@ from PyQt5.QtGui import QPixmap, QImage, QKeySequence
 from PyQt5.QtWidgets import QShortcut
 
 from video_player import VideoPlayer
-from processing.inference import run_inference
+from processing.inference import run_inference, set_detection_model
 from processing.tracking import run_tracking, reset_tracker
+from processing.field_segmentation import set_field_model  # <-- Add this import
 
 class MainTab(QWidget):
     def __init__(self):
@@ -223,3 +224,11 @@ class MainTab(QWidget):
 
     def run_tracking(self, frame, detections):
         return run_tracking(frame, detections)
+
+    def set_detection_model(self, model_path):
+        print(f"[DEBUG] MainTab.set_detection_model called with: {model_path}")
+        set_detection_model(model_path)
+
+    def set_field_model(self, model_path):
+        print(f"[DEBUG] MainTab.set_field_model called with: {model_path}")
+        set_field_model(model_path)  # <-- Add this line to actually update the field segmentation model

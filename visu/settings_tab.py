@@ -38,7 +38,6 @@ class SettingsTab(QWidget):
         detection_group = QGroupBox("Detection Settings")
         detection_layout = QFormLayout()
         self.model_combo = QComboBox()
-        # For detection models
         detection_models = find_models("finetune", keyword="object_detection")
         self.model_combo.addItems(detection_models)
         detection_layout.addRow("Inference Model:", self.model_combo)
@@ -49,7 +48,6 @@ class SettingsTab(QWidget):
         field_group = QGroupBox("Field Segmentation Settings")
         field_layout = QFormLayout()
         self.field_model_combo = QComboBox()
-        # For field segmentation models
         field_models = find_models("finetune", keyword="field_finder")
         self.field_model_combo.addItems(field_models)
         field_layout.addRow("Field Segmentation Model:", self.field_model_combo)
@@ -65,8 +63,48 @@ class SettingsTab(QWidget):
 
         self.setLayout(layout)
 
+        # Set combo boxes to current model if possible
+        self._set_initial_model_selection()
+
         # Reset tracker and visualisation when switching type
         self.tracker_combo.currentTextChanged.connect(self._on_tracker_changed)
+
+        # Connect model selection changes to update models in main_tab
+        self.model_combo.currentTextChanged.connect(self._on_detection_model_changed)
+        self.field_model_combo.currentTextChanged.connect(self._on_field_model_changed)
+
+    def _set_initial_model_selection(self):
+        # Set detection model combo to current model if available
+        try:
+            from processing.inference import weights_path as detection_weights_path
+            if detection_weights_path:
+                rel_path = os.path.relpath(detection_weights_path, "finetune")
+                idx = self.model_combo.findText(rel_path)
+                if idx >= 0:
+                    self.model_combo.setCurrentIndex(idx)
+        except Exception as e:
+            print(f"[DEBUG] Could not set initial detection model selection: {e}")
+
+        # Set field model combo to current model if available
+        try:
+            from processing.field_segmentation import field_model_path
+            if field_model_path:
+                rel_path = os.path.relpath(field_model_path, "finetune")
+                idx = self.field_model_combo.findText(rel_path)
+                if idx >= 0:
+                    self.field_model_combo.setCurrentIndex(idx)
+        except Exception as e:
+            print(f"[DEBUG] Could not set initial field model selection: {e}")
+
+        # Set tracker combo to current tracker if available
+        try:
+            from processing.tracking import tracker_type
+            tracker_type_cap = tracker_type.capitalize()
+            idx = self.tracker_combo.findText(tracker_type_cap)
+            if idx >= 0:
+                self.tracker_combo.setCurrentIndex(idx)
+        except Exception as e:
+            print(f"[DEBUG] Could not set initial tracker type: {e}")
 
     def _on_tracker_changed(self, t):
         set_tracker_type(t.lower())
@@ -75,12 +113,12 @@ class SettingsTab(QWidget):
         if self.main_tab is not None:
             self.main_tab.reset_visualisation()
 
-class VisualisationApp(QWidget):
-    def __init__(self):
-        super().__init__()
-        # ... other initializations ...
-        self.main_tab = MainTab()
-        self.settings_tab = SettingsTab(main_tab=self.main_tab)
-        self.addTab(self.main_tab, "Main")
-        self.addTab(self.settings_tab, "Settings")
-        # ... rest of the code ...
+    def _on_detection_model_changed(self, model_path):
+        print(f"[DEBUG] SettingsTab: Detection model changed to: {model_path}")
+        if self.main_tab is not None and hasattr(self.main_tab, "set_detection_model"):
+            self.main_tab.set_detection_model(os.path.join("finetune", model_path))
+
+    def _on_field_model_changed(self, model_path):
+        print(f"[DEBUG] SettingsTab: Field segmentation model changed to: {model_path}")
+        if self.main_tab is not None and hasattr(self.main_tab, "set_field_model"):
+            self.main_tab.set_field_model(os.path.join("finetune", model_path))
