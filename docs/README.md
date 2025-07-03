@@ -28,7 +28,7 @@ Ultimate Analysis is a computer vision and AI-powered tool for automated analysi
 - **Developer Tools**
   - **Dev-Runtimes Tab:** View live runtime statistics for each processing and visualisation step.
   - **Dev-Video Preprocessing Tab:** Browse large video files, preview, and snip video segments directly from the GUI.
-  - **Dev-YOLO Training Tab:** View available training datasets and select a YOLO model architecture for training (UI mockup).
+  - **Dev-YOLO Training Tab:** View available training datasets and select a YOLO model architecture for training (currently UI mockup).
 
 - **Testing and Scripts**
   - Example scripts for training, running and visualizing detection, tracking, field segmentation, and digit/jersey number recognition on video files.
