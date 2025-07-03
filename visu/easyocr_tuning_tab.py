@@ -57,6 +57,9 @@ PREPROC_PARAMS = [
     ("upscale", QDoubleSpinBox, 1.0, 5.0, 0.1, 2.0),
 ]
 
+import json
+from PyQt5.QtWidgets import QFileDialog
+
 class DevEasyOCRTuningTab(QWidget):
     def __init__(self, input_folder="input/dev_data"):
         super().__init__()
@@ -70,6 +73,8 @@ class DevEasyOCRTuningTab(QWidget):
         self.preproc_params = self.default_preproc_params()
         self.player_crops = []
         self.player_results = []
+        self.bw_mode = False
+        self.colour_mode = False
         self.init_ui()
         self.populate_video_list()
 
@@ -118,7 +123,13 @@ class DevEasyOCRTuningTab(QWidget):
         preproc_group = QGroupBox("Preprocessing Parameters")
         preproc_layout = QFormLayout()
         self.preproc_widgets = {}
+        self.preproc_enables = {}
         for name, widget_type, *args in PREPROC_PARAMS:
+            row = QHBoxLayout()
+            enable = QCheckBox()
+            enable.setChecked(True)
+            enable.stateChanged.connect(self.update_preproc_params)
+            self.preproc_enables[name] = enable
             if widget_type == QSpinBox:
                 widget = QSpinBox()
                 widget.setRange(args[0], args[1])
@@ -131,8 +142,21 @@ class DevEasyOCRTuningTab(QWidget):
                 widget.setValue(self.preproc_params[name])
                 widget.valueChanged.connect(self.update_preproc_params)
             widget.setToolTip(PREPROC_PARAM_DESCRIPTIONS.get(name, ""))
-            preproc_layout.addRow(name, widget)
+            row.addWidget(enable)
+            row.addWidget(widget)
+            preproc_layout.addRow(name, row)
             self.preproc_widgets[name] = widget
+        # Add black/white switch
+        self.bw_checkbox = QCheckBox("Black/White Invert")
+        self.bw_checkbox.setChecked(False)
+        self.bw_checkbox.stateChanged.connect(self.toggle_bw_mode)
+        preproc_layout.addRow("Invert B/W", self.bw_checkbox)
+        # Add colour input switch
+        self.colour_checkbox = QCheckBox("Use Colour Input")
+        self.colour_checkbox.setChecked(False)
+        self.colour_checkbox.stateChanged.connect(self.toggle_colour_mode)
+        preproc_layout.addRow("Use Colour Input", self.colour_checkbox)
+
         preproc_group.setLayout(preproc_layout)
         right.addWidget(preproc_group)
 
@@ -164,6 +188,16 @@ class DevEasyOCRTuningTab(QWidget):
         param_group.setLayout(param_layout)
         right.addWidget(param_group)
 
+        # Save/load parameter set buttons
+        param_btn_row = QHBoxLayout()
+        self.save_params_btn = QPushButton("Save Param Set")
+        self.save_params_btn.clicked.connect(self.save_param_set)
+        self.load_params_btn = QPushButton("Load Param Set")
+        self.load_params_btn.clicked.connect(self.load_param_set)
+        param_btn_row.addWidget(self.save_params_btn)
+        param_btn_row.addWidget(self.load_params_btn)
+        right.addLayout(param_btn_row)
+
         self.run_button = QPushButton("Run Player Detection + OCR on Frame")
         self.run_button.clicked.connect(self.run_detection_and_ocr)
         right.addWidget(self.run_button)
@@ -177,8 +211,13 @@ class DevEasyOCRTuningTab(QWidget):
         self.mosaic_area.setWidgetResizable(True)
         right.addWidget(self.mosaic_area, 6)
 
+        # Add the right panel to the main layout
         layout.addLayout(right, 4)
+        # Only set the layout once, at the end of init_ui
         self.setLayout(layout)
+
+    def toggle_bw_mode(self, state):
+        self.bw_mode = bool(state)
 
     def populate_video_list(self):
         self.video_list.clear()
@@ -229,6 +268,7 @@ class DevEasyOCRTuningTab(QWidget):
     def update_preproc_params(self):
         for name, widget in self.preproc_widgets.items():
             self.preproc_params[name] = widget.value()
+        # No return needed, enables are handled in preprocess_crop
 
     def update_params(self):
         for name, widget in self.param_widgets.items():
@@ -248,26 +288,85 @@ class DevEasyOCRTuningTab(QWidget):
                 self.ocr_params[name] = widget.value()
 
     def preprocess_crop(self, crop):
-        # CLAHE
-        clahe = cv2.createCLAHE(clipLimit=self.preproc_params["clahe_clip"], tileGridSize=(self.preproc_params["clahe_grid"], self.preproc_params["clahe_grid"]))
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        enhanced = clahe.apply(gray)
+        # Step enables
+        enabled = self.preproc_enables
+        # Colour mode: skip grayscale and CLAHE, use original crop
+        if self.colour_mode:
+            proc = crop.copy()
+        else:
+            # CLAHE
+            if enabled["clahe_clip"].isChecked() or enabled["clahe_grid"].isChecked():
+                gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                proc = cv2.createCLAHE(clipLimit=self.preproc_params["clahe_clip"], tileGridSize=(self.preproc_params["clahe_grid"], self.preproc_params["clahe_grid"])) .apply(gray)
+            else:
+                proc = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            # Black/White invert
+            if self.bw_mode:
+                proc = cv2.bitwise_not(proc)
         # Sharpening
-        sharpen_strength = self.preproc_params["sharpen"]
-        if sharpen_strength > 0:
+        if enabled["sharpen"].isChecked() and self.preproc_params["sharpen"] > 0:
+            sharpen_strength = self.preproc_params["sharpen"]
             kernel = np.array([[0, -1, 0], [-1, 5 + sharpen_strength, -1], [0, -1, 0]])
-            enhanced = cv2.filter2D(enhanced, -1, kernel)
+            proc = cv2.filter2D(proc, -1, kernel)
         # Upscale
-        scale = self.preproc_params["upscale"]
-        upscaled = cv2.resize(enhanced, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        if enabled["upscale"].isChecked() and self.preproc_params["upscale"] > 1.0:
+            scale = self.preproc_params["upscale"]
+            proc = cv2.resize(proc, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
         # Blur
-        ksize = self.preproc_params["blur_ksize"]
-        if ksize % 2 == 0:
-            ksize += 1
-        blurred = cv2.GaussianBlur(upscaled, (ksize, ksize), 0)
-        # Convert back to 3-channel RGB for easyocr
-        upscaled_rgb = cv2.cvtColor(blurred, cv2.COLOR_GRAY2RGB)
-        return upscaled_rgb, blurred
+        if enabled["blur_ksize"].isChecked() and self.preproc_params["blur_ksize"] > 1:
+            ksize = self.preproc_params["blur_ksize"]
+            if ksize % 2 == 0:
+                ksize += 1
+            proc = cv2.GaussianBlur(proc, (ksize, ksize), 0)
+        # Convert to 3-channel RGB for easyocr if not already
+        if len(proc.shape) == 2:
+            upscaled_rgb = cv2.cvtColor(proc, cv2.COLOR_GRAY2RGB)
+        else:
+            upscaled_rgb = proc
+        return upscaled_rgb, proc
+
+    def save_param_set(self):
+        params = {
+            'ocr': self.ocr_params,
+            'preproc': self.preproc_params,
+            'preproc_enables': {k: v.isChecked() for k, v in self.preproc_enables.items()},
+            'colour_mode': getattr(self, 'colour_mode', False),
+            'bw_mode': getattr(self, 'bw_mode', False)
+        }
+        fname, _ = QFileDialog.getSaveFileName(self, "Save Parameter Set", "easyocr_params.json", "JSON Files (*.json)")
+        if fname:
+            with open(fname, 'w') as f:
+                json.dump(params, f, indent=2)
+
+    def load_param_set(self):
+        fname, _ = QFileDialog.getOpenFileName(self, "Load Parameter Set", "", "JSON Files (*.json)")
+        if fname:
+            with open(fname, 'r') as f:
+                params = json.load(f)
+            # Load OCR params
+            for k, v in params.get('ocr', {}).items():
+                if k in self.param_widgets:
+                    widget = self.param_widgets[k]
+                    if isinstance(widget, QComboBox):
+                        idx = widget.findText(str(v))
+                        if idx >= 0:
+                            widget.setCurrentIndex(idx)
+                    else:
+                        widget.setValue(v)
+            # Load preproc params
+            for k, v in params.get('preproc', {}).items():
+                if k in self.preproc_widgets:
+                    self.preproc_widgets[k].setValue(v)
+            # Load enables
+            for k, v in params.get('preproc_enables', {}).items():
+                if k in self.preproc_enables:
+                    self.preproc_enables[k].setChecked(v)
+            # Load colour mode if present
+            if 'colour_mode' in params:
+                self.colour_checkbox.setChecked(params['colour_mode'])
+            # Load B/W mode if present
+            if 'bw_mode' in params:
+                self.bw_checkbox.setChecked(params['bw_mode'])
 
     def run_detection_and_ocr(self):
         if not hasattr(self, "current_frame_img"):
@@ -310,8 +409,9 @@ class DevEasyOCRTuningTab(QWidget):
                             )
                             digit_str = ''.join([r[1] for r in ocr_results])
                             ocr_boxes = [r[0] for r in ocr_results]
+                            ocr_confs = [r[2] if len(r) > 2 else None for r in ocr_results]
                             player_crops.append(preproc_gray)  # Show preprocessed grayscale in mosaic
-                            player_results.append((digit_str, ocr_boxes))
+                            player_results.append((digit_str, ocr_boxes, ocr_confs))
         self.display_mosaic(player_crops, player_results)
 
     def display_mosaic(self, crops, results):
@@ -322,13 +422,19 @@ class DevEasyOCRTuningTab(QWidget):
                 widget.setParent(None)
         # Display crops in a grid
         cols = 6
-        for idx, (crop, (digit_str, ocr_boxes)) in enumerate(zip(crops, results)):
+        for idx, (crop, (digit_str, ocr_boxes, ocr_confs)) in enumerate(zip(crops, results)):
             label = QLabel()
             crop_disp = crop.copy()
             # Draw OCR boxes
-            for box in ocr_boxes:
+            for i, box in enumerate(ocr_boxes):
                 pts = np.array(box, dtype=np.int32)
-                cv2.polylines(crop_disp, [pts], isClosed=True, color=(255, 0, 0), thickness=2)
+                conf = ocr_confs[i] if ocr_confs and i < len(ocr_confs) else None
+                color = (255, 0, 0)
+                cv2.polylines(crop_disp, [pts], isClosed=True, color=color, thickness=2)
+                # Draw confidence as text near the box
+                if conf is not None:
+                    pt = pts[0]
+                    cv2.putText(crop_disp, f"{conf:.2f}", (pt[0], pt[1]-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,0), 1, cv2.LINE_AA)
             # If a digit was detected, add a thick green border
             if digit_str and any(char.isdigit() for char in digit_str):
                 border_color = (0, 255, 0)  # Green
@@ -359,3 +465,7 @@ class DevEasyOCRTuningTab(QWidget):
                 self.mosaic_layout.addWidget(container, idx // cols, idx % cols)
             else:
                 self.mosaic_layout.addWidget(label, idx // cols, idx % cols)
+
+
+    def toggle_colour_mode(self, state):
+        self.colour_mode = bool(state)
