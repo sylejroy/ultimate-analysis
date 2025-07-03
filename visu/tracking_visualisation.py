@@ -4,6 +4,13 @@ from processing.inference import get_class_names
 
 def draw_track_history(frame, tracks, detections, history_length=300):
     class_names = get_class_names()
+    # Draw all detections in subtle gray (when tracking is on)
+    gray = (180, 180, 180)
+    for det in detections:
+        (dx, dy, dw, dh), conf, cls = det
+        cv2.rectangle(frame, (int(dx), int(dy)), (int(dx + dw), int(dy + dh)), gray, 1)
+        # No class name or label for subtle detections
+
     for track in tracks:
         if not track.is_confirmed():
             continue
