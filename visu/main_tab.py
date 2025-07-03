@@ -355,8 +355,16 @@ class MainTab(QWidget):
         # --- Detection/Tracking overlays ---
         t6 = time.time()
         if self.tracking_checkbox.isChecked():
-            from tracking_visualisation import draw_track_history
+            from tracking_visualisation import draw_track_history, draw_pitch_projection
             vis_frame = draw_track_history(vis_frame, self.tracks, self.detections)
+            # --- Pitch projection visualisation (now handled in tracking_visualisation) ---
+            from tracking_visualisation import get_pitch_projection_qimage
+            if not hasattr(self, 'pitch_label'):
+                self.pitch_label = QLabel()
+                self.pitch_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+                self.layout().addWidget(self.pitch_label, 0)
+            qimg2 = get_pitch_projection_qimage(self.tracks, frame)
+            self.pitch_label.setPixmap(QPixmap.fromImage(qimg2))
         elif self.inference_checkbox.isChecked():
             from detection_visualisation import draw_yolo_detections
             vis_frame = draw_yolo_detections(vis_frame, self.detections)

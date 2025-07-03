@@ -1,16 +1,138 @@
+def get_pitch_projection_qimage(tracks, frame, label_font_size=10):
+    """
+    Returns a QImage of the pitch projection, rotated 180deg, with upright labels for each track.
+    - tracks: list of track objects
+    - frame: current video frame (numpy array)
+    - label_font_size: font size for track labels
+    """
+    from PyQt5.QtGui import QImage, QPixmap, QPainter, QFont, QColor
+    import cv2
+    pitch_img = draw_pitch_projection(tracks, frame.shape)
+    h2, w2, ch2 = pitch_img.shape
+    qpix = QPixmap.fromImage(QImage(pitch_img.data, w2, h2, ch2 * w2, QImage.Format_BGR888))
+    painter = QPainter(qpix)
+    font = QFont()
+    font.setPointSize(label_font_size)
+    painter.setFont(font)
+    frame_h, frame_w = frame.shape[:2]
+    img_w, img_h = w2, h2
+    for track in tracks:
+        if not track.is_confirmed():
+            continue
+        track_id = track.track_id
+        ltrb = track.to_ltrb()
+        x1, y1, x2, y2 = map(int, ltrb)
+        cx = (x1 + x2) // 2
+        cy = y2
+        # Direct mapping: x (frame) -> x (pitch), y (frame) -> y (pitch)
+        px = int(cx / frame_w * img_w)
+        py = int(cy / frame_h * img_h)
+        color = get_color(int(track_id))
+        painter.setPen(QColor(*color))
+        painter.setBrush(QColor(*color))
+        painter.drawText(px + 8, py - 8, str(track_id))
+    painter.end()
+    return qpix.toImage()
+def draw_pitch_projection(tracks, frame_shape, pitch_size=(100, 37), history_length=300, image_size=(600, 222)):
+    """
+    Projects player tracks onto a 2D pitch and returns an image with the pitch and tracks drawn.
+    - tracks: list of track objects (must have .to_ltrb() and .track_id)
+    - frame_shape: shape of the video frame (h, w, c)
+    - pitch_size: (length, width) in meters
+    - history_length: how many points to show per track
+    - image_size: (width, height) of the pitch image in pixels
+    """
+    import cv2
+    import numpy as np
+    # Set pitch image so that length is vertical (long axis = vertical)
+    pitch_length, pitch_width = pitch_size
+    # Default image_size is (600, 222) (w, h), but for vertical pitch, swap to (width, length)
+    img_h = 600  # vertical (length)
+    img_w = 222  # horizontal (width)
+    pitch_img = np.zeros((img_h, img_w, 3), dtype=np.uint8)
+    # Draw pitch outline
+    cv2.rectangle(pitch_img, (0, 0), (img_w-1, img_h-1), (255, 255, 255), 2)
+    # Center line (horizontal across the middle)
+    cv2.line(pitch_img, (0, img_h//2), (img_w-1, img_h//2), (200, 200, 200), 1)
+    # End zones (18m each side for ultimate, vertical)
+    endzone_py = int(18 / pitch_length * img_h)
+    cv2.rectangle(pitch_img, (0, 0), (img_w-1, endzone_py), (100, 100, 255), 1)
+    cv2.rectangle(pitch_img, (0, img_h-endzone_py), (img_w-1, img_h-1), (100, 100, 255), 1)
+    # Map from image (frame) to pitch: x (frame) -> x (pitch), y (frame) -> y (pitch)
+    frame_h, frame_w = frame_shape[:2]
+    def img_to_pitch_coords(x, y):
+        px = int(x / frame_w * img_w)
+        py = int(y / frame_h * img_h)
+        return px, py
+    # Draw tracks
+    for track in tracks:
+        if not track.is_confirmed():
+            continue
+        track_id = track.track_id
+        ltrb = track.to_ltrb()
+        x1, y1, x2, y2 = map(int, ltrb)
+        # Use bottom middle of bbox
+        cx = (x1 + x2) // 2
+        cy = y2
+        # Get history if available
+        history = []
+        if hasattr(draw_track_history, "track_histories"):
+            track_histories = draw_track_history.track_histories
+            if track_id in track_histories:
+                history = track_histories[track_id][-history_length:]
+        else:
+            history = [(cx, cy)]
+        color = get_color(int(track_id))
+        # Draw history
+        for i in range(len(history) - 1):
+            pt1 = img_to_pitch_coords(*history[i])
+            pt2 = img_to_pitch_coords(*history[i+1])
+            cv2.line(pitch_img, pt1, pt2, color, 2)
+        # Draw current position
+        px, py = img_to_pitch_coords(cx, cy)
+        cv2.circle(pitch_img, (px, py), 6, color, -1)
+        # Do NOT draw text label here; label will be drawn after in get_pitch_projection_qimage
+    return pitch_img
 import cv2
 import numpy as np
 from processing.inference import get_class_names
 
 def draw_track_history(frame, tracks, detections, history_length=300):
     class_names = get_class_names()
-    # Draw all detections in subtle gray (when tracking is on)
     gray = (180, 180, 180)
     for det in detections:
         (dx, dy, dw, dh), conf, cls = det
         cv2.rectangle(frame, (int(dx), int(dy)), (int(dx + dw), int(dy + dh)), gray, 1)
-        # No class name or label for subtle detections
-
+    # --- Optical flow camera motion compensation ---
+    import numpy as np
+    import cv2
+    frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    if not hasattr(draw_track_history, "prev_gray"):
+        draw_track_history.prev_gray = None
+    if not hasattr(draw_track_history, "track_histories"):
+        draw_track_history.track_histories = {}
+    prev_gray = draw_track_history.prev_gray
+    track_histories = draw_track_history.track_histories
+    # Compute optical flow if previous frame exists
+    flow = None
+    if prev_gray is not None:
+        flow = cv2.calcOpticalFlowFarneback(prev_gray, frame_gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+    # Compensate all history points for all tracks
+    if flow is not None:
+        h, w = flow.shape[:2]
+        for track_id, history in track_histories.items():
+            new_history = []
+            for (x, y) in history:
+                # Clamp to image bounds
+                xi = int(np.clip(x, 0, w-1))
+                yi = int(np.clip(y, 0, h-1))
+                fx, fy = flow[yi, xi]
+                # Subtract flow to compensate camera motion
+                new_x = x - fx
+                new_y = y - fy
+                new_history.append((new_x, new_y))
+            track_histories[track_id] = new_history
+    # Now update with new detections
     for track in tracks:
         if not track.is_confirmed():
             continue
@@ -18,15 +140,8 @@ def draw_track_history(frame, tracks, detections, history_length=300):
         ltrb = track.to_ltrb()
         x1, y1, x2, y2 = map(int, ltrb)
         color = get_color(int(track_id))
-        # Maintain a global dictionary to store track histories
-        if not hasattr(draw_track_history, "track_histories"):
-            draw_track_history.track_histories = {}
-        track_histories = draw_track_history.track_histories
-
-        # Use the bottom middle of the bounding box for the history point
         cx = (x1 + x2) // 2
         cy = y2
-
         if track_id not in track_histories:
             track_histories[track_id] = []
         track_histories[track_id].append((cx, cy))
@@ -36,43 +151,10 @@ def draw_track_history(frame, tracks, detections, history_length=300):
             pt1 = (int(history[i][0]), int(history[i][1]))
             pt2 = (int(history[i + 1][0]), int(history[i + 1][1]))
             cv2.line(frame, pt1, pt2, color, 2)
-
-        # Draw a colored bounding box for the latest entry in the object's track
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        # Find the best matching detection for this track (IoU or center proximity)
-        best_det = None
-        best_dist = float('inf')
-        track_class = getattr(track, "det_class", None)
-        for det in detections:
-            (dx, dy, dw, dh), conf, cls = det
-            if track_class is not None and cls != track_class:
-                continue  # Only match detections of the same class
-            dcx = dx + dw // 2
-            dcy = dy + dh // 2
-            dist = (dcx - cx) ** 2 + (dcy - cy) ** 2
-            if dist < best_dist:
-                best_dist = dist
-                best_det = det
-        if best_det is not None:
-            (_, _, _, _), conf, cls = best_det
-            class_name = class_names.get(cls, str(cls))
-            label = f'{class_name} {conf:.2f}'
-        else:
-            label = ""
-        # Draw class and confidence underneath the bounding box (if available)
-        if label:
-            text_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
-            text_x = x1
-            text_y = y2 + text_size[1] + 6  # a bit below the box
-            cv2.putText(
-                frame,
-                label,
-                (text_x, text_y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                color,
-                2
-            )
+    # Store current frame for next call
+    draw_track_history.prev_gray = frame_gray
+    return frame
     return frame
 
 def get_color(idx):
