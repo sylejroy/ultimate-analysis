@@ -32,25 +32,47 @@ Ultimate Analysis is a computer vision and AI-powered tool for automated analysi
 
 - **Game State Detection**
   - Classify game states (live play, stoppage, pre-pull, between points) from video.
+    - Implement a classifier for game state transitions.
+    - Annotate and label training data for different game states.
+    - Integrate state detection into the main analysis pipeline.
   - Detect turnovers, team possession, and player in possession.
+    - Develop logic to infer turnovers from disc and player tracking.
+    - Track team possession changes.
+    - Identify which player is in possession of the disc at each frame.
 
 - **Disc Possession and Event Detection**
   - More robust disc tracking and event detection (e.g., passes, turnovers).
+    - Improve disc detection accuracy in crowded scenes.
+    - Detect disc throw and catch events.
+    - Automatically log passes, turnovers, and other key events.
 
 - **Perspective Transformation**
   - Apply perspective transformation to generate a top-down view for tactical analysis.
+    - Calibrate camera and field coordinates.
+    - Map player and disc positions to a bird’s-eye view.
+    - Visualize team formations and movement patterns on the transformed field.
 
 - **Custom Dataset Tools**
   - Tools for creating and managing custom datasets (e.g., via Roboflow) to improve detection accuracy.
+    - Build annotation tools for labeling players, discs, and field boundaries.
+    - Automate dataset export and augmentation.
+    - Integrate with Roboflow or similar platforms for dataset management.
 
 - **Advanced Analytics**
   - Generate player heatmaps, movement statistics, and tactical insights.
+    - Aggregate player positions over time to create heatmaps.
+    - Calculate player speed, distance covered, and other statistics.
+    - Analyze team strategies and formations.
 
 - **Export and Reporting**
   - Export results to CSV, JSON, or annotated video.
+    - Implement export functions for detections, tracks, and analytics.
+    - Generate summary reports and visualizations.
 
 - **Model Weights Hosting**
-  - Host trained YOLO and segmentation weights for easy download and reproducibility (e.g., on [Hugging Face Hub](https://huggingface.co/), [Zenodo](https://zenodo.org/), or [GitHub Releases](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases)).
+  - Host trained YOLO and segmentation weights for easy download and reproducibility.
+    - Upload models to [Hugging Face Hub](https://huggingface.co/), [Zenodo](https://zenodo.org/), or [GitHub Releases](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases).
+    - Provide download scripts or links in the documentation.
 
 ## Getting Started
 
