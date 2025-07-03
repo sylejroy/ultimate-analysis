@@ -35,8 +35,11 @@ def draw_track_history(frame, tracks, detections, history_length=300):
         # Find the best matching detection for this track (IoU or center proximity)
         best_det = None
         best_dist = float('inf')
+        track_class = getattr(track, "det_class", None)
         for det in detections:
             (dx, dy, dw, dh), conf, cls = det
+            if track_class is not None and cls != track_class:
+                continue  # Only match detections of the same class
             dcx = dx + dw // 2
             dcy = dy + dh // 2
             dist = (dcx - cx) ** 2 + (dcy - cy) ** 2

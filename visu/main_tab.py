@@ -38,6 +38,14 @@ class MainTab(QWidget):
         self.video_label.setAlignment(Qt.AlignCenter)
         right_layout.addWidget(self.video_label, 8)
 
+        # Progress bar for video position
+        from PyQt5.QtWidgets import QSlider
+        self.progress_bar = QSlider(Qt.Horizontal)
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setSingleStep(1)
+        self.progress_bar.sliderMoved.connect(self.seek_video)
+        right_layout.addWidget(self.progress_bar)
+
         # Checkboxes with keybinds in labels
         self.inference_checkbox = QCheckBox("Show Inference Results [I]")
         self.tracking_checkbox = QCheckBox("Show Inference Tracking [T]")
@@ -153,6 +161,11 @@ class MainTab(QWidget):
         self.current_video_index = index
         self.is_paused = False
         self.play_pause_button.setText("Play")
+        # Set progress bar range
+        if self.player.cap:
+            total_frames = int(self.player.cap.get(7))  # cv2.CAP_PROP_FRAME_COUNT == 7
+            self.progress_bar.setMaximum(max(0, total_frames - 1))
+            self.progress_bar.setValue(0)
 
     def toggle_play_pause(self):
         if not self.player.cap:
@@ -172,6 +185,11 @@ class MainTab(QWidget):
             self.timer.stop()
             self.play_pause_button.setText("Play")
             return
+
+        # Update progress bar
+        if self.player.cap:
+            current_frame = int(self.player.cap.get(1))  # cv2.CAP_PROP_POS_FRAMES == 1
+            self.progress_bar.setValue(current_frame)
 
         # --- Inference step ---
         t0 = time.time()
@@ -305,3 +323,17 @@ class MainTab(QWidget):
     def set_field_model(self, model_path):
         print(f"[DEBUG] MainTab.set_field_model called with: {model_path}")
         set_field_model(model_path)  # <-- Add this line to actually update the field segmentation model
+
+    def seek_video(self, frame_idx):
+        if self.player.cap:
+            self.player.cap.set(1, frame_idx)  # cv2.CAP_PROP_POS_FRAMES == 1
+            frame = self.player.get_next_frame()
+            if frame is not None:
+                vis_frame = frame.copy()
+                h, w, ch = vis_frame.shape
+                bytes_per_line = ch * w
+                qimg = QImage(vis_frame.data, w, h, bytes_per_line, QImage.Format_BGR888)
+                pixmap = QPixmap.fromImage(qimg)
+                self.video_label.setPixmap(pixmap.scaled(
+                    self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+                ))
