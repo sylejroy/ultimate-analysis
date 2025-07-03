@@ -1,11 +1,16 @@
 from ultralytics import YOLO
 import easyocr
 import cv2
+import numpy as np
+
+# ---- CONFIGURABLE DEFAULT ----
+DEFAULT_PLAYER_ID_METHOD = "easyocr"  # Change to "yolo" to use YOLO by default
+# ------------------------------
 
 # Global state
 player_id_model = None
 player_id_model_path = None
-player_id_method = "yolo"  # or "easyocr"
+player_id_method = DEFAULT_PLAYER_ID_METHOD
 easyocr_reader = None
 
 def set_player_id_method(method):
@@ -30,7 +35,9 @@ def set_easyocr():
         print("[DEBUG] Initializing EasyOCR reader")
         easyocr_reader = easyocr.Reader(['en'], gpu=True)
 
+
 def run_player_id(frame):
+    global easyocr_reader
     if player_id_method == "yolo":
         if player_id_model is None:
             raise RuntimeError("Player ID YOLO model not loaded.")
@@ -46,18 +53,18 @@ def run_player_id(frame):
     elif player_id_method == "easyocr":
         if easyocr_reader is None:
             set_easyocr()
-        crop_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        ocr_results = easyocr_reader.readtext(
-            crop_rgb, detail=0, allowlist='0123456789', min_size=5,
-            rotation_info=[0, 90, 180, 270], text_threshold=0.3
-        )
-        digit_str = ''.join(ocr_results)
-        return digit_str, []
+        # Only blur before OCR, no other preprocessing
+        blurred = cv2.GaussianBlur(frame, (3, 3), 0)
+        ocr_results = easyocr_reader.readtext(blurred, detail=1, allowlist='0123456789', decoder='greedy')
+        ocr_boxes = [res[0] for res in ocr_results]
+        digit_str = ''.join([res[1] for res in ocr_results])
+        return digit_str, ocr_boxes
     else:
         raise RuntimeError("Unknown player ID method.")
 
-# Try to load a default player ID model at startup (adjust the path as needed)
-try:
-    load_player_id_model("finetune/digit_detector_yolo11l/finetune/weights/best.pt")
-except Exception as e:
-    print(f"[DEBUG] Could not load default player ID model: {e}")
+# Initialize the default method at startup
+if DEFAULT_PLAYER_ID_METHOD == "easyocr":
+    try:
+        set_easyocr()
+    except Exception as e:
+        print(f"[DEBUG] Could not initialize EasyOCR at startup: {e}")

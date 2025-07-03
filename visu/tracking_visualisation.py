@@ -56,18 +56,23 @@ def draw_track_history(frame, tracks, detections, history_length=300):
         if best_det is not None:
             (_, _, _, _), conf, cls = best_det
             class_name = class_names.get(cls, str(cls))
-            label = f'ID {track_id} {class_name} {conf:.2f}'
+            label = f'{class_name} {conf:.2f}'
         else:
-            label = f'ID {track_id}'
-        cv2.putText(
-            frame,
-            label,
-            (x1, y1 - 10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            color,
-            2
-        )
+            label = ""
+        # Draw class and confidence underneath the bounding box (if available)
+        if label:
+            text_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
+            text_x = x1
+            text_y = y2 + text_size[1] + 6  # a bit below the box
+            cv2.putText(
+                frame,
+                label,
+                (text_x, text_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                color,
+                2
+            )
     return frame
 
 def get_color(idx):

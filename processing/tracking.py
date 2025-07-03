@@ -4,7 +4,7 @@ import numpy as np
 from collections import deque
 
 # Tracker selection
-tracker_type =  "deepsort" # or "histogram"
+tracker_type =  "deepsort" #"histogram" # or "deepsort"
 tracker = None
 
 # --- Histogram-based tracker implementation ---
@@ -36,14 +36,15 @@ def get_histogram(img, bbox):
     return hist
 
 class Track:
-    def __init__(self, track_id, bbox, hist, frame_id):
+    def __init__(self, track_id, bbox, hist, frame_id, det_class=None):
         self.track_id = track_id
         self.bbox = bbox  # [x1, y1, x2, y2]
         self.hist = hist
         self.last_frame = frame_id
         self.history = deque([bbox], maxlen=MAX_HISTORY)
         self.lost = 0
-        self.confirmed = True  # Always confirmed for histogram tracker
+        self.confirmed = True
+        self.det_class = det_class  # <-- Store class
 
     def update(self, bbox, hist, frame_id):
         self.bbox = bbox
@@ -73,6 +74,7 @@ class HistogramTracker:
         # detections: [([x, y, w, h], conf, cls), ...]
         det_bboxes = []
         det_hists = []
+        det_classes = []
         for det in detections:
             (x, y, w, h), conf, cls = det
             x1, y1, x2, y2 = x, y, x + w, y + h
@@ -80,6 +82,7 @@ class HistogramTracker:
             hist = get_histogram(frame, bbox)
             det_bboxes.append(bbox)
             det_hists.append(hist)
+            det_classes.append(cls)
 
         assigned = set()
         for track in self.tracks:
@@ -103,7 +106,7 @@ class HistogramTracker:
         # Create new tracks for unassigned detections
         for i, (bbox, hist) in enumerate(zip(det_bboxes, det_hists)):
             if i not in assigned:
-                self.tracks.append(Track(self.next_track_id, bbox, hist, self.frame_id))
+                self.tracks.append(Track(self.next_track_id, bbox, hist, self.frame_id, det_class=det_classes[i]))
                 self.next_track_id += 1
 
         # Remove lost tracks

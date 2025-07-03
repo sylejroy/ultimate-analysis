@@ -17,7 +17,9 @@ class RuntimesDialog(QDialog):
     def __init__(self, dev_runtimes_tab, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Processing & Visualisation Runtimes")
-        self.setMinimumWidth(400)
+        self.setMinimumWidth(700)  # Increased width
+        self.setMinimumHeight(400) # Increased height
+        self.resize(900, 500)      # Set initial size larger
         self.dev_runtimes_tab = dev_runtimes_tab
         layout = QVBoxLayout()
         # Create a new table to avoid widget reparenting issues
@@ -325,11 +327,19 @@ class MainTab(QWidget):
             from player_id_visualisation import draw_player_id
             import numpy as np
             for track in self.tracks:
+                # Only run player ID on player class objects
+                track_class = getattr(track, "det_class", None)
+                PLAYER_CLASS_IDX = 1
+                if track_class is not None and track_class != PLAYER_CLASS_IDX:
+                    continue
                 bbox = None
-                if hasattr(track, "to_tlwh"):
-                    bbox = track.to_tlwh()
-                elif hasattr(track, "to_ltrb"):
+                # Always use to_ltrb for tracks (returns [x1, y1, x2, y2])
+                if hasattr(track, "to_ltrb"):
                     bbox = track.to_ltrb()
+                elif hasattr(track, "to_tlwh"):
+                    # Convert [x, y, w, h] to [x1, y1, x2, y2]
+                    x, y, w, h = track.to_tlwh()
+                    bbox = [x, y, x + w, y + h]
                 elif hasattr(track, "bbox"):
                     bbox = track.bbox
                 elif isinstance(track, dict):
@@ -337,14 +347,22 @@ class MainTab(QWidget):
                 if bbox is not None:
                     bbox = np.round(np.array(bbox)).astype(int)
                     if len(bbox) == 4:
-                        x, y, w, h = bbox
-                        x, y = max(0, x), max(0, y)
-                        w, h = max(1, w), max(1, h)
-                        if y + h <= frame.shape[0] and x + w <= frame.shape[1]:
-                            obj_crop = frame[y:y+h, x:x+w]
+                        x1, y1, x2, y2 = bbox
+                        x1, y1 = max(0, x1), max(0, y1)
+                        x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
+                        w, h = x2 - x1, y2 - y1
+                        if w > 0 and h > 0:
+                            # Only use the top half of the bounding box for player ID
+                            half_h = max(1, h // 2)
+                            obj_crop = frame[y1:y1+half_h, x1:x2]
                             if obj_crop.size > 0:
                                 digit_str, digits = run_player_id(obj_crop)
-                                vis_frame = draw_player_id(vis_frame, (x, y, w, h), digit_str, digits)
+                                vis_frame = draw_player_id(
+                                    vis_frame,
+                                    (x1, y1, x2 - x1, half_h),  # [x, y, w, h] for the top half
+                                    digit_str,
+                                    digits
+                                )
         t9 = time.time()
         if self.dev_runtimes_tab:
             self.dev_runtimes_tab.log_runtime("Player ID", (t9 - t8) * 1000)
