@@ -1,9 +1,10 @@
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from PyQt5.QtWidgets import QApplication, QTabWidget
-from PyQt5.QtGui import QPalette, QColor
+from PyQt5.QtWidgets import QApplication, QTabWidget, QLabel
+from PyQt5.QtGui import QPalette, QColor, QPixmap, QPainter, QPen
 from PyQt5.QtCore import Qt
+
 from main_tab import MainTab
 from settings_tab import SettingsTab
 from dev_video_preprocessing_tab import DevVideoPreprocessingTab
@@ -65,6 +66,22 @@ if __name__ == "__main__":
         }
         QScrollBar::add-line, QScrollBar::sub-line {
             background: none;
+        }
+        QTableWidget, QTableView, QHeaderView {
+            background-color: #232323; color: #f0f0f0;
+            gridline-color: #444444;
+            selection-background-color: #2a2a2a;
+            selection-color: #ffffff;
+            border: 1px solid #444444;
+        }
+        QTableWidget QTableCornerButton::section, QTableView QTableCornerButton::section {
+            background-color: #232323;
+            border: 1px solid #444444;
+        }
+        QHeaderView::section {
+            background-color: #232323;
+            color: #f0f0f0;
+            border: 1px solid #444444;
         }
     """)
     # ---- END DARK MODE ----

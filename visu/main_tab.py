@@ -30,6 +30,42 @@ class RuntimesDialog(QDialog):
         self.runtimes = {}  # {step: [list of runtimes]}
         self.refresh_table()
 
+    def create_sparkline(self, values, width=60, height=18, color='#6cf'):  # color: cyan for dark mode
+        # Minimal sparkline using QPixmap and QPainter
+        from PyQt5.QtGui import QPixmap, QPainter, QColor, QPen
+        from PyQt5.QtWidgets import QLabel
+        import numpy as np
+        if not values:
+            pixmap = QPixmap(width, height)
+            pixmap.fill(Qt.transparent)
+            return QLabel(pixmap=pixmap)
+        arr = np.array(values[-width:])
+        arr = arr[-width:] if len(arr) > width else arr
+        arr = np.pad(arr, (width - len(arr), 0), 'constant', constant_values=(arr[0] if len(arr) else 0,))
+        min_v, max_v = float(np.min(arr)), float(np.max(arr))
+        if max_v == min_v:
+            min_v -= 1
+            max_v += 1
+        norm = (arr - min_v) / (max_v - min_v)
+        pixmap = QPixmap(width, height)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        pen = QPen(QColor(color))
+        pen.setWidth(2)
+        painter.setPen(pen)
+        points = [
+            (i, height - 2 - int(n * (height - 4)))
+            for i, n in enumerate(norm)
+        ]
+        for i in range(1, len(points)):
+            painter.drawLine(points[i-1][0], points[i-1][1], points[i][0], points[i][1])
+        painter.end()
+        label = QLabel()
+        label.setPixmap(pixmap)
+        label.setFixedSize(width, height)
+        label.setStyleSheet("background: transparent;")
+        return label
+
     def log_runtime(self, step, runtime_ms):
         if step not in self.runtimes:
             self.runtimes[step] = []
@@ -40,8 +76,8 @@ class RuntimesDialog(QDialog):
 
     def refresh_table(self):
         self.table.setRowCount(0)
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["Step", "Last Runtime (ms)", "Average Runtime (ms)"])
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["Step", "Last Runtime (ms)", "Average Runtime (ms)", "History"])
         for step, times in self.runtimes.items():
             last = times[-1] if times else 0
             avg = sum(times) / len(times) if times else 0
@@ -50,6 +86,9 @@ class RuntimesDialog(QDialog):
             self.table.setItem(row, 0, QTableWidgetItem(step))
             self.table.setItem(row, 1, QTableWidgetItem(f"{last:.1f}"))
             self.table.setItem(row, 2, QTableWidgetItem(f"{avg:.1f}"))
+            # Sparkline widget for history
+            sparkline = self.create_sparkline(times)
+            self.table.setCellWidget(row, 3, sparkline)
         self.table.resizeColumnsToContents()
         self.table.resizeRowsToContents()
 

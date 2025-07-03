@@ -79,29 +79,29 @@ class DevEasyOCRTuningTab(QWidget):
         self.populate_video_list()
 
     def default_ocr_params(self):
-        # Use EasyOCR's documented defaults
+        # Optimized defaults for better OCR performance
         return {
             "detail": 1,
             "allowlist": None,
-            "min_size": 20,
-            "rotation_info": [0],
-            "text_threshold": 0.7,
-            "low_text": 0.4,
-            "mag_ratio": 1.5,
-            "contrast_ths": 0.1,
-            "adjust_contrast": 0.5,
+            "min_size": 18,
+            "rotation_info": [0, 90, 180, 270],
+            "text_threshold": 0.6,
+            "low_text": 0.3,
+            "mag_ratio": 2.0,
+            "contrast_ths": 0.05,
+            "adjust_contrast": 0.7,
             "slope_ths": 0.1,
-            "width_ths": 0.4,
+            "width_ths": 0.3,
             "decoder": "greedy",
         }
 
     def default_preproc_params(self):
         return {
-            "blur_ksize": 3,
-            "clahe_clip": 2.0,
-            "clahe_grid": 4,
-            "sharpen": 1.0,
-            "upscale": 2.0,
+            "blur_ksize": 1,         # No blur by default
+            "clahe_clip": 3.0,       # Stronger contrast
+            "clahe_grid": 8,         # Finer grid
+            "sharpen": 2.0,          # Stronger sharpening
+            "upscale": 3.0,          # Larger crops
         }
 
     def init_ui(self):
@@ -146,6 +146,20 @@ class DevEasyOCRTuningTab(QWidget):
             row.addWidget(widget)
             preproc_layout.addRow(name, row)
             self.preproc_widgets[name] = widget
+        # Upscale mode: by factor or to pixel size
+        self.upscale_to_size_checkbox = QCheckBox("Upscale to pixel size")
+        self.upscale_to_size_checkbox.setChecked(False)
+        self.upscale_to_size_checkbox.setToolTip("If checked, upscaling resizes the largest crop dimension to the target size in pixels.")
+        self.upscale_to_size_checkbox.stateChanged.connect(self.update_preproc_params)
+        self.upscale_target_size_spin = QSpinBox()
+        self.upscale_target_size_spin.setRange(16, 512)
+        self.upscale_target_size_spin.setValue(64)
+        self.upscale_target_size_spin.setToolTip("Target pixel size for upscaling (largest dimension). Only used if 'Upscale to pixel size' is checked.")
+        self.upscale_target_size_spin.valueChanged.connect(self.update_preproc_params)
+        upscale_row = QHBoxLayout()
+        upscale_row.addWidget(self.upscale_to_size_checkbox)
+        upscale_row.addWidget(self.upscale_target_size_spin)
+        preproc_layout.addRow("Upscale Mode", upscale_row)
         # Add black/white switch
         self.bw_checkbox = QCheckBox("Black/White Invert")
         self.bw_checkbox.setChecked(False)
@@ -268,7 +282,8 @@ class DevEasyOCRTuningTab(QWidget):
     def update_preproc_params(self):
         for name, widget in self.preproc_widgets.items():
             self.preproc_params[name] = widget.value()
-        # No return needed, enables are handled in preprocess_crop
+        self.upscale_to_size = self.upscale_to_size_checkbox.isChecked()
+        self.upscale_target_size = self.upscale_target_size_spin.value()
 
     def update_params(self):
         for name, widget in self.param_widgets.items():
@@ -309,9 +324,18 @@ class DevEasyOCRTuningTab(QWidget):
             kernel = np.array([[0, -1, 0], [-1, 5 + sharpen_strength, -1], [0, -1, 0]])
             proc = cv2.filter2D(proc, -1, kernel)
         # Upscale
-        if enabled["upscale"].isChecked() and self.preproc_params["upscale"] > 1.0:
-            scale = self.preproc_params["upscale"]
-            proc = cv2.resize(proc, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+        if enabled["upscale"].isChecked():
+            if getattr(self, 'upscale_to_size', False):
+                # Resize so largest dimension == target size
+                h, w = proc.shape[:2]
+                max_dim = max(h, w)
+                target = getattr(self, 'upscale_target_size', 64)
+                if max_dim != target:
+                    scale = target / max_dim
+                    proc = cv2.resize(proc, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+            elif self.preproc_params["upscale"] > 1.0:
+                scale = self.preproc_params["upscale"]
+                proc = cv2.resize(proc, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
         # Blur
         if enabled["blur_ksize"].isChecked() and self.preproc_params["blur_ksize"] > 1:
             ksize = self.preproc_params["blur_ksize"]
@@ -331,7 +355,9 @@ class DevEasyOCRTuningTab(QWidget):
             'preproc': self.preproc_params,
             'preproc_enables': {k: v.isChecked() for k, v in self.preproc_enables.items()},
             'colour_mode': getattr(self, 'colour_mode', False),
-            'bw_mode': getattr(self, 'bw_mode', False)
+            'bw_mode': getattr(self, 'bw_mode', False),
+            'upscale_to_size': getattr(self, 'upscale_to_size', False),
+            'upscale_target_size': getattr(self, 'upscale_target_size', 64)
         }
         fname, _ = QFileDialog.getSaveFileName(self, "Save Parameter Set", "easyocr_params.json", "JSON Files (*.json)")
         if fname:
@@ -367,6 +393,11 @@ class DevEasyOCRTuningTab(QWidget):
             # Load B/W mode if present
             if 'bw_mode' in params:
                 self.bw_checkbox.setChecked(params['bw_mode'])
+            # Load upscale mode if present
+            if 'upscale_to_size' in params:
+                self.upscale_to_size_checkbox.setChecked(params['upscale_to_size'])
+            if 'upscale_target_size' in params:
+                self.upscale_target_size_spin.setValue(params['upscale_target_size'])
 
     def run_detection_and_ocr(self):
         if not hasattr(self, "current_frame_img"):
@@ -434,7 +465,7 @@ class DevEasyOCRTuningTab(QWidget):
                 # Draw confidence as text near the box
                 if conf is not None:
                     pt = pts[0]
-                    cv2.putText(crop_disp, f"{conf:.2f}", (pt[0], pt[1]-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,0), 1, cv2.LINE_AA)
+                    cv2.putText(crop_disp, f"{conf:.2f}", (pt[0], pt[1]-5), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255,255,0), 3, cv2.LINE_AA)
             # If a digit was detected, add a thick green border
             if digit_str and any(char.isdigit() for char in digit_str):
                 border_color = (0, 255, 0)  # Green

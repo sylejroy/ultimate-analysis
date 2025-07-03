@@ -23,9 +23,9 @@ def draw_track_history(frame, tracks, detections, history_length=300):
             draw_track_history.track_histories = {}
         track_histories = draw_track_history.track_histories
 
-        # Use the center of the bounding box for the history point
+        # Use the bottom middle of the bounding box for the history point
         cx = (x1 + x2) // 2
-        cy = (y1 + y2) // 2
+        cy = y2
 
         if track_id not in track_histories:
             track_histories[track_id] = []

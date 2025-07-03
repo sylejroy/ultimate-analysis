@@ -1,0 +1,36 @@
+{
+  "ocr": {
+    "detail": 1,
+    "allowlist": "0123456789",
+    "min_size": 10,
+    "rotation_info": [
+      0
+    ],
+    "text_threshold": 0.7,
+    "low_text": 0.6,
+    "mag_ratio": 2.0,
+    "contrast_ths": 0.1,
+    "adjust_contrast": 0.5,
+    "slope_ths": 0.1,
+    "width_ths": 0.4,
+    "decoder": "greedy"
+  },
+  "preproc": {
+    "blur_ksize": 13,
+    "clahe_clip": 3.0,
+    "clahe_grid": 8,
+    "sharpen": 0.05,
+    "upscale": 3.0
+  },
+  "preproc_enables": {
+    "blur_ksize": true,
+    "clahe_clip": false,
+    "clahe_grid": false,
+    "sharpen": true,
+    "upscale": true
+  },
+  "colour_mode": true,
+  "bw_mode": true,
+  "upscale_to_size": true,
+  "upscale_target_size": 256
+}
