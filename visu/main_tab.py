@@ -10,6 +10,7 @@ from video_player import VideoPlayer
 from processing.inference import run_inference, set_detection_model
 from processing.tracking import run_tracking, reset_tracker
 from processing.field_segmentation import set_field_model  # <-- Add this import
+from processing.player_id import run_player_id
 
 class MainTab(QWidget):
     def __init__(self):
@@ -22,7 +23,7 @@ class MainTab(QWidget):
         self.tracks = []
         self.track_histories = {}  # or whatever structure you use
         self.init_ui()
-        self.init_shortcuts()  # <-- Add this line
+        self.init_shortcuts()
 
     def init_ui(self):
         layout = QHBoxLayout()
@@ -38,11 +39,11 @@ class MainTab(QWidget):
         # Checkboxes with keybinds in labels
         self.inference_checkbox = QCheckBox("Show Inference Results [I]")
         self.tracking_checkbox = QCheckBox("Show Inference Tracking [T]")
-        self.jersey_checkbox = QCheckBox("Show Jersey Number Tracking [J]")
+        self.player_id_checkbox = QCheckBox("Show Player Identification [J]")
         self.field_checkbox = QCheckBox("Show Field Segmentation [F]")
         right_layout.addWidget(self.inference_checkbox)
         right_layout.addWidget(self.tracking_checkbox)
-        right_layout.addWidget(self.jersey_checkbox)
+        right_layout.addWidget(self.player_id_checkbox)
         right_layout.addWidget(self.field_checkbox)
 
         # Play/Pause button with keybind
@@ -76,6 +77,8 @@ class MainTab(QWidget):
 
         # Now connect signals and load videos
         self.inference_checkbox.stateChanged.connect(self.handle_inference_checkbox)
+        self.tracking_checkbox.stateChanged.connect(self.handle_tracking_checkbox)
+        self.player_id_checkbox.stateChanged.connect(self.handle_player_id_checkbox)
         self.video_list.currentRowChanged.connect(self.load_selected_video)
         self.load_videos()
 
@@ -93,7 +96,7 @@ class MainTab(QWidget):
         # T: Toggle Tracking Checkbox
         QShortcut(QKeySequence(Qt.Key_T), self, lambda: self.tracking_checkbox.toggle())
         # J: Toggle Jersey Checkbox
-        QShortcut(QKeySequence(Qt.Key_J), self, lambda: self.jersey_checkbox.toggle())
+        QShortcut(QKeySequence(Qt.Key_J), self, lambda: self.player_id_checkbox.toggle())
         # F: Toggle Field Segmentation Checkbox
         QShortcut(QKeySequence(Qt.Key_F), self, lambda: self.field_checkbox.toggle())
 
@@ -103,6 +106,27 @@ class MainTab(QWidget):
         else:
             self.tracking_checkbox.setChecked(False)
             self.tracking_checkbox.setEnabled(False)
+            self.player_id_checkbox.setChecked(False)
+            self.player_id_checkbox.setEnabled(False)
+
+    def handle_tracking_checkbox(self, state):
+        if state == Qt.Checked:
+            # Automatically enable inference if tracking is enabled
+            if not self.inference_checkbox.isChecked():
+                self.inference_checkbox.setChecked(True)
+            self.player_id_checkbox.setEnabled(True)
+        else:
+            self.player_id_checkbox.setChecked(False)
+            self.player_id_checkbox.setEnabled(False)
+
+    def handle_player_id_checkbox(self, state):
+        if state == Qt.Checked:
+            # Automatically enable tracking and inference if player ID is enabled
+            if not self.tracking_checkbox.isChecked():
+                self.tracking_checkbox.setChecked(True)
+            if not self.inference_checkbox.isChecked():
+                self.inference_checkbox.setChecked(True)
+        # No further dependencies to set here, but could add logic if needed
 
     def load_videos(self):
         self.video_list.clear()
@@ -149,7 +173,6 @@ class MainTab(QWidget):
 
         # --- Inference step ---
         if self.inference_checkbox.isChecked() or self.tracking_checkbox.isChecked():
-            # Always run inference if either visualisation is needed
             self.detections = self.run_inference(frame)
         else:
             self.detections = []
@@ -180,6 +203,44 @@ class MainTab(QWidget):
             vis_frame = draw_yolo_detections(vis_frame, self.detections)
 
         # Display
+        h, w, ch = vis_frame.shape
+        bytes_per_line = ch * w
+        qimg = QImage(vis_frame.data, w, h, bytes_per_line, QImage.Format_BGR888)
+        pixmap = QPixmap.fromImage(qimg)
+        self.video_label.setPixmap(pixmap.scaled(
+            self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+        ))
+
+        # --- Player ID step ---
+        # Only run if both tracking and detection are enabled
+        if self.player_id_checkbox.isChecked() and self.tracking_checkbox.isChecked() and self.inference_checkbox.isChecked():
+            from player_id_visualisation import draw_player_id
+            import numpy as np
+            for track in self.tracks:
+                bbox = None
+                # Try common DeepSort bbox methods/attributes
+                if hasattr(track, "to_tlwh"):
+                    bbox = track.to_tlwh()
+                elif hasattr(track, "to_ltrb"):
+                    bbox = track.to_ltrb()
+                elif hasattr(track, "bbox"):
+                    bbox = track.bbox
+                elif isinstance(track, dict):
+                    bbox = track.get('bbox', None)
+                if bbox is not None:
+                    bbox = np.round(np.array(bbox)).astype(int)
+                    if len(bbox) == 4:
+                        x, y, w, h = bbox
+                        # Ensure bbox is within frame bounds
+                        x, y = max(0, x), max(0, y)
+                        w, h = max(1, w), max(1, h)
+                        if y + h <= frame.shape[0] and x + w <= frame.shape[1]:
+                            obj_crop = frame[y:y+h, x:x+w]
+                            if obj_crop.size > 0:
+                                digit_str, digits = run_player_id(obj_crop)
+                                vis_frame = draw_player_id(vis_frame, (x, y, w, h), digit_str, digits)
+
+        # Now display vis_frame
         h, w, ch = vis_frame.shape
         bytes_per_line = ch * w
         qimg = QImage(vis_frame.data, w, h, bytes_per_line, QImage.Format_BGR888)

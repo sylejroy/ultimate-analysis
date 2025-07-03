@@ -54,6 +54,20 @@ class SettingsTab(QWidget):
         field_group.setLayout(field_layout)
         layout.addWidget(field_group)
 
+        # --- Player Identification Settings ---
+        player_id_group = QGroupBox("Player Identification")
+        player_id_layout = QFormLayout()
+        self.player_id_method_combo = QComboBox()
+        self.player_id_method_combo.addItems(["YOLO", "EasyOCR"])
+        player_id_layout.addRow("Player ID Method:", self.player_id_method_combo)
+
+        self.player_id_model_combo = QComboBox()
+        player_id_models = find_models("finetune", keyword="digit_detector")
+        self.player_id_model_combo.addItems(player_id_models)
+        player_id_layout.addRow("Player ID YOLO Model:", self.player_id_model_combo)
+        player_id_group.setLayout(player_id_layout)
+        layout.addWidget(player_id_group)
+
         # Suggest more settings:
         # - Confidence threshold slider
         # - NMS threshold slider
@@ -72,6 +86,10 @@ class SettingsTab(QWidget):
         # Connect model selection changes to update models in main_tab
         self.model_combo.currentTextChanged.connect(self._on_detection_model_changed)
         self.field_model_combo.currentTextChanged.connect(self._on_field_model_changed)
+
+        # Connect player ID settings
+        self.player_id_method_combo.currentTextChanged.connect(self._on_player_id_method_changed)
+        self.player_id_model_combo.currentTextChanged.connect(self._on_player_id_model_changed)
 
     def _set_initial_model_selection(self):
         # Set detection model combo to current model if available
@@ -106,6 +124,27 @@ class SettingsTab(QWidget):
         except Exception as e:
             print(f"[DEBUG] Could not set initial tracker type: {e}")
 
+        # Set player ID method combo to current method if available
+        try:
+            from processing.player_id import player_id_method
+            method_cap = player_id_method.capitalize()
+            idx = self.player_id_method_combo.findText(method_cap)
+            if idx >= 0:
+                self.player_id_method_combo.setCurrentIndex(idx)
+        except Exception as e:
+            print(f"[DEBUG] Could not set initial player ID method: {e}")
+
+        # Set player ID model combo to current model if available
+        try:
+            from processing.player_id import player_id_model_path
+            if player_id_model_path:
+                rel_path = os.path.relpath(player_id_model_path, "finetune")
+                idx = self.player_id_model_combo.findText(rel_path)
+                if idx >= 0:
+                    self.player_id_model_combo.setCurrentIndex(idx)
+        except Exception as e:
+            print(f"[DEBUG] Could not set initial player ID model selection: {e}")
+
     def _on_tracker_changed(self, t):
         set_tracker_type(t.lower())
         reset_tracker()
@@ -122,3 +161,16 @@ class SettingsTab(QWidget):
         print(f"[DEBUG] SettingsTab: Field segmentation model changed to: {model_path}")
         if self.main_tab is not None and hasattr(self.main_tab, "set_field_model"):
             self.main_tab.set_field_model(os.path.join("finetune", model_path))
+
+    def _on_player_id_method_changed(self, method):
+        print(f"[DEBUG] SettingsTab: Player ID method changed to: {method}")
+        from processing.player_id import set_player_id_method, set_easyocr
+        if method.lower() == "easyocr":
+            set_easyocr()
+        else:
+            set_player_id_method("yolo")
+
+    def _on_player_id_model_changed(self, model_path):
+        print(f"[DEBUG] SettingsTab: Player ID YOLO model changed to: {model_path}")
+        from processing.player_id import set_player_id_model
+        set_player_id_model(os.path.join("finetune", model_path))
