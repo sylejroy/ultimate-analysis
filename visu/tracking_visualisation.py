@@ -101,37 +101,27 @@ def draw_track_history(frame, tracks, detections, history_length=300):
     class_names = get_class_names()
     gray = (180, 180, 180)
     for det in detections:
-        (dx, dy, dw, dh), conf, cls = det
-        cv2.rectangle(frame, (int(dx), int(dy)), (int(dx + dw), int(dy + dh)), gray, 1)
-    # --- Optical flow camera motion compensation ---
-    import numpy as np
-    import cv2
-    frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    if not hasattr(draw_track_history, "prev_gray"):
-        draw_track_history.prev_gray = None
+        # Defensive: handle both tuple and dict detection formats, and restore class/confidence
+        if isinstance(det, dict):
+            bbox = det.get('bbox', None)
+            if bbox is not None and len(bbox) == 4:
+                dx, dy, dw, dh = bbox
+            else:
+                continue
+        else:
+            try:
+                (dx, dy, dw, dh), _, _ = det
+            except Exception:
+                continue
+        try:
+            # Only draw bbox in gray, no label
+            cv2.rectangle(frame, (int(dx), int(dy)), (int(dx + dw), int(dy + dh)), gray, 1)
+        except Exception:
+            continue
+    # --- Track history logic (no optical flow compensation) ---
     if not hasattr(draw_track_history, "track_histories"):
         draw_track_history.track_histories = {}
-    prev_gray = draw_track_history.prev_gray
     track_histories = draw_track_history.track_histories
-    # Compute optical flow if previous frame exists
-    flow = None
-    if prev_gray is not None:
-        flow = cv2.calcOpticalFlowFarneback(prev_gray, frame_gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
-    # Compensate all history points for all tracks
-    if flow is not None:
-        h, w = flow.shape[:2]
-        for track_id, history in track_histories.items():
-            new_history = []
-            for (x, y) in history:
-                # Clamp to image bounds
-                xi = int(np.clip(x, 0, w-1))
-                yi = int(np.clip(y, 0, h-1))
-                fx, fy = flow[yi, xi]
-                # Subtract flow to compensate camera motion
-                new_x = x - fx
-                new_y = y - fy
-                new_history.append((new_x, new_y))
-            track_histories[track_id] = new_history
     # Now update with new detections
     for track in tracks:
         if not track.is_confirmed():
@@ -152,9 +142,26 @@ def draw_track_history(frame, tracks, detections, history_length=300):
             pt2 = (int(history[i + 1][0]), int(history[i + 1][1]))
             cv2.line(frame, pt1, pt2, color, 2)
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-    # Store current frame for next call
-    draw_track_history.prev_gray = frame_gray
-    return frame
+        # Always draw class name below the bbox, in the same color as the bbox
+        class_name = None
+        # Try all possible class attributes for both DeepSort and HistogramTracker tracks
+        if hasattr(track, 'cls') and track.cls is not None:
+            class_idx = int(track.cls)
+            class_name = class_names[class_idx] if class_idx < len(class_names) else str(track.cls)
+        elif hasattr(track, 'class_id') and track.class_id is not None:
+            class_idx = int(track.class_id)
+            class_name = class_names[class_idx] if class_idx < len(class_names) else str(track.class_id)
+        elif hasattr(track, 'det_class') and track.det_class is not None:
+            class_idx = int(track.det_class)
+            class_name = class_names[class_idx] if class_idx < len(class_names) else str(track.det_class)
+        if class_name is not None:
+            label = f"{class_name}"
+            if hasattr(track, 'conf') and track.conf is not None:
+                label += f" {track.conf:.2f}"
+            cv2.putText(frame, label, (x1, y2 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
+        else:
+            # Fallback: show track id if no class
+            cv2.putText(frame, str(track_id), (x1, y2 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
     return frame
 
 def get_color(idx):
