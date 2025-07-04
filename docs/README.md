@@ -1,6 +1,6 @@
 
 <p align="center">
-  <img src="docs/gui_example.png" alt="Ultimate Analysis GUI Example" width="700"/>
+  <img src="gui_example.png" alt="Ultimate Analysis GUI Example" width="700"/>
 </p>
 
 # Ultimate Analysis
