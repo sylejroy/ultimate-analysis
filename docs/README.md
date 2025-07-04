@@ -4,33 +4,46 @@
 
 Ultimate Analysis is a computer vision and AI-powered tool for automated analysis of Ultimate Frisbee games from video footage. The system extracts meaningful information from game videos, including player and disc tracking, field mapping, and game state detection, to enable advanced analytics and insights.
 
-## Features (Currently Implemented)
+## Features (2025)
 
 - **Playing Field Detection**
   - Detect and segment the playing field from video frames using YOLO segmentation models.
   - Visualize field segmentation overlays and field boundaries.
 
 - **Player Detection and Tracking**
-  - Detect players on the field using YOLO object detection models.
-  - Track player movements across frames using DeepSort or a custom histogram-based tracker.
-  - Identify players using jersey numbers via YOLO digit detector or EasyOCR (configurable in the GUI).
+  - Detect players using YOLO object detection models.
+  - Track player movements with DeepSort or a custom histogram-based tracker (selectable in the GUI).
+  - Identify players by jersey number using either YOLO digit detector or EasyOCR (fully configurable in the main tab).
 
 - **Disc Detection and Tracking**
-  - Detect the disc in each frame (if included in your detection model).
-  - Track disc movement (if included in your tracking logic).
+  - Detect and track the disc (if included in your detection model and pipeline).
 
-- **GUI Application**
-  - Visualize detections, tracks, field segmentation, and player IDs in a PyQt5-based GUI.
-  - Switch between different models and trackers in the settings tab.
-  - Step through video frames, play/pause, and reset trackers and visualisation state.
-  - Select and switch between YOLO and EasyOCR for player identification.
+- **Unified Configuration Panel**
+  - All settings (model selection, tracker, player ID method, etc.) are now centralized in the main tab, organized into logical sections (General, Tracker, Detection, Field Segmentation, Player Identification).
+  - Changing any setting immediately updates both the backend and the UI.
+
+- **Modern GUI Application**
+  - PyQt5-based GUI for visualizing detections, tracks, field segmentation, and player IDs.
+  - Step through video frames, play/pause, reset trackers, and visualization state.
+  - Select and switch between YOLO and EasyOCR for player identification directly in the main tab.
+  - All configuration is now in the left panel under the video list for a streamlined workflow.
 
 - **Developer Tools**
-  - **Dev-Runtimes Tab:** View live runtime statistics for each processing and visualisation step.
-  - **Dev-Video Preprocessing Tab:** Browse large video files, preview, and snip video segments directly from the GUI.
-  - **Dev-YOLO Training Tab:** View available training datasets and select a YOLO model architecture for training (currently UI mockup).
+  - **Dev-Runtimes Tab:** View live runtime statistics for each processing and visualization step (with max value and units, no rolling average).
+  - **Dev-Video Preprocessing Tab:** Browse, preview, and snip video segments directly from the GUI.
+  - **Dev-YOLO Training Tab:** View available training datasets and select a YOLO model architecture for training (UI mockup).
 
 - **Testing and Scripts**
+  - Example scripts for training, running, and visualizing detection, tracking, field segmentation, and digit/jersey number recognition on video files.
+
+- **Robust, Modular Codebase**
+  - Centralized all player ID logic (YOLO/EasyOCR) and parameter management in `processing/player_id.py`.
+  - Visualization files contain only visualization logic, with robust error handling and logging.
+  - All settings/configuration logic is in the main tab; the settings tab has been removed.
+  - Public getter functions provide safe access to internal state for player ID methods and models.
+  - Imports and type hints are fixed throughout for maintainability.
+  - Only top-down (naive) pitch projection is used; camera-model-based projection logic has been removed.
+  - Optimized for runtime performance (import placement, reduced frame copies, batch/parallel processing where possible).
   - Example scripts for training, running and visualizing detection, tracking, field segmentation, and digit/jersey number recognition on video files.
 
 ## Nice-to-Have / Future Features

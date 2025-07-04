@@ -154,7 +154,15 @@ class MainTab(QWidget):
         detection_group = QGroupBox("Detection Settings")
         detection_layout = QFormLayout()
         self.model_combo = QComboBox()
-        from visu.settings_tab import find_models
+
+        def find_models(root_folder, keyword=None):
+            import os
+            models = []
+            for dirpath, dirnames, filenames in os.walk(root_folder):
+                if "best.pt" in filenames:
+                    if keyword is None or keyword in dirpath:
+                        models.append(os.path.relpath(os.path.join(dirpath, "best.pt"), root_folder))
+            return models if models else ["None found"]
         detection_models = find_models("finetune", keyword="object_detection")
         self.model_combo.addItems(detection_models)
         detection_layout.addRow("Inference Model:", self.model_combo)
