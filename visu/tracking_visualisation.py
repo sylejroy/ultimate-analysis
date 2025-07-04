@@ -1,13 +1,15 @@
-def get_pitch_projection_qimage(tracks, frame, label_font_size=10):
+def get_pitch_projection_qimage(tracks, frame, label_font_size=10, ground_homography=None):
     """
     Returns a QImage of the pitch projection, rotated 180deg, with upright labels for each track.
     - tracks: list of track objects
     - frame: current video frame (numpy array)
     - label_font_size: font size for track labels
+    - ground_homography: optional homography to stabilize track positions
     """
     from PyQt5.QtGui import QImage, QPixmap, QPainter, QFont, QColor
     import cv2
-    pitch_img = draw_pitch_projection(tracks, frame.shape)
+    import numpy as np
+    pitch_img = draw_pitch_projection(tracks, frame.shape, ground_homography=ground_homography)
     h2, w2, ch2 = pitch_img.shape
     qpix = QPixmap.fromImage(QImage(pitch_img.data, w2, h2, ch2 * w2, QImage.Format_BGR888))
     painter = QPainter(qpix)
@@ -24,16 +26,23 @@ def get_pitch_projection_qimage(tracks, frame, label_font_size=10):
         x1, y1, x2, y2 = map(int, ltrb)
         cx = (x1 + x2) // 2
         cy = y2
-        # Direct mapping: x (frame) -> x (pitch), y (frame) -> y (pitch)
-        px = int(cx / frame_w * img_w)
-        py = int(cy / frame_h * img_h)
+        # Use ground homography if provided
+        if ground_homography is not None:
+            pt = np.array([[[cx, cy]]], dtype=np.float32)
+            pt_stab = cv2.perspectiveTransform(pt, ground_homography)
+            cx_stab, cy_stab = pt_stab[0, 0]
+            px = int(cx_stab / frame_w * img_w)
+            py = int(cy_stab / frame_h * img_h)
+        else:
+            px = int(cx / frame_w * img_w)
+            py = int(cy / frame_h * img_h)
         color = get_color(int(track_id))
         painter.setPen(QColor(*color))
         painter.setBrush(QColor(*color))
         painter.drawText(px + 8, py - 8, str(track_id))
     painter.end()
     return qpix.toImage()
-def draw_pitch_projection(tracks, frame_shape, pitch_size=(100, 37), history_length=300, image_size=(600, 222)):
+def draw_pitch_projection(tracks, frame_shape, pitch_size=(100, 37), history_length=300, image_size=(600, 222), ground_homography=None):
     """
     Projects player tracks onto a 2D pitch and returns an image with the pitch and tracks drawn.
     - tracks: list of track objects (must have .to_ltrb() and .track_id)
@@ -60,6 +69,7 @@ def draw_pitch_projection(tracks, frame_shape, pitch_size=(100, 37), history_len
     cv2.rectangle(pitch_img, (0, img_h-endzone_py), (img_w-1, img_h-1), (100, 100, 255), 1)
     # Map from image (frame) to pitch: x (frame) -> x (pitch), y (frame) -> y (pitch)
     frame_h, frame_w = frame_shape[:2]
+    import numpy as np
     def img_to_pitch_coords(x, y):
         px = int(x / frame_w * img_w)
         py = int(y / frame_h * img_h)
@@ -74,6 +84,13 @@ def draw_pitch_projection(tracks, frame_shape, pitch_size=(100, 37), history_len
         # Use bottom middle of bbox
         cx = (x1 + x2) // 2
         cy = y2
+        # Use ground homography if provided
+        if ground_homography is not None:
+            pt = np.array([[[cx, cy]]], dtype=np.float32)
+            pt_stab = cv2.perspectiveTransform(pt, ground_homography)
+            cx_stab, cy_stab = pt_stab[0, 0]
+        else:
+            cx_stab, cy_stab = cx, cy
         # Get history if available
         history = []
         if hasattr(draw_track_history, "track_histories"):
@@ -81,7 +98,7 @@ def draw_pitch_projection(tracks, frame_shape, pitch_size=(100, 37), history_len
             if track_id in track_histories:
                 history = track_histories[track_id][-history_length:]
         else:
-            history = [(cx, cy)]
+            history = [(cx_stab, cy_stab)]
         color = get_color(int(track_id))
         # Draw history
         for i in range(len(history) - 1):
@@ -89,7 +106,7 @@ def draw_pitch_projection(tracks, frame_shape, pitch_size=(100, 37), history_len
             pt2 = img_to_pitch_coords(*history[i+1])
             cv2.line(pitch_img, pt1, pt2, color, 2)
         # Draw current position
-        px, py = img_to_pitch_coords(cx, cy)
+        px, py = img_to_pitch_coords(cx_stab, cy_stab)
         cv2.circle(pitch_img, (px, py), 6, color, -1)
         # Do NOT draw text label here; label will be drawn after in get_pitch_projection_qimage
     return pitch_img

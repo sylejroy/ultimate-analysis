@@ -107,6 +107,9 @@ class MainTab(QWidget):
         self.tracks = []
         self.track_histories = {}
         self.runtimes_dialog = RuntimesDialog(self)
+        self.prev_frame_for_ground = None
+        self.ground_homography = None
+        self.ground_homography_vis = None
         self.init_ui()
         self.init_shortcuts()
 
@@ -195,6 +198,12 @@ class MainTab(QWidget):
         util_row.addWidget(self.show_runtimes_button)
 
         controls_layout.addLayout(util_row)
+
+        # --- Ground plane visualisation label ---
+        self.ground_plane_label = QLabel("Ground plane: N/A")
+        self.ground_plane_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.ground_plane_label.setStyleSheet("color: #6cf; font-size: 12px;")
+        controls_layout.addWidget(self.ground_plane_label)
 
         right_layout.addLayout(controls_layout)
 
@@ -352,6 +361,37 @@ class MainTab(QWidget):
         t5 = time.time()
         self.log_runtime("Field Segmentation", (t5 - t4) * 1000)
 
+        # --- Ground plane estimation step ---
+        t_gp0 = time.time()
+        from processing.ground_plane import estimate_ground_homography, draw_ground_plane_grid
+        # Convert detections to bboxes for filtering (handle both dict and tuple)
+        det_bboxes = []
+        for det in self.detections:
+            if isinstance(det, dict):
+                bbox = det.get('bbox', None)
+                if bbox is not None:
+                    det_bboxes.append(bbox)
+            else:
+                try:
+                    (dx, dy, dw, dh), _, _ = det
+                    det_bboxes.append([dx, dy, dw, dh])
+                except Exception:
+                    continue
+        ground_plane_status = "N/A"
+        if self.prev_frame_for_ground is not None:
+            H, mask, matches = estimate_ground_homography(self.prev_frame_for_ground, frame, det_bboxes)
+            self.ground_homography = H
+            if H is not None:
+                # Draw ground plane grid on the current frame
+                vis_frame = draw_ground_plane_grid(vis_frame, H)
+                ground_plane_status = "OK"
+            else:
+                ground_plane_status = "Failed"
+        self.prev_frame_for_ground = frame.copy()
+        t_gp1 = time.time()
+        self.log_runtime("Ground Plane", (t_gp1 - t_gp0) * 1000)
+        self.ground_plane_label.setText(f"Ground plane: {ground_plane_status}")
+
         # --- Detection/Tracking overlays ---
         t6 = time.time()
         if self.tracking_checkbox.isChecked():
@@ -363,7 +403,8 @@ class MainTab(QWidget):
                 self.pitch_label = QLabel()
                 self.pitch_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
                 self.layout().addWidget(self.pitch_label, 0)
-            qimg2 = get_pitch_projection_qimage(self.tracks, frame)
+            # Pass ground_homography to stabilize pitch projection
+            qimg2 = get_pitch_projection_qimage(self.tracks, frame, ground_homography=self.ground_homography)
             self.pitch_label.setPixmap(QPixmap.fromImage(qimg2))
         elif self.inference_checkbox.isChecked():
             from detection_visualisation import draw_yolo_detections
@@ -425,6 +466,8 @@ class MainTab(QWidget):
         self.video_label.setPixmap(pixmap.scaled(
             self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
         ))
+        # Optionally, display ground plane match visualisation in a separate window or label
+        # For now, just update the label text
         t11 = time.time()
         self.log_runtime("Display", (t11 - t10) * 1000)
 
