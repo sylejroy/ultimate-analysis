@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QIcon
 
-from video_player import VideoPlayer
+from visu.video_player import VideoPlayer
 from processing.inference import run_inference, set_detection_model
 from processing.tracking import run_tracking, reset_tracker
 from processing.field_segmentation import set_field_model
@@ -29,7 +29,7 @@ class RuntimesDialog(QDialog):
         self.setLayout(layout)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh_table)
-        self.timer.start(500)
+        self.timer.start(1000)  # Update every 1 second instead of 500ms
         self.runtimes = {}  # {step: [list of runtimes]}
         self.refresh_table()
 
@@ -450,25 +450,88 @@ class MainTab(QWidget):
             self.load_selected_video(0)
 
     def load_selected_video(self, index):
+        print(f"[DEBUG] load_selected_video called with index: {index}")
         if not self.video_files or index < 0 or index >= len(self.video_files):
+            print("[DEBUG] Invalid video index or no video files")
             return
+        
+        # Clean up cached resources when loading new video
+        self._cleanup_caches()
+        
         filename = self.video_files[index]
         path = os.path.join(self.video_folder, filename)
-        self.player.load_video(path)
-        self.video_label.setText("Ready to play: " + filename)
-        self.current_video_index = index
-        self.is_paused = False
-        self.play_pause_button.setText("Play")
-        # Set progress bar range
-        if self.player.cap:
-            total_frames = int(self.player.cap.get(7))  # cv2.CAP_PROP_FRAME_COUNT == 7
-            self.progress_bar.setMaximum(max(0, total_frames - 1))
-            self.progress_bar.setValue(0)
+        print(f"[DEBUG] Loading video: {path}")
+        
+        try:
+            self.player.load_video(path)
+            print(f"[DEBUG] Video loaded successfully, cap: {self.player.cap is not None}")
+            
+            if self.player.cap is not None:
+                # Test if we can get the first frame
+                test_frame = self.player.get_next_frame()
+                if test_frame is not None:
+                    print(f"[DEBUG] Successfully got test frame with shape: {test_frame.shape}")
+                    # Reset to beginning
+                    self.player.cap.set(1, 0)  # cv2.CAP_PROP_POS_FRAMES = 1
+                else:
+                    print("[DEBUG] Failed to get test frame")
+            
+            self.video_label.setText("Ready to play: " + filename)
+            self.current_video_index = index
+            self.is_paused = False
+            self.play_pause_button.setText("Play")
+            
+            # Reset frame counter
+            self._frame_counter = 0
+            
+            # Set progress bar range
+            if self.player.cap:
+                total_frames = int(self.player.cap.get(7))  # cv2.CAP_PROP_FRAME_COUNT == 7
+                self.progress_bar.setMaximum(max(0, total_frames - 1))
+                self.progress_bar.setValue(0)
+                print(f"[DEBUG] Video has {total_frames} frames")
+            
+        except Exception as e:
+            print(f"[ERROR] Exception in load_selected_video: {e}")
+            import traceback
+            traceback.print_exc()
+            
+    def _cleanup_caches(self):
+        """Clean up cached data to free memory"""
+        if hasattr(self, '_player_id_cache'):
+            self._player_id_cache.clear()
+        if hasattr(self, '_cached_scaled_pixmap'):
+            self._cached_scaled_pixmap = None
+        if hasattr(self, '_cached_label_size'):
+            self._cached_label_size = None
+        if hasattr(self, '_cached_scale_factor'):
+            self._cached_scale_factor = None
+        
+        # Clear tracking histories to free memory
+        from visu.tracking_visualisation import reset_track_histories, clear_pitch_projection_cache
+        reset_track_histories()
+        clear_pitch_projection_cache()
+        
+        # Clear model caches
+        try:
+            from processing.inference import clear_model_cache
+            clear_model_cache()
+        except ImportError:
+            pass
+        
+        try:
+            from processing.field_segmentation import clear_field_model_cache
+            clear_field_model_cache()
+        except ImportError:
+            pass
 
     def toggle_play_pause(self):
+        print(f"[DEBUG] toggle_play_pause called, timer active: {self.timer.isActive()}")
         if not self.player.cap:
+            print("[DEBUG] No video loaded, returning")
             return
         if self.timer.isActive():
+            print("[DEBUG] Stopping timer")
             self.timer.stop()
             self.is_paused = True
             # Set play icon or text
@@ -478,7 +541,12 @@ class MainTab(QWidget):
             else:
                 self.play_pause_button.setText("▶")
         else:
-            self.timer.start(30)  # ~30 FPS
+            print("[DEBUG] Starting timer")
+            # Dynamic timer interval based on processing load
+            interval = self._calculate_optimal_interval()
+            print(f"[DEBUG] Calculated interval: {interval}ms")
+            
+            self.timer.start(interval)
             self.is_paused = False
             # Set stop icon or text
             if hasattr(self, "pause_icon") and not self.pause_icon.isNull():
@@ -486,151 +554,349 @@ class MainTab(QWidget):
                 self.play_pause_button.setText("")
             else:
                 self.play_pause_button.setText("❚❚")  # Unicode for pause
+                
+    def _calculate_optimal_interval(self):
+        """Calculate optimal timer interval based on processing load"""
+        base_interval = 33  # ~30 FPS
+        
+        # Count active processing steps
+        active_steps = 0
+        if self.inference_checkbox.isChecked():
+            active_steps += 1
+        if self.tracking_checkbox.isChecked():
+            active_steps += 2  # Tracking is more expensive
+        if self.player_id_checkbox.isChecked():
+            active_steps += 1
+        if self.field_checkbox.isChecked():
+            active_steps += 2  # Field segmentation is expensive
+        
+        # Adjust interval based on load
+        if active_steps <= 1:
+            return base_interval  # 30 FPS
+        elif active_steps <= 2:
+            return int(base_interval * 1.3)  # ~23 FPS
+        elif active_steps <= 3:
+            return int(base_interval * 1.6)  # ~19 FPS
+        else:
+            return int(base_interval * 2.0)  # ~15 FPS
 
     def next_frame(self):
-        frame = self.player.get_next_frame()
-        if frame is None:
+        print("[DEBUG] next_frame called")
+        try:
+            print("[DEBUG] Getting next frame from player")
+            frame = self.player.get_next_frame()
+            if frame is None:
+                print("[DEBUG] No frame returned, stopping timer")
+                self.timer.stop()
+                self.play_pause_button.setText("Play")
+                return
+            
+            print(f"[DEBUG] Got frame with shape: {frame.shape}")
+
+            # Update progress bar - optimize by reducing frequency
+            if not hasattr(self, '_frame_counter'):
+                self._frame_counter = 0
+            self._frame_counter += 1
+            
+            # Only update progress bar every 10 frames to reduce overhead
+            if self._frame_counter % 10 == 0 and self.player.cap:
+                current_frame = int(self.player.cap.get(1))  # cv2.CAP_PROP_POS_FRAMES == 1
+                self.progress_bar.setValue(current_frame)
+
+            # --- Inference step ---
+            print("[DEBUG] Starting inference step")
+            t0 = time.time()
+            if self.inference_checkbox.isChecked() or self.tracking_checkbox.isChecked():
+                print("[DEBUG] Running inference")
+                self.detections = self.run_inference(frame)
+                print(f"[DEBUG] Inference returned {len(self.detections)} detections")
+            else:
+                self.detections = []
+            t1 = time.time()
+            self.log_runtime("Inference", (t1 - t0) * 1000)
+
+            # --- Tracking step ---
+            print("[DEBUG] Starting tracking step")
+            t2 = time.time()
+            if self.tracking_checkbox.isChecked():
+                print("[DEBUG] Running tracking")
+                self.tracks = self.run_tracking(frame, self.detections)
+                print(f"[DEBUG] Tracking returned {len(self.tracks)} tracks")
+            else:
+                self.tracks = []
+            t3 = time.time()
+            self.log_runtime("Tracking", (t3 - t2) * 1000)
+
+            # --- Field segmentation step ---
+            print("[DEBUG] Starting field segmentation step")
+            t4 = time.time()
+            # Initialize vis_frame
+            vis_frame = frame
+            # Optimize: only copy frame if field segmentation is enabled
+            if self.field_checkbox.isChecked():
+                print("[DEBUG] Field segmentation enabled, processing")
+                if vis_frame is frame:  # Only copy if we haven't already
+                    vis_frame = frame.copy()
+                try:
+                    from processing.field_segmentation import run_field_segmentation
+                    results = run_field_segmentation(frame)
+                    print(f"[DEBUG] Field segmentation returned {len(results) if results else 0} results")
+                    
+                    if results and len(results) > 0:
+                        result = results[0]
+                        print(f"[DEBUG] First result has masks: {hasattr(result, 'masks')}")
+                        
+                        if hasattr(result, 'masks') and result.masks is not None:
+                            print(f"[DEBUG] Masks type: {type(result.masks)}")
+                            try:
+                                # Try to get the mask data
+                                if hasattr(result.masks, 'data'):
+                                    mask_data = result.masks.data
+                                    print(f"[DEBUG] Mask data shape: {mask_data.shape}")
+                                    
+                                    # Convert to numpy
+                                    if hasattr(mask_data, 'cpu'):
+                                        mask = mask_data.cpu().numpy()
+                                    else:
+                                        mask = mask_data.numpy() if hasattr(mask_data, 'numpy') else mask_data
+                                    
+                                    from visu.field_segmentation_visualisation import draw_field_segmentation
+                                    vis_frame = draw_field_segmentation(vis_frame, mask)
+                                    print("[DEBUG] Field segmentation completed successfully")
+                                else:
+                                    print("[DEBUG] Masks object has no 'data' attribute")
+                            except Exception as mask_error:
+                                print(f"[DEBUG] Error processing masks: {mask_error}")
+                        else:
+                            print("[DEBUG] No masks found in results")
+                    else:
+                        print("[DEBUG] No field segmentation results")
+                except Exception as field_error:
+                    print(f"[DEBUG] Field segmentation error: {field_error}")
+                    import traceback
+                    traceback.print_exc()
+            t5 = time.time()
+            self.log_runtime("Field Segmentation", (t5 - t4) * 1000)
+
+            # --- Detection/Tracking overlays ---
+            print("[DEBUG] Starting visualization overlays")
+            t6 = time.time()
+            if self.tracking_checkbox.isChecked():
+                print("[DEBUG] Drawing tracking overlays")
+                from visu.tracking_visualisation import draw_track_history, get_pitch_projection_qimage
+                # Only copy frame if we haven't already done so
+                if vis_frame is frame:
+                    vis_frame = frame.copy()
+                vis_frame = draw_track_history(vis_frame, self.tracks, self.detections)
+                
+                # --- Pitch projection visualisation (optimize by reducing frequency) ---
+                if self._frame_counter % 5 == 0:  # Update pitch projection every 5 frames
+                    print("[DEBUG] Updating pitch projection")
+                    if not hasattr(self, 'pitch_label'):
+                        self.pitch_label = QLabel()
+                        self.pitch_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+                        self.layout().addWidget(self.pitch_label, 0)
+                    qimg2 = get_pitch_projection_qimage(self.tracks, frame)
+                    self.pitch_label.setPixmap(QPixmap.fromImage(qimg2))
+            elif self.inference_checkbox.isChecked():
+                print("[DEBUG] Drawing detection overlays")
+                from visu.detection_visualisation import draw_yolo_detections
+                # Only copy frame if we haven't already done so
+                if vis_frame is frame:
+                    vis_frame = frame.copy()
+                vis_frame = draw_yolo_detections(vis_frame, self.detections)
+            t7 = time.time()
+            self.log_runtime("Overlay", (t7 - t6) * 1000)
+
+            # --- Player ID step ---
+            t8 = time.time()
+            if self.player_id_checkbox.isChecked() and self.tracking_checkbox.isChecked() and self.inference_checkbox.isChecked():
+                # Optimize: only run player ID every 10 frames and cache results
+                if self._frame_counter % 10 == 0:  # Run player ID every 10 frames to reduce overhead
+                    from visu.player_id_visualisation import draw_player_id
+                    import numpy as np
+                    for track in self.tracks:
+                        # Only run player ID on player class objects
+                        track_class = getattr(track, "det_class", None)
+                        PLAYER_CLASS_IDX = 1
+                        if track_class is not None and track_class != PLAYER_CLASS_IDX:
+                            continue
+                        bbox = None
+                        # Always use to_ltrb for tracks (returns [x1, y1, x2, y2])
+                        if hasattr(track, "to_ltrb"):
+                            bbox = track.to_ltrb()
+                        elif hasattr(track, "to_tlwh"):
+                            # Convert [x, y, w, h] to [x1, y1, x2, y2]
+                            x, y, w, h = track.to_tlwh()
+                            bbox = [x, y, x + w, y + h]
+                        elif hasattr(track, "bbox"):
+                            bbox = track.bbox
+                        elif isinstance(track, dict):
+                            bbox = track.get('bbox', None)
+                        if bbox is not None:
+                            bbox = np.round(np.array(bbox)).astype(int)
+                            if len(bbox) == 4:
+                                x1, y1, x2, y2 = bbox
+                                x1, y1 = max(0, x1), max(0, y1)
+                                x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
+                                w, h = x2 - x1, y2 - y1
+                                if w > 0 and h > 0:
+                                    # Only use the top half of the bounding box for player ID
+                                    half_h = max(1, h // 2)
+                                    obj_crop = frame[y1:y1+half_h, x1:x2]
+                                    if obj_crop.size > 0:
+                                        digit_str, details = run_player_id(obj_crop)
+                                        # Cache player ID result
+                                        if not hasattr(self, '_player_id_cache'):
+                                            self._player_id_cache = {}
+                                        track_id = getattr(track, 'track_id', None)
+                                        if track_id is not None:
+                                            self._player_id_cache[track_id] = (digit_str, details)
+                                        
+                                        # details is digits (YOLO) or ocr_boxes (EasyOCR)
+                                        if self.player_id_method_combo.currentText().lower() == "yolo":
+                                            # details is a list of (box, class) or just boxes
+                                            digits = []
+                                            if details and len(details) > 0:
+                                                first = details[0]
+                                                # If first is (box, class) and box is a list/array of 4 ints
+                                                if (
+                                                    isinstance(first, (list, tuple)) and len(first) == 2
+                                                    and isinstance(first[0], (list, tuple, np.ndarray)) and len(first[0]) == 4
+                                                    and all(isinstance(v, (int, float, np.integer, np.floating)) for v in first[0])
+                                                ):
+                                                    digits = details  # already (box, class)
+                                                elif (
+                                                    isinstance(first, (list, tuple, np.ndarray)) and len(first) == 4
+                                                    and all(isinstance(v, (int, float, np.integer, np.floating)) for v in first)
+                                                ):
+                                                    # Only boxes, wrap with dummy class 0
+                                                    digits = [(list(map(int, box)), 0) for box in details]
+                                            vis_frame = draw_player_id(
+                                                vis_frame,
+                                                (x1, y1, x2 - x1, half_h),
+                                                digit_str,
+                                                digits
+                                            )
+                                        else:
+                                            vis_frame = draw_player_id(
+                                                vis_frame,
+                                                (x1, y1, x2 - x1, half_h),
+                                                digit_str,
+                                                None,
+                                                (0, 255, 255),
+                                                details
+                                            )
+                else:
+                    # Use cached player ID results for other frames
+                    if hasattr(self, '_player_id_cache') and self._player_id_cache:
+                        from visu.player_id_visualisation import draw_player_id
+                        import numpy as np
+                        for track in self.tracks:
+                            track_id = getattr(track, 'track_id', None)
+                            if track_id in self._player_id_cache:
+                                digit_str, details = self._player_id_cache[track_id]
+                                bbox = None
+                                if hasattr(track, "to_ltrb"):
+                                    bbox = track.to_ltrb()
+                                elif hasattr(track, "to_tlwh"):
+                                    x, y, w, h = track.to_tlwh()
+                                    bbox = [x, y, x + w, y + h]
+                                elif hasattr(track, "bbox"):
+                                    bbox = track.bbox
+                                elif isinstance(track, dict):
+                                    bbox = track.get('bbox', None)
+                                if bbox is not None:
+                                    bbox = np.round(np.array(bbox)).astype(int)
+                                    if len(bbox) == 4:
+                                        x1, y1, x2, y2 = bbox
+                                        x1, y1 = max(0, x1), max(0, y1)
+                                        x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
+                                        w, h = x2 - x1, y2 - y1
+                                        if w > 0 and h > 0:
+                                            half_h = max(1, h // 2)
+                                            # Use cached results
+                                            if self.player_id_method_combo.currentText().lower() == "yolo":
+                                                digits = []
+                                                if details and len(details) > 0:
+                                                    first = details[0]
+                                                    if (
+                                                        isinstance(first, (list, tuple)) and len(first) == 2
+                                                        and isinstance(first[0], (list, tuple, np.ndarray)) and len(first[0]) == 4
+                                                        and all(isinstance(v, (int, float, np.integer, np.floating)) for v in first[0])
+                                                    ):
+                                                        digits = details
+                                                    elif (
+                                                        isinstance(first, (list, tuple, np.ndarray)) and len(first) == 4
+                                                        and all(isinstance(v, (int, float, np.integer, np.floating)) for v in first)
+                                                    ):
+                                                        digits = [(list(map(int, box)), 0) for box in details]
+                                                vis_frame = draw_player_id(
+                                                    vis_frame,
+                                                    (x1, y1, x2 - x1, half_h),
+                                                    digit_str,
+                                                    digits
+                                                )
+                                            else:
+                                                vis_frame = draw_player_id(
+                                                    vis_frame,
+                                                    (x1, y1, x2 - x1, half_h),
+                                                    digit_str,
+                                                    None,
+                                                    (0, 255, 255),
+                                                    details
+                                                )
+            t9 = time.time()
+            self.log_runtime("Player ID", (t9 - t8) * 1000)
+
+            # --- Display step ---
+            print("[DEBUG] Starting display step")
+            t10 = time.time()
+            # Optimize display by caching QImage format conversion
+            h, w, ch = vis_frame.shape
+            bytes_per_line = ch * w
+            
+            # Create QImage more efficiently
+            qimg = QImage(vis_frame.data, w, h, bytes_per_line, QImage.Format_BGR888)
+            
+            # Cache the scaled pixmap size and only rescale when necessary
+            if not hasattr(self, '_cached_label_size'):
+                self._cached_label_size = self.video_label.size()
+                self._cached_scale_factor = None
+            
+            # Only rescale if label size changed or if we don't have a cached scale factor
+            current_size = self.video_label.size()
+            if current_size != self._cached_label_size or self._cached_scale_factor is None:
+                self._cached_label_size = current_size
+                # Calculate scale factor for current label size
+                label_w, label_h = current_size.width(), current_size.height()
+                scale_x = label_w / w
+                scale_y = label_h / h
+                self._cached_scale_factor = min(scale_x, scale_y)
+            
+            # Apply cached scale factor
+            if self._cached_scale_factor < 1.0:
+                # Scale down for display
+                scaled_w = int(w * self._cached_scale_factor)
+                scaled_h = int(h * self._cached_scale_factor)
+                pixmap = QPixmap.fromImage(qimg.scaled(scaled_w, scaled_h, Qt.KeepAspectRatio, Qt.FastTransformation))
+            else:
+                # Use original size
+                pixmap = QPixmap.fromImage(qimg)
+            
+            self.video_label.setPixmap(pixmap)
+            t11 = time.time()
+            self.log_runtime("Display", (t11 - t10) * 1000)
+            print("[DEBUG] Frame processing completed successfully")
+            
+        except Exception as e:
+            print(f"[ERROR] Exception in next_frame: {e}")
+            import traceback
+            traceback.print_exc()
+            # Stop the timer to prevent continuous errors
             self.timer.stop()
             self.play_pause_button.setText("Play")
-            return
-
-        # Update progress bar
-        if self.player.cap:
-            current_frame = int(self.player.cap.get(1))  # cv2.CAP_PROP_POS_FRAMES == 1
-            self.progress_bar.setValue(current_frame)
-
-        # --- Inference step ---
-        t0 = time.time()
-        if self.inference_checkbox.isChecked() or self.tracking_checkbox.isChecked():
-            self.detections = self.run_inference(frame)
-        else:
-            self.detections = []
-        t1 = time.time()
-        self.log_runtime("Inference", (t1 - t0) * 1000)
-
-        # --- Tracking step ---
-        t2 = time.time()
-        if self.tracking_checkbox.isChecked():
-            self.tracks = self.run_tracking(frame, self.detections)
-        else:
-            self.tracks = []
-        t3 = time.time()
-        self.log_runtime("Tracking", (t3 - t2) * 1000)
-
-        # --- Field segmentation step ---
-        t4 = time.time()
-        vis_frame = frame.copy()
-        if self.field_checkbox.isChecked():
-            from processing.field_segmentation import run_field_segmentation
-            results = run_field_segmentation(frame)
-            mask = results[0].masks.data.cpu().numpy()
-            from field_segmentation_visualisation import draw_field_segmentation
-            vis_frame = draw_field_segmentation(vis_frame, mask)
-        t5 = time.time()
-        self.log_runtime("Field Segmentation", (t5 - t4) * 1000)
-
-        # --- Detection/Tracking overlays ---
-        t6 = time.time()
-        if self.tracking_checkbox.isChecked():
-            from tracking_visualisation import draw_track_history, get_pitch_projection_qimage
-            vis_frame = draw_track_history(vis_frame, self.tracks, self.detections)
-            # --- Pitch projection visualisation (now handled in tracking_visualisation) ---
-            if not hasattr(self, 'pitch_label'):
-                self.pitch_label = QLabel()
-                self.pitch_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-                self.layout().addWidget(self.pitch_label, 0)
-            qimg2 = get_pitch_projection_qimage(self.tracks, frame)
-            self.pitch_label.setPixmap(QPixmap.fromImage(qimg2))
-        elif self.inference_checkbox.isChecked():
-            from detection_visualisation import draw_yolo_detections
-            vis_frame = draw_yolo_detections(vis_frame, self.detections)
-        t7 = time.time()
-        self.log_runtime("Overlay", (t7 - t6) * 1000)
-
-        # --- Player ID step ---
-        t8 = time.time()
-        if self.player_id_checkbox.isChecked() and self.tracking_checkbox.isChecked() and self.inference_checkbox.isChecked():
-            from player_id_visualisation import draw_player_id
-            import numpy as np
-            for track in self.tracks:
-                # Only run player ID on player class objects
-                track_class = getattr(track, "det_class", None)
-                PLAYER_CLASS_IDX = 1
-                if track_class is not None and track_class != PLAYER_CLASS_IDX:
-                    continue
-                bbox = None
-                # Always use to_ltrb for tracks (returns [x1, y1, x2, y2])
-                if hasattr(track, "to_ltrb"):
-                    bbox = track.to_ltrb()
-                elif hasattr(track, "to_tlwh"):
-                    # Convert [x, y, w, h] to [x1, y1, x2, y2]
-                    x, y, w, h = track.to_tlwh()
-                    bbox = [x, y, x + w, y + h]
-                elif hasattr(track, "bbox"):
-                    bbox = track.bbox
-                elif isinstance(track, dict):
-                    bbox = track.get('bbox', None)
-                if bbox is not None:
-                    bbox = np.round(np.array(bbox)).astype(int)
-                    if len(bbox) == 4:
-                        x1, y1, x2, y2 = bbox
-                        x1, y1 = max(0, x1), max(0, y1)
-                        x2, y2 = min(frame.shape[1], x2), min(frame.shape[0], y2)
-                        w, h = x2 - x1, y2 - y1
-                        if w > 0 and h > 0:
-                            # Only use the top half of the bounding box for player ID
-                            half_h = max(1, h // 2)
-                            obj_crop = frame[y1:y1+half_h, x1:x2]
-                            if obj_crop.size > 0:
-                                digit_str, details = run_player_id(obj_crop)
-                                # details is digits (YOLO) or ocr_boxes (EasyOCR)
-                                if self.player_id_method_combo.currentText().lower() == "yolo":
-                                    # details is a list of (box, class) or just boxes
-                                    digits = []
-                                    if details and len(details) > 0:
-                                        first = details[0]
-                                        # If first is (box, class) and box is a list/array of 4 ints
-                                        if (
-                                            isinstance(first, (list, tuple)) and len(first) == 2
-                                            and isinstance(first[0], (list, tuple, np.ndarray)) and len(first[0]) == 4
-                                            and all(isinstance(v, (int, float, np.integer, np.floating)) for v in first[0])
-                                        ):
-                                            digits = details  # already (box, class)
-                                        elif (
-                                            isinstance(first, (list, tuple, np.ndarray)) and len(first) == 4
-                                            and all(isinstance(v, (int, float, np.integer, np.floating)) for v in first)
-                                        ):
-                                            # Only boxes, wrap with dummy class 0
-                                            digits = [(list(map(int, box)), 0) for box in details]
-                                    vis_frame = draw_player_id(
-                                        vis_frame,
-                                        (x1, y1, x2 - x1, half_h),
-                                        digit_str,
-                                        digits
-                                    )
-                                else:
-                                    vis_frame = draw_player_id(
-                                        vis_frame,
-                                        (x1, y1, x2 - x1, half_h),
-                                        digit_str,
-                                        None,
-                                        (0, 255, 255),
-                                        details
-                                    )
-        t9 = time.time()
-        self.log_runtime("Player ID", (t9 - t8) * 1000)
-
-        # --- Display step ---
-        t10 = time.time()
-        h, w, ch = vis_frame.shape
-        bytes_per_line = ch * w
-        qimg = QImage(vis_frame.data, w, h, bytes_per_line, QImage.Format_BGR888)
-        pixmap = QPixmap.fromImage(qimg)
-        self.video_label.setPixmap(pixmap.scaled(
-            self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
-        ))
-        t11 = time.time()
-        self.log_runtime("Display", (t11 - t10) * 1000)
+            self.is_paused = True
 
     def next_video(self):
         if not self.video_files:
@@ -658,16 +924,34 @@ class MainTab(QWidget):
         self.tracks = []
         self.track_histories = {}
         try:
-            from tracking_visualisation import reset_track_histories
+            from visu.tracking_visualisation import reset_track_histories
             reset_track_histories()
         except ImportError:
             pass
 
     def run_inference(self, frame):
-        return run_inference(frame)
+        print("[DEBUG] run_inference called")
+        try:
+            result = run_inference(frame)
+            print(f"[DEBUG] run_inference completed with {len(result)} detections")
+            return result
+        except Exception as e:
+            print(f"[ERROR] Exception in run_inference: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
 
     def run_tracking(self, frame, detections):
-        return run_tracking(frame, detections)
+        print("[DEBUG] run_tracking called")
+        try:
+            result = run_tracking(frame, detections)
+            print(f"[DEBUG] run_tracking completed with {len(result)} tracks")
+            return result
+        except Exception as e:
+            print(f"[ERROR] Exception in run_tracking: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
 
     def set_detection_model(self, model_path):
         print(f"[DEBUG] MainTab.set_detection_model called with: {model_path}")

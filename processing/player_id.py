@@ -129,12 +129,24 @@ def set_player_id_model(path: str) -> None:
 def set_easyocr() -> None:
     """
     Set the player ID method to EasyOCR and initialize the reader if needed.
+    Optimized version with better error handling and CPU preference.
     """
     global _easyocr_reader
     set_player_id_method("easyocr")
     if _easyocr_reader is None:
         logger.info("Initializing EasyOCR reader")
-        _easyocr_reader = easyocr.Reader(['en'], gpu=True)
+        try:
+            # Try GPU first, fallback to CPU for stability
+            _easyocr_reader = easyocr.Reader(['en'], gpu=True, verbose=False)
+            logger.info("EasyOCR reader initialized with GPU support")
+        except Exception as e:
+            logger.warning(f"GPU initialization failed, falling back to CPU: {e}")
+            try:
+                _easyocr_reader = easyocr.Reader(['en'], gpu=False, verbose=False)
+                logger.info("EasyOCR reader initialized with CPU")
+            except Exception as e2:
+                logger.error(f"Failed to initialize EasyOCR reader: {e2}")
+                _easyocr_reader = None
 
 
 def run_player_id(frame: np.ndarray) -> Tuple[str, Any]:

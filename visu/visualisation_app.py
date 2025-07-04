@@ -8,6 +8,8 @@ from PyQt5.QtCore import Qt
 
 # Ensure the parent directory is in sys.path for relative imports to work
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# Also add the current directory (visu) to the path for local imports
+sys.path.append(os.path.dirname(__file__))
 
 from main_tab import MainTab
 from dev_video_preprocessing_tab import DevVideoPreprocessingTab
