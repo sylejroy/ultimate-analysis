@@ -1,25 +1,32 @@
+
 import sys
 import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+import logging
 from PyQt5.QtWidgets import QApplication, QTabWidget, QLabel
 from PyQt5.QtGui import QPalette, QColor, QPixmap, QPainter, QPen
 from PyQt5.QtCore import Qt
 
+# Ensure the parent directory is in sys.path for relative imports to work
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from main_tab import MainTab
-from settings_tab import SettingsTab
 from dev_video_preprocessing_tab import DevVideoPreprocessingTab
 from dev_yolo_training_tab import DevYoloTrainingTab
 from easyocr_tuning_tab import DevEasyOCRTuningTab
 
+logger = logging.getLogger("ultimate_analysis.visualisation_app")
+
 class VisualizationApp(QTabWidget):
+    """
+    Main application window for Ultimate Analysis Visualization.
+    Only GUI logic is present here.
+    """
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Ultimate Analysis Visualization")
         self.showMaximized()
-        self.main_tab = MainTab()  # No dev_runtimes_tab needed
-        self.settings_tab = SettingsTab(main_tab=self.main_tab)
+        self.main_tab = MainTab()
         self.addTab(self.main_tab, "Main")
-        self.addTab(self.settings_tab, "Settings")
         self.dev_video_preprocessing_tab = DevVideoPreprocessingTab()
         self.addTab(self.dev_video_preprocessing_tab, "Dev-Video Preprocessing")
         self.dev_yolo_training_tab = DevYoloTrainingTab()

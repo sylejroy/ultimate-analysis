@@ -126,8 +126,8 @@ class SettingsTab(QWidget):
 
         # Set player ID method combo to current method if available
         try:
-            from processing.player_id import player_id_method
-            method_cap = player_id_method.capitalize()
+            from processing.player_id import get_player_id_method
+            method_cap = get_player_id_method().capitalize()
             idx = self.player_id_method_combo.findText(method_cap)
             if idx >= 0:
                 self.player_id_method_combo.setCurrentIndex(idx)
@@ -136,9 +136,10 @@ class SettingsTab(QWidget):
 
         # Set player ID model combo to current model if available
         try:
-            from processing.player_id import player_id_model_path
-            if player_id_model_path:
-                rel_path = os.path.relpath(player_id_model_path, "finetune")
+            from processing.player_id import get_player_id_model_path
+            model_path = get_player_id_model_path()
+            if model_path:
+                rel_path = os.path.relpath(model_path, "finetune")
                 idx = self.player_id_model_combo.findText(rel_path)
                 if idx >= 0:
                     self.player_id_model_combo.setCurrentIndex(idx)

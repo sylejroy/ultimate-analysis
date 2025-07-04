@@ -1,6 +1,3 @@
-import cv2
-import numpy as np
-
 def draw_player_id(vis_frame, bbox, digit_str, digits=None, color=(0, 255, 255), ocr_boxes=None):
     """
     Draws the player ID (jersey number) and optionally digit bounding boxes on the frame.
@@ -47,3 +44,8 @@ def draw_player_id(vis_frame, bbox, digit_str, digits=None, color=(0, 255, 255),
             pts[:, 1] += y  # shift y by bbox y
             cv2.polylines(vis_frame, [pts], isClosed=True, color=(255, 0, 0), thickness=2)
     return vis_frame
+import logging
+import cv2
+import numpy as np
+
+logger = logging.getLogger("ultimate_analysis.player_id_visualisation")

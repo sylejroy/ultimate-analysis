@@ -1,17 +1,20 @@
+
 import os
 import time
+import logging
 from PyQt5.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, QCheckBox, QPushButton, QDialog, QTableWidget, QTableWidgetItem
+    QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, QCheckBox, QPushButton, QDialog, QTableWidget, QTableWidgetItem, QSlider, QShortcut, QStyle
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QIcon
-from PyQt5.QtWidgets import QShortcut, QStyle
 
 from video_player import VideoPlayer
 from processing.inference import run_inference, set_detection_model
 from processing.tracking import run_tracking, reset_tracker
-from processing.field_segmentation import set_field_model  # <-- Add this import
+from processing.field_segmentation import set_field_model
 from processing.player_id import run_player_id
+
+logger = logging.getLogger("ultimate_analysis.main_tab")
 
 class RuntimesDialog(QDialog):
     def __init__(self, parent=None):
@@ -30,15 +33,19 @@ class RuntimesDialog(QDialog):
         self.runtimes = {}  # {step: [list of runtimes]}
         self.refresh_table()
 
-    def create_sparkline(self, values, width=60, height=18, color='#6cf'):  # color: cyan for dark mode
-        # Minimal sparkline using QPixmap and QPainter
-        from PyQt5.QtGui import QPixmap, QPainter, QColor, QPen
+    def create_sparkline(self, values, width=60, height=18, color='#6cf'):
+        # Sparkline with units label, no rolling average, no max value inside
+        from PyQt5.QtGui import QPixmap, QPainter, QColor, QPen, QFont
         from PyQt5.QtWidgets import QLabel
         import numpy as np
         if not values:
             pixmap = QPixmap(width, height)
             pixmap.fill(Qt.transparent)
-            return QLabel(pixmap=pixmap)
+            label = QLabel()
+            label.setPixmap(pixmap)
+            label.setFixedSize(width, height)
+            label.setStyleSheet("background: transparent;")
+            return label
         arr = np.array(values[-width:])
         arr = arr[-width:] if len(arr) > width else arr
         arr = np.pad(arr, (width - len(arr), 0), 'constant', constant_values=(arr[0] if len(arr) else 0,))
@@ -50,15 +57,22 @@ class RuntimesDialog(QDialog):
         pixmap = QPixmap(width, height)
         pixmap.fill(Qt.transparent)
         painter = QPainter(pixmap)
+        # Main sparkline
         pen = QPen(QColor(color))
         pen.setWidth(2)
         painter.setPen(pen)
         points = [
-            (i, height - 2 - int(n * (height - 4)))
+            (i, height - 2 - int(n * (height - 8)))
             for i, n in enumerate(norm)
         ]
         for i in range(1, len(points)):
             painter.drawLine(points[i-1][0], points[i-1][1], points[i][0], points[i][1])
+        # Draw units label ("ms") in the bottom right
+        painter.setPen(QColor("#aaa"))
+        font = QFont()
+        font.setPointSize(7)
+        painter.setFont(font)
+        painter.drawText(width-20, height-2, "ms")
         painter.end()
         label = QLabel()
         label.setPixmap(pixmap)
@@ -77,15 +91,15 @@ class RuntimesDialog(QDialog):
     def refresh_table(self):
         self.table.setRowCount(0)
         self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["Step", "Last Runtime (ms)", "Average Runtime (ms)", "History"])
+        self.table.setHorizontalHeaderLabels(["Step", "Last Runtime (ms)", "Max (ms)", "History"])
         for step, times in self.runtimes.items():
             last = times[-1] if times else 0
-            avg = sum(times) / len(times) if times else 0
+            max_v = max(times) if times else 0
             row = self.table.rowCount()
             self.table.insertRow(row)
             self.table.setItem(row, 0, QTableWidgetItem(step))
             self.table.setItem(row, 1, QTableWidgetItem(f"{last:.1f}"))
-            self.table.setItem(row, 2, QTableWidgetItem(f"{avg:.1f}"))
+            self.table.setItem(row, 2, QTableWidgetItem(f"{max_v:.1f}"))
             # Sparkline widget for history
             sparkline = self.create_sparkline(times)
             self.table.setCellWidget(row, 3, sparkline)
@@ -110,24 +124,66 @@ class MainTab(QWidget):
         self.init_ui()
         self.init_shortcuts()
 
+
     def init_ui(self):
+        from PyQt5.QtWidgets import QGroupBox, QFormLayout, QComboBox, QVBoxLayout, QHBoxLayout, QCheckBox, QPushButton, QLabel, QListWidget, QSlider
         layout = QHBoxLayout()
         # Video list
         self.video_list = QListWidget()
 
-        # Video display and controls
-        right_layout = QVBoxLayout()
-        self.video_label = QLabel("Select a video to play")
-        self.video_label.setAlignment(Qt.AlignCenter)
-        right_layout.addWidget(self.video_label, 8)
+        # --- Settings/Configuration Panel ---
+        config_panel = QVBoxLayout()
 
-        # Progress bar for video position
-        from PyQt5.QtWidgets import QSlider
-        self.progress_bar = QSlider(Qt.Horizontal)
-        self.progress_bar.setMinimum(0)
-        self.progress_bar.setSingleStep(1)
-        self.progress_bar.sliderMoved.connect(self.seek_video)
-        right_layout.addWidget(self.progress_bar)
+        # --- General Settings ---
+        general_group = QGroupBox("General Settings")
+        general_layout = QFormLayout()
+        # Add more general settings here if needed
+        general_group.setLayout(general_layout)
+        config_panel.addWidget(general_group)
+
+        # --- Tracker Settings ---
+        tracker_group = QGroupBox("Tracker Settings")
+        tracker_layout = QFormLayout()
+        self.tracker_combo = QComboBox()
+        self.tracker_combo.addItems(["DeepSort", "Histogram"])
+        tracker_layout.addRow("Tracker Type:", self.tracker_combo)
+        tracker_group.setLayout(tracker_layout)
+        config_panel.addWidget(tracker_group)
+
+        # --- Detection Settings ---
+        detection_group = QGroupBox("Detection Settings")
+        detection_layout = QFormLayout()
+        self.model_combo = QComboBox()
+        from visu.settings_tab import find_models
+        detection_models = find_models("finetune", keyword="object_detection")
+        self.model_combo.addItems(detection_models)
+        detection_layout.addRow("Inference Model:", self.model_combo)
+        detection_group.setLayout(detection_layout)
+        config_panel.addWidget(detection_group)
+
+        # --- Field Segmentation Settings ---
+        field_group = QGroupBox("Field Segmentation Settings")
+        field_layout = QFormLayout()
+        self.field_model_combo = QComboBox()
+        field_models = find_models("finetune", keyword="field_finder")
+        self.field_model_combo.addItems(field_models)
+        field_layout.addRow("Field Segmentation Model:", self.field_model_combo)
+        field_group.setLayout(field_layout)
+        config_panel.addWidget(field_group)
+
+        # --- Player Identification Settings ---
+        player_id_group = QGroupBox("Player Identification")
+        player_id_layout = QFormLayout()
+        self.player_id_method_combo = QComboBox()
+        self.player_id_method_combo.addItems(["YOLO", "EasyOCR"])
+        player_id_layout.addRow("Player ID Method:", self.player_id_method_combo)
+
+        self.player_id_model_combo = QComboBox()
+        player_id_models = find_models("finetune", keyword="digit_detector")
+        self.player_id_model_combo.addItems(player_id_models)
+        player_id_layout.addRow("Player ID YOLO Model:", self.player_id_model_combo)
+        player_id_group.setLayout(player_id_layout)
+        config_panel.addWidget(player_id_group)
 
         # --- Controls Section ---
         controls_layout = QVBoxLayout()
@@ -150,9 +206,8 @@ class MainTab(QWidget):
         nav_row = QHBoxLayout()
         self.prev_button = QPushButton()
         self.prev_button.setMinimumHeight(36)
-        # Always use unicode left arrow for prev
         self.prev_button.setText("←")
-        self.prev_button.setIcon(QIcon())  # Remove any icon
+        self.prev_button.setIcon(QIcon())
         self.prev_button.setToolTip("Prev [←]")
         self.prev_button.clicked.connect(self.prev_video)
         nav_row.addWidget(self.prev_button)
@@ -161,7 +216,6 @@ class MainTab(QWidget):
         self.play_pause_button.setMinimumHeight(36)
         self.play_icon = QIcon.fromTheme("media-playback-start")
         self.pause_icon = QIcon.fromTheme("media-playback-pause")
-        # Fallback to unicode if icon theme not found
         if self.play_icon.isNull():
             self.play_pause_button.setText("▶")
         else:
@@ -173,9 +227,8 @@ class MainTab(QWidget):
 
         self.next_button = QPushButton()
         self.next_button.setMinimumHeight(36)
-        # Always use unicode right arrow for next
         self.next_button.setText("→")
-        self.next_button.setIcon(QIcon())  # Remove any icon
+        self.next_button.setIcon(QIcon())
         self.next_button.setToolTip("Next [→]")
         self.next_button.clicked.connect(self.next_video)
         nav_row.addWidget(self.next_button)
@@ -185,22 +238,138 @@ class MainTab(QWidget):
         # Utility buttons in a row
         util_row = QHBoxLayout()
         self.reset_tracker_button = QPushButton("Reset Tracker [R]")
-        # self.reset_tracker_button.setFixedWidth(120)
         self.reset_tracker_button.clicked.connect(self.reset_tracker)
         util_row.addWidget(self.reset_tracker_button)
 
         self.show_runtimes_button = QPushButton("Runtimes")
-        # self.show_runtimes_button.setFixedWidth(90)
         self.show_runtimes_button.clicked.connect(self.open_runtimes_dialog)
         util_row.addWidget(self.show_runtimes_button)
 
         controls_layout.addLayout(util_row)
 
+        # --- Left layout: video list + settings ---
+        left_layout = QVBoxLayout()
+        left_layout.addWidget(self.video_list, 1)
+        left_layout.addLayout(config_panel, 0)
+
+        # --- Right layout: video display and controls ---
+        right_layout = QVBoxLayout()
+        self.video_label = QLabel("Select a video to play")
+        self.video_label.setAlignment(Qt.AlignCenter)
+        right_layout.addWidget(self.video_label, 8)
+        self.progress_bar = QSlider(Qt.Horizontal)
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setSingleStep(1)
+        self.progress_bar.sliderMoved.connect(self.seek_video)
+        right_layout.addWidget(self.progress_bar)
         right_layout.addLayout(controls_layout)
 
-        layout.addWidget(self.video_list, 1)
+        layout.addLayout(left_layout, 1)
         layout.addLayout(right_layout, 4)
         self.setLayout(layout)
+
+        # Timer for video playback
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.next_frame)
+
+        # Connect settings signals
+        self.tracker_combo.currentTextChanged.connect(self._on_tracker_changed)
+        self.model_combo.currentTextChanged.connect(self._on_detection_model_changed)
+        self.field_model_combo.currentTextChanged.connect(self._on_field_model_changed)
+        self.player_id_method_combo.currentTextChanged.connect(self._on_player_id_method_changed)
+        self.player_id_model_combo.currentTextChanged.connect(self._on_player_id_model_changed)
+
+        # Now connect signals and load videos
+        self.inference_checkbox.stateChanged.connect(self.handle_inference_checkbox)
+        self.tracking_checkbox.stateChanged.connect(self.handle_tracking_checkbox)
+        self.player_id_checkbox.stateChanged.connect(self.handle_player_id_checkbox)
+        self.video_list.currentRowChanged.connect(self.load_selected_video)
+        self.load_videos()
+
+        # Set combo boxes to current model if possible
+        self._set_initial_model_selection()
+
+    def _set_initial_model_selection(self):
+        # Set detection model combo to current model if available
+        try:
+            from processing.inference import weights_path as detection_weights_path
+            if detection_weights_path:
+                rel_path = os.path.relpath(detection_weights_path, "finetune")
+                idx = self.model_combo.findText(rel_path)
+                if idx >= 0:
+                    self.model_combo.setCurrentIndex(idx)
+        except Exception as e:
+            print(f"[DEBUG] Could not set initial detection model selection: {e}")
+
+        # Set field model combo to current model if available
+        try:
+            from processing.field_segmentation import field_model_path
+            if field_model_path:
+                rel_path = os.path.relpath(field_model_path, "finetune")
+                idx = self.field_model_combo.findText(rel_path)
+                if idx >= 0:
+                    self.field_model_combo.setCurrentIndex(idx)
+        except Exception as e:
+            print(f"[DEBUG] Could not set initial field model selection: {e}")
+
+        # Set tracker combo to current tracker if available
+        try:
+            from processing.tracking import tracker_type
+            tracker_type_cap = tracker_type.capitalize()
+            idx = self.tracker_combo.findText(tracker_type_cap)
+            if idx >= 0:
+                self.tracker_combo.setCurrentIndex(idx)
+        except Exception as e:
+            print(f"[DEBUG] Could not set initial tracker type: {e}")
+
+        # Set player ID method combo to current method if available
+        try:
+            from processing.player_id import get_player_id_method
+            method_cap = get_player_id_method().capitalize()
+            idx = self.player_id_method_combo.findText(method_cap)
+            if idx >= 0:
+                self.player_id_method_combo.setCurrentIndex(idx)
+        except Exception as e:
+            print(f"[DEBUG] Could not set initial player ID method: {e}")
+
+        # Set player ID model combo to current model if available
+        try:
+            from processing.player_id import get_player_id_model_path
+            model_path = get_player_id_model_path()
+            if model_path:
+                rel_path = os.path.relpath(model_path, "finetune")
+                idx = self.player_id_model_combo.findText(rel_path)
+                if idx >= 0:
+                    self.player_id_model_combo.setCurrentIndex(idx)
+        except Exception as e:
+            print(f"[DEBUG] Could not set initial player ID model selection: {e}")
+
+    def _on_tracker_changed(self, t):
+        from processing.tracking import set_tracker_type, reset_tracker
+        from visu.tracking_visualisation import reset_track_histories
+        set_tracker_type(t.lower())
+        reset_tracker()
+        reset_track_histories()
+        self.reset_visualisation()
+
+    def _on_detection_model_changed(self, model_path):
+        if hasattr(self, "set_detection_model"):
+            self.set_detection_model(os.path.join("finetune", model_path))
+
+    def _on_field_model_changed(self, model_path):
+        if hasattr(self, "set_field_model"):
+            self.set_field_model(os.path.join("finetune", model_path))
+
+    def _on_player_id_method_changed(self, method):
+        from processing.player_id import set_player_id_method, set_easyocr
+        if method.lower() == "easyocr":
+            set_easyocr()
+        else:
+            set_player_id_method("yolo")
+
+    def _on_player_id_model_changed(self, model_path):
+        from processing.player_id import set_player_id_model
+        set_player_id_model(os.path.join("finetune", model_path))
 
         # Timer for video playback
         self.timer = QTimer()
@@ -355,10 +524,9 @@ class MainTab(QWidget):
         # --- Detection/Tracking overlays ---
         t6 = time.time()
         if self.tracking_checkbox.isChecked():
-            from tracking_visualisation import draw_track_history, draw_pitch_projection
+            from tracking_visualisation import draw_track_history, get_pitch_projection_qimage
             vis_frame = draw_track_history(vis_frame, self.tracks, self.detections)
             # --- Pitch projection visualisation (now handled in tracking_visualisation) ---
-            from tracking_visualisation import get_pitch_projection_qimage
             if not hasattr(self, 'pitch_label'):
                 self.pitch_label = QLabel()
                 self.pitch_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
@@ -406,13 +574,41 @@ class MainTab(QWidget):
                             half_h = max(1, h // 2)
                             obj_crop = frame[y1:y1+half_h, x1:x2]
                             if obj_crop.size > 0:
-                                digit_str, digits = run_player_id(obj_crop)
-                                vis_frame = draw_player_id(
-                                    vis_frame,
-                                    (x1, y1, x2 - x1, half_h),  # [x, y, w, h] for the top half
-                                    digit_str,
-                                    digits
-                                )
+                                digit_str, details = run_player_id(obj_crop)
+                                # details is digits (YOLO) or ocr_boxes (EasyOCR)
+                                if self.player_id_method_combo.currentText().lower() == "yolo":
+                                    # details is a list of (box, class) or just boxes
+                                    digits = []
+                                    if details and len(details) > 0:
+                                        first = details[0]
+                                        # If first is (box, class) and box is a list/array of 4 ints
+                                        if (
+                                            isinstance(first, (list, tuple)) and len(first) == 2
+                                            and isinstance(first[0], (list, tuple, np.ndarray)) and len(first[0]) == 4
+                                            and all(isinstance(v, (int, float, np.integer, np.floating)) for v in first[0])
+                                        ):
+                                            digits = details  # already (box, class)
+                                        elif (
+                                            isinstance(first, (list, tuple, np.ndarray)) and len(first) == 4
+                                            and all(isinstance(v, (int, float, np.integer, np.floating)) for v in first)
+                                        ):
+                                            # Only boxes, wrap with dummy class 0
+                                            digits = [(list(map(int, box)), 0) for box in details]
+                                    vis_frame = draw_player_id(
+                                        vis_frame,
+                                        (x1, y1, x2 - x1, half_h),
+                                        digit_str,
+                                        digits
+                                    )
+                                else:
+                                    vis_frame = draw_player_id(
+                                        vis_frame,
+                                        (x1, y1, x2 - x1, half_h),
+                                        digit_str,
+                                        None,
+                                        (0, 255, 255),
+                                        details
+                                    )
         t9 = time.time()
         self.log_runtime("Player ID", (t9 - t8) * 1000)
 

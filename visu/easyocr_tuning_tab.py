@@ -8,7 +8,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QImage, QPixmap
 from processing.inference import run_inference
 from processing.tracking import run_tracking
-from processing.player_id import run_player_id, easyocr_reader
+from processing.player_id import run_player_id, preprocess_for_easyocr, load_easyocr_params
 
 # Parameter descriptions for tooltips
 EASYOCR_PARAM_DESCRIPTIONS = {
@@ -303,53 +303,26 @@ class DevEasyOCRTuningTab(QWidget):
                 self.ocr_params[name] = widget.value()
 
     def preprocess_crop(self, crop):
-        # Step enables
-        enabled = self.preproc_enables
-        # Colour mode: skip grayscale and CLAHE, use original crop
-        if self.colour_mode:
-            proc = crop.copy()
-        else:
-            # CLAHE
-            if enabled["clahe_clip"].isChecked() or enabled["clahe_grid"].isChecked():
-                gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                proc = cv2.createCLAHE(clipLimit=self.preproc_params["clahe_clip"], tileGridSize=(self.preproc_params["clahe_grid"], self.preproc_params["clahe_grid"])) .apply(gray)
-            else:
-                proc = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-            # Black/White invert
-            if self.bw_mode:
-                proc = cv2.bitwise_not(proc)
-        # Sharpening
-        if enabled["sharpen"].isChecked() and self.preproc_params["sharpen"] > 0:
-            sharpen_strength = self.preproc_params["sharpen"]
-            kernel = np.array([[0, -1, 0], [-1, 5 + sharpen_strength, -1], [0, -1, 0]])
-            proc = cv2.filter2D(proc, -1, kernel)
-        # Upscale
-        if enabled["upscale"].isChecked():
-            if getattr(self, 'upscale_to_size', False):
-                # Resize so largest dimension == target size
-                h, w = proc.shape[:2]
-                max_dim = max(h, w)
-                target = getattr(self, 'upscale_target_size', 64)
-                if max_dim != target:
-                    scale = target / max_dim
-                    proc = cv2.resize(proc, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-            elif self.preproc_params["upscale"] > 1.0:
-                scale = self.preproc_params["upscale"]
-                proc = cv2.resize(proc, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-        # Blur
-        if enabled["blur_ksize"].isChecked() and self.preproc_params["blur_ksize"] > 1:
-            ksize = self.preproc_params["blur_ksize"]
-            if ksize % 2 == 0:
-                ksize += 1
-            proc = cv2.GaussianBlur(proc, (ksize, ksize), 0)
-        # Convert to 3-channel RGB for easyocr if not already
-        if len(proc.shape) == 2:
-            upscaled_rgb = cv2.cvtColor(proc, cv2.COLOR_GRAY2RGB)
-        else:
-            upscaled_rgb = proc
-        return upscaled_rgb, proc
+        """
+        Preprocess a crop for EasyOCR using the current GUI state (not global config).
+        This ensures the GUI always reflects the user's current parameter choices.
+        """
+        preproc_params = self.preproc_params.copy()
+        preproc_enables = {k: v.isChecked() for k, v in self.preproc_enables.items()}
+        colour_mode = getattr(self, 'colour_mode', False)
+        bw_mode = getattr(self, 'bw_mode', False)
+        upscale_to_size = getattr(self, 'upscale_to_size', False)
+        upscale_target_size = getattr(self, 'upscale_target_size', 64)
+        return preprocess_for_easyocr(
+            crop, preproc_params, preproc_enables,
+            colour_mode=colour_mode, bw_mode=bw_mode,
+            upscale_to_size=upscale_to_size, upscale_target_size=upscale_target_size
+        )
 
     def save_param_set(self):
+        """
+        Save the current parameter set (OCR, preprocessing, toggles) to a JSON file.
+        """
         params = {
             'ocr': self.ocr_params,
             'preproc': self.preproc_params,
@@ -365,6 +338,9 @@ class DevEasyOCRTuningTab(QWidget):
                 json.dump(params, f, indent=2)
 
     def load_param_set(self):
+        """
+        Load a parameter set from a JSON file and update all GUI widgets accordingly.
+        """
         fname, _ = QFileDialog.getOpenFileName(self, "Load Parameter Set", "", "JSON Files (*.json)")
         if fname:
             with open(fname, 'r') as f:
@@ -434,7 +410,10 @@ class DevEasyOCRTuningTab(QWidget):
                         obj_crop = frame[y1:y1+half_h, x1:x2]
                         if obj_crop.size > 0:
                             preproc_rgb, preproc_gray = self.preprocess_crop(obj_crop)
-                            ocr_results = easyocr_reader.readtext(
+                            import processing.player_id as player_id_mod
+                            if not hasattr(player_id_mod, '_easyocr_reader') or player_id_mod._easyocr_reader is None:
+                                player_id_mod.set_easyocr()
+                            ocr_results = player_id_mod._easyocr_reader.readtext(
                                 preproc_rgb,
                                 **self.ocr_params
                             )
