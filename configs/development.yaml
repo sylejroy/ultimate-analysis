@@ -1,0 +1,21 @@
+# Development configuration for Ultimate Analysis
+# Extends default configuration with development-specific settings
+
+# Import base configuration
+extends: "default.yaml"
+
+application:
+  debug: true
+
+logging:
+  level: "DEBUG"
+  file: "logs/ultimate_analysis_dev.log"
+
+performance:
+  # Relaxed performance requirements for development
+  min_fps: 5.0
+  max_inference_time_ms: 200.0
+
+models:
+  # Use smaller/faster models for development if needed
+  input_size: 640  # Smaller input size for faster processing

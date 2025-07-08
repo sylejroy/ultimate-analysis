@@ -1,0 +1,23 @@
+# Production configuration for Ultimate Analysis
+# Optimized settings for production deployment
+
+# Import base configuration
+extends: "default.yaml"
+
+application:
+  debug: false
+
+logging:
+  level: "WARNING"
+  file: "logs/ultimate_analysis.log"
+
+performance:
+  # Stricter performance requirements for production
+  min_fps: 15.0
+  max_inference_time_ms: 80.0
+  max_memory_usage_mb: 1536
+
+models:
+  # Optimized settings for production
+  input_size: 960
+  confidence_threshold: 0.6  # Higher confidence threshold
