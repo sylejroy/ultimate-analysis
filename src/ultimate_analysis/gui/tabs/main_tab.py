@@ -13,13 +13,12 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QIcon
 
-from ..components.video_player import VideoPlayer
-from ..components.runtime_dialog import RuntimesDialog
-from ...processing.inference import run_inference, set_detection_model
-from ...processing.tracking import run_tracking, reset_tracker, tracker_type
-from ...processing import field_segmentation
-from ...processing.player_id import run_player_id
-from ..utils.visualization import draw_detections, draw_tracks
+from ultimate_analysis.gui.components.video_player import VideoPlayer
+from ultimate_analysis.gui.components.runtime_dialog import RuntimesDialog
+from ultimate_analysis.processing.inference import run_inference, set_detection_model, get_model_status
+from ultimate_analysis.processing.tracking import run_tracking, reset_tracker, set_tracker_type
+from ultimate_analysis.processing import field_segmentation
+from ultimate_analysis.processing.player_id import run_player_id
 
 logger = logging.getLogger("ultimate_analysis.gui.main_tab")
 
@@ -260,12 +259,7 @@ class MainTab(QWidget):
         self.video_list.addItems(self.video_files)
         
         if self.video_files:
-            # Auto-select a random video at startup
-            import random
-            random_index = random.randint(0, len(self.video_files) - 1)
-            self.video_list.setCurrentRow(random_index)
-            self._load_selected_video(random_index)
-            logger.info(f"Auto-selected video: {self.video_files[random_index]}")
+            self.video_list.setCurrentRow(0)
 
     def _load_selected_video(self, row: int):
         """Load the selected video."""
@@ -320,46 +314,76 @@ class MainTab(QWidget):
 
     def _process_frame(self, frame):
         """Apply selected processing steps to the frame."""
+
         processed_frame = frame.copy()
-        detections = []  # Store detections for tracking
-        
+        detections = None
+
         # Apply inference if enabled
-        detections = []
         if self.inference_checkbox.isChecked():
+            # Check if model is loaded before running inference
+            try:
+                status = get_model_status()
+                if not status['model_loaded']:
+                    logger.error(f"Model not loaded when inference requested. Status: {status}")
+                    # Try to load the model
+                    from ...config.settings import get_settings
+                    settings = get_settings()
+                    logger.info(f"Attempting to load model during playback: {settings.models.detection_model}")
+                    set_detection_model(settings.models.detection_model)
+                    logger.info("Model loaded successfully during playback")
+            except Exception as e:
+                logger.error(f"Failed to check/load model during playback: {e}")
+
             start_time = time.time()
-            # Apply inference processing and store detections
+            # Apply inference processing
             detections = run_inference(processed_frame)
             runtime = (time.time() - start_time) * 1000
             self.runtimes_dialog.log_runtime("Inference", runtime)
-            
-            # Draw detection boxes
-            processed_frame = draw_detections(processed_frame, detections)
-        
+
         # Apply tracking if enabled
-        tracks = []
         if self.tracking_checkbox.isChecked():
             start_time = time.time()
-            # Apply tracking processing with detections
+            # Apply tracking processing
+            if detections is None:
+                # If inference was not run, run it now
+                detections = run_inference(processed_frame)
             tracks = run_tracking(processed_frame, detections)
+            
+            # Draw tracks on the frame
+            from ultimate_analysis.gui.utils.visualization import draw_tracks
+            from ultimate_analysis.processing.tracking import tracker_type
+            processed_frame = draw_tracks(processed_frame, tracks, tracker_type)
+            
             runtime = (time.time() - start_time) * 1000
             self.runtimes_dialog.log_runtime("Tracking", runtime)
-            
-            # Draw tracking results
-            processed_frame = draw_tracks(processed_frame, tracks, tracker_type)
         
         # Apply player ID if enabled
         if self.player_id_checkbox.isChecked():
             start_time = time.time()
             # Apply player ID processing
-            processed_frame = run_player_id(processed_frame)
+            digit_str, digits = run_player_id(processed_frame)
+            from ultimate_analysis.gui.utils.visualization import draw_player_id_results
+            processed_frame = draw_player_id_results(processed_frame, digits, digit_str)
             runtime = (time.time() - start_time) * 1000
             self.runtimes_dialog.log_runtime("Player ID", runtime)
         
         # Apply field segmentation if enabled
         if self.field_checkbox.isChecked():
             start_time = time.time()
+            # Ensure field segmentation model is loaded
+            try:
+                if getattr(field_segmentation, 'field_model', None) is None:
+                    from ...config.settings import get_settings
+                    settings = get_settings()
+                    logger.info(f"Loading field segmentation model: {settings.models.segmentation_model}")
+                    field_segmentation.set_field_model(settings.models.segmentation_model)
+                    logger.info("Field segmentation model loaded successfully")
+            except Exception as e:
+                logger.error(f"Failed to check/load field segmentation model: {e}")
             # Apply field segmentation processing
-            # processed_frame = run_field_segmentation(processed_frame)
+            masks = field_segmentation.run_field_segmentation(processed_frame)
+            from ultimate_analysis.gui.utils.visualization import overlay_segmentation_mask
+            processed_frame = overlay_segmentation_mask(processed_frame, masks, color=(0, 255, 0), alpha=0.4)
             runtime = (time.time() - start_time) * 1000
             self.runtimes_dialog.log_runtime("Field Segmentation", runtime)
         
@@ -397,6 +421,12 @@ class MainTab(QWidget):
         reset_tracker()
         self.tracks = []
         self.track_histories = {}
+        
+        # Clear any cached track histories in the visualization module
+        from ultimate_analysis.gui.utils.visualization import clear_track_history
+        clear_track_history()
+        
+        logger.info("Tracker reset and track histories cleared")
 
     def _open_runtimes_dialog(self):
         """Open the runtimes dialog."""
@@ -405,7 +435,25 @@ class MainTab(QWidget):
     # Settings handlers
     def _on_tracker_changed(self, tracker_type: str):
         """Handle tracker type change."""
-        logger.info(f"Tracker changed to: {tracker_type}")
+        # Convert GUI names to internal tracker names
+        if tracker_type == "DeepSort":
+            internal_type = "deepsort"
+        elif tracker_type == "Histogram":
+            internal_type = "histogram"
+        else:
+            logger.warning(f"Unknown tracker type: {tracker_type}")
+            return
+        
+        logger.info(f"Tracker changed to: {tracker_type} (internal: {internal_type})")
+        
+        # Set the new tracker type (this creates a new tracker instance)
+        set_tracker_type(internal_type)
+        
+        # Clear any cached track histories in the visualization module
+        from ultimate_analysis.gui.utils.visualization import clear_track_history
+        clear_track_history()
+        
+        logger.info("Track histories cleared for new tracker")
 
     def _on_detection_model_changed(self, model_path: str):
         """Handle detection model change."""

@@ -2,6 +2,7 @@ from deep_sort_realtime.deepsort_tracker import DeepSort
 import cv2
 import numpy as np
 from collections import deque
+import random
 
 # Tracker selection
 tracker_type =  "deepsort" #"histogram" # or "deepsort"
@@ -67,7 +68,7 @@ class HistogramTracker:
 
     def reset(self):
         self.tracks = []
-        self.next_track_id = 0
+        self.next_track_id = random.randint(0, 1000000)
         self.frame_id = 0
 
     def update(self, frame, detections):
@@ -141,3 +142,6 @@ def run_tracking(frame, detections):
 def reset_tracker():
     global tracker
     set_tracker_type(tracker_type)  # This re-initializes the tracker
+    # Randomize next_track_id if using HistogramTracker
+    if tracker_type == "histogram" and hasattr(tracker, 'next_track_id'):
+        tracker.next_track_id = random.randint(0, 1000000)

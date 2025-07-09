@@ -147,3 +147,12 @@ def clear_model_cache():
     """Clear the model cache to free memory"""
     global _model_cache
     _model_cache.clear()
+
+def get_model_status():
+    """Get current model loading status for debugging and GUI checks."""
+    global model, weights_path, _model_cache
+    return {
+        'model_loaded': model is not None,
+        'model_path': weights_path if 'weights_path' in globals() else None,
+        'cached_models': list(_model_cache.keys()) if '_model_cache' in globals() else []
+    }

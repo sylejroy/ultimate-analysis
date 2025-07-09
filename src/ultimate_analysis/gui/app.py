@@ -37,28 +37,52 @@ class VisualizationApp(QTabWidget):
             
             # Initialize detection model
             try:
-                from ..processing.inference import set_detection_model
+                from ultimate_analysis.processing.inference import set_detection_model
+                logger.info(f"Attempting to load detection model: {settings.models.detection_model}")
+                print(f"[APP STARTUP] Loading detection model: {settings.models.detection_model}")
                 set_detection_model(settings.models.detection_model)
-                logger.info(f"Detection model loaded: {settings.models.detection_model}")
+                logger.info(f"Detection model loaded successfully: {settings.models.detection_model}")
+                print(f"[APP STARTUP] Detection model loaded successfully")
             except ImportError as e:
                 logger.warning(f"Detection model not available - inference module not imported: {e}")
+                print(f"[APP STARTUP] Import error: {e}")
             except Exception as e:
                 logger.error(f"Failed to load detection model: {e}")
                 logger.error(f"Model path: {settings.models.detection_model}")
+                print(f"[APP STARTUP] Failed to load detection model: {e}")
+                import traceback
+                logger.error(f"Full traceback: {traceback.format_exc()}")
+                print(f"[APP STARTUP] Full traceback: {traceback.format_exc()}")
             
             # Initialize field segmentation model
             try:
-                from ..processing import field_segmentation
+                from ultimate_analysis.processing import field_segmentation
+                logger.info(f"Attempting to load field segmentation model: {settings.models.segmentation_model}")
                 field_segmentation.set_field_model(settings.models.segmentation_model)
-                logger.info(f"Field segmentation model loaded: {settings.models.segmentation_model}")
+                logger.info(f"Field segmentation model loaded successfully: {settings.models.segmentation_model}")
             except ImportError as e:
                 logger.warning(f"Field segmentation model not available - field_segmentation module not imported: {e}")
             except Exception as e:
                 logger.error(f"Failed to load field segmentation model: {e}")
                 logger.error(f"Model path: {settings.models.segmentation_model}")
+                import traceback
+                logger.error(f"Full traceback: {traceback.format_exc()}")
             
         except Exception as e:
             logger.error(f"Failed to initialize models: {e}")
+
+
+class VisualizationApp(QTabWidget):
+    """
+    Main application window for Ultimate Analysis Visualization.
+    Only GUI logic is present here.
+    """
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Ultimate Analysis Visualization")
+        self.showMaximized()
+        self._setup_tabs()
+        self._setup_dark_mode()
 
     def _setup_tabs(self):
         """Initialize and add all tabs to the application."""
