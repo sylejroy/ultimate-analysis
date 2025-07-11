@@ -1,3 +1,13 @@
+## The Most Important Guideline: KISS
+
+**Keep It Simple, Stupid (KISS):**
+- Always strive for the simplest solution that works.
+- Avoid unnecessary complexity, cleverness, or over-engineering.
+- Prefer clear, readable, and maintainable code over “smart” tricks.
+- Simplicity makes code easier to test, debug, and extend.
+
+---
+
 # Ultimate Analysis - Development Guidelines
 
 ## Project Overview
@@ -70,14 +80,9 @@ ultimate-analysis/
 ├── requirements.txt                   # Python dependencies
 ├── setup.py                          # Package setup configuration
 ├── .gitignore                        # Git ignore patterns
-├── .env.example                      # Example environment variables
-├── pyproject.toml                    # Modern Python project configuration
 │
 ├── docs/                             # Documentation
 │   ├── DEVELOPMENT_GUIDELINES.md     # Development standards (this file)
-│   ├── API.md                        # API documentation
-│   ├── ARCHITECTURE.md               # System architecture overview
-│   ├── DEPLOYMENT.md                 # Deployment instructions
 │   └── assets/                       # Documentation images/diagrams
 │
 ├── src/                              # Source code
@@ -134,19 +139,6 @@ ultimate-analysis/
 │           ├── dataset_utils.py      # Dataset generation and management
 │           └── performance_utils.py  # Performance monitoring
 │
-├── tests/                            # Test suite
-│   ├── __init__.py
-│   ├── conftest.py                   # Pytest configuration
-│   ├── unit/                         # Unit tests
-│   │   ├── test_processing.py
-│   │   ├── test_gui.py
-│   │   └── test_utils.py
-│   ├── integration/                  # Integration tests
-│   │   ├── test_video_pipeline.py
-│   │   └── test_model_integration.py
-│   └── performance/                  # Performance tests
-│       └── test_inference_speed.py
-│
 ├── data/                             # Data directories (gitignored)
 │   ├── raw/                          # Raw input data
 │   ├── processed/                    # Processed datasets
@@ -154,13 +146,6 @@ ultimate-analysis/
 │   │   ├── detection/                # Object detection models
 │   │   ├── segmentation/             # Field segmentation models
 │   │   └── player_id/                # Player identification models
-│   └── cache/                        # Temporary cache files
-│
-├── scripts/                          # Utility scripts
-│   ├── setup_environment.py         # Environment setup
-│   ├── download_models.py           # Model download script
-│   ├── data_preprocessing.py        # Data preprocessing pipeline
-│   └── benchmark.py                 # Performance benchmarking
 │
 ├── configs/                          # Configuration files
 │   ├── default.yaml                 # Default configuration
@@ -170,11 +155,6 @@ ultimate-analysis/
 │       ├── yolo_detection.yaml
 │       ├── field_segmentation.yaml
 │       └── player_id.yaml
-│
-└── notebooks/                        # Jupyter notebooks (optional)
-    ├── exploration/                  # Data exploration
-    ├── experiments/                  # Model experiments
-    └── analysis/                     # Results analysis
 ```
 
 ### Key Structure Principles
