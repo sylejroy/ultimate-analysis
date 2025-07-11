@@ -39,6 +39,10 @@ def load_easyocr_params(json_path: str = "easyocr_params.json") -> Dict[str, Any
     global _easyocr_params
     if _easyocr_params is not None:
         return _easyocr_params
+    # Always resolve path relative to project root
+    if not os.path.isabs(json_path):
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        json_path = os.path.join(project_root, json_path)
     if not os.path.exists(json_path):
         logger.warning("easyocr_params.json not found, using defaults.")
         _easyocr_params = {}

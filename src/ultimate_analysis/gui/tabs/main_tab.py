@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QIcon
+import cv2
 
 from ultimate_analysis.gui.components.video_player import VideoPlayer
 from ultimate_analysis.gui.components.runtime_dialog import RuntimesDialog
@@ -270,7 +271,12 @@ class MainTab(QWidget):
         if self.player.load_video(video_path):
             self.current_video_index = row
             self.progress_bar.setMaximum(self.player.get_frame_count() - 1)
+            
+            # Reset tracker and clear track histories when switching videos
+            self._reset_tracker()
+            
             self._update_video_display()
+            logger.info(f"Loaded video: {self.video_files[row]} and reset tracker")
         else:
             logger.error(f"Failed to load video: {video_path}")
 
@@ -358,9 +364,33 @@ class MainTab(QWidget):
             self.runtimes_dialog.log_runtime("Tracking", runtime)
         
         # Apply player ID if enabled
-        if self.player_id_checkbox.isChecked():
+        if self.player_id_checkbox.isChecked() and self.tracking_checkbox.isChecked():
             start_time = time.time()
-            # Apply player ID processing
+            # Run EasyOCR on tracked players (class 1)
+            from ultimate_analysis.processing.player_id import run_player_id, get_player_id_method
+            from ultimate_analysis.gui.utils.visualization import draw_player_id_results, highlight_ocr_search_area
+            player_id_method = get_player_id_method()
+            # Use tracks from previous tracking step
+            if 'tracks' in locals():
+                for track in tracks:
+                    if hasattr(track, 'det_class') and track.det_class == 1 and hasattr(track, 'to_ltrb'):
+                        x1, y1, x2, y2 = map(int, track.to_ltrb())
+                        # Crop player region
+                        crop = processed_frame[y1:y2, x1:x2]
+                        if crop.size == 0:
+                            continue
+                        # Highlight the area being searched
+                        processed_frame = highlight_ocr_search_area(processed_frame, (x1, y1, x2, y2), color=(255, 255, 0), alpha=0.25)
+                        # Run EasyOCR on the crop
+                        digit_str, digits = run_player_id(crop)
+                        # Draw the result on the main frame (show ID above bbox)
+                        label = f"ID: {digit_str}" if digit_str else "No ID"
+                        cv2.putText(processed_frame, label, (x1, y1 - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            runtime = (time.time() - start_time) * 1000
+            self.runtimes_dialog.log_runtime("Player ID", runtime)
+        elif self.player_id_checkbox.isChecked():
+            # Fallback: global player ID (legacy, no tracking)
+            start_time = time.time()
             digit_str, digits = run_player_id(processed_frame)
             from ultimate_analysis.gui.utils.visualization import draw_player_id_results
             processed_frame = draw_player_id_results(processed_frame, digits, digit_str)

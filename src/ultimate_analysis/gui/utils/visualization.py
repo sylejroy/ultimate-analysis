@@ -14,13 +14,29 @@ def get_color(track_id: int) -> tuple:
         idx = int(track_id) if track_id is not None else 0
     except Exception:
         idx = 0
-    # Use tab20 colormap for up to 20, fallback to hsv for more
+    
+    # Use tab20 colormap for up to 20, more distinct colors for higher IDs
     if idx < 20:
         cmap = plt.get_cmap('tab20')
         color = cmap(idx % 20)[:3]
     else:
-        cmap = plt.get_cmap('hsv')
-        color = cmap((idx % 256) / 256.0)[:3]
+        # For IDs > 20, use a combination approach for better distinction
+        # Use Set3 colormap with offset for better color variation
+        base_colors = plt.get_cmap('Set3')
+        accent_colors = plt.get_cmap('Set1')
+        
+        # Alternate between different colormaps and add brightness variation
+        if idx % 2 == 0:
+            color_idx = ((idx - 20) % 12) / 12.0
+            color = base_colors(color_idx)[:3]
+        else:
+            color_idx = ((idx - 20) % 9) / 9.0
+            color = accent_colors(color_idx)[:3]
+        
+        # Add brightness variation for even more distinction
+        brightness_factor = 0.7 + 0.6 * ((idx - 20) % 3) / 3.0
+        color = tuple(min(1.0, c * brightness_factor) for c in color)
+    
     # Convert to 0-255 BGR
     color = tuple(int(255 * c) for c in color[::-1])
     return color
@@ -83,6 +99,15 @@ def draw_tracks_deepsort(frame: np.ndarray, tracks: list) -> np.ndarray:
             label_y = y2 + label_size[1] + 5
             cv2.rectangle(frame, (label_x, y2 + 5), (label_x + label_size[0], label_y), color, -1)
             cv2.putText(frame, label, (label_x, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+        
+        # Track ID drawing - hidden for cleaner visualization
+        # track_id_label = f"T{track_id}"
+        # track_id_y = y2 + 15  # Position below the bounding box
+        # # Black outline for contrast
+        # cv2.putText(frame, track_id_label, (x1, track_id_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 3, cv2.LINE_AA)
+        # # White text for visibility
+        # cv2.putText(frame, track_id_label, (x1, track_id_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+        
         # Draw center point
         center_x = (x1 + x2) // 2
         center_y = (y1 + y2) // 2
@@ -129,6 +154,15 @@ def draw_tracks_histogram(frame: np.ndarray, tracks: list) -> np.ndarray:
             label_y = y2 + label_size[1] + 5
             cv2.rectangle(frame, (label_x, y2 + 5), (label_x + label_size[0], label_y), color, -1)
             cv2.putText(frame, label, (label_x, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
+        
+        # Track ID drawing - hidden for cleaner visualization
+        # track_id_label = f"T{track_id}"
+        # track_id_y = y2 + 15 if class_name is None else y2 + 30  # Adjust if class name is shown
+        # # Black outline for contrast
+        # cv2.putText(frame, track_id_label, (x1, track_id_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 3, cv2.LINE_AA)
+        # # White text for visibility
+        # cv2.putText(frame, track_id_label, (x1, track_id_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+        
         center_x = (x1 + x2) // 2
         center_y = (y1 + y2) // 2
         cv2.circle(frame, (center_x, center_y), 3, color, -1)
@@ -202,12 +236,41 @@ def draw_player_id_results(frame: np.ndarray, digits: list, digit_str: str = "",
     """
     vis_frame = frame.copy()
     # Draw bounding boxes for each digit
+    # Support both YOLO (list of (box, digit)) and EasyOCR (list of boxes)
     if digits:
-        for box, digit in digits:
-            x1, y1, x2, y2 = [int(v) for v in box]
-            cv2.rectangle(vis_frame, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(vis_frame, str(digit), (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
+        # Check if digits is a list of (box, digit) or just boxes
+        first = digits[0]
+        if isinstance(first, (tuple, list)) and len(first) == 2 and isinstance(first[1], (int, str)):
+            # YOLO format: (box, digit)
+            for box, digit in digits:
+                x1, y1, x2, y2 = [int(v) for v in box]
+                cv2.rectangle(vis_frame, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(vis_frame, str(digit), (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
+        else:
+            # EasyOCR format: just boxes
+            for box in digits:
+                # Each box is a list of 4 points: [[x1, y1], [x2, y2], [x3, y3], [x4, y4]]
+                pts = np.array(box, dtype=np.int32)
+                cv2.polylines(vis_frame, [pts], isClosed=True, color=color, thickness=2)
     # Always show the player ID string or a fallback label
     label = f"ID: {digit_str}" if digit_str else "No ID detected"
     cv2.putText(vis_frame, label, (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
     return vis_frame
+
+
+def highlight_ocr_search_area(frame: np.ndarray, bbox: tuple, color: tuple = (255, 255, 0), alpha: float = 0.25) -> np.ndarray:
+    """
+    Draw a semi-transparent rectangle to highlight the OCR search area.
+    Args:
+        frame: Input frame (np.ndarray)
+        bbox: (x1, y1, x2, y2) tuple
+        color: BGR color for the overlay
+        alpha: Transparency
+    Returns:
+        Frame with highlighted area
+    """
+    overlay = frame.copy()
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
+    cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0, frame)
+    return frame
