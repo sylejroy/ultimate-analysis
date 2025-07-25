@@ -1,0 +1,91 @@
+# Ultimate Analysis - Default Configuration
+# This file contains all default settings for the application
+
+# Application Settings
+app:
+  name: "Ultimate Analysis"
+  version: "0.1.0"
+  debug: false
+  log_level: "INFO"
+  max_file_size_lines: 500
+
+# Video Processing Settings
+video:
+  supported_formats: [".mp4", ".avi", ".mov", ".mkv", ".wmv"]
+  max_fps: 30
+  default_fps: 25
+  frame_skip: 1
+  cache_frames: true
+  max_cached_frames: 100
+
+# Model Configuration
+models:
+  base_path: "data/models"
+  detection:
+    default_model: "yolo11l.pt"
+    confidence_threshold: 0.5
+    nms_threshold: 0.45
+    max_detections: 100
+    cache_results: true
+  
+  segmentation:
+    default_model: "yolo11l-seg.pt"
+    confidence_threshold: 0.6
+    mask_alpha: 0.3
+  
+  tracking:
+    default_tracker: "deepsort"
+    max_tracks: 50
+    track_history_length: 30
+    color_pool_size: 20
+  
+  player_id:
+    ocr_enabled: true
+    ocr_languages: ["en"]
+    ocr_confidence_threshold: 0.7
+    cache_player_ids: true
+
+# GUI Settings
+gui:
+  window_title: "Ultimate Analysis"
+  window_width: 1920
+  window_height: 1080
+  theme: "dark"
+  auto_save_settings: true
+  fps_display: true
+
+# Performance Settings
+performance:
+  enable_gpu: true
+  max_cpu_cores: -1  # -1 means use all available
+  memory_limit_mb: 4096
+  cache_size_mb: 512
+  enable_profiling: false
+  profiling_interval_ms: 1000
+
+# Logging Settings
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file_enabled: true
+  file_path: "logs/ultimate_analysis.log"
+  max_file_size_mb: 10
+  backup_count: 5
+
+# Paths
+paths:
+  data_dir: "data"
+  models_dir: "data/models"
+  cache_dir: "data/cache"
+  logs_dir: "logs"
+  output_dir: "output"
+  temp_dir: "temp"
+
+# Data Directories
+data:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  dev_data_dir: "data/processed/dev_data"
+  raw_videos_dir: "data/raw/videos"
+  training_dir: "data/raw/training_data"
+  dataset_dir: "data/raw/dataset"
