@@ -39,7 +39,6 @@
 - **Code formatting**: Use `black` for consistent formatting
 - **Style guide**: Follow PEP8 strictly
 - **Type hints**: Required for all function signatures and class attributes
-- **Data validation**: Use `pydantic` for data models and validation
 
 ### Import Organization
 ```python
@@ -52,120 +51,13 @@ from typing import List, Dict, Optional
 import cv2
 import numpy as np
 from PyQt5.QtWidgets import QWidget
-from pydantic import BaseModel
-
-# Local imports (prefer relative within packages)
-from .video_player import VideoPlayer
-from ..processing.inference import run_inference
-```
-
-### Documentation Requirements
-- **README.md**: Place in the project root. Update when adding features, changing dependencies, or modifying setup.
-- **DEVELOPMENT_GUIDELINES.md**: Place in the project root. Update as standards and best practices evolve.
-- **LICENSE, CONTRIBUTING.md**: Place in the project root for visibility and compliance.
-- **docs/**: Place extended or detailed documentation (user guides, API docs, diagrams) in a `docs/` directory at the root.
-- **Inline comments**: Required for non-obvious code logic
-- **Reasoning comments**: Use `# Reason:` prefix to explain complex logic decisions
-- **Docstrings**: Required for all public functions and classes
-- **Type documentation**: Include types in docstrings for complex parameters
-
-### Code Organization Principles
-
-#### Module Structure
-```
-ultimate-analysis/
-├── README.md                           # Project overview and setup instructions
-├── LICENSE                            # Project license
-├── CONTRIBUTING.md                    # Contribution guidelines
-├── requirements.txt                   # Python dependencies
-├── setup.py                          # Package setup configuration
-├── .gitignore                        # Git ignore patterns
-│
-├── docs/                             # Documentation
-│   ├── DEVELOPMENT_GUIDELINES.md     # Development standards (this file)
-│   └── assets/                       # Documentation images/diagrams
-│
-├── src/                              # Source code
-│   └── ultimate_analysis/            # Main package
-│       ├── __init__.py
-│       ├── main.py                   # Application entry point
-│       ├── config/                   # Configuration management
-│       │   ├── __init__.py
-│       │   ├── settings.py           # Application settings
-│       │   └── constants.py          # Global constants
-│       │
-│       ├── core/                     # Core business logic
-│       │   ├── __init__.py
-│       │   ├── models.py             # Data models (Pydantic)
-│       │   ├── exceptions.py         # Custom exceptions
-│       │   └── utils.py              # Core utilities
-│       │
-│       ├── processing/               # ML and video processing
-│       │   ├── __init__.py
-│       │   ├── inference.py          # YOLO inference engine
-│       │   ├── tracking.py           # Object tracking algorithms
-│       │   ├── field_segmentation.py # Field detection and segmentation
-│       │   ├── player_id.py          # Player identification (YOLO/OCR)
-│       │   └── video_processor.py    # Video processing pipeline
-│       │
-│       ├── gui/                      # User interface
-│       │   ├── __init__.py
-│       │   ├── app.py                # Main application window
-│       │   ├── components/           # Reusable UI components
-│       │   │   ├── __init__.py
-│       │   │   ├── video_player.py   # Video player widget
-│       │   │   ├── controls.py       # Control panels
-│       │   │   └── dialogs.py        # Dialog windows
-│       │   │
-│       │   ├── tabs/                 # Tab implementations
-│       │   │   ├── __init__.py
-│       │   │   ├── main_tab.py       # Main analysis tab
-│       │   │   ├── preprocessing_tab.py # Video preprocessing
-│       │   │   ├── training_tab.py   # Model training interface
-│       │   │   └── tuning_tab.py     # Parameter tuning
-│       │   │
-│       │   └── visualization/        # Visualization components
-│       │       ├── __init__.py
-│       │       ├── detection_viz.py  # Detection overlays
-│       │       ├── tracking_viz.py   # Tracking visualizations
-│       │       ├── field_viz.py      # Field segmentation display
-│       │       └── player_id_viz.py  # Player ID visualizations
-│       │
-│       └── utils/                    # Utility modules
-│           ├── __init__.py
-│           ├── file_utils.py         # File operations
-│           ├── image_utils.py        # Image processing utilities
-│           ├── video_utils.py        # Video manipulation utilities
-│           ├── dataset_utils.py      # Dataset generation and management
-│           └── performance_utils.py  # Performance monitoring
-│
-├── data/                             # Data directories (gitignored)
-│   ├── raw/                          # Raw input data
-│   ├── processed/                    # Processed datasets
-│   ├── models/                       # Trained models
-│   │   ├── detection/                # Object detection models
-│   │   ├── segmentation/             # Field segmentation models
-│   │   └── player_id/                # Player identification models
-│
-├── configs/                          # Configuration files
-│   ├── default.yaml                 # Default configuration
-│   ├── development.yaml             # Development settings
-│   ├── production.yaml              # Production settings
-│   └── model_configs/               # Model-specific configurations
-│       ├── yolo_detection.yaml
-│       ├── field_segmentation.yaml
-│       └── player_id.yaml
 ```
 
 ### Key Structure Principles
 
 1. **Clear Separation of Concerns**: GUI, processing, and utilities are separate
-2. **Testability**: Test structure mirrors source structure
-3. **Scalability**: Modular design allows easy addition of new features
-4. **Configuration Management**: Centralized configuration with environment-specific settings
-5. **Data Organization**: Structured data directories with clear purposes
-6. **Documentation**: Comprehensive documentation structure
-7. **Modern Python**: Follows `src/` layout best practices
+2. **Data Organization**: Structured data directories with clear purposes
+3. **Modern Python**: Follows `src/` layout best practices
 
 #### Naming Conventions
 - **Files**: `snake_case.py`
@@ -174,23 +66,11 @@ ultimate-analysis/
 - **Constants**: `UPPER_SNAKE_CASE`
 - **Private methods**: `_leading_underscore`
 
-### Error Handling and Logging
-- **Structured logging**: Use Python's `logging` module with appropriate levels
-- **Exception handling**: Catch specific exceptions, not broad `except:` blocks
-- **Error context**: Include relevant context in error messages
-- **Graceful degradation**: Application should handle missing models/files gracefully
-
 ### Performance Considerations
 - **Caching**: Cache expensive operations (model loading, computations)
 - **Batch processing**: Use parallel processing for CPU-intensive tasks
 - **Memory management**: Clean up resources and clear caches when switching contexts
-- **Frame rate optimization**: Adjust processing frequency based on computational load
 
-### Testing Standards
-- **Test files**: Prefix with `test_` for easy identification
-- **Test coverage**: Focus on critical paths and edge cases
-- **Integration tests**: Test complete workflows, not just individual functions
-- **Performance tests**: Monitor and validate optimization improvements
 
 ## Development Workflow
 
@@ -275,4 +155,5 @@ When uncertain about implementation details:
 ---
 
 *This document should be referenced before making any code changes to ensure consistency and quality across the Ultimate Analysis project.*
+
 The project structure and organization should follow best practices for modern Python computer vision and AI applications, including clear separation of concerns, modularity, and maintainability. Use the provided module structure as a baseline, and adapt as needed to ensure scalability and clarity as the project evolves.
