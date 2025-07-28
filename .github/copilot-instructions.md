@@ -42,6 +42,8 @@ data/models/pretrained/yolo11l.pt
 2. **Type hints**: Required for all function signatures
 3. **Import order**: Standard → Third-party → Local (see development guidelines)
 4. **Documentation**: Docstrings for public functions/classes
+5. **Explanations**: Check with user on all new pieces of code for clarity and understanding - assume user is not an expert in python or computer vision
+6. **Clarify**: If unsure about a feature, ask for clarification before implementing
 
 ## Performance Considerations
 
@@ -54,7 +56,6 @@ data/models/pretrained/yolo11l.pt
 ### YOLO Model Strategy
 - **Detection**: `yolo11l.pt` (large) for accuracy vs `yolo11n.pt` (nano) for speed
 - **Segmentation**: Field boundary detection with `yolo11l-seg.pt`
-- **Pose**: Player keypoints with `yolo11n-pose.pt`
 
 ### GUI-Processing Bridge
 PyQt5 GUI communicates with processing modules through simple data structures (dicts, lists). No complex ORM patterns.

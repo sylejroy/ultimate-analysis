@@ -1,0 +1,683 @@
+"""Main tab for Ultimate Analysis GUI.
+
+This module contains the main video analysis interface with video list,
+playback controls, and processing options.
+"""
+
+import os
+import cv2
+import time
+from typing import List, Dict, Any, Optional
+from pathlib import Path
+
+from PyQt5.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, 
+    QCheckBox, QPushButton, QSlider, QListWidgetItem, QGroupBox,
+    QFormLayout, QComboBox, QShortcut, QProgressBar, QSplitter,
+    QTableWidget, QTableWidgetItem, QHeaderView
+)
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont
+
+from .video_player import VideoPlayer
+from ..processing import (
+    run_inference, run_tracking, run_player_id, run_field_segmentation,
+    set_detection_model, set_field_model, set_tracker_type, 
+    set_player_id_method, reset_tracker
+)
+from ..config.settings import get_setting
+from ..constants import SHORTCUTS, DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS
+
+
+class VideoListWidget(QListWidget):
+    """Enhanced video list widget with duration information."""
+    
+    def __init__(self):
+        super().__init__()
+        
+        self.setStyleSheet("""
+            QListWidget::item {
+                padding: 8px;
+                border-bottom: 1px solid #444;
+            }
+            QListWidget::item:selected {
+                background-color: #2a2a2a;
+            }
+        """)
+
+
+class MainTab(QWidget):
+    """Main video analysis tab with video player and processing controls."""
+    
+    # Signals
+    video_changed = pyqtSignal(str)  # Emitted when video selection changes
+    
+    def __init__(self):
+        super().__init__()
+        
+        # Video player and state
+        self.video_player = VideoPlayer()
+        self.video_files: List[str] = []
+        self.current_video_index: int = 0
+        self.is_playing: bool = False
+        
+        # Processing state
+        self.current_detections: List[Dict] = []
+        self.current_tracks: List[Any] = []
+        
+        # Playback timer
+        self.playback_timer = QTimer()
+        self.playback_timer.timeout.connect(self._on_timer_tick)
+        
+        # Initialize UI
+        self._init_ui()
+        self._init_shortcuts()
+        self._load_videos()
+        
+        # Load random video by default
+        if self.video_files:
+            import random
+            random_index = random.randint(0, len(self.video_files) - 1)
+            self.video_list.setCurrentRow(random_index)
+            self._load_selected_video()
+    
+    def _init_ui(self):
+        """Initialize the user interface."""
+        main_layout = QHBoxLayout()
+        
+        # Create splitter for resizable panels
+        splitter = QSplitter(Qt.Horizontal)
+        
+        # Left panel: Video list and controls
+        left_panel = self._create_left_panel()
+        splitter.addWidget(left_panel)
+        
+        # Right panel: Video display
+        right_panel = self._create_right_panel()
+        splitter.addWidget(right_panel)
+        
+        # Set splitter proportions (30% left, 70% right)
+        splitter.setSizes([300, 700])
+        
+        main_layout.addWidget(splitter)
+        self.setLayout(main_layout)
+    
+    def _create_left_panel(self) -> QWidget:
+        """Create the left panel with video list and controls."""
+        panel = QWidget()
+        layout = QVBoxLayout()
+        
+        # Video list section
+        video_group = QGroupBox("Available Videos")
+        video_layout = QVBoxLayout()
+        
+        # Video list with refresh button
+        list_header = QHBoxLayout()
+        list_header.addWidget(QLabel("Videos"))
+        
+        refresh_button = QPushButton("Refresh")
+        refresh_button.clicked.connect(self._load_videos)
+        refresh_button.setToolTip("Refresh video list")
+        list_header.addWidget(refresh_button)
+        
+        video_layout.addLayout(list_header)
+        
+        # Video list widget
+        self.video_list = VideoListWidget()
+        self.video_list.currentRowChanged.connect(self._on_video_selection_changed)
+        video_layout.addWidget(self.video_list)
+        
+        video_group.setLayout(video_layout)
+        layout.addWidget(video_group)
+        
+        # Processing controls section
+        processing_group = QGroupBox("Processing Options")
+        processing_layout = QVBoxLayout()
+        
+        # Checkboxes for processing features
+        self.inference_checkbox = QCheckBox("Object Detection (Inference)")
+        self.inference_checkbox.setToolTip(f"Enable/disable object detection [{SHORTCUTS['TOGGLE_INFERENCE']}]")
+        self.inference_checkbox.stateChanged.connect(self._on_inference_toggled)
+        
+        self.tracking_checkbox = QCheckBox("Object Tracking")  
+        self.tracking_checkbox.setToolTip(f"Enable/disable object tracking [{SHORTCUTS['TOGGLE_TRACKING']}]")
+        self.tracking_checkbox.stateChanged.connect(self._on_tracking_toggled)
+        
+        self.player_id_checkbox = QCheckBox("Player Identification")
+        self.player_id_checkbox.setToolTip(f"Enable/disable player ID based on jersey numbers [{SHORTCUTS['TOGGLE_PLAYER_ID']}]")
+        self.player_id_checkbox.stateChanged.connect(self._on_player_id_toggled)
+        
+        self.field_segmentation_checkbox = QCheckBox("Field Segmentation")
+        self.field_segmentation_checkbox.setToolTip(f"Enable/disable field boundary detection [{SHORTCUTS['TOGGLE_FIELD_SEGMENTATION']}]")
+        self.field_segmentation_checkbox.stateChanged.connect(self._on_field_segmentation_toggled)
+        
+        processing_layout.addWidget(self.inference_checkbox)
+        processing_layout.addWidget(self.tracking_checkbox)
+        processing_layout.addWidget(self.player_id_checkbox)
+        processing_layout.addWidget(self.field_segmentation_checkbox)
+        
+        processing_group.setLayout(processing_layout)
+        layout.addWidget(processing_group)
+        
+        # Model selection section
+        models_group = QGroupBox("Model Settings")
+        models_layout = QFormLayout()
+        
+        # Detection model dropdown
+        self.detection_model_combo = QComboBox()
+        self._populate_model_combo(self.detection_model_combo, "detection")
+        self.detection_model_combo.currentTextChanged.connect(self._on_detection_model_changed)
+        models_layout.addRow("Detection Model:", self.detection_model_combo)
+        
+        # Tracking method dropdown
+        self.tracking_method_combo = QComboBox()
+        self.tracking_method_combo.addItems(["DeepSORT", "Histogram"])
+        self.tracking_method_combo.currentTextChanged.connect(self._on_tracking_method_changed)
+        models_layout.addRow("Tracking Method:", self.tracking_method_combo)
+        
+        # Player ID method dropdown
+        self.player_id_method_combo = QComboBox()
+        self.player_id_method_combo.addItems(["YOLO", "EasyOCR"])
+        self.player_id_method_combo.currentTextChanged.connect(self._on_player_id_method_changed)
+        models_layout.addRow("Player ID Method:", self.player_id_method_combo)
+        
+        # Field segmentation model dropdown
+        self.field_model_combo = QComboBox()
+        self._populate_model_combo(self.field_model_combo, "segmentation")
+        self.field_model_combo.currentTextChanged.connect(self._on_field_model_changed)
+        models_layout.addRow("Field Model:", self.field_model_combo)
+        
+        models_group.setLayout(models_layout)
+        layout.addWidget(models_group)
+        
+        # Add stretch to push everything to top
+        layout.addStretch()
+        
+        panel.setLayout(layout)
+        return panel
+    
+    def _create_right_panel(self) -> QWidget:
+        """Create the right panel with video display and controls."""
+        panel = QWidget()
+        layout = QVBoxLayout()
+        
+        # Video display area
+        self.video_label = QLabel("No video selected")
+        self.video_label.setAlignment(Qt.AlignCenter)
+        self.video_label.setMinimumHeight(400)
+        self.video_label.setStyleSheet("""
+            QLabel {
+                border: 2px solid #555;
+                background-color: #1a1a1a;
+                color: #999;
+                font-size: 14px;
+            }
+        """)
+        layout.addWidget(self.video_label, 1)  # Takes most space
+        
+        # Progress bar
+        self.progress_bar = QSlider(Qt.Horizontal)
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.sliderMoved.connect(self._on_seek)
+        layout.addWidget(self.progress_bar)
+        
+        # Control buttons
+        controls_layout = QHBoxLayout()
+        
+        # Previous video button
+        self.prev_button = QPushButton("⏮")
+        self.prev_button.setToolTip(f"Previous video [{SHORTCUTS['PREV_VIDEO']}]")
+        self.prev_button.clicked.connect(self._prev_video)
+        self.prev_button.setFixedSize(40, 40)
+        controls_layout.addWidget(self.prev_button)
+        
+        # Play/Pause button
+        self.play_pause_button = QPushButton("▶")
+        self.play_pause_button.setToolTip(f"Play/Pause [{SHORTCUTS['PLAY_PAUSE']}]")
+        self.play_pause_button.clicked.connect(self._toggle_play_pause)
+        self.play_pause_button.setFixedSize(60, 40)
+        controls_layout.addWidget(self.play_pause_button)
+        
+        # Next video button
+        self.next_button = QPushButton("⏭")
+        self.next_button.setToolTip(f"Next video [{SHORTCUTS['NEXT_VIDEO']}]")
+        self.next_button.clicked.connect(self._next_video)
+        self.next_button.setFixedSize(40, 40)
+        controls_layout.addWidget(self.next_button)
+        
+        # Add some space
+        controls_layout.addStretch()
+        
+        # Reset tracker button
+        reset_button = QPushButton("Reset Tracker")
+        reset_button.setToolTip(f"Reset object tracker [{SHORTCUTS['RESET_TRACKER']}]")
+        reset_button.clicked.connect(self._reset_tracker)
+        reset_button.setFixedHeight(40)
+        controls_layout.addWidget(reset_button)
+        
+        layout.addLayout(controls_layout)
+        
+        panel.setLayout(layout)
+        return panel
+    
+    def _init_shortcuts(self):
+        """Initialize keyboard shortcuts."""
+        # Play/Pause
+        QShortcut(QKeySequence(SHORTCUTS['PLAY_PAUSE']), self, self._toggle_play_pause)
+        
+        # Previous/Next video
+        QShortcut(QKeySequence(SHORTCUTS['PREV_VIDEO']), self, self._prev_video)
+        QShortcut(QKeySequence(SHORTCUTS['NEXT_VIDEO']), self, self._next_video)
+        
+        # Reset tracker
+        QShortcut(QKeySequence(SHORTCUTS['RESET_TRACKER']), self, self._reset_tracker)
+        
+        # Toggle processing features
+        QShortcut(QKeySequence(SHORTCUTS['TOGGLE_INFERENCE']), self, 
+                 lambda: self.inference_checkbox.toggle())
+        QShortcut(QKeySequence(SHORTCUTS['TOGGLE_TRACKING']), self, 
+                 lambda: self.tracking_checkbox.toggle())
+        QShortcut(QKeySequence(SHORTCUTS['TOGGLE_PLAYER_ID']), self, 
+                 lambda: self.player_id_checkbox.toggle())
+        QShortcut(QKeySequence(SHORTCUTS['TOGGLE_FIELD_SEGMENTATION']), self, 
+                 lambda: self.field_segmentation_checkbox.toggle())
+    
+    def _load_videos(self):
+        """Load and display available video files."""
+        print("[MAIN_TAB] Loading video files...")
+        
+        self.video_files.clear()
+        self.video_list.clear()
+        
+        # Search paths for videos
+        search_paths = [
+            Path(DEFAULT_PATHS['DEV_DATA']),
+            Path(DEFAULT_PATHS['RAW_VIDEOS'])
+        ]
+        
+        for search_path in search_paths:
+            if not search_path.exists():
+                print(f"[MAIN_TAB] Search path does not exist: {search_path}")
+                continue
+            
+            print(f"[MAIN_TAB] Searching for videos in: {search_path}")
+            
+            # Find video files
+            for file_path in search_path.glob("*"):
+                if file_path.is_file() and file_path.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS:
+                    self.video_files.append(str(file_path))
+        
+        # Sort videos by name
+        self.video_files.sort()
+        
+        # Populate list with video info
+        for video_path in self.video_files:
+            duration = self._get_video_duration(video_path)
+            filename = Path(video_path).name
+            
+            # Create list item with filename and duration
+            item_text = f"{filename} ({duration})"
+            item = QListWidgetItem(item_text)
+            item.setToolTip(video_path)
+            self.video_list.addItem(item)
+        
+        print(f"[MAIN_TAB] Found {len(self.video_files)} video files")
+    
+    def _get_video_duration(self, video_path: str) -> str:
+        """Get video duration as formatted string.
+        
+        Args:
+            video_path: Path to video file
+            
+        Returns:
+            Duration string in format "MM:SS" or "Unknown"
+        """
+        try:
+            cap = cv2.VideoCapture(video_path)
+            if cap.isOpened():
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                cap.release()
+                
+                if fps > 0:
+                    duration_seconds = frame_count / fps
+                    minutes = int(duration_seconds // 60)
+                    seconds = int(duration_seconds % 60)
+                    return f"{minutes:02d}:{seconds:02d}"
+            
+        except Exception as e:
+            print(f"[MAIN_TAB] Error getting duration for {video_path}: {e}")
+        
+        return "Unknown"
+    
+    def _populate_model_combo(self, combo: QComboBox, model_type: str):
+        """Populate a combo box with available models.
+        
+        Args:
+            combo: QComboBox to populate
+            model_type: Type of models to find ("detection", "segmentation", etc.)
+        """
+        combo.clear()
+        
+        # Look for models in the models directory
+        models_path = Path(get_setting("models.base_path", DEFAULT_PATHS['MODELS']))
+        
+        if not models_path.exists():
+            print(f"[MAIN_TAB] Models directory not found: {models_path}")
+            return
+        
+        # Search for model files
+        model_files = []
+        for model_dir in models_path.rglob("*"):
+            if model_dir.is_file() and model_dir.suffix == ".pt":
+                # Check if this model type is in the path
+                if model_type in str(model_dir).lower():
+                    relative_path = model_dir.relative_to(models_path)
+                    model_files.append(str(relative_path))
+        
+        # Add pretrained models
+        pretrained_path = models_path / "pretrained"
+        if pretrained_path.exists():
+            for model_file in pretrained_path.glob("*.pt"):
+                if model_type in model_file.name.lower() or model_type == "detection":
+                    relative_path = model_file.relative_to(models_path)
+                    model_files.append(str(relative_path))
+        
+        # Sort and add to combo
+        model_files.sort()
+        combo.addItems(model_files)
+        
+        print(f"[MAIN_TAB] Found {len(model_files)} {model_type} models")
+    
+    def _on_video_selection_changed(self, row: int):
+        """Handle video selection change."""
+        if 0 <= row < len(self.video_files):
+            self.current_video_index = row
+            self._load_selected_video()
+    
+    def _load_selected_video(self):
+        """Load the currently selected video."""
+        if not self.video_files or self.current_video_index >= len(self.video_files):
+            return
+        
+        video_path = self.video_files[self.current_video_index]
+        print(f"[MAIN_TAB] Loading video: {video_path}")
+        
+        # Stop playback
+        self._stop_playback()
+        
+        # Load video
+        if self.video_player.load_video(video_path):
+            # Update UI
+            filename = Path(video_path).name
+            self.video_label.setText(f"Loaded: {filename}")
+            
+            # Set progress bar range
+            video_info = self.video_player.get_video_info()
+            self.progress_bar.setMaximum(max(1, video_info['total_frames'] - 1))
+            self.progress_bar.setValue(0)
+            
+            # Display first frame
+            first_frame = self.video_player.get_current_frame()
+            if first_frame is not None:
+                self._display_frame(first_frame)
+            
+            # Emit signal
+            self.video_changed.emit(video_path)
+            
+            print(f"[MAIN_TAB] Video loaded successfully: {filename}")
+        else:
+            self.video_label.setText("Failed to load video")
+    
+    def _display_frame(self, frame):
+        """Display a frame in the video label.
+        
+        Args:
+            frame: OpenCV frame (numpy array) to display
+        """
+        if frame is None:
+            return
+        
+        # Apply processing if enabled
+        processed_frame = self._process_frame(frame.copy())
+        
+        # Convert to Qt format and display
+        height, width, channel = processed_frame.shape
+        bytes_per_line = 3 * width
+        
+        q_image = QImage(processed_frame.data, width, height, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
+        
+        # Scale to fit label
+        pixmap = QPixmap.fromImage(q_image)
+        scaled_pixmap = pixmap.scaled(
+            self.video_label.size(), 
+            Qt.KeepAspectRatio, 
+            Qt.SmoothTransformation
+        )
+        
+        self.video_label.setPixmap(scaled_pixmap)
+    
+    def _process_frame(self, frame):
+        """Apply enabled processing to a frame.
+        
+        Args:
+            frame: Input frame to process
+            
+        Returns:
+            Processed frame with visualizations
+        """
+        # Reset detection/tracking results
+        self.current_detections = []
+        self.current_tracks = []
+        
+        # Run inference if enabled
+        if self.inference_checkbox.isChecked():
+            print("[MAIN_TAB] Running inference...")
+            self.current_detections = run_inference(frame)
+        
+        # Run tracking if enabled
+        if self.tracking_checkbox.isChecked() and self.current_detections:
+            print("[MAIN_TAB] Running tracking...")
+            self.current_tracks = run_tracking(frame, self.current_detections)
+        
+        # Run field segmentation if enabled
+        if self.field_segmentation_checkbox.isChecked():
+            print("[MAIN_TAB] Running field segmentation...")
+            field_results = run_field_segmentation(frame)
+            # TODO: Apply field segmentation visualization
+        
+        # Run player ID if enabled
+        if self.player_id_checkbox.isChecked() and self.current_tracks:
+            print("[MAIN_TAB] Running player identification...")
+            # TODO: Run player ID on tracked objects
+        
+        # Apply visualizations
+        frame = self._apply_visualizations(frame)
+        
+        return frame
+    
+    def _apply_visualizations(self, frame):
+        """Apply visualization overlays to frame.
+        
+        Args:
+            frame: Frame to add visualizations to
+            
+        Returns:
+            Frame with visualizations applied
+        """
+        # Draw detections
+        for detection in self.current_detections:
+            bbox = detection['bbox']
+            confidence = detection['confidence']  
+            class_name = detection['class_name']
+            
+            x1, y1, x2, y2 = map(int, bbox)
+            
+            # Draw bounding box
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            
+            # Draw label
+            label = f"{class_name}: {confidence:.2f}"
+            cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        
+        # Draw tracks
+        for track in self.current_tracks:
+            bbox = track.to_ltrb()
+            track_id = track.track_id
+            
+            x1, y1, x2, y2 = map(int, bbox)
+            
+            # Draw track box in different color
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
+            
+            # Draw track ID
+            cv2.putText(frame, f"ID: {track_id}", (x1, y1 - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+        
+        return frame
+    
+    def _toggle_play_pause(self):
+        """Toggle video playback."""
+        if not self.video_player.is_loaded():
+            return
+        
+        if self.is_playing:
+            self._stop_playback()
+        else:
+            self._start_playback()
+    
+    def _start_playback(self):
+        """Start video playback."""
+        if not self.video_player.is_loaded():
+            return
+        
+        # Calculate timer interval based on FPS
+        video_info = self.video_player.get_video_info()
+        fps = video_info['fps']
+        interval_ms = max(1, int(1000 / fps))
+        
+        self.playback_timer.start(interval_ms)
+        self.is_playing = True
+        self.play_pause_button.setText("⏸")
+        
+        print(f"[MAIN_TAB] Started playback at {fps} FPS (interval: {interval_ms}ms)")
+    
+    def _stop_playback(self):
+        """Stop video playback."""
+        self.playback_timer.stop()
+        self.is_playing = False
+        self.play_pause_button.setText("▶")
+        
+        print("[MAIN_TAB] Stopped playback")
+    
+    def _on_timer_tick(self):
+        """Handle playback timer tick."""
+        if not self.video_player.is_loaded():
+            self._stop_playback()
+            return
+        
+        # Get next frame
+        frame = self.video_player.get_next_frame()
+        
+        if frame is not None:
+            # Display frame
+            self._display_frame(frame)
+            
+            # Update progress bar
+            video_info = self.video_player.get_video_info()
+            self.progress_bar.setValue(video_info['current_frame'])
+        else:
+            # End of video reached
+            print("[MAIN_TAB] End of video reached")
+            self._stop_playback()
+    
+    def _on_seek(self, frame_idx: int):
+        """Handle seek bar movement."""
+        if self.video_player.is_loaded():
+            self.video_player.seek_to_frame(frame_idx)
+            
+            # Display current frame
+            frame = self.video_player.get_current_frame()
+            if frame is not None:
+                self._display_frame(frame)
+    
+    def _prev_video(self):
+        """Switch to previous video."""
+        if not self.video_files:
+            return
+        
+        # Loop to last video if on first
+        new_index = (self.current_video_index - 1) % len(self.video_files)
+        self.video_list.setCurrentRow(new_index)
+    
+    def _next_video(self):
+        """Switch to next video."""
+        if not self.video_files:
+            return
+        
+        # Loop to first video if on last
+        new_index = (self.current_video_index + 1) % len(self.video_files)
+        self.video_list.setCurrentRow(new_index)
+    
+    def _reset_tracker(self):
+        """Reset the object tracker."""
+        reset_tracker()
+        print("[MAIN_TAB] Tracker reset")
+    
+    # Processing control event handlers
+    def _on_inference_toggled(self, checked: bool):
+        """Handle inference checkbox toggle."""
+        print(f"[MAIN_TAB] Inference {'enabled' if checked else 'disabled'}")
+    
+    def _on_tracking_toggled(self, checked: bool):
+        """Handle tracking checkbox toggle."""
+        print(f"[MAIN_TAB] Tracking {'enabled' if checked else 'disabled'}")
+        if checked:
+            # Enable inference if tracking is enabled
+            self.inference_checkbox.setChecked(True)
+    
+    def _on_player_id_toggled(self, checked: bool):
+        """Handle player ID checkbox toggle."""
+        print(f"[MAIN_TAB] Player ID {'enabled' if checked else 'disabled'}")
+        if checked:
+            # Enable tracking and inference if player ID is enabled
+            self.tracking_checkbox.setChecked(True)
+            self.inference_checkbox.setChecked(True)
+    
+    def _on_field_segmentation_toggled(self, checked: bool):
+        """Handle field segmentation checkbox toggle."""
+        print(f"[MAIN_TAB] Field segmentation {'enabled' if checked else 'disabled'}")
+    
+    # Model selection event handlers
+    def _on_detection_model_changed(self, model_path: str):
+        """Handle detection model change."""
+        if model_path:
+            full_path = Path(get_setting("models.base_path", DEFAULT_PATHS['MODELS'])) / model_path
+            set_detection_model(str(full_path))
+            print(f"[MAIN_TAB] Detection model changed to: {model_path}")
+    
+    def _on_tracking_method_changed(self, method: str):
+        """Handle tracking method change."""
+        if method:
+            set_tracker_type(method.lower())
+            print(f"[MAIN_TAB] Tracking method changed to: {method}")
+    
+    def _on_player_id_method_changed(self, method: str):
+        """Handle player ID method change."""
+        if method:
+            set_player_id_method(method.lower())
+            print(f"[MAIN_TAB] Player ID method changed to: {method}")
+    
+    def _on_field_model_changed(self, model_path: str):
+        """Handle field model change."""
+        if model_path:
+            full_path = Path(get_setting("models.base_path", DEFAULT_PATHS['MODELS'])) / model_path
+            set_field_model(str(full_path))
+            print(f"[MAIN_TAB] Field model changed to: {model_path}")
+    
+    def closeEvent(self, event):
+        """Handle widget close event."""
+        self._stop_playback()
+        self.video_player.close_video()
+        super().closeEvent(event)

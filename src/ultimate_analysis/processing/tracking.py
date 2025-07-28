@@ -1,132 +1,215 @@
-"""Multi-object tracking for Ultimate Analysis."""
+"""Object tracking module - DeepSORT and histogram-based tracking.
 
-import logging
-from typing import List, Tuple, Any
+This module handles tracking of detected objects across video frames.
+Maintains consistent identities for players and discs throughout the game.
+"""
+
 import numpy as np
-from ultimate_analysis.config import get_setting
+from typing import List, Dict, Any, Optional, Tuple
+from collections import defaultdict
 
-logger = logging.getLogger("ultimate_analysis.processing.tracking")
+from ..config.settings import get_setting
+from ..constants import MAX_TRACKS_ACTIVE, TRACK_HISTORY_MAX_LENGTH, FALLBACK_DEFAULTS
 
-# Global tracker state
-_tracker = None
+
+# Global tracking state
 _tracker_type = "deepsort"
+_tracker_instance = None
+_track_histories = defaultdict(list)
+_next_track_id = 1
 
 
-class SimpleTrack:
-    """Simple track object for stub implementation."""
+class Track:
+    """Represents a tracked object with consistent identity."""
     
-    def __init__(self, track_id: int, bbox: List[int], class_id: int):
+    def __init__(self, track_id: int, bbox: List[float], class_id: int, confidence: float):
         self.track_id = track_id
         self.bbox = bbox  # [x1, y1, x2, y2]
-        self.det_class = class_id
-        self.conf = 0.8
+        self.class_id = class_id
+        self.confidence = confidence
+        self.det_class = class_id  # For compatibility with existing code
         
-    def to_ltrb(self) -> List[int]:
+    def to_ltrb(self) -> List[float]:
         """Return bounding box in [x1, y1, x2, y2] format."""
         return self.bbox
         
-    def to_tlwh(self) -> List[int]:
-        """Return bounding box in [x, y, w, h] format."""
+    def to_tlwh(self) -> List[float]:
+        """Return bounding box in [x, y, width, height] format."""
         x1, y1, x2, y2 = self.bbox
         return [x1, y1, x2 - x1, y2 - y1]
-        
-    def is_confirmed(self) -> bool:
-        """Return if track is confirmed."""
-        return True
 
 
-def initialize_tracker() -> None:
-    """Initialize the tracking system."""
-    global _tracker
-    
-    tracker_type = get_setting("models.tracking.default_tracker", "deepsort")
-    
-    logger.info(f"Initializing {tracker_type} tracker")
-    
-    # TODO: Implement actual tracker initialization
-    # if tracker_type.lower() == "deepsort":
-    #     from deep_sort_realtime import DeepSort
-    #     _tracker = DeepSort(max_age=10, n_init=5)
-    # elif tracker_type.lower() == "histogram":
-    #     _tracker = HistogramTracker()
-    
-    # Stub implementation
-    _tracker = "stub_tracker"
-    logger.info("Tracker initialized (stub)")
-
-
-def run_tracking(frame: np.ndarray, detections: List[Tuple[List[int], float, int]]) -> List[SimpleTrack]:
-    """
-    Update tracks with new detections.
+def run_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) -> List[Track]:
+    """Run object tracking on detected objects.
     
     Args:
-        frame: Current video frame
-        detections: List of (bbox, confidence, class_id) from inference
+        frame: Input video frame as numpy array (H, W, C) in BGR format
+        detections: List of detection dictionaries from inference
         
     Returns:
-        List of active tracks
+        List of Track objects with consistent IDs across frames
+        
+    Example:
+        tracks = run_tracking(frame, detections)
+        for track in tracks:
+            track_id = track.track_id
+            x1, y1, x2, y2 = track.to_ltrb()
     """
-    if _tracker is None:
-        initialize_tracker()
+    global _next_track_id
     
-    # TODO: Implement actual tracking
-    # Convert detections to tracker format
-    # tracks = _tracker.update_tracks(detections, frame=frame)
-    # return tracks
+    print(f"[TRACKING] Processing {len(detections)} detections with {_tracker_type} tracker")
     
-    # Stub implementation - convert detections to tracks
+    if not detections:
+        return []
+    
+    # TODO: Implement actual tracking algorithms
+    # For now, create simple tracks from detections
     tracks = []
-    for i, (bbox, conf, class_id) in enumerate(detections):
-        # Convert [x, y, w, h] to [x1, y1, x2, y2]
-        x, y, w, h = bbox
-        track_bbox = [x, y, x + w, y + h]
-        track = SimpleTrack(track_id=i, bbox=track_bbox, class_id=class_id)
-        tracks.append(track)
     
-    logger.debug(f"Tracking returned {len(tracks)} tracks (stub)")
+    for i, detection in enumerate(detections):
+        # Simple placeholder: assign consecutive track IDs
+        track = Track(
+            track_id=_next_track_id + i,
+            bbox=detection['bbox'],
+            class_id=detection['class_id'],
+            confidence=detection['confidence']
+        )
+        tracks.append(track)
+        
+        # Update track history for visualization
+        _update_track_history(track.track_id, track.bbox)
+    
+    _next_track_id += len(detections)
+    
+    # Limit number of active tracks
+    max_tracks = get_setting("models.tracking.max_tracks", MAX_TRACKS_ACTIVE)
+    if len(tracks) > max_tracks:
+        tracks = tracks[:max_tracks]
+    
+    print(f"[TRACKING] Returning {len(tracks)} tracks")
     return tracks
 
 
-def reset_tracker() -> None:
-    """Reset the tracker state."""
-    global _tracker
-    
-    logger.info("Resetting tracker")
-    
-    # TODO: Implement actual tracker reset
-    # if hasattr(_tracker, 'reset'):
-    #     _tracker.reset()
-    # else:
-    #     initialize_tracker()
-    
-    # Stub implementation
-    _tracker = None
-    initialize_tracker()
-
-
-def set_tracker_type(tracker_type: str) -> None:
-    """
-    Set the tracker type and reinitialize.
+def set_tracker_type(tracker_type: str) -> bool:
+    """Set the type of tracker to use.
     
     Args:
-        tracker_type: Type of tracker ("deepsort", "histogram")
+        tracker_type: Type of tracker ("deepsort" or "histogram")
+        
+    Returns:
+        True if tracker type set successfully, False otherwise
+        
+    Example:
+        set_tracker_type("deepsort")
     """
-    global _tracker_type
-    _tracker_type = tracker_type.lower()
+    global _tracker_type, _tracker_instance
     
-    logger.info(f"Setting tracker type to: {_tracker_type}")
+    tracker_type = tracker_type.lower()
+    
+    if tracker_type not in ["deepsort", "histogram"]:
+        print(f"[TRACKING] Unsupported tracker type: {tracker_type}")
+        return False
+    
+    print(f"[TRACKING] Setting tracker type to: {tracker_type}")
+    _tracker_type = tracker_type
+    
+    # Reset tracker instance to force reinitialization
+    _tracker_instance = None
     reset_tracker()
+    
+    return True
+
+
+def reset_tracker() -> None:
+    """Reset the tracker state and clear all tracks.
+    
+    This should be called when switching videos or when tracking quality degrades.
+    """
+    global _tracker_instance, _track_histories, _next_track_id
+    
+    print("[TRACKING] Resetting tracker state")
+    
+    _tracker_instance = None
+    _track_histories.clear()
+    _next_track_id = 1
+    
+    print("[TRACKING] Tracker reset complete")
 
 
 def get_tracker_type() -> str:
-    """Get current tracker type."""
+    """Get the current tracker type.
+    
+    Returns:
+        Current tracker type string
+    """
     return _tracker_type
 
 
-# Initialize default tracker on import
-default_tracker = get_setting("models.tracking.default_tracker", "deepsort")
-if default_tracker:
+def get_track_histories() -> Dict[int, List[Tuple[float, float]]]:
+    """Get track history for all tracked objects.
+    
+    Returns:
+        Dictionary mapping track_id to list of (center_x, center_y) positions
+    """
+    return dict(_track_histories)
+
+
+def _update_track_history(track_id: int, bbox: List[float]) -> None:
+    """Update the position history for a track.
+    
+    Args:
+        track_id: Unique track identifier
+        bbox: Bounding box [x1, y1, x2, y2]
+    """
+    # Calculate center point
+    x1, y1, x2, y2 = bbox
+    center_x = (x1 + x2) / 2
+    center_y = (y1 + y2) / 2
+    
+    # Add to history
+    _track_histories[track_id].append((center_x, center_y))
+    
+    # Limit history length
+    max_length = get_setting("models.tracking.track_history_length", TRACK_HISTORY_MAX_LENGTH)
+    if len(_track_histories[track_id]) > max_length:
+        _track_histories[track_id] = _track_histories[track_id][-max_length:]
+
+
+def _initialize_tracker() -> None:
+    """Initialize the tracker instance based on current type."""
+    global _tracker_instance
+    
+    if _tracker_instance is not None:
+        return
+    
+    print(f"[TRACKING] Initializing {_tracker_type} tracker")
+    
     try:
-        set_tracker_type(default_tracker)
+        if _tracker_type == "deepsort":
+            # TODO: Initialize DeepSORT tracker
+            # from deep_sort_realtime import DeepSort
+            # _tracker_instance = DeepSort()
+            _tracker_instance = "deepsort_placeholder"
+            
+        elif _tracker_type == "histogram":
+            # TODO: Initialize histogram-based tracker
+            _tracker_instance = "histogram_placeholder"
+            
+        print(f"[TRACKING] {_tracker_type} tracker initialized successfully")
+        
     except Exception as e:
-        logger.warning(f"Could not initialize default tracker: {e}")
+        print(f"[TRACKING] Failed to initialize {_tracker_type} tracker: {e}")
+        _tracker_instance = None
+
+
+# Initialize default tracker when module is imported
+def _load_default_tracker():
+    """Load the default tracker type."""
+    default_tracker = get_setting(
+        "models.tracking.default_tracker",
+        FALLBACK_DEFAULTS['tracker_type']
+    )
+    set_tracker_type(default_tracker)
+
+
+_load_default_tracker()
