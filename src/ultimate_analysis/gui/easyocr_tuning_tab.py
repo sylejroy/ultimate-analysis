@@ -1757,11 +1757,48 @@ class EasyOCRTuningTab(QWidget):
     
     def _disconnect_param_signals(self):
         """Temporarily disconnect parameter change signals."""
-        # Disconnect preprocessing signals
+        # Disconnect preprocessing signals - spinboxes
         self.crop_fraction_spin.valueChanged.disconnect()
         self.contrast_spin.valueChanged.disconnect()
         self.brightness_spin.valueChanged.disconnect()
         self.blur_spin.valueChanged.disconnect()
+        self.resize_spin.valueChanged.disconnect()
+        self.resize_width_spin.valueChanged.disconnect()
+        self.resize_height_spin.valueChanged.disconnect()
+        self.rotation_spin.valueChanged.disconnect()
+        
+        # Disconnect preprocessing signals - checkboxes
+        self.denoise_check.stateChanged.disconnect()
+        
+        # Disconnect optional preprocessing controls
+        if hasattr(self, 'enhance_check'):
+            self.enhance_check.stateChanged.disconnect()
+        if hasattr(self, 'clahe_clip_spin'):
+            self.clahe_clip_spin.valueChanged.disconnect()
+        if hasattr(self, 'clahe_grid_spin'):
+            self.clahe_grid_spin.valueChanged.disconnect()
+        if hasattr(self, 'sharpen_check'):
+            self.sharpen_check.stateChanged.disconnect()
+        if hasattr(self, 'sharpen_strength_spin'):
+            self.sharpen_strength_spin.valueChanged.disconnect()
+        if hasattr(self, 'upscale_check'):
+            self.upscale_check.stateChanged.disconnect()
+        if hasattr(self, 'upscale_factor_spin'):
+            self.upscale_factor_spin.valueChanged.disconnect()
+        if hasattr(self, 'upscale_to_size_check'):
+            self.upscale_to_size_check.stateChanged.disconnect()
+        if hasattr(self, 'upscale_target_spin'):
+            self.upscale_target_spin.valueChanged.disconnect()
+        if hasattr(self, 'colour_mode_check'):
+            self.colour_mode_check.stateChanged.disconnect()
+        if hasattr(self, 'bw_mode_check'):
+            self.bw_mode_check.stateChanged.disconnect()
+        if hasattr(self, 'morph_open_check'):
+            self.morph_open_check.stateChanged.disconnect()
+        if hasattr(self, 'morph_close_check'):
+            self.morph_close_check.stateChanged.disconnect()
+        if hasattr(self, 'bilateral_check'):
+            self.bilateral_check.stateChanged.disconnect()
         
         # Disconnect OCR signals if available
         if EASYOCR_AVAILABLE:
@@ -1773,14 +1810,89 @@ class EasyOCRTuningTab(QWidget):
             self.canvas_size_spin.valueChanged.disconnect()
             self.mag_ratio_spin.valueChanged.disconnect()
             self.gpu_check.stateChanged.disconnect()
+            
+            # Disconnect optional OCR controls
+            if hasattr(self, 'x_ths_spin'):
+                self.x_ths_spin.valueChanged.disconnect()
+            if hasattr(self, 'y_ths_spin'):
+                self.y_ths_spin.valueChanged.disconnect()
+            if hasattr(self, 'ycenter_ths_spin'):
+                self.ycenter_ths_spin.valueChanged.disconnect()
+            if hasattr(self, 'slope_ths_spin'):
+                self.slope_ths_spin.valueChanged.disconnect()
+            if hasattr(self, 'adjust_contrast_spin'):
+                self.adjust_contrast_spin.valueChanged.disconnect()
+            if hasattr(self, 'filter_ths_spin'):
+                self.filter_ths_spin.valueChanged.disconnect()
+            if hasattr(self, 'workers_spin'):
+                self.workers_spin.valueChanged.disconnect()
+            if hasattr(self, 'batch_size_spin'):
+                self.batch_size_spin.valueChanged.disconnect()
+            if hasattr(self, 'beam_width_spin'):
+                self.beam_width_spin.valueChanged.disconnect()
+            if hasattr(self, 'paragraph_check'):
+                self.paragraph_check.stateChanged.disconnect()
+            if hasattr(self, 'quantize_check'):
+                self.quantize_check.stateChanged.disconnect()
+            if hasattr(self, 'verbose_check'):
+                self.verbose_check.stateChanged.disconnect()
+            if hasattr(self, 'detail_spin'):
+                self.detail_spin.valueChanged.disconnect()
+            if hasattr(self, 'allowlist_edit'):
+                self.allowlist_edit.textChanged.disconnect()
+            if hasattr(self, 'blocklist_edit'):
+                self.blocklist_edit.textChanged.disconnect()
+            if hasattr(self, 'min_size_spin'):
+                self.min_size_spin.valueChanged.disconnect()
+            if hasattr(self, 'contrast_ths_spin'):
+                self.contrast_ths_spin.valueChanged.disconnect()
+            if hasattr(self, 'add_margin_spin'):
+                self.add_margin_spin.valueChanged.disconnect()
     
     def _connect_param_signals(self):
         """Reconnect parameter change signals."""
-        # Reconnect preprocessing signals
+        # Reconnect preprocessing signals - spinboxes
         self.crop_fraction_spin.valueChanged.connect(self._on_preprocess_param_changed)
         self.contrast_spin.valueChanged.connect(self._on_preprocess_param_changed)
         self.brightness_spin.valueChanged.connect(self._on_preprocess_param_changed)
         self.blur_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        self.resize_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        self.resize_width_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        self.resize_height_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        self.rotation_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        
+        # Reconnect preprocessing signals - checkboxes
+        self.denoise_check.stateChanged.connect(self._on_preprocess_param_changed)
+        
+        # Reconnect optional preprocessing controls
+        if hasattr(self, 'enhance_check'):
+            self.enhance_check.stateChanged.connect(self._on_preprocess_param_changed)
+        if hasattr(self, 'clahe_clip_spin'):
+            self.clahe_clip_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        if hasattr(self, 'clahe_grid_spin'):
+            self.clahe_grid_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        if hasattr(self, 'sharpen_check'):
+            self.sharpen_check.stateChanged.connect(self._on_preprocess_param_changed)
+        if hasattr(self, 'sharpen_strength_spin'):
+            self.sharpen_strength_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        if hasattr(self, 'upscale_check'):
+            self.upscale_check.stateChanged.connect(self._on_preprocess_param_changed)
+        if hasattr(self, 'upscale_factor_spin'):
+            self.upscale_factor_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        if hasattr(self, 'upscale_to_size_check'):
+            self.upscale_to_size_check.stateChanged.connect(self._on_preprocess_param_changed)
+        if hasattr(self, 'upscale_target_spin'):
+            self.upscale_target_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        if hasattr(self, 'colour_mode_check'):
+            self.colour_mode_check.stateChanged.connect(self._on_preprocess_param_changed)
+        if hasattr(self, 'bw_mode_check'):
+            self.bw_mode_check.stateChanged.connect(self._on_preprocess_param_changed)
+        if hasattr(self, 'morph_open_check'):
+            self.morph_open_check.stateChanged.connect(self._on_preprocess_param_changed)
+        if hasattr(self, 'morph_close_check'):
+            self.morph_close_check.stateChanged.connect(self._on_preprocess_param_changed)
+        if hasattr(self, 'bilateral_check'):
+            self.bilateral_check.stateChanged.connect(self._on_preprocess_param_changed)
         
         # Reconnect OCR signals if available
         if EASYOCR_AVAILABLE:
@@ -1792,6 +1904,44 @@ class EasyOCRTuningTab(QWidget):
             self.canvas_size_spin.valueChanged.connect(self._on_ocr_param_changed)
             self.mag_ratio_spin.valueChanged.connect(self._on_ocr_param_changed)
             self.gpu_check.stateChanged.connect(self._on_ocr_param_changed)
+            
+            # Reconnect optional OCR controls
+            if hasattr(self, 'x_ths_spin'):
+                self.x_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
+            if hasattr(self, 'y_ths_spin'):
+                self.y_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
+            if hasattr(self, 'ycenter_ths_spin'):
+                self.ycenter_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
+            if hasattr(self, 'slope_ths_spin'):
+                self.slope_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
+            if hasattr(self, 'adjust_contrast_spin'):
+                self.adjust_contrast_spin.valueChanged.connect(self._on_ocr_param_changed)
+            if hasattr(self, 'filter_ths_spin'):
+                self.filter_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
+            if hasattr(self, 'workers_spin'):
+                self.workers_spin.valueChanged.connect(self._on_ocr_param_changed)
+            if hasattr(self, 'batch_size_spin'):
+                self.batch_size_spin.valueChanged.connect(self._on_ocr_param_changed)
+            if hasattr(self, 'beam_width_spin'):
+                self.beam_width_spin.valueChanged.connect(self._on_ocr_param_changed)
+            if hasattr(self, 'paragraph_check'):
+                self.paragraph_check.stateChanged.connect(self._on_ocr_param_changed)
+            if hasattr(self, 'quantize_check'):
+                self.quantize_check.stateChanged.connect(self._on_ocr_param_changed)
+            if hasattr(self, 'verbose_check'):
+                self.verbose_check.stateChanged.connect(self._on_ocr_param_changed)
+            if hasattr(self, 'detail_spin'):
+                self.detail_spin.valueChanged.connect(self._on_ocr_param_changed)
+            if hasattr(self, 'allowlist_edit'):
+                self.allowlist_edit.textChanged.connect(self._on_ocr_param_changed)
+            if hasattr(self, 'blocklist_edit'):
+                self.blocklist_edit.textChanged.connect(self._on_ocr_param_changed)
+            if hasattr(self, 'min_size_spin'):
+                self.min_size_spin.valueChanged.connect(self._on_ocr_param_changed)
+            if hasattr(self, 'contrast_ths_spin'):
+                self.contrast_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
+            if hasattr(self, 'add_margin_spin'):
+                self.add_margin_spin.valueChanged.connect(self._on_ocr_param_changed)
     
     def _save_parameters_to_config(self):
         """Save current parameters to configuration file."""
