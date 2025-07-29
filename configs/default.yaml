@@ -35,15 +35,15 @@ models:
   
   tracking:
     default_tracker: "deepsort"
-    max_tracks: 50
-    track_history_length: 30
-    color_pool_size: 20
+    max_tracks: 300
+    track_history_length: 300
+    color_pool_size: 50
     
     # DeepSORT specific settings
-    max_age: 50              # Frames to keep lost tracks alive
-    n_init: 3                # Frames needed to confirm a track
-    nms_overlap: 0.7         # Non-maximum suppression overlap threshold
-    max_cosine_distance: 0.7 # Feature similarity threshold
+    max_age: 10              # Frames to keep lost tracks alive
+    n_init: 5                # Frames needed to confirm a track
+    nms_overlap: 1           # Non-maximum suppression overlap threshold
+    max_cosine_distance: 0.2 # Feature similarity threshold
     nn_budget: 100           # Feature budget per class
   
   player_id:
