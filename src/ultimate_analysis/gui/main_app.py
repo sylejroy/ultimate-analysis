@@ -12,6 +12,7 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QPalette, QColor, QIcon
 
 from .main_tab import MainTab
+from .easyocr_tuning_tab import EasyOCRTuningTab
 from ..config.settings import get_setting
 from ..constants import DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT
 
@@ -56,6 +57,10 @@ class UltimateAnalysisApp(QMainWindow):
         self.main_tab = MainTab()
         self.main_tab.video_changed.connect(self._on_video_changed)
         self.tab_widget.addTab(self.main_tab, "Main Analysis")
+        
+        # Create EasyOCR tuning tab
+        self.easyocr_tab = EasyOCRTuningTab()
+        self.tab_widget.addTab(self.easyocr_tab, "EasyOCR Tuning")
         
         # TODO: Add more tabs as needed
         # Example placeholder tabs:
