@@ -134,8 +134,8 @@ class EasyOCRTuningTab(QWidget):
         right_panel = self._create_right_panel()
         splitter.addWidget(right_panel)
         
-        # Set splitter proportions (40% left, 60% right)
-        splitter.setSizes([400, 600])
+        # Set splitter proportions (30% left, 70% right - more space for results)
+        splitter.setSizes([300, 700])
         
         main_layout.addWidget(splitter)
         self.setLayout(main_layout)
@@ -180,25 +180,39 @@ class EasyOCRTuningTab(QWidget):
         model_group.setLayout(model_layout)
         layout.addWidget(model_group)
         
-        # Preprocessing parameters
+        # Parameters in 2-column layout
+        params_group = QGroupBox("Parameters")
+        params_main_layout = QHBoxLayout()
+        
+        # Left column - Preprocessing
+        left_column = QWidget()
+        left_layout = QVBoxLayout()
+        
         preprocess_group = QGroupBox("Preprocessing Parameters")
         preprocess_layout = QFormLayout()
-        
-        # Create parameter controls
         self._create_preprocessing_controls(preprocess_layout)
-        
         preprocess_group.setLayout(preprocess_layout)
-        layout.addWidget(preprocess_group)
+        left_layout.addWidget(preprocess_group)
+        left_layout.addStretch()
+        left_column.setLayout(left_layout)
         
-        # EasyOCR parameters
+        # Right column - EasyOCR
+        right_column = QWidget()
+        right_layout = QVBoxLayout()
+        
         ocr_group = QGroupBox("EasyOCR Parameters")
         ocr_layout = QFormLayout()
-        
-        # Create OCR parameter controls
         self._create_ocr_controls(ocr_layout)
-        
         ocr_group.setLayout(ocr_layout)
-        layout.addWidget(ocr_group)
+        right_layout.addWidget(ocr_group)
+        right_layout.addStretch()
+        right_column.setLayout(right_layout)
+        
+        # Add columns to main layout
+        params_main_layout.addWidget(left_column)
+        params_main_layout.addWidget(right_column)
+        params_group.setLayout(params_main_layout)
+        layout.addWidget(params_group)
         
         # Control buttons
         button_layout = QHBoxLayout()
@@ -226,11 +240,13 @@ class EasyOCRTuningTab(QWidget):
         panel = QWidget()
         layout = QVBoxLayout()
         
-        # Video display area
+        # Video display area - fixed size
+        video_container = QWidget()
+        video_container.setFixedHeight(350)  # Fixed height for video
+        video_layout = QVBoxLayout()
+        
         self.video_label = QLabel("No video selected")
         self.video_label.setAlignment(Qt.AlignCenter)
-        self.video_label.setMinimumHeight(300)
-        self.video_label.setMaximumHeight(500)  # Fixed maximum height
         self.video_label.setStyleSheet("""
             QLabel {
                 border: 2px solid #555;
@@ -240,7 +256,7 @@ class EasyOCRTuningTab(QWidget):
             }
         """)
         self.video_label.setScaledContents(False)  # Don't scale contents
-        layout.addWidget(self.video_label)
+        video_layout.addWidget(self.video_label)
         
         # Frame slider
         slider_layout = QHBoxLayout()
@@ -256,7 +272,7 @@ class EasyOCRTuningTab(QWidget):
         self.frame_label = QLabel("0 / 0")
         slider_layout.addWidget(self.frame_label)
         
-        layout.addLayout(slider_layout)
+        video_layout.addLayout(slider_layout)
         
         # Control buttons
         control_layout = QHBoxLayout()
@@ -268,16 +284,18 @@ class EasyOCRTuningTab(QWidget):
         control_layout.addWidget(self.run_analysis_button)
         
         control_layout.addStretch()
-        layout.addLayout(control_layout)
+        video_layout.addLayout(control_layout)
         
-        # Crops display area
+        video_container.setLayout(video_layout)
+        layout.addWidget(video_container)
+        
+        # Crops display area - takes remaining space
         crops_group = QGroupBox("Detected Crops & OCR Results")
         crops_layout = QVBoxLayout()
         
-        # Scroll area for crops
+        # Scroll area for crops - no height restriction, takes all remaining space
         self.crops_scroll = QScrollArea()
         self.crops_scroll.setWidgetResizable(True)
-        self.crops_scroll.setMaximumHeight(250)
         self.crops_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.crops_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         
@@ -289,7 +307,7 @@ class EasyOCRTuningTab(QWidget):
         
         crops_layout.addWidget(self.crops_scroll)
         crops_group.setLayout(crops_layout)
-        layout.addWidget(crops_group)
+        layout.addWidget(crops_group, 1)  # Give it stretch factor of 1 to take remaining space
         
         panel.setLayout(layout)
         return panel

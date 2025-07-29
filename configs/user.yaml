@@ -1,0 +1,40 @@
+player_id:
+  easyocr:
+    adjust_contrast: 0.5
+    allowlist: 0123456789
+    batch_size: 1
+    beamWidth: 5
+    blocklist: null
+    canvas_size: 2560
+    detail: 1
+    filter_ths: 0.003
+    gpu: true
+    height_ths: 0.7
+    link_threshold: 0.2
+    low_text: 0.3
+    mag_ratio: 2.0
+    paragraph: false
+    quantize: true
+    slope_ths: 0.1
+    text_threshold: 0.4
+    verbose: false
+    width_ths: 0.4
+    workers: 0
+    x_ths: 1.0
+    y_ths: 0.5
+    ycenter_ths: 0.5
+  preprocessing:
+    bilateral_filter: true
+    brightness_beta: 0
+    contrast_alpha: 1.2
+    crop_top_fraction: 0.45
+    denoise: false
+    enhance_contrast: true
+    gaussian_blur: 1
+    morphology_close: false
+    morphology_open: false
+    resize_absolute_height: 0
+    resize_absolute_width: 0
+    resize_factor: 1.0
+    rotation_angle: 0
+    sharpen: false
