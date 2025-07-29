@@ -2,7 +2,7 @@ player_id:
   easyocr:
     adjust_contrast: 0.5
     allowlist: 0123456789
-    batch_size: 1
+    batch_size: 16
     beamWidth: 5
     blocklist: null
     canvas_size: 2560
@@ -18,7 +18,7 @@ player_id:
     slope_ths: 0.1
     text_threshold: 0.4
     verbose: false
-    width_ths: 0.4
+    width_ths: 0.3
     workers: 0
     x_ths: 1.0
     y_ths: 0.5
@@ -26,10 +26,10 @@ player_id:
   preprocessing:
     bilateral_filter: true
     brightness_beta: 0
-    contrast_alpha: 1.2
+    contrast_alpha: 1.5000000000000002
     crop_top_fraction: 0.45
-    denoise: false
-    enhance_contrast: true
+    denoise: true
+    enhance_contrast: false
     gaussian_blur: 1
     morphology_close: false
     morphology_open: false
@@ -37,4 +37,4 @@ player_id:
     resize_absolute_width: 0
     resize_factor: 1.0
     rotation_angle: 0
-    sharpen: false
+    sharpen: true
