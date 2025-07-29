@@ -84,7 +84,7 @@ FALLBACK_DEFAULTS = {
     'confidence_threshold': 0.5,
     'nms_threshold': 0.45,
     'tracker_type': 'deepsort',
-    'model_detection': 'yolo11l.pt',
+    'model_detection': 'data/models/detection/object_detection_yolo11l/finetune3/weights/best.pt',
     'model_segmentation': 'yolo11l-seg.pt',
 }
 
