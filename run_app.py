@@ -15,9 +15,8 @@ def main():
     """Main entry point for the application."""
     app = QApplication(sys.argv)
     
-    # Create and show the main window
+    # Create the main window (it will show maximized automatically)
     window = UltimateAnalysisApp()
-    window.show()
     
     # Start the application event loop
     sys.exit(app.exec_())

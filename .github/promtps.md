@@ -21,3 +21,14 @@ Inference implementation
 Read all the repository to get an idea of the current status of the repository.
 
 Keeping copilot-instructions.md in mind, implement the inference processing function and the visualisation function.
+
+
+
+Player ID
+
+Read all the repository to get an idea of the current status of the repository. Read copilot-instructions.md and apply it for all modifications.
+
+Implement the player id functionality. For now it should work as follows:
+1) Using the tracks of class "player" use easyocr by default to find jersey numbers in the top third of the bounding box (likely position of jersey number).
+2) Display the detected jersey number along with the confidence
+3) Use the measurement of easyocr to estimate a fused jersey number based on the easyocr measurement history

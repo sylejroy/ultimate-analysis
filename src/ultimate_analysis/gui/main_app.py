@@ -38,8 +38,8 @@ class UltimateAnalysisApp(QMainWindow):
         self.setMinimumSize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
         self.resize(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
         
-        # Center the window
-        self._center_window()
+        # Show window maximized
+        self.showMaximized()
         
         # Create central widget and layout
         central_widget = QWidget()
