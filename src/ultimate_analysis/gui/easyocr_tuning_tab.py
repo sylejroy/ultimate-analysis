@@ -247,7 +247,7 @@ class EasyOCRTuningTab(QWidget):
         
         self.video_label = QLabel("No video selected")
         self.video_label.setAlignment(Qt.AlignCenter)
-        self.video_label.setMinimumHeight(450)  # Set minimum height for actual video display
+        self.video_label.setFixedHeight(450)  # Fixed height instead of minimum to prevent growth
         self.video_label.setStyleSheet("""
             QLabel {
                 border: 2px solid #555;

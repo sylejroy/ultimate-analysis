@@ -85,20 +85,23 @@ class MainTab(QWidget):
     def _init_ui(self):
         """Initialize the user interface."""
         main_layout = QHBoxLayout()
+        main_layout.setContentsMargins(5, 5, 5, 5)
         
         # Create splitter for resizable panels
         splitter = QSplitter(Qt.Horizontal)
         
         # Left panel: Video list and controls
         left_panel = self._create_left_panel()
+        left_panel.setMinimumWidth(300)  # Minimum width to prevent collapse
+        left_panel.setMaximumWidth(500)  # Maximum width to prevent taking too much space
         splitter.addWidget(left_panel)
         
         # Right panel: Video display
         right_panel = self._create_right_panel()
         splitter.addWidget(right_panel)
         
-        # Set splitter proportions (30% left, 70% right)
-        splitter.setSizes([300, 700])
+        # Simple initial sizing - left takes ~20%, right takes ~80%
+        splitter.setSizes([350, 1400])  # Initial sizes in pixels
         
         main_layout.addWidget(splitter)
         self.setLayout(main_layout)
@@ -205,7 +208,7 @@ class MainTab(QWidget):
         # Video display area
         self.video_label = QLabel("No video selected")
         self.video_label.setAlignment(Qt.AlignCenter)
-        self.video_label.setMinimumHeight(400)
+        self.video_label.setFixedHeight(1080)  # Much bigger for main tab - increased from 400 to 1080
         self.video_label.setStyleSheet("""
             QLabel {
                 border: 2px solid #555;
@@ -452,8 +455,11 @@ class MainTab(QWidget):
         
         # Scale to fit label
         pixmap = QPixmap.fromImage(q_image)
+        # Use fixed dimensions instead of current label size to prevent growth
+        label_width = self.video_label.width()
+        label_height = 1200  # Use the fixed height we set
         scaled_pixmap = pixmap.scaled(
-            self.video_label.size(), 
+            label_width - 4, label_height - 4,  # Account for 2px border on each side
             Qt.KeepAspectRatio, 
             Qt.SmoothTransformation
         )
