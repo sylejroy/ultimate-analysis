@@ -13,6 +13,9 @@ torchvision>=0.15.0
 # OCR for player identification
 easyocr>=1.7.0
 
+# Object tracking
+deep-sort-realtime>=1.2.0
+
 # System monitoring
 psutil>=5.9.0
 

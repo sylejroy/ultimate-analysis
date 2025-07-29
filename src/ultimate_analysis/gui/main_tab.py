@@ -24,7 +24,7 @@ from .visualization import draw_detections, draw_tracks
 from ..processing import (
     run_inference, run_tracking, run_player_id, run_field_segmentation,
     set_detection_model, set_field_model, set_tracker_type, 
-    set_player_id_method, reset_tracker
+    set_player_id_method, reset_tracker, get_track_histories
 )
 from ..config.settings import get_setting
 from ..constants import SHORTCUTS, DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS
@@ -508,12 +508,15 @@ class MainTab(QWidget):
         Returns:
             Frame with visualizations applied
         """
-        # Use proper visualization functions with correct colors
-        if self.current_detections:
+        # Show detections only if tracking is NOT enabled (to avoid visual clutter)
+        if self.current_detections and not self.tracking_checkbox.isChecked():
             frame = draw_detections(frame, self.current_detections)
         
-        if self.current_tracks:
-            frame = draw_tracks(frame, self.current_tracks)
+        # Show tracking visualization if tracking is enabled
+        if self.current_tracks and self.tracking_checkbox.isChecked():
+            # Get track histories for trajectory visualization
+            track_histories = get_track_histories()
+            frame = draw_tracks(frame, self.current_tracks, track_histories)
         
         return frame
     

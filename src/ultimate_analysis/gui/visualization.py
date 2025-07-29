@@ -114,51 +114,85 @@ def draw_tracks(frame: np.ndarray, tracks: List[Any], track_histories: Optional[
             
         x1, y1, x2, y2 = map(int, bbox)
         
-        # Generate consistent color for track ID
+        # Generate unique color for each track ID (better for tracking visualization)
         color = _get_track_color(track_id)
         
-        # Draw bounding box
-        cv2.rectangle(vis_frame, (x1, y1), (x2, y2), color, 2)
+        # Draw bounding box with unique track color
+        cv2.rectangle(vis_frame, (x1, y1), (x2, y2), color, 3)  # Thicker line for better visibility
         
-        # Draw track ID
-        label = f"ID: {track_id}"
+        # Draw track ID with background for better visibility
+        track_label = f"ID:{track_id}"
+        label_size = cv2.getTextSize(track_label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+        
+        # Draw label background
+        cv2.rectangle(
+            vis_frame,
+            (x1, y1 - label_size[1] - 10),
+            (x1 + label_size[0] + 4, y1),
+            color,
+            -1
+        )
+        
+        # Draw track ID text
         cv2.putText(
             vis_frame, 
-            label, 
-            (x1, y1 - 10), 
+            track_label, 
+            (x1 + 2, y1 - 5), 
             cv2.FONT_HERSHEY_SIMPLEX, 
-            0.6, 
-            color, 
+            0.7, 
+            (255, 255, 255),  # White text for contrast
             2
         )
         
-        # Draw class if available
-        class_name = None
-        if hasattr(track, 'det_class') and track.det_class is not None:
-            class_name = f"Class: {track.det_class}"
+        # Draw class information if available
+        class_info = ""
+        if hasattr(track, 'class_name') and track.class_name:
+            class_info = track.class_name
+        elif hasattr(track, 'det_class') and track.det_class is not None:
+            class_info = str(track.det_class)
         elif hasattr(track, 'class_id') and track.class_id is not None:
-            class_name = f"Class: {track.class_id}"
+            class_info = f"C{track.class_id}"
             
-        if class_name:
+        if class_info:
             cv2.putText(
                 vis_frame, 
-                class_name, 
+                class_info, 
                 (x1, y2 + 20), 
                 cv2.FONT_HERSHEY_SIMPLEX, 
                 0.5, 
                 color, 
-                1
+                2
             )
         
-        # Draw track history if available
+        # Draw track history if available (tracks are at foot level)
         if track_histories and track_id in track_histories:
             history = track_histories[track_id]
             if len(history) > 1:
-                # Draw lines connecting history points
+                # Draw trajectory lines with decreasing opacity for older points
                 for i in range(1, len(history)):
                     pt1 = history[i-1]
                     pt2 = history[i]
-                    cv2.line(vis_frame, pt1, pt2, color, 2)
+                    
+                    # Calculate line thickness and opacity based on recency
+                    alpha = min(1.0, (i / len(history)) + 0.3)  # Newer points more visible
+                    thickness = max(1, int(3 * alpha))
+                    
+                    # Draw trajectory line (foot-level tracking)
+                    cv2.line(vis_frame, pt1, pt2, color, thickness)
+                
+                # Draw small circles at trajectory points (representing foot positions)
+                for i, point in enumerate(history[-10:]):  # Only last 10 points
+                    alpha = (i + 1) / min(10, len(history))
+                    radius = max(2, int(4 * alpha))  # Slightly larger for foot positions
+                    cv2.circle(vis_frame, point, radius, color, -1)
+                    
+                    # Add small ground indicator for most recent position
+                    if i == len(history[-10:]) - 1:  # Most recent point
+                        # Draw small line below the point to indicate ground level
+                        cv2.line(vis_frame, 
+                                (point[0] - 5, point[1]), 
+                                (point[0] + 5, point[1]), 
+                                color, 2)
     
     return vis_frame
 
@@ -366,7 +400,7 @@ def _draw_segmentation_masks(frame: np.ndarray, masks: np.ndarray) -> np.ndarray
 
 
 def _get_track_color(track_id: int) -> Tuple[int, int, int]:
-    """Generate a consistent color for a track ID.
+    """Generate a consistent, distinct color for a track ID.
     
     Args:
         track_id: Unique track identifier
@@ -374,10 +408,41 @@ def _get_track_color(track_id: int) -> Tuple[int, int, int]:
     Returns:
         BGR color tuple
     """
-    # Use track ID to generate consistent color
-    np.random.seed(track_id)
-    color = tuple(int(x) for x in np.random.randint(0, 255, 3))
-    return color
+    # Predefined distinct colors for better visual separation
+    distinct_colors = [
+        (0, 255, 255),    # Cyan
+        (255, 0, 255),    # Magenta
+        (255, 255, 0),    # Yellow
+        (0, 255, 0),      # Green
+        (255, 0, 0),      # Blue
+        (0, 165, 255),    # Orange
+        (128, 0, 128),    # Purple
+        (255, 20, 147),   # Deep Pink
+        (0, 255, 127),    # Spring Green
+        (255, 69, 0),     # Red Orange
+        (30, 144, 255),   # Dodger Blue
+        (255, 215, 0),    # Gold
+        (50, 205, 50),    # Lime Green
+        (255, 105, 180),  # Hot Pink
+        (0, 206, 209),    # Dark Turquoise
+        (255, 140, 0),    # Dark Orange
+    ]
+    
+    # Use modulo to cycle through distinct colors
+    color_index = track_id % len(distinct_colors)
+    base_color = distinct_colors[color_index]
+    
+    # Add slight variation based on track_id for uniqueness when cycling
+    if track_id >= len(distinct_colors):
+        variation = (track_id // len(distinct_colors)) * 30
+        r, g, b = base_color
+        # Apply variation while keeping colors bright
+        r = max(50, min(255, r + (variation % 100)))
+        g = max(50, min(255, g + ((variation * 2) % 100)))
+        b = max(50, min(255, b + ((variation * 3) % 100)))
+        return (int(b), int(g), int(r))  # Return as BGR
+    
+    return base_color
 
 
 def apply_all_visualizations(

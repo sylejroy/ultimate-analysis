@@ -38,6 +38,13 @@ models:
     max_tracks: 50
     track_history_length: 30
     color_pool_size: 20
+    
+    # DeepSORT specific settings
+    max_age: 50              # Frames to keep lost tracks alive
+    n_init: 3                # Frames needed to confirm a track
+    nms_overlap: 0.7         # Non-maximum suppression overlap threshold
+    max_cosine_distance: 0.7 # Feature similarity threshold
+    nn_budget: 100           # Feature budget per class
   
   player_id:
     ocr_enabled: true
