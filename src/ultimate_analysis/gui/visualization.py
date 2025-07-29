@@ -38,12 +38,17 @@ def draw_detections(frame: np.ndarray, detections: List[Dict[str, Any]]) -> np.n
             
         x1, y1, x2, y2 = map(int, bbox)
         
-        # Choose color based on class
-        color = VISUALIZATION_COLORS['DETECTION_BOX']
-        if 'disc' in class_name.lower():
-            color = (114, 38, 249)  # Pink/purple for disc
-        elif 'player' in class_name.lower():
-            color = (200, 217, 37)  # Teal for player
+        # Choose color based on class - disc should be bright and easy to spot, player subtle
+        color = VISUALIZATION_COLORS['DETECTION_BOX']  # Default fallback (green)
+        
+        # Ensure we have a valid class_name
+        if class_name and isinstance(class_name, str):
+            class_name_lower = class_name.lower().strip()
+            
+            if class_name_lower == 'disc' or 'disc' in class_name_lower:
+                color = VISUALIZATION_COLORS['DISC']    # Bright cyan for disc - very easy to spot
+            elif class_name_lower == 'player' or 'player' in class_name_lower:
+                color = VISUALIZATION_COLORS['PLAYER']  # Subtle gray for player
         
         # Draw bounding box
         cv2.rectangle(vis_frame, (x1, y1), (x2, y2), color, 2)

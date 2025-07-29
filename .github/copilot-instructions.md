@@ -72,3 +72,5 @@ PyQt5 GUI communicates with processing modules through simple data structures (d
 4. **DeepSORT/Histogram tracking** for object persistence
 
 When modifying this codebase, always check these files first to understand existing patterns and maintain consistency with the established architecture.
+
+No need to make test scripts for every feature.

@@ -1,3 +1,6 @@
+Main Tab
+
+
 Read all the repository to get an idea of the current status of the repository.
 
 Keeping copilot-instructions.md in mind, lets implement the visualisation with empty processing functions for now - one separate file per processing feature. Visualisation related code should be cleanly separated intothe gui folder. For now implement the following tab:
@@ -10,3 +13,11 @@ Keeping copilot-instructions.md in mind, lets implement the visualisation with e
     - next recording (loops to first recording if pressed while on last video)
     - check boxes to enable processing and visualisation of inference (using trained models to detect players and discs), object tracking, player identification (based on jersey numbers), field segmentation
     - controls should all have corresponding keyboard shortcuts
+
+
+Inference implementation
+
+
+Read all the repository to get an idea of the current status of the repository.
+
+Keeping copilot-instructions.md in mind, implement the inference processing function and the visualisation function.

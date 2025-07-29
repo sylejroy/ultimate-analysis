@@ -39,11 +39,12 @@ SHORTCUTS = {
     'TOGGLE_FIELD_SEGMENTATION': 'F'
 }
 
-# YOLO class indices (standard COCO classes relevant to Ultimate Frisbee)
+# YOLO class indices for Ultimate Frisbee finetuned models
+# Note: Actual class names come from the model itself via model.names
 YOLO_CLASSES = {
-    'PERSON': 0,
-    'PLAYER': 1,  # Custom class for trained models
-    'DISC': 2,    # Custom class for trained models
+    'DISC': 0,      # Frisbee disc (finetuned model class 0)
+    'PLAYER': 1,    # Ultimate player (finetuned model class 1)
+    'PERSON': 0,    # Fallback mapping for standard COCO models
 }
 
 # Processing pipeline constraints
@@ -53,11 +54,15 @@ TRACK_HISTORY_MAX_LENGTH = 100
 
 # Color scheme for visualization (BGR format for OpenCV)
 VISUALIZATION_COLORS = {
-    'DETECTION_BOX': (0, 255, 0),      # Green
+    'DETECTION_BOX': (0, 255, 0),      # Green (default)
     'TRACKING_BOX': (255, 0, 0),       # Blue
     'PLAYER_ID_BOX': (0, 255, 255),    # Yellow
     'FIELD_MASK': (0, 0, 255),         # Red
     'BACKGROUND': (30, 30, 30),        # Dark gray
+    
+    # Class-specific colors
+    'DISC': (0, 255, 255),             # Bright cyan - easy to spot
+    'PLAYER': (128, 128, 128),         # Subtle gray
 }
 
 # Performance monitoring

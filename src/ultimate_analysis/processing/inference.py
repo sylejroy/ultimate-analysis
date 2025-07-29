@@ -104,12 +104,16 @@ def run_inference(frame: np.ndarray, model_name: Optional[str] = None) -> List[D
                     conf = float(confidences[i])
                     cls = int(classes[i])
                     
-                    # Map class ID to class name
+                    # Get class name from the model itself (important for finetuned models)
                     class_name = "unknown"
-                    for name, class_id in YOLO_CLASSES.items():
-                        if class_id == cls:
-                            class_name = name.lower()
-                            break
+                    if hasattr(_detection_model, 'names') and cls in _detection_model.names:
+                        class_name = _detection_model.names[cls]
+                    else:
+                        # Fallback to our predefined mapping
+                        for name, class_id in YOLO_CLASSES.items():
+                            if class_id == cls:
+                                class_name = name.lower()
+                                break
                     
                     # Skip detections below confidence threshold
                     if conf < confidence_threshold:
@@ -186,8 +190,13 @@ def set_detection_model(model_path: str) -> bool:
         _detection_model = YOLO(model_file_path)
         _current_model_path = model_path
         
+        # Log model information
         print(f"[INFERENCE] Model loaded successfully: {model_path}")
-        print(f"[INFERENCE] Model classes: {list(_detection_model.names.values()) if hasattr(_detection_model, 'names') else 'Unknown'}")
+        if hasattr(_detection_model, 'names'):
+            model_classes = _detection_model.names
+            print(f"[INFERENCE] Model classes: {dict(model_classes)}")
+        else:
+            print(f"[INFERENCE] Model classes: Unknown (no names attribute)")
         
         return True
         
@@ -213,13 +222,22 @@ def get_model_info() -> Dict[str, Any]:
     Returns:
         Dictionary with model information:
         - path: Model file path
-        - classes: List of class names
+        - classes: List of class names from the model
         - input_size: Model input size
         - loaded: Whether model is loaded
     """
+    model_classes = []
+    
+    if _detection_model is not None and hasattr(_detection_model, 'names'):
+        # Get actual class names from the loaded model
+        model_classes = list(_detection_model.names.values())
+    else:
+        # Fallback to our predefined classes
+        model_classes = list(YOLO_CLASSES.keys())
+    
     return {
         'path': _current_model_path,
-        'classes': list(YOLO_CLASSES.keys()),
+        'classes': model_classes,
         'input_size': [640, 640],  # Standard YOLO input size
         'loaded': _detection_model is not None
     }

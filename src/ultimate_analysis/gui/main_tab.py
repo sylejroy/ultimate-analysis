@@ -20,6 +20,7 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont
 
 from .video_player import VideoPlayer
+from .visualization import draw_detections, draw_tracks
 from ..processing import (
     run_inference, run_tracking, run_player_id, run_field_segmentation,
     set_detection_model, set_field_model, set_tracker_type, 
@@ -507,33 +508,12 @@ class MainTab(QWidget):
         Returns:
             Frame with visualizations applied
         """
-        # Draw detections
-        for detection in self.current_detections:
-            bbox = detection['bbox']
-            confidence = detection['confidence']  
-            class_name = detection['class_name']
-            
-            x1, y1, x2, y2 = map(int, bbox)
-            
-            # Draw bounding box
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            
-            # Draw label
-            label = f"{class_name}: {confidence:.2f}"
-            cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        # Use proper visualization functions with correct colors
+        if self.current_detections:
+            frame = draw_detections(frame, self.current_detections)
         
-        # Draw tracks
-        for track in self.current_tracks:
-            bbox = track.to_ltrb()
-            track_id = track.track_id
-            
-            x1, y1, x2, y2 = map(int, bbox)
-            
-            # Draw track box in different color
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
-            
-            # Draw track ID
-            cv2.putText(frame, f"ID: {track_id}", (x1, y1 - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
+        if self.current_tracks:
+            frame = draw_tracks(frame, self.current_tracks)
         
         return frame
     
