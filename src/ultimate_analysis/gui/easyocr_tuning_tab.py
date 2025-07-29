@@ -15,7 +15,8 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, 
     QPushButton, QSlider, QListWidgetItem, QGroupBox,
     QFormLayout, QComboBox, QSpinBox, QDoubleSpinBox,
-    QCheckBox, QTextEdit, QSplitter, QScrollArea, QGridLayout
+    QCheckBox, QTextEdit, QSplitter, QScrollArea, QGridLayout,
+    QLineEdit
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QPixmap, QImage, QFont
@@ -49,36 +50,66 @@ class EasyOCRTuningTab(QWidget):
         self.current_detections: List[Dict] = []
         self.current_crops: List[Tuple[np.ndarray, Dict]] = []  # (crop_image, detection_info)
         
-        # EasyOCR parameters (with defaults)
+        # EasyOCR parameters (with optimized defaults)
         self.ocr_params = {
             'languages': ['en'],
             'gpu': True,
-            'width_ths': 0.7,
+            'width_ths': 0.4,  # Updated from provided config
             'height_ths': 0.7,
             'paragraph': False,
-            'adjust_contrast': 0.5,
+            'adjust_contrast': 0.5,  # From provided config
             'filter_ths': 0.003,
-            'text_threshold': 0.7,
-            'low_text': 0.4,
+            'text_threshold': 0.7,  # From provided config
+            'low_text': 0.6,  # Updated from provided config
             'link_threshold': 0.4,
             'canvas_size': 2560,
-            'mag_ratio': 1.0,
-            'slope_ths': 0.1,
+            'mag_ratio': 2.0,  # Updated from provided config
+            'slope_ths': 0.1,  # From provided config
             'ycenter_ths': 0.5,
-            'height_ths': 0.7,
-            'width_ths': 0.7,
             'y_ths': 0.5,
             'x_ths': 1.0,
+            'detector': True,
+            'recognizer': True,
+            'verbose': False,
+            'quantize': True,
+            'allowlist': '0123456789',  # From provided config - digits only
+            'blocklist': None,
+            'detail': 1,  # From provided config
+            'rotation_info': [0],  # From provided config
+            'decoder': 'greedy',  # From provided config
+            'beamWidth': 5,
+            'workers': 0,  # Number of parallel workers (0 = auto)
+            'batch_size': 1,
+            'min_size': 10,  # From provided config
+            'contrast_ths': 0.1,  # From provided config
+            'add_margin': 0.1,  # From provided config
         }
         
-        # Preprocessing parameters
+        # Preprocessing parameters (with optimized defaults)
         self.preprocess_params = {
             'crop_top_fraction': 0.33,  # Use top third of detection
             'contrast_alpha': 1.0,     # Contrast adjustment
             'brightness_beta': 0,      # Brightness adjustment
-            'gaussian_blur': 0,        # Blur kernel size (0 = no blur)
-            'resize_factor': 1.0,      # Resize factor
-            'enhance_contrast': False,  # CLAHE enhancement
+            'gaussian_blur': 13,       # Updated from provided config (blur_ksize)
+            'resize_factor': 1.0,      # Resize factor (multiplier)
+            'resize_absolute_width': 0,  # Absolute width in pixels (0 = use factor)
+            'resize_absolute_height': 0, # Absolute height in pixels (0 = use factor)
+            'enhance_contrast': False,  # CLAHE enhancement (disabled per config)
+            'clahe_clip_limit': 3.0,   # From provided config
+            'clahe_grid_size': 8,      # From provided config
+            'denoise': False,          # Apply denoising
+            'sharpen': True,           # From provided config (enabled)
+            'sharpen_strength': 0.05,  # From provided config
+            'rotation_angle': 0,       # Rotation angle in degrees
+            'morphology_open': False,  # Apply morphological opening
+            'morphology_close': False, # Apply morphological closing
+            'bilateral_filter': False, # Apply bilateral filtering
+            'upscale': True,           # From provided config (enabled)
+            'upscale_factor': 3.0,     # From provided config
+            'upscale_to_size': True,   # From provided config
+            'upscale_target_size': 256, # From provided config
+            'colour_mode': True,       # From provided config
+            'bw_mode': True,           # From provided config
         }
         
         # Initialize UI
@@ -290,11 +321,87 @@ class EasyOCRTuningTab(QWidget):
         
         # Gaussian blur
         self.blur_spin = QSpinBox()
-        self.blur_spin.setRange(0, 15)
+        self.blur_spin.setRange(0, 31)  # Must be odd
         self.blur_spin.setSingleStep(2)
         self.blur_spin.setValue(self.preprocess_params['gaussian_blur'])
         self.blur_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("Gaussian Blur:", self.blur_spin)
+        layout.addRow("Gaussian Blur (ksize):", self.blur_spin)
+        
+        # CLAHE enhancement
+        self.enhance_check = QCheckBox()
+        self.enhance_check.setChecked(self.preprocess_params['enhance_contrast'])
+        self.enhance_check.stateChanged.connect(self._on_preprocess_param_changed)
+        layout.addRow("Enhance Contrast (CLAHE):", self.enhance_check)
+        
+        # CLAHE clip limit
+        self.clahe_clip_spin = QDoubleSpinBox()
+        self.clahe_clip_spin.setRange(1.0, 10.0)
+        self.clahe_clip_spin.setSingleStep(0.5)
+        self.clahe_clip_spin.setValue(self.preprocess_params['clahe_clip_limit'])
+        self.clahe_clip_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        layout.addRow("CLAHE Clip Limit:", self.clahe_clip_spin)
+        
+        # CLAHE grid size
+        self.clahe_grid_spin = QSpinBox()
+        self.clahe_grid_spin.setRange(2, 16)
+        self.clahe_grid_spin.setValue(self.preprocess_params['clahe_grid_size'])
+        self.clahe_grid_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        layout.addRow("CLAHE Grid Size:", self.clahe_grid_spin)
+        
+        # Sharpening
+        self.sharpen_check = QCheckBox()
+        self.sharpen_check.setChecked(self.preprocess_params['sharpen'])
+        self.sharpen_check.stateChanged.connect(self._on_preprocess_param_changed)
+        layout.addRow("Apply Sharpening:", self.sharpen_check)
+        
+        # Sharpen strength
+        self.sharpen_strength_spin = QDoubleSpinBox()
+        self.sharpen_strength_spin.setRange(0.01, 1.0)
+        self.sharpen_strength_spin.setSingleStep(0.01)
+        self.sharpen_strength_spin.setDecimals(3)
+        self.sharpen_strength_spin.setValue(self.preprocess_params['sharpen_strength'])
+        self.sharpen_strength_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        layout.addRow("Sharpen Strength:", self.sharpen_strength_spin)
+        
+        # Upscaling
+        self.upscale_check = QCheckBox()
+        self.upscale_check.setChecked(self.preprocess_params['upscale'])
+        self.upscale_check.stateChanged.connect(self._on_preprocess_param_changed)
+        layout.addRow("Apply Upscaling:", self.upscale_check)
+        
+        # Upscale factor
+        self.upscale_factor_spin = QDoubleSpinBox()
+        self.upscale_factor_spin.setRange(1.0, 8.0)
+        self.upscale_factor_spin.setSingleStep(0.5)
+        self.upscale_factor_spin.setValue(self.preprocess_params['upscale_factor'])
+        self.upscale_factor_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        layout.addRow("Upscale Factor:", self.upscale_factor_spin)
+        
+        # Upscale to fixed size
+        self.upscale_to_size_check = QCheckBox()
+        self.upscale_to_size_check.setChecked(self.preprocess_params['upscale_to_size'])
+        self.upscale_to_size_check.stateChanged.connect(self._on_preprocess_param_changed)
+        layout.addRow("Upscale to Size:", self.upscale_to_size_check)
+        
+        # Upscale target size
+        self.upscale_target_spin = QSpinBox()
+        self.upscale_target_spin.setRange(64, 1024)
+        self.upscale_target_spin.setSingleStep(32)
+        self.upscale_target_spin.setValue(self.preprocess_params['upscale_target_size'])
+        self.upscale_target_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        layout.addRow("Target Size (px):", self.upscale_target_spin)
+        
+        # Color mode processing
+        self.colour_mode_check = QCheckBox()
+        self.colour_mode_check.setChecked(self.preprocess_params['colour_mode'])
+        self.colour_mode_check.stateChanged.connect(self._on_preprocess_param_changed)
+        layout.addRow("Color Mode:", self.colour_mode_check)
+        
+        # Black & white mode
+        self.bw_mode_check = QCheckBox()
+        self.bw_mode_check.setChecked(self.preprocess_params['bw_mode'])
+        self.bw_mode_check.stateChanged.connect(self._on_preprocess_param_changed)
+        layout.addRow("B&W Mode:", self.bw_mode_check)
         
         # Resize factor
         self.resize_spin = QDoubleSpinBox()
@@ -304,17 +411,76 @@ class EasyOCRTuningTab(QWidget):
         self.resize_spin.valueChanged.connect(self._on_preprocess_param_changed)
         layout.addRow("Resize Factor:", self.resize_spin)
         
+        # Absolute resize width
+        self.resize_width_spin = QSpinBox()
+        self.resize_width_spin.setRange(0, 2048)
+        self.resize_width_spin.setSingleStep(32)
+        self.resize_width_spin.setValue(self.preprocess_params['resize_absolute_width'])
+        self.resize_width_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        self.resize_width_spin.setToolTip("Absolute width in pixels (0 = use factor)")
+        layout.addRow("Absolute Width (px):", self.resize_width_spin)
+        
+        # Absolute resize height
+        self.resize_height_spin = QSpinBox()
+        self.resize_height_spin.setRange(0, 2048)
+        self.resize_height_spin.setSingleStep(32)
+        self.resize_height_spin.setValue(self.preprocess_params['resize_absolute_height'])
+        self.resize_height_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        self.resize_height_spin.setToolTip("Absolute height in pixels (0 = use factor)")
+        layout.addRow("Absolute Height (px):", self.resize_height_spin)
+        
+        # Rotation angle
+        self.rotation_spin = QSpinBox()
+        self.rotation_spin.setRange(-180, 180)
+        self.rotation_spin.setSingleStep(15)
+        self.rotation_spin.setValue(self.preprocess_params['rotation_angle'])
+        self.rotation_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        layout.addRow("Rotation (degrees):", self.rotation_spin)
+        
         # CLAHE enhancement
         self.enhance_check = QCheckBox()
         self.enhance_check.setChecked(self.preprocess_params['enhance_contrast'])
         self.enhance_check.stateChanged.connect(self._on_preprocess_param_changed)
         layout.addRow("Enhance Contrast:", self.enhance_check)
+        
+        # Denoising
+        self.denoise_check = QCheckBox()
+        self.denoise_check.setChecked(self.preprocess_params['denoise'])
+        self.denoise_check.stateChanged.connect(self._on_preprocess_param_changed)
+        layout.addRow("Apply Denoising:", self.denoise_check)
+        
+        # Sharpening
+        self.sharpen_check = QCheckBox()
+        self.sharpen_check.setChecked(self.preprocess_params['sharpen'])
+        self.sharpen_check.stateChanged.connect(self._on_preprocess_param_changed)
+        layout.addRow("Apply Sharpening:", self.sharpen_check)
+        
+        # Morphological opening
+        self.morph_open_check = QCheckBox()
+        self.morph_open_check.setChecked(self.preprocess_params['morphology_open'])
+        self.morph_open_check.stateChanged.connect(self._on_preprocess_param_changed)
+        layout.addRow("Morphology Open:", self.morph_open_check)
+        
+        # Morphological closing
+        self.morph_close_check = QCheckBox()
+        self.morph_close_check.setChecked(self.preprocess_params['morphology_close'])
+        self.morph_close_check.stateChanged.connect(self._on_preprocess_param_changed)
+        layout.addRow("Morphology Close:", self.morph_close_check)
+        
+        # Bilateral filter
+        self.bilateral_check = QCheckBox()
+        self.bilateral_check.setChecked(self.preprocess_params['bilateral_filter'])
+        self.bilateral_check.stateChanged.connect(self._on_preprocess_param_changed)
+        layout.addRow("Bilateral Filter:", self.bilateral_check)
     
     def _create_ocr_controls(self, layout: QFormLayout):
         """Create EasyOCR parameter controls."""
         if not EASYOCR_AVAILABLE:
             layout.addRow(QLabel("EasyOCR not available"))
             return
+        
+        # Core detection parameters
+        layout.addRow(QLabel("=== Detection Parameters ==="))
         
         # Text confidence threshold
         self.text_threshold_spin = QDoubleSpinBox()
@@ -340,6 +506,9 @@ class EasyOCRTuningTab(QWidget):
         self.link_threshold_spin.valueChanged.connect(self._on_ocr_param_changed)
         layout.addRow("Link Threshold:", self.link_threshold_spin)
         
+        # Geometric constraints
+        layout.addRow(QLabel("=== Geometric Constraints ==="))
+        
         # Width threshold
         self.width_ths_spin = QDoubleSpinBox()
         self.width_ths_spin.setRange(0.1, 2.0)
@@ -355,6 +524,41 @@ class EasyOCRTuningTab(QWidget):
         self.height_ths_spin.setValue(self.ocr_params['height_ths'])
         self.height_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
         layout.addRow("Height Threshold:", self.height_ths_spin)
+        
+        # X threshold
+        self.x_ths_spin = QDoubleSpinBox()
+        self.x_ths_spin.setRange(0.1, 3.0)
+        self.x_ths_spin.setSingleStep(0.1)
+        self.x_ths_spin.setValue(self.ocr_params['x_ths'])
+        self.x_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
+        layout.addRow("X Threshold:", self.x_ths_spin)
+        
+        # Y threshold
+        self.y_ths_spin = QDoubleSpinBox()
+        self.y_ths_spin.setRange(0.1, 1.0)
+        self.y_ths_spin.setSingleStep(0.05)
+        self.y_ths_spin.setValue(self.ocr_params['y_ths'])
+        self.y_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
+        layout.addRow("Y Threshold:", self.y_ths_spin)
+        
+        # Y-center threshold
+        self.ycenter_ths_spin = QDoubleSpinBox()
+        self.ycenter_ths_spin.setRange(0.1, 1.0)
+        self.ycenter_ths_spin.setSingleStep(0.05)
+        self.ycenter_ths_spin.setValue(self.ocr_params['ycenter_ths'])
+        self.ycenter_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
+        layout.addRow("Y-Center Threshold:", self.ycenter_ths_spin)
+        
+        # Slope threshold
+        self.slope_ths_spin = QDoubleSpinBox()
+        self.slope_ths_spin.setRange(0.01, 1.0)
+        self.slope_ths_spin.setSingleStep(0.05)
+        self.slope_ths_spin.setValue(self.ocr_params['slope_ths'])
+        self.slope_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
+        layout.addRow("Slope Threshold:", self.slope_ths_spin)
+        
+        # Image processing parameters
+        layout.addRow(QLabel("=== Image Processing ==="))
         
         # Canvas size
         self.canvas_size_spin = QSpinBox()
@@ -372,11 +576,128 @@ class EasyOCRTuningTab(QWidget):
         self.mag_ratio_spin.valueChanged.connect(self._on_ocr_param_changed)
         layout.addRow("Mag Ratio:", self.mag_ratio_spin)
         
+        # Adjust contrast
+        self.adjust_contrast_spin = QDoubleSpinBox()
+        self.adjust_contrast_spin.setRange(0.0, 2.0)
+        self.adjust_contrast_spin.setSingleStep(0.1)
+        self.adjust_contrast_spin.setValue(self.ocr_params['adjust_contrast'])
+        self.adjust_contrast_spin.valueChanged.connect(self._on_ocr_param_changed)
+        layout.addRow("Adjust Contrast:", self.adjust_contrast_spin)
+        
+        # Filter threshold
+        self.filter_ths_spin = QDoubleSpinBox()
+        self.filter_ths_spin.setRange(0.001, 0.1)
+        self.filter_ths_spin.setSingleStep(0.001)
+        self.filter_ths_spin.setDecimals(4)
+        self.filter_ths_spin.setValue(self.ocr_params['filter_ths'])
+        self.filter_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
+        layout.addRow("Filter Threshold:", self.filter_ths_spin)
+        
+        # Performance and parallel processing
+        layout.addRow(QLabel("=== Performance ==="))
+        
+        # Number of workers
+        self.workers_spin = QSpinBox()
+        self.workers_spin.setRange(0, 16)
+        self.workers_spin.setValue(self.ocr_params['workers'])
+        self.workers_spin.valueChanged.connect(self._on_ocr_param_changed)
+        self.workers_spin.setToolTip("Number of parallel workers (0 = auto)")
+        layout.addRow("Workers:", self.workers_spin)
+        
+        # Batch size
+        self.batch_size_spin = QSpinBox()
+        self.batch_size_spin.setRange(1, 32)
+        self.batch_size_spin.setValue(self.ocr_params['batch_size'])
+        self.batch_size_spin.valueChanged.connect(self._on_ocr_param_changed)
+        layout.addRow("Batch Size:", self.batch_size_spin)
+        
+        # Beam width (for beam search decoder)
+        self.beam_width_spin = QSpinBox()
+        self.beam_width_spin.setRange(1, 20)
+        self.beam_width_spin.setValue(self.ocr_params['beamWidth'])
+        self.beam_width_spin.valueChanged.connect(self._on_ocr_param_changed)
+        layout.addRow("Beam Width:", self.beam_width_spin)
+        
+        # Options and flags
+        layout.addRow(QLabel("=== Options ==="))
+        
         # GPU usage
         self.gpu_check = QCheckBox()
         self.gpu_check.setChecked(self.ocr_params['gpu'])
         self.gpu_check.stateChanged.connect(self._on_ocr_param_changed)
         layout.addRow("Use GPU:", self.gpu_check)
+        
+        # Paragraph mode
+        self.paragraph_check = QCheckBox()
+        self.paragraph_check.setChecked(self.ocr_params['paragraph'])
+        self.paragraph_check.stateChanged.connect(self._on_ocr_param_changed)
+        layout.addRow("Paragraph Mode:", self.paragraph_check)
+        
+        # Quantize
+        self.quantize_check = QCheckBox()
+        self.quantize_check.setChecked(self.ocr_params['quantize'])
+        self.quantize_check.stateChanged.connect(self._on_ocr_param_changed)
+        layout.addRow("Quantize:", self.quantize_check)
+        
+        # Verbose output
+        self.verbose_check = QCheckBox()
+        self.verbose_check.setChecked(self.ocr_params['verbose'])
+        self.verbose_check.stateChanged.connect(self._on_ocr_param_changed)
+        layout.addRow("Verbose:", self.verbose_check)
+        
+        # Detail level
+        self.detail_spin = QSpinBox()
+        self.detail_spin.setRange(0, 2)
+        self.detail_spin.setValue(self.ocr_params['detail'])
+        self.detail_spin.valueChanged.connect(self._on_ocr_param_changed)
+        self.detail_spin.setToolTip("0=no detail, 1=bbox, 2=polygon")
+        layout.addRow("Detail Level:", self.detail_spin)
+        
+        # Character filtering
+        layout.addRow(QLabel("=== Character Filtering ==="))
+        
+        # Allowlist (only allow these characters)
+        self.allowlist_edit = QLineEdit()
+        if self.ocr_params['allowlist']:
+            self.allowlist_edit.setText(self.ocr_params['allowlist'])
+        self.allowlist_edit.textChanged.connect(self._on_ocr_param_changed)
+        self.allowlist_edit.setPlaceholderText("e.g., 0123456789")
+        layout.addRow("Allowlist:", self.allowlist_edit)
+        
+        # Blocklist (exclude these characters)
+        self.blocklist_edit = QLineEdit()
+        if self.ocr_params['blocklist']:
+            self.blocklist_edit.setText(self.ocr_params['blocklist'])
+        self.blocklist_edit.textChanged.connect(self._on_ocr_param_changed)
+        self.blocklist_edit.setPlaceholderText("e.g., abcdef")
+        layout.addRow("Blocklist:", self.blocklist_edit)
+        
+        # Additional parameters
+        layout.addRow(QLabel("=== Additional Options ==="))
+        
+        # Minimum size
+        self.min_size_spin = QSpinBox()
+        self.min_size_spin.setRange(1, 100)
+        self.min_size_spin.setValue(self.ocr_params['min_size'])
+        self.min_size_spin.valueChanged.connect(self._on_ocr_param_changed)
+        layout.addRow("Min Size (px):", self.min_size_spin)
+        
+        # Contrast threshold
+        self.contrast_ths_spin = QDoubleSpinBox()
+        self.contrast_ths_spin.setRange(0.01, 1.0)
+        self.contrast_ths_spin.setSingleStep(0.01)
+        self.contrast_ths_spin.setDecimals(3)
+        self.contrast_ths_spin.setValue(self.ocr_params['contrast_ths'])
+        self.contrast_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
+        layout.addRow("Contrast Threshold:", self.contrast_ths_spin)
+        
+        # Add margin
+        self.add_margin_spin = QDoubleSpinBox()
+        self.add_margin_spin.setRange(0.0, 0.5)
+        self.add_margin_spin.setSingleStep(0.05)
+        self.add_margin_spin.setValue(self.ocr_params['add_margin'])
+        self.add_margin_spin.valueChanged.connect(self._on_ocr_param_changed)
+        layout.addRow("Add Margin:", self.add_margin_spin)
     
     def _load_videos(self):
         """Load and display available video files."""
@@ -547,8 +868,30 @@ class EasyOCRTuningTab(QWidget):
         self.preprocess_params['contrast_alpha'] = self.contrast_spin.value()
         self.preprocess_params['brightness_beta'] = self.brightness_spin.value()
         self.preprocess_params['gaussian_blur'] = self.blur_spin.value()
-        self.preprocess_params['resize_factor'] = self.resize_spin.value()
         self.preprocess_params['enhance_contrast'] = self.enhance_check.isChecked()
+        self.preprocess_params['clahe_clip_limit'] = self.clahe_clip_spin.value()
+        self.preprocess_params['clahe_grid_size'] = self.clahe_grid_spin.value()
+        self.preprocess_params['sharpen'] = self.sharpen_check.isChecked()
+        self.preprocess_params['sharpen_strength'] = self.sharpen_strength_spin.value()
+        self.preprocess_params['upscale'] = self.upscale_check.isChecked()
+        self.preprocess_params['upscale_factor'] = self.upscale_factor_spin.value()
+        self.preprocess_params['upscale_to_size'] = self.upscale_to_size_check.isChecked()
+        self.preprocess_params['upscale_target_size'] = self.upscale_target_spin.value()
+        self.preprocess_params['colour_mode'] = self.colour_mode_check.isChecked()
+        self.preprocess_params['bw_mode'] = self.bw_mode_check.isChecked()
+        self.preprocess_params['resize_factor'] = self.resize_spin.value()
+        self.preprocess_params['resize_absolute_width'] = self.resize_width_spin.value()
+        self.preprocess_params['resize_absolute_height'] = self.resize_height_spin.value()
+        self.preprocess_params['rotation_angle'] = self.rotation_spin.value()
+        self.preprocess_params['denoise'] = self.denoise_check.isChecked()
+        
+        # Handle optional parameters
+        if hasattr(self, 'morph_open_check'):
+            self.preprocess_params['morphology_open'] = self.morph_open_check.isChecked()
+        if hasattr(self, 'morph_close_check'):
+            self.preprocess_params['morphology_close'] = self.morph_close_check.isChecked()
+        if hasattr(self, 'bilateral_check'):
+            self.preprocess_params['bilateral_filter'] = self.bilateral_check.isChecked()
         
         print(f"[EASYOCR_TUNING] Preprocessing parameters updated")
     
@@ -563,9 +906,36 @@ class EasyOCRTuningTab(QWidget):
         self.ocr_params['link_threshold'] = self.link_threshold_spin.value()
         self.ocr_params['width_ths'] = self.width_ths_spin.value()
         self.ocr_params['height_ths'] = self.height_ths_spin.value()
+        self.ocr_params['x_ths'] = getattr(self, 'x_ths_spin', self).value() if hasattr(self, 'x_ths_spin') else self.ocr_params['x_ths']
+        self.ocr_params['y_ths'] = getattr(self, 'y_ths_spin', self).value() if hasattr(self, 'y_ths_spin') else self.ocr_params['y_ths']
+        self.ocr_params['ycenter_ths'] = getattr(self, 'ycenter_ths_spin', self).value() if hasattr(self, 'ycenter_ths_spin') else self.ocr_params['ycenter_ths']
+        self.ocr_params['slope_ths'] = getattr(self, 'slope_ths_spin', self).value() if hasattr(self, 'slope_ths_spin') else self.ocr_params['slope_ths']
         self.ocr_params['canvas_size'] = self.canvas_size_spin.value()
         self.ocr_params['mag_ratio'] = self.mag_ratio_spin.value()
+        self.ocr_params['adjust_contrast'] = getattr(self, 'adjust_contrast_spin', self).value() if hasattr(self, 'adjust_contrast_spin') else self.ocr_params['adjust_contrast']
+        self.ocr_params['filter_ths'] = getattr(self, 'filter_ths_spin', self).value() if hasattr(self, 'filter_ths_spin') else self.ocr_params['filter_ths']
+        self.ocr_params['workers'] = getattr(self, 'workers_spin', self).value() if hasattr(self, 'workers_spin') else self.ocr_params['workers']
+        self.ocr_params['batch_size'] = getattr(self, 'batch_size_spin', self).value() if hasattr(self, 'batch_size_spin') else self.ocr_params['batch_size']
+        self.ocr_params['beamWidth'] = getattr(self, 'beam_width_spin', self).value() if hasattr(self, 'beam_width_spin') else self.ocr_params['beamWidth']
         self.ocr_params['gpu'] = self.gpu_check.isChecked()
+        self.ocr_params['paragraph'] = getattr(self, 'paragraph_check', self).isChecked() if hasattr(self, 'paragraph_check') else self.ocr_params['paragraph']
+        self.ocr_params['quantize'] = getattr(self, 'quantize_check', self).isChecked() if hasattr(self, 'quantize_check') else self.ocr_params['quantize']
+        self.ocr_params['verbose'] = getattr(self, 'verbose_check', self).isChecked() if hasattr(self, 'verbose_check') else self.ocr_params['verbose']
+        self.ocr_params['detail'] = getattr(self, 'detail_spin', self).value() if hasattr(self, 'detail_spin') else self.ocr_params['detail']
+        
+        # New parameters from optimized config
+        self.ocr_params['min_size'] = getattr(self, 'min_size_spin', self).value() if hasattr(self, 'min_size_spin') else self.ocr_params['min_size']
+        self.ocr_params['contrast_ths'] = getattr(self, 'contrast_ths_spin', self).value() if hasattr(self, 'contrast_ths_spin') else self.ocr_params['contrast_ths']
+        self.ocr_params['add_margin'] = getattr(self, 'add_margin_spin', self).value() if hasattr(self, 'add_margin_spin') else self.ocr_params['add_margin']
+        
+        # Handle text inputs
+        if hasattr(self, 'allowlist_edit'):
+            allowlist_text = self.allowlist_edit.text().strip()
+            self.ocr_params['allowlist'] = allowlist_text if allowlist_text else None
+            
+        if hasattr(self, 'blocklist_edit'):
+            blocklist_text = self.blocklist_edit.text().strip()
+            self.ocr_params['blocklist'] = blocklist_text if blocklist_text else None
         
         print(f"[EASYOCR_TUNING] EasyOCR parameters updated")
     
@@ -667,12 +1037,58 @@ class EasyOCRTuningTab(QWidget):
         """Apply preprocessing to a crop."""
         processed = crop.copy()
         
-        # Resize
+        # Resize (absolute takes priority over factor)
+        abs_width = self.preprocess_params['resize_absolute_width']
+        abs_height = self.preprocess_params['resize_absolute_height']
         resize_factor = self.preprocess_params['resize_factor']
-        if resize_factor != 1.0:
+        
+        if abs_width > 0 and abs_height > 0:
+            # Absolute resize
+            processed = cv2.resize(processed, (abs_width, abs_height))
+        elif abs_width > 0:
+            # Absolute width, maintain aspect ratio
+            current_height, current_width = processed.shape[:2]
+            new_height = int(current_height * abs_width / current_width)
+            processed = cv2.resize(processed, (abs_width, new_height))
+        elif abs_height > 0:
+            # Absolute height, maintain aspect ratio
+            current_height, current_width = processed.shape[:2]
+            new_width = int(current_width * abs_height / current_height)
+            processed = cv2.resize(processed, (new_width, abs_height))
+        elif resize_factor != 1.0:
+            # Factor-based resize
             new_height = int(processed.shape[0] * resize_factor)
             new_width = int(processed.shape[1] * resize_factor)
             processed = cv2.resize(processed, (new_width, new_height))
+        
+        # Rotation
+        rotation_angle = self.preprocess_params['rotation_angle']
+        if rotation_angle != 0:
+            height, width = processed.shape[:2]
+            center = (width // 2, height // 2)
+            matrix = cv2.getRotationMatrix2D(center, rotation_angle, 1.0)
+            processed = cv2.warpAffine(processed, matrix, (width, height))
+        
+        # Color mode conversion
+        if self.preprocess_params['bw_mode']:
+            processed = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
+            processed = cv2.cvtColor(processed, cv2.COLOR_GRAY2BGR)
+        elif not self.preprocess_params.get('colour_mode', False):
+            # Default grayscale processing
+            if len(processed.shape) == 3:
+                processed = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
+                processed = cv2.cvtColor(processed, cv2.COLOR_GRAY2BGR)
+        
+        # Denoising
+        if self.preprocess_params['denoise']:
+            if len(processed.shape) == 3:
+                processed = cv2.fastNlMeansDenoisingColored(processed, None, 10, 10, 7, 21)
+            else:
+                processed = cv2.fastNlMeansDenoising(processed, None, 10, 7, 21)
+        
+        # Bilateral filter
+        if self.preprocess_params['bilateral_filter']:
+            processed = cv2.bilateralFilter(processed, 9, 75, 75)
         
         # Contrast and brightness
         alpha = self.preprocess_params['contrast_alpha']
@@ -683,15 +1099,67 @@ class EasyOCRTuningTab(QWidget):
         # Gaussian blur
         blur_kernel = self.preprocess_params['gaussian_blur']
         if blur_kernel > 0:
+            # Ensure kernel size is odd
+            if blur_kernel % 2 == 0:
+                blur_kernel += 1
             processed = cv2.GaussianBlur(processed, (blur_kernel, blur_kernel), 0)
         
         # CLAHE enhancement
         if self.preprocess_params['enhance_contrast']:
-            # Convert to LAB, apply CLAHE to L channel
-            lab = cv2.cvtColor(processed, cv2.COLOR_BGR2LAB)
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            lab[:, :, 0] = clahe.apply(lab[:, :, 0])
-            processed = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+            clip_limit = self.preprocess_params['clahe_clip_limit']
+            grid_size = self.preprocess_params['clahe_grid_size']
+            
+            if len(processed.shape) == 3:
+                # Convert to LAB, apply CLAHE to L channel
+                lab = cv2.cvtColor(processed, cv2.COLOR_BGR2LAB)
+                clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(grid_size, grid_size))
+                lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+                processed = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+            else:
+                # Grayscale
+                clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(grid_size, grid_size))
+                processed = clahe.apply(processed)
+        
+        # Sharpening
+        if self.preprocess_params['sharpen']:
+            strength = self.preprocess_params['sharpen_strength']
+            kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]]) * strength
+            kernel[1,1] = 1 + (8 * strength)  # Adjust center to maintain brightness
+            processed = cv2.filter2D(processed, -1, kernel)
+        
+        # Upscaling
+        if self.preprocess_params['upscale']:
+            if self.preprocess_params['upscale_to_size']:
+                # Upscale to fixed size
+                target_size = self.preprocess_params['upscale_target_size']
+                processed = cv2.resize(processed, (target_size, target_size), interpolation=cv2.INTER_CUBIC)
+            else:
+                # Upscale by factor
+                factor = self.preprocess_params['upscale_factor']
+                new_height = int(processed.shape[0] * factor)
+                new_width = int(processed.shape[1] * factor)
+                processed = cv2.resize(processed, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
+        
+        # Morphological operations (convert to grayscale first if needed)
+        if self.preprocess_params.get('morphology_open', False) or self.preprocess_params.get('morphology_close', False):
+            if len(processed.shape) == 3:
+                gray = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = processed.copy()
+            
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            
+            if self.preprocess_params.get('morphology_open', False):
+                gray = cv2.morphologyEx(gray, cv2.MORPH_OPEN, kernel)
+            
+            if self.preprocess_params.get('morphology_close', False):
+                gray = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+            
+            # Convert back to BGR if needed
+            if len(processed.shape) == 3:
+                processed = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            else:
+                processed = gray
         
         return processed
     
@@ -708,24 +1176,52 @@ class EasyOCRTuningTab(QWidget):
         try:
             # Initialize EasyOCR reader with current parameters
             gpu = self.ocr_params['gpu']
-            reader = easyocr.Reader(['en'], gpu=gpu)
+            reader = easyocr.Reader(
+                self.ocr_params['languages'], 
+                gpu=gpu,
+                verbose=self.ocr_params['verbose'],
+                quantize=self.ocr_params['quantize']
+            )
             
             results = []
             
             for crop_data in self.current_crops:
                 processed_crop = crop_data['processed_crop']
                 
+                # Prepare parameters for readtext
+                readtext_params = {
+                    'text_threshold': self.ocr_params['text_threshold'],
+                    'low_text': self.ocr_params['low_text'],
+                    'link_threshold': self.ocr_params['link_threshold'],
+                    'width_ths': self.ocr_params['width_ths'],
+                    'height_ths': self.ocr_params['height_ths'],
+                    'canvas_size': self.ocr_params['canvas_size'],
+                    'mag_ratio': self.ocr_params['mag_ratio'],
+                    'slope_ths': self.ocr_params['slope_ths'],
+                    'ycenter_ths': self.ocr_params['ycenter_ths'],
+                    'y_ths': self.ocr_params['y_ths'],
+                    'x_ths': self.ocr_params['x_ths'],
+                    'paragraph': self.ocr_params['paragraph'],
+                    'adjust_contrast': self.ocr_params['adjust_contrast'],
+                    'filter_ths': self.ocr_params['filter_ths'],
+                    'batch_size': self.ocr_params['batch_size'],
+                    'workers': self.ocr_params['workers'],
+                    'decoder': self.ocr_params['decoder'],
+                    'beamWidth': self.ocr_params['beamWidth'],
+                    'detail': self.ocr_params['detail'],
+                    'min_size': self.ocr_params['min_size'],
+                    'contrast_ths': self.ocr_params['contrast_ths'],
+                    'add_margin': self.ocr_params['add_margin']
+                }
+                
+                # Add character filtering if specified
+                if self.ocr_params['allowlist']:
+                    readtext_params['allowlist'] = self.ocr_params['allowlist']
+                if self.ocr_params['blocklist']:
+                    readtext_params['blocklist'] = self.ocr_params['blocklist']
+                
                 # Run EasyOCR
-                ocr_results = reader.readtext(
-                    processed_crop,
-                    text_threshold=self.ocr_params['text_threshold'],
-                    low_text=self.ocr_params['low_text'],
-                    link_threshold=self.ocr_params['link_threshold'],
-                    width_ths=self.ocr_params['width_ths'],
-                    height_ths=self.ocr_params['height_ths'],
-                    canvas_size=self.ocr_params['canvas_size'],
-                    mag_ratio=self.ocr_params['mag_ratio']
-                )
+                ocr_results = reader.readtext(processed_crop, **readtext_params)
                 
                 # Process results - find best numeric text (likely jersey number)
                 best_text = ""
@@ -975,23 +1471,58 @@ class EasyOCRTuningTab(QWidget):
         """Load parameters from configuration."""
         try:
             # Load preprocessing parameters
-            self.preprocess_params['crop_top_fraction'] = get_setting('player_id.preprocessing.crop_top_fraction', 0.5)
+            self.preprocess_params['crop_top_fraction'] = get_setting('player_id.preprocessing.crop_top_fraction', 0.33)
             self.preprocess_params['contrast_alpha'] = get_setting('player_id.preprocessing.contrast_alpha', 1.0)
             self.preprocess_params['brightness_beta'] = get_setting('player_id.preprocessing.brightness_beta', 0)
-            self.preprocess_params['gaussian_blur'] = get_setting('player_id.preprocessing.gaussian_blur', 0)
+            self.preprocess_params['gaussian_blur'] = get_setting('player_id.preprocessing.gaussian_blur', 13)
+            self.preprocess_params['enhance_contrast'] = get_setting('player_id.preprocessing.enhance_contrast', True)
+            self.preprocess_params['clahe_clip_limit'] = get_setting('player_id.preprocessing.clahe_clip_limit', 2.0)
+            self.preprocess_params['clahe_grid_size'] = get_setting('player_id.preprocessing.clahe_grid_size', 8)
+            self.preprocess_params['sharpen'] = get_setting('player_id.preprocessing.sharpen', True)
+            self.preprocess_params['sharpen_strength'] = get_setting('player_id.preprocessing.sharpen_strength', 0.05)
+            self.preprocess_params['upscale'] = get_setting('player_id.preprocessing.upscale', True)
+            self.preprocess_params['upscale_factor'] = get_setting('player_id.preprocessing.upscale_factor', 3.0)
+            self.preprocess_params['upscale_to_size'] = get_setting('player_id.preprocessing.upscale_to_size', True)
+            self.preprocess_params['upscale_target_size'] = get_setting('player_id.preprocessing.upscale_target_size', 256)
+            self.preprocess_params['colour_mode'] = get_setting('player_id.preprocessing.colour_mode', False)
+            self.preprocess_params['bw_mode'] = get_setting('player_id.preprocessing.bw_mode', True)
             self.preprocess_params['resize_factor'] = get_setting('player_id.preprocessing.resize_factor', 1.0)
-            self.preprocess_params['enhance_contrast'] = get_setting('player_id.preprocessing.enhance_contrast', False)
+            self.preprocess_params['resize_absolute_width'] = get_setting('player_id.preprocessing.resize_absolute_width', 0)
+            self.preprocess_params['resize_absolute_height'] = get_setting('player_id.preprocessing.resize_absolute_height', 0)
+            self.preprocess_params['rotation_angle'] = get_setting('player_id.preprocessing.rotation_angle', 0)
+            self.preprocess_params['denoise'] = get_setting('player_id.preprocessing.denoise', False)
+            self.preprocess_params['morphology_open'] = get_setting('player_id.preprocessing.morphology_open', False)
+            self.preprocess_params['morphology_close'] = get_setting('player_id.preprocessing.morphology_close', False)
+            self.preprocess_params['bilateral_filter'] = get_setting('player_id.preprocessing.bilateral_filter', False)
             
             # Load OCR parameters
             if EASYOCR_AVAILABLE:
                 self.ocr_params['text_threshold'] = get_setting('player_id.easyocr.text_threshold', 0.7)
-                self.ocr_params['low_text'] = get_setting('player_id.easyocr.low_text', 0.4)
+                self.ocr_params['low_text'] = get_setting('player_id.easyocr.low_text', 0.6)
                 self.ocr_params['link_threshold'] = get_setting('player_id.easyocr.link_threshold', 0.4)
-                self.ocr_params['width_ths'] = get_setting('player_id.easyocr.width_ths', 0.7)
+                self.ocr_params['width_ths'] = get_setting('player_id.easyocr.width_ths', 0.4)
                 self.ocr_params['height_ths'] = get_setting('player_id.easyocr.height_ths', 0.7)
+                self.ocr_params['x_ths'] = get_setting('player_id.easyocr.x_ths', 1.0)
+                self.ocr_params['y_ths'] = get_setting('player_id.easyocr.y_ths', 0.5)
+                self.ocr_params['ycenter_ths'] = get_setting('player_id.easyocr.ycenter_ths', 0.5)
+                self.ocr_params['slope_ths'] = get_setting('player_id.easyocr.slope_ths', 0.1)
                 self.ocr_params['canvas_size'] = get_setting('player_id.easyocr.canvas_size', 2560)
-                self.ocr_params['mag_ratio'] = get_setting('player_id.easyocr.mag_ratio', 1.0)
+                self.ocr_params['mag_ratio'] = get_setting('player_id.easyocr.mag_ratio', 2.0)
+                self.ocr_params['adjust_contrast'] = get_setting('player_id.easyocr.adjust_contrast', 0.5)
+                self.ocr_params['filter_ths'] = get_setting('player_id.easyocr.filter_ths', 0.003)
+                self.ocr_params['workers'] = get_setting('player_id.easyocr.workers', 0)
+                self.ocr_params['batch_size'] = get_setting('player_id.easyocr.batch_size', 1)
+                self.ocr_params['beamWidth'] = get_setting('player_id.easyocr.beamWidth', 5)
                 self.ocr_params['gpu'] = get_setting('player_id.easyocr.gpu', True)
+                self.ocr_params['paragraph'] = get_setting('player_id.easyocr.paragraph', False)
+                self.ocr_params['quantize'] = get_setting('player_id.easyocr.quantize', True)
+                self.ocr_params['verbose'] = get_setting('player_id.easyocr.verbose', False)
+                self.ocr_params['detail'] = get_setting('player_id.easyocr.detail', 1)
+                self.ocr_params['allowlist'] = get_setting('player_id.easyocr.allowlist', '0123456789')
+                self.ocr_params['blocklist'] = get_setting('player_id.easyocr.blocklist', '')
+                self.ocr_params['min_size'] = get_setting('player_id.easyocr.min_size', 10)
+                self.ocr_params['contrast_ths'] = get_setting('player_id.easyocr.contrast_ths', 0.1)
+                self.ocr_params['add_margin'] = get_setting('player_id.easyocr.add_margin', 0.1)
             
             # Update UI controls with loaded values
             self._update_controls_from_params()
@@ -1008,8 +1539,39 @@ class EasyOCRTuningTab(QWidget):
         self.contrast_spin.setValue(self.preprocess_params['contrast_alpha'])
         self.brightness_spin.setValue(self.preprocess_params['brightness_beta'])
         self.blur_spin.setValue(self.preprocess_params['gaussian_blur'])
+        if hasattr(self, 'enhance_check'):
+            self.enhance_check.setChecked(self.preprocess_params['enhance_contrast'])
+        if hasattr(self, 'clahe_clip_spin'):
+            self.clahe_clip_spin.setValue(self.preprocess_params['clahe_clip_limit'])
+        if hasattr(self, 'clahe_grid_spin'):
+            self.clahe_grid_spin.setValue(self.preprocess_params['clahe_grid_size'])
+        if hasattr(self, 'sharpen_check'):
+            self.sharpen_check.setChecked(self.preprocess_params['sharpen'])
+        if hasattr(self, 'sharpen_strength_spin'):
+            self.sharpen_strength_spin.setValue(self.preprocess_params['sharpen_strength'])
+        if hasattr(self, 'upscale_check'):
+            self.upscale_check.setChecked(self.preprocess_params['upscale'])
+        if hasattr(self, 'upscale_factor_spin'):
+            self.upscale_factor_spin.setValue(self.preprocess_params['upscale_factor'])  
+        if hasattr(self, 'upscale_to_size_check'):
+            self.upscale_to_size_check.setChecked(self.preprocess_params['upscale_to_size'])
+        if hasattr(self, 'upscale_target_spin'):
+            self.upscale_target_spin.setValue(self.preprocess_params['upscale_target_size'])
+        if hasattr(self, 'colour_mode_check'):
+            self.colour_mode_check.setChecked(self.preprocess_params['colour_mode'])
+        if hasattr(self, 'bw_mode_check'):
+            self.bw_mode_check.setChecked(self.preprocess_params['bw_mode'])
         self.resize_spin.setValue(self.preprocess_params['resize_factor'])
-        self.enhance_check.setChecked(self.preprocess_params['enhance_contrast'])
+        self.resize_width_spin.setValue(self.preprocess_params['resize_absolute_width'])
+        self.resize_height_spin.setValue(self.preprocess_params['resize_absolute_height'])
+        self.rotation_spin.setValue(self.preprocess_params['rotation_angle'])
+        self.denoise_check.setChecked(self.preprocess_params['denoise'])
+        if hasattr(self, 'morph_open_check'):
+            self.morph_open_check.setChecked(self.preprocess_params['morphology_open'])
+        if hasattr(self, 'morph_close_check'):
+            self.morph_close_check.setChecked(self.preprocess_params['morphology_close'])
+        if hasattr(self, 'bilateral_check'):
+            self.bilateral_check.setChecked(self.preprocess_params['bilateral_filter'])
         
         # OCR controls
         if EASYOCR_AVAILABLE:
@@ -1021,6 +1583,44 @@ class EasyOCRTuningTab(QWidget):
             self.canvas_size_spin.setValue(self.ocr_params['canvas_size'])
             self.mag_ratio_spin.setValue(self.ocr_params['mag_ratio'])
             self.gpu_check.setChecked(self.ocr_params['gpu'])
+            
+            # Extended controls (check if they exist)
+            if hasattr(self, 'x_ths_spin'):
+                self.x_ths_spin.setValue(self.ocr_params['x_ths'])
+            if hasattr(self, 'y_ths_spin'):
+                self.y_ths_spin.setValue(self.ocr_params['y_ths'])
+            if hasattr(self, 'ycenter_ths_spin'):
+                self.ycenter_ths_spin.setValue(self.ocr_params['ycenter_ths'])
+            if hasattr(self, 'slope_ths_spin'):
+                self.slope_ths_spin.setValue(self.ocr_params['slope_ths'])
+            if hasattr(self, 'adjust_contrast_spin'):
+                self.adjust_contrast_spin.setValue(self.ocr_params['adjust_contrast'])
+            if hasattr(self, 'filter_ths_spin'):
+                self.filter_ths_spin.setValue(self.ocr_params['filter_ths'])
+            if hasattr(self, 'workers_spin'):
+                self.workers_spin.setValue(self.ocr_params['workers'])
+            if hasattr(self, 'batch_size_spin'):
+                self.batch_size_spin.setValue(self.ocr_params['batch_size'])
+            if hasattr(self, 'beam_width_spin'):
+                self.beam_width_spin.setValue(self.ocr_params['beamWidth'])
+            if hasattr(self, 'paragraph_check'):
+                self.paragraph_check.setChecked(self.ocr_params['paragraph'])
+            if hasattr(self, 'quantize_check'):
+                self.quantize_check.setChecked(self.ocr_params['quantize'])
+            if hasattr(self, 'verbose_check'):
+                self.verbose_check.setChecked(self.ocr_params['verbose'])
+            if hasattr(self, 'detail_spin'):
+                self.detail_spin.setValue(self.ocr_params['detail'])
+            if hasattr(self, 'allowlist_edit'):
+                self.allowlist_edit.setText(self.ocr_params['allowlist'] or '')
+            if hasattr(self, 'blocklist_edit'):
+                self.blocklist_edit.setText(self.ocr_params['blocklist'] or '')
+            if hasattr(self, 'min_size_spin'):
+                self.min_size_spin.setValue(self.ocr_params['min_size'])
+            if hasattr(self, 'contrast_ths_spin'):
+                self.contrast_ths_spin.setValue(self.ocr_params['contrast_ths'])
+            if hasattr(self, 'add_margin_spin'):
+                self.add_margin_spin.setValue(self.ocr_params['add_margin'])
     
     def _save_parameters_to_config(self):
         """Save current parameters to configuration file."""
@@ -1034,7 +1634,15 @@ class EasyOCRTuningTab(QWidget):
                         'brightness_beta': self.preprocess_params['brightness_beta'],
                         'gaussian_blur': self.preprocess_params['gaussian_blur'],
                         'resize_factor': self.preprocess_params['resize_factor'],
-                        'enhance_contrast': self.preprocess_params['enhance_contrast']
+                        'resize_absolute_width': self.preprocess_params['resize_absolute_width'],
+                        'resize_absolute_height': self.preprocess_params['resize_absolute_height'],
+                        'rotation_angle': self.preprocess_params['rotation_angle'],
+                        'enhance_contrast': self.preprocess_params['enhance_contrast'],
+                        'denoise': self.preprocess_params['denoise'],
+                        'sharpen': self.preprocess_params['sharpen'],
+                        'morphology_open': self.preprocess_params['morphology_open'],
+                        'morphology_close': self.preprocess_params['morphology_close'],
+                        'bilateral_filter': self.preprocess_params['bilateral_filter']
                     }
                 }
             }
@@ -1046,9 +1654,24 @@ class EasyOCRTuningTab(QWidget):
                     'link_threshold': self.ocr_params['link_threshold'],
                     'width_ths': self.ocr_params['width_ths'],
                     'height_ths': self.ocr_params['height_ths'],
+                    'x_ths': self.ocr_params['x_ths'],
+                    'y_ths': self.ocr_params['y_ths'],
+                    'ycenter_ths': self.ocr_params['ycenter_ths'],
+                    'slope_ths': self.ocr_params['slope_ths'],
                     'canvas_size': self.ocr_params['canvas_size'],
                     'mag_ratio': self.ocr_params['mag_ratio'],
-                    'gpu': self.ocr_params['gpu']
+                    'adjust_contrast': self.ocr_params['adjust_contrast'],
+                    'filter_ths': self.ocr_params['filter_ths'],
+                    'workers': self.ocr_params['workers'],
+                    'batch_size': self.ocr_params['batch_size'],
+                    'beamWidth': self.ocr_params['beamWidth'],
+                    'gpu': self.ocr_params['gpu'],
+                    'paragraph': self.ocr_params['paragraph'],
+                    'quantize': self.ocr_params['quantize'],
+                    'verbose': self.ocr_params['verbose'],
+                    'detail': self.ocr_params['detail'],
+                    'allowlist': self.ocr_params['allowlist'],
+                    'blocklist': self.ocr_params['blocklist']
                 }
             
             # Save to user config
