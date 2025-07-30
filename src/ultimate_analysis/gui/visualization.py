@@ -80,6 +80,96 @@ def draw_detections(frame: np.ndarray, detections: List[Dict[str, Any]]) -> np.n
     return vis_frame
 
 
+def draw_tracks_with_player_ids(frame: np.ndarray, tracks: List[Any], 
+                                track_histories: Optional[Dict[int, List[Tuple[int, int]]]] = None,
+                                player_ids: Optional[Dict[int, Tuple[str, Any]]] = None) -> np.ndarray:
+    """Draw tracking bounding boxes, IDs, player jersey numbers, and history trails.
+    
+    Args:
+        frame: Input frame to draw on
+        tracks: List of track objects
+        track_histories: Optional dictionary of track histories
+        player_ids: Optional dictionary mapping track_id -> (jersey_number, details)
+        
+    Returns:
+        Frame with tracking and player ID overlays
+    """
+    if not tracks:
+        return frame
+    
+    vis_frame = frame.copy()
+    
+    for track in tracks:
+        # Get track properties
+        track_id = getattr(track, 'track_id', None)
+        if track_id is None:
+            continue
+            
+        # Get bounding box
+        bbox = None
+        if hasattr(track, 'to_ltrb'):
+            bbox = track.to_ltrb()
+        elif hasattr(track, 'to_tlbr'):
+            bbox = track.to_tlbr()
+        elif hasattr(track, 'bbox'):
+            bbox = track.bbox
+        
+        if bbox is None or len(bbox) != 4:
+            continue
+            
+        x1, y1, x2, y2 = map(int, bbox)
+        
+        # Generate unique color for each track ID
+        color = _get_track_color(track_id)
+        
+        # Draw bounding box with unique track color
+        cv2.rectangle(vis_frame, (x1, y1), (x2, y2), color, 3)
+        
+        # Create track label with player ID if available
+        track_label = f"ID:{track_id}"
+        if player_ids and track_id in player_ids:
+            jersey_number, _ = player_ids[track_id]
+            if jersey_number != "Unknown":
+                track_label = f"ID:{track_id} #{jersey_number}"
+        
+        # Calculate label size and position
+        label_size = cv2.getTextSize(track_label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+        
+        # Draw label background
+        cv2.rectangle(
+            vis_frame,
+            (x1, y1 - label_size[1] - 10),
+            (x1 + label_size[0] + 10, y1),
+            color,
+            -1
+        )
+        
+        # Draw track ID text
+        cv2.putText(
+            vis_frame,
+            track_label,
+            (x1 + 5, y1 - 5),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2
+        )
+        
+        # Draw trajectory history if available
+        if track_histories and track_id in track_histories:
+            history = track_histories[track_id]
+            if len(history) > 1:
+                # Draw trajectory line
+                points = np.array(history, dtype=np.int32)
+                cv2.polylines(vis_frame, [points], False, color, 2)
+                
+                # Draw trajectory points
+                for point in history[-10:]:  # Show last 10 points
+                    cv2.circle(vis_frame, tuple(point), 3, color, -1)
+    
+    return vis_frame
+
+
 def draw_tracks(frame: np.ndarray, tracks: List[Any], track_histories: Optional[Dict[int, List[Tuple[int, int]]]] = None) -> np.ndarray:
     """Draw tracking bounding boxes, IDs, and history trails.
     

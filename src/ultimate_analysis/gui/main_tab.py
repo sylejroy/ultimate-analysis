@@ -7,7 +7,7 @@ playback controls, and processing options.
 import os
 import cv2
 import time
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 
 from PyQt5.QtWidgets import (
@@ -20,9 +20,9 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont
 
 from .video_player import VideoPlayer
-from .visualization import draw_detections, draw_tracks
+from .visualization import draw_detections, draw_tracks, draw_tracks_with_player_ids
 from ..processing import (
-    run_inference, run_tracking, run_player_id, run_field_segmentation,
+    run_inference, run_tracking, run_player_id, run_player_id_on_tracks, run_field_segmentation,
     set_detection_model, set_field_model, set_tracker_type, 
     set_player_id_method, reset_tracker, get_track_histories
 )
@@ -67,6 +67,7 @@ class MainTab(QWidget):
         self.current_detections: List[Dict] = []
         self.current_tracks: List[Any] = []
         self.current_field_results: List[Any] = []
+        self.current_player_ids: Dict[int, Tuple[str, Any]] = {}
         
         # Playback timer
         self.playback_timer = QTimer()
@@ -481,6 +482,7 @@ class MainTab(QWidget):
         self.current_detections = []
         self.current_tracks = []
         self.current_field_results = []
+        self.current_player_ids = {}
         
         # Run inference if enabled
         if self.inference_checkbox.isChecked():
@@ -497,10 +499,11 @@ class MainTab(QWidget):
             print("[MAIN_TAB] Running field segmentation...")
             self.current_field_results = run_field_segmentation(frame)
         
-        # Run player ID if enabled
+        # Run player ID if enabled (requires tracking to be active)
         if self.player_id_checkbox.isChecked() and self.current_tracks:
             print("[MAIN_TAB] Running player identification...")
-            # TODO: Run player ID on tracked objects
+            self.current_player_ids = run_player_id_on_tracks(frame, self.current_tracks)
+            print(f"[MAIN_TAB] Identified {len(self.current_player_ids)} players")
         
         # Apply visualizations
         frame = self._apply_visualizations(frame)
@@ -528,7 +531,12 @@ class MainTab(QWidget):
         if self.current_tracks and self.tracking_checkbox.isChecked():
             # Get track histories for trajectory visualization
             track_histories = get_track_histories()
-            frame = draw_tracks(frame, self.current_tracks, track_histories)
+            
+            # Use player ID visualization if player ID is enabled
+            if self.player_id_checkbox.isChecked() and self.current_player_ids:
+                frame = draw_tracks_with_player_ids(frame, self.current_tracks, track_histories, self.current_player_ids)
+            else:
+                frame = draw_tracks(frame, self.current_tracks, track_histories)
         
         return frame
     
@@ -639,6 +647,10 @@ class MainTab(QWidget):
             # Enable tracking and inference if player ID is enabled
             self.tracking_checkbox.setChecked(True)
             self.inference_checkbox.setChecked(True)
+            
+            # Set player ID method to EasyOCR for jersey number recognition
+            set_player_id_method("easyocr")
+            print("[MAIN_TAB] Player ID method set to EasyOCR for jersey number recognition")
     
     def _on_field_segmentation_toggled(self, checked: bool):
         """Handle field segmentation checkbox toggle."""
