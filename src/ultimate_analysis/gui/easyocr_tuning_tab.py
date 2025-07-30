@@ -340,69 +340,91 @@ class EasyOCRTuningTab(QWidget):
         self.blur_spin.valueChanged.connect(self._on_preprocess_param_changed)
         layout.addRow("Gaussian Blur (ksize):", self.blur_spin)
         
-        # CLAHE enhancement
+        # Contrast Enhancement Section
+        layout.addRow(QLabel("=== Contrast Enhancement ==="))
+        
+        # CLAHE enhancement toggle
         self.enhance_check = QCheckBox()
         self.enhance_check.setChecked(self.preprocess_params['enhance_contrast'])
         self.enhance_check.stateChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("Enhance Contrast (CLAHE):", self.enhance_check)
+        self.enhance_check.stateChanged.connect(self._update_clahe_controls)  # Update control states
+        layout.addRow("Enable CLAHE Enhancement:", self.enhance_check)
         
-        # CLAHE clip limit
+        # CLAHE parameters (indented to show dependency)
         self.clahe_clip_spin = QDoubleSpinBox()
         self.clahe_clip_spin.setRange(1.0, 10.0)
         self.clahe_clip_spin.setSingleStep(0.5)
         self.clahe_clip_spin.setValue(self.preprocess_params['clahe_clip_limit'])
         self.clahe_clip_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("CLAHE Clip Limit:", self.clahe_clip_spin)
+        layout.addRow("  → Clip Limit:", self.clahe_clip_spin)
         
-        # CLAHE grid size
         self.clahe_grid_spin = QSpinBox()
         self.clahe_grid_spin.setRange(2, 16)
         self.clahe_grid_spin.setValue(self.preprocess_params['clahe_grid_size'])
         self.clahe_grid_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("CLAHE Grid Size:", self.clahe_grid_spin)
+        layout.addRow("  → Grid Size:", self.clahe_grid_spin)
         
-        # Sharpening
+        # Denoising Section
+        layout.addRow(QLabel("=== Denoising ==="))
+        
+        # Denoising toggle
+        self.denoise_check = QCheckBox()
+        self.denoise_check.setChecked(self.preprocess_params['denoise'])
+        self.denoise_check.stateChanged.connect(self._on_preprocess_param_changed)
+        layout.addRow("Enable Denoising:", self.denoise_check)
+        
+        # Sharpening Section
+        layout.addRow(QLabel("=== Sharpening ==="))
+        
+        # Sharpening toggle
         self.sharpen_check = QCheckBox()
         self.sharpen_check.setChecked(self.preprocess_params['sharpen'])
         self.sharpen_check.stateChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("Apply Sharpening:", self.sharpen_check)
+        self.sharpen_check.stateChanged.connect(self._update_sharpen_controls)  # Update control states
+        layout.addRow("Enable Sharpening:", self.sharpen_check)
         
-        # Sharpen strength
+        # Sharpen strength (indented to show dependency)
         self.sharpen_strength_spin = QDoubleSpinBox()
         self.sharpen_strength_spin.setRange(0.01, 1.0)
         self.sharpen_strength_spin.setSingleStep(0.01)
         self.sharpen_strength_spin.setDecimals(3)
         self.sharpen_strength_spin.setValue(self.preprocess_params['sharpen_strength'])
         self.sharpen_strength_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("Sharpen Strength:", self.sharpen_strength_spin)
+        layout.addRow("  → Strength:", self.sharpen_strength_spin)
         
-        # Upscaling
+        # Upscaling Section
+        layout.addRow(QLabel("=== Upscaling ==="))
+        
+        # Upscaling toggle
         self.upscale_check = QCheckBox()
         self.upscale_check.setChecked(self.preprocess_params['upscale'])
         self.upscale_check.stateChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("Apply Upscaling:", self.upscale_check)
+        self.upscale_check.stateChanged.connect(self._update_upscale_controls)  # Update control states
+        layout.addRow("Enable Upscaling:", self.upscale_check)
         
-        # Upscale factor
+        # Upscale parameters (indented to show dependency)
         self.upscale_factor_spin = QDoubleSpinBox()
         self.upscale_factor_spin.setRange(1.0, 8.0)
         self.upscale_factor_spin.setSingleStep(0.5)
         self.upscale_factor_spin.setValue(self.preprocess_params['upscale_factor'])
         self.upscale_factor_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("Upscale Factor:", self.upscale_factor_spin)
+        layout.addRow("  → Factor:", self.upscale_factor_spin)
         
-        # Upscale to fixed size
         self.upscale_to_size_check = QCheckBox()
         self.upscale_to_size_check.setChecked(self.preprocess_params['upscale_to_size'])
         self.upscale_to_size_check.stateChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("Upscale to Size:", self.upscale_to_size_check)
+        self.upscale_to_size_check.stateChanged.connect(self._update_upscale_controls)  # Update target size control
+        layout.addRow("  → Scale to Fixed Size:", self.upscale_to_size_check)
         
-        # Upscale target size
         self.upscale_target_spin = QSpinBox()
         self.upscale_target_spin.setRange(64, 1024)
         self.upscale_target_spin.setSingleStep(32)
         self.upscale_target_spin.setValue(self.preprocess_params['upscale_target_size'])
         self.upscale_target_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("Target Size (px):", self.upscale_target_spin)
+        layout.addRow("    → Target Size (px):", self.upscale_target_spin)
+        
+        # Color Processing Section
+        layout.addRow(QLabel("=== Color Processing ==="))
         
         # Color mode processing
         self.colour_mode_check = QCheckBox()
@@ -415,6 +437,9 @@ class EasyOCRTuningTab(QWidget):
         self.bw_mode_check.setChecked(self.preprocess_params['bw_mode'])
         self.bw_mode_check.stateChanged.connect(self._on_preprocess_param_changed)
         layout.addRow("B&W Mode:", self.bw_mode_check)
+        
+        # Size Adjustment Section
+        layout.addRow(QLabel("=== Size Adjustment ==="))
         
         # Resize factor
         self.resize_spin = QDoubleSpinBox()
@@ -442,23 +467,10 @@ class EasyOCRTuningTab(QWidget):
         self.resize_height_spin.setToolTip("Absolute height in pixels (0 = use factor)")
         layout.addRow("Absolute Height (px):", self.resize_height_spin)
         
-        # CLAHE enhancement
-        self.enhance_check = QCheckBox()
-        self.enhance_check.setChecked(self.preprocess_params['enhance_contrast'])
-        self.enhance_check.stateChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("Enhance Contrast:", self.enhance_check)
-        
-        # Denoising
-        self.denoise_check = QCheckBox()
-        self.denoise_check.setChecked(self.preprocess_params['denoise'])
-        self.denoise_check.stateChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("Apply Denoising:", self.denoise_check)
-        
-        # Sharpening
-        self.sharpen_check = QCheckBox()
-        self.sharpen_check.setChecked(self.preprocess_params['sharpen'])
-        self.sharpen_check.stateChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("Apply Sharpening:", self.sharpen_check)
+        # Initialize control states based on checkboxes
+        self._update_clahe_controls()
+        self._update_sharpen_controls()
+        self._update_upscale_controls()
     
     def _create_ocr_controls(self, layout: QFormLayout):
         """Create EasyOCR parameter controls."""
@@ -872,6 +884,24 @@ class EasyOCRTuningTab(QWidget):
             self.ocr_params['allowlist'] = allowlist_text if allowlist_text else None
         
         print(f"[EASYOCR_TUNING] EasyOCR parameters updated")
+    
+    def _update_clahe_controls(self):
+        """Enable/disable CLAHE controls based on enhance_contrast checkbox."""
+        enabled = self.enhance_check.isChecked()
+        self.clahe_clip_spin.setEnabled(enabled)
+        self.clahe_grid_spin.setEnabled(enabled)
+    
+    def _update_sharpen_controls(self):
+        """Enable/disable sharpen controls based on sharpen checkbox."""
+        enabled = self.sharpen_check.isChecked()
+        self.sharpen_strength_spin.setEnabled(enabled)
+    
+    def _update_upscale_controls(self):
+        """Enable/disable upscale controls based on upscale checkbox."""
+        enabled = self.upscale_check.isChecked()
+        self.upscale_factor_spin.setEnabled(enabled)
+        self.upscale_to_size_check.setEnabled(enabled)
+        self.upscale_target_spin.setEnabled(enabled and self.upscale_to_size_check.isChecked())
     
     # Core Processing Methods
     def _run_easyocr_analysis(self):
