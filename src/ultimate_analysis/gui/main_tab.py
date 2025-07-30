@@ -26,6 +26,7 @@ from ..processing import (
     set_detection_model, set_field_model, set_tracker_type, 
     set_player_id_method, reset_tracker, get_track_histories
 )
+from ..processing.field_segmentation import visualize_segmentation
 from ..config.settings import get_setting
 from ..constants import SHORTCUTS, DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS
 
@@ -65,6 +66,7 @@ class MainTab(QWidget):
         # Processing state
         self.current_detections: List[Dict] = []
         self.current_tracks: List[Any] = []
+        self.current_field_results: List[Any] = []
         
         # Playback timer
         self.playback_timer = QTimer()
@@ -478,6 +480,7 @@ class MainTab(QWidget):
         # Reset detection/tracking results
         self.current_detections = []
         self.current_tracks = []
+        self.current_field_results = []
         
         # Run inference if enabled
         if self.inference_checkbox.isChecked():
@@ -492,8 +495,7 @@ class MainTab(QWidget):
         # Run field segmentation if enabled
         if self.field_segmentation_checkbox.isChecked():
             print("[MAIN_TAB] Running field segmentation...")
-            field_results = run_field_segmentation(frame)
-            # TODO: Apply field segmentation visualization
+            self.current_field_results = run_field_segmentation(frame)
         
         # Run player ID if enabled
         if self.player_id_checkbox.isChecked() and self.current_tracks:
@@ -514,6 +516,10 @@ class MainTab(QWidget):
         Returns:
             Frame with visualizations applied
         """
+        # Apply field segmentation overlay first (as background)
+        if self.current_field_results and self.field_segmentation_checkbox.isChecked():
+            frame = visualize_segmentation(frame, self.current_field_results, alpha=0.3)
+        
         # Show detections only if tracking is NOT enabled (to avoid visual clutter)
         if self.current_detections and not self.tracking_checkbox.isChecked():
             frame = draw_detections(frame, self.current_detections)
@@ -637,6 +643,16 @@ class MainTab(QWidget):
     def _on_field_segmentation_toggled(self, checked: bool):
         """Handle field segmentation checkbox toggle."""
         print(f"[MAIN_TAB] Field segmentation {'enabled' if checked else 'disabled'}")
+        
+        if checked:
+            # Ensure field segmentation model is loaded with the default path
+            default_model_path = Path(get_setting("models.base_path", DEFAULT_PATHS['MODELS'])) / "segmentation/field_finder_yolo11m-seg/segmentation_finetune/weights/best.pt"
+            if default_model_path.exists():
+                set_field_model(str(default_model_path))
+                print(f"[MAIN_TAB] Field segmentation model set to: {default_model_path}")
+            else:
+                print(f"[MAIN_TAB] Default field segmentation model not found at: {default_model_path}")
+                print("[MAIN_TAB] Will use fallback models or mock results")
     
     # Model selection event handlers
     def _on_detection_model_changed(self, model_path: str):

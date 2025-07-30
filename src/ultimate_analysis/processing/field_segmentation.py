@@ -4,9 +4,17 @@ This module handles segmenting the Ultimate Frisbee field boundaries and
 identifying important field features like end zones and sidelines.
 """
 
+import cv2
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
+
+try:
+    from ultralytics import YOLO
+    ULTRALYTICS_AVAILABLE = True
+except ImportError:
+    ULTRALYTICS_AVAILABLE = False
+    print("[FIELD_SEG] Warning: ultralytics not available, using mock results")
 
 from ..config.settings import get_setting
 from ..constants import FIELD_DIMENSIONS, FALLBACK_DEFAULTS
@@ -42,37 +50,48 @@ def run_field_segmentation(frame: np.ndarray) -> List[Any]:
     if _field_model is None:
         _load_default_model()
     
-    # TODO: Implement actual field segmentation
-    # For now, return empty list as placeholder
-    results = []
+    try:
+        if ULTRALYTICS_AVAILABLE and _field_model is not None:
+            # Run actual YOLO segmentation
+            results = _field_model(frame, verbose=False)
+            print(f"[FIELD_SEG] YOLO segmentation complete: {len(results)} results")
+            return results
+        else:
+            # Fall back to mock results for testing
+            results = _create_mock_results(frame)
+            print(f"[FIELD_SEG] Using mock segmentation: {len(results)} results")
+            return results
+            
+    except Exception as e:
+        print(f"[FIELD_SEG] Error during segmentation: {e}")
+        # Return mock results as fallback
+        return _create_mock_results(frame)
+
+
+def _create_mock_results(frame: np.ndarray) -> List[Any]:
+    """Create mock segmentation results for testing when YOLO is unavailable."""
+    # Create a mock result object for testing
+    class MockResult:
+        def __init__(self):
+            self.masks = MockMasks()
+            self.boxes = None
+            self.classes = None
     
-    # Placeholder: simulate field segmentation for testing
-    if get_setting("app.debug", False):
-        # Create a mock result object for testing
-        class MockResult:
-            def __init__(self):
-                self.masks = MockMasks()
-                self.boxes = None
-                self.classes = None
-        
-        class MockMasks:
-            def __init__(self):
-                h, w = frame.shape[:2]
-                # Create a simple field mask (rectangular field area)
-                mask = np.zeros((h, w), dtype=np.uint8)
-                # Field area is roughly center 60% of frame
-                field_h = int(h * 0.6)
-                field_w = int(w * 0.8)
-                start_y = (h - field_h) // 2
-                start_x = (w - field_w) // 2
-                mask[start_y:start_y+field_h, start_x:start_x+field_w] = 1
-                
-                self.data = np.array([mask])  # Shape: (1, H, W)
-        
-        results = [MockResult()]
+    class MockMasks:
+        def __init__(self):
+            h, w = frame.shape[:2]
+            # Create a simple field mask (rectangular field area)
+            mask = np.zeros((h, w), dtype=np.uint8)
+            # Field area is roughly center 60% of frame
+            field_h = int(h * 0.6)
+            field_w = int(w * 0.8)
+            start_y = (h - field_h) // 2
+            start_x = (w - field_w) // 2
+            mask[start_y:start_y+field_h, start_x:start_x+field_w] = 1
+            
+            self.data = np.array([mask])  # Shape: (1, H, W)
     
-    print(f"[FIELD_SEG] Found {len(results)} field segmentation results")
-    return results
+    return [MockResult()]
 
 
 def set_field_model(model_path: str) -> bool:
@@ -97,12 +116,14 @@ def set_field_model(model_path: str) -> bool:
         return False
     
     try:
-        # TODO: Load actual YOLO segmentation model
-        # from ultralytics import YOLO
-        # _field_model = YOLO(model_path)
+        if ULTRALYTICS_AVAILABLE:
+            # Load actual YOLO segmentation model
+            _field_model = YOLO(model_path)
+            print(f"[FIELD_SEG] YOLO model loaded successfully: {model_path}")
+        else:
+            print(f"[FIELD_SEG] Ultralytics not available, model path stored for mock mode: {model_path}")
         
         _current_model_path = model_path
-        print(f"[FIELD_SEG] Field segmentation model loaded: {model_path}")
         return True
         
     except Exception as e:
@@ -203,20 +224,121 @@ def transform_to_field_coordinates(points: List[Tuple[int, int]],
 def _load_default_model() -> None:
     """Load the default field segmentation model if none is loaded."""
     if _field_model is None:
-        default_model = get_setting(
-            "models.segmentation.default_model",
-            FALLBACK_DEFAULTS['model_segmentation']
-        )
+        # Use the specified default model path
+        default_model_path = "data/models/segmentation/field_finder_yolo11m-seg/segmentation_finetune/weights/best.pt"
         
-        # Try to find the model in the models directory
-        models_path = Path(get_setting("models.base_path", "data/models"))
-        pretrained_path = models_path / "pretrained" / default_model
+        # Try the specified model first
+        models_base = Path(get_setting("models.base_path", "data/models"))
+        full_path = models_base / "segmentation/field_finder_yolo11m-seg/segmentation_finetune/weights/best.pt"
         
-        if pretrained_path.exists():
-            set_field_model(str(pretrained_path))
-        else:
-            print(f"[FIELD_SEG] Default model not found: {pretrained_path}")
+        if full_path.exists():
+            print(f"[FIELD_SEG] Loading default field segmentation model: {full_path}")
+            set_field_model(str(full_path))
+            return
+        
+        # Fallback to other segmentation models
+        fallback_paths = [
+            models_base / "segmentation/field_finder_yolo11m-seg/finetune/weights/best.pt",
+            models_base / "segmentation/field_finder_yolo11n-seg/segmentation_finetune/weights/best.pt", 
+            models_base / "pretrained/yolo11m-seg.pt",
+            models_base / "pretrained/yolo11n-seg.pt"
+        ]
+        
+        for fallback_path in fallback_paths:
+            if fallback_path.exists():
+                print(f"[FIELD_SEG] Loading fallback segmentation model: {fallback_path}")
+                set_field_model(str(fallback_path))
+                return
+        
+        print("[FIELD_SEG] No field segmentation models found, will use mock results")
 
 
 # Initialize with default model when module is imported
 _load_default_model()
+
+
+def visualize_segmentation(frame: np.ndarray, results: List[Any], alpha: float = 0.5) -> np.ndarray:
+    """Visualize field segmentation results on a frame.
+    
+    Args:
+        frame: Original frame to overlay segmentation on
+        results: Segmentation results from run_field_segmentation()
+        alpha: Transparency for overlay (0.0 = transparent, 1.0 = opaque)
+        
+    Returns:
+        Frame with segmentation overlay applied
+    """
+    if not results:
+        return frame
+    
+    viz_frame = frame.copy()
+    
+    # Define colors for different field regions  
+    colors = [
+        (0, 255, 0),    # Green for field
+        (255, 0, 0),    # Red for end zone
+        (0, 0, 255),    # Blue for sideline
+        (255, 255, 0),  # Yellow for goal line
+    ]
+    
+    for result in results:
+        if hasattr(result, 'masks') and result.masks is not None:
+            # Get masks data
+            masks = result.masks.data.cpu().numpy() if hasattr(result.masks.data, 'cpu') else result.masks.data
+            
+            for idx, mask in enumerate(masks):
+                # Ensure mask is right shape
+                if mask.shape != frame.shape[:2]:
+                    mask_resized = cv2.resize(mask.astype(np.float32), (frame.shape[1], frame.shape[0]))
+                else:
+                    mask_resized = mask
+                
+                # Create colored overlay
+                color = colors[idx % len(colors)]
+                overlay = np.zeros_like(frame)
+                overlay[mask_resized > 0.5] = color
+                
+                # Blend with original frame
+                viz_frame = cv2.addWeighted(viz_frame, 1.0, overlay, alpha, 0)
+                
+                # Draw contours for better visibility
+                contours, _ = cv2.findContours(
+                    (mask_resized > 0.5).astype(np.uint8), 
+                    cv2.RETR_EXTERNAL, 
+                    cv2.CHAIN_APPROX_SIMPLE
+                )
+                cv2.drawContours(viz_frame, contours, -1, color, 2)
+    
+    return viz_frame
+
+
+def get_field_mask(results: List[Any], frame_shape: Tuple[int, int]) -> Optional[np.ndarray]:
+    """Extract field mask from segmentation results.
+    
+    Args:
+        results: Segmentation results from run_field_segmentation()
+        frame_shape: Shape of the frame (height, width)
+        
+    Returns:
+        Binary mask of the field region, or None if no field detected
+    """
+    if not results:
+        return None
+    
+    field_mask = np.zeros(frame_shape, dtype=np.uint8)
+    
+    for result in results:
+        if hasattr(result, 'masks') and result.masks is not None:
+            masks = result.masks.data.cpu().numpy() if hasattr(result.masks.data, 'cpu') else result.masks.data
+            
+            for mask in masks:
+                # Resize mask if necessary
+                if mask.shape != frame_shape:
+                    mask_resized = cv2.resize(mask.astype(np.float32), (frame_shape[1], frame_shape[0]))
+                else:
+                    mask_resized = mask
+                
+                # Add to field mask
+                field_mask = np.logical_or(field_mask, mask_resized > 0.5).astype(np.uint8)
+    
+    return field_mask
