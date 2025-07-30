@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 import yaml
 import random
+import traceback
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 
@@ -217,7 +218,7 @@ class EasyOCRTuningTab(QWidget):
         
         save_button = QPushButton("Save to Config")
         save_button.clicked.connect(self._save_parameters_to_config)
-        save_button.setToolTip("Save current parameters to default.yaml")
+        save_button.setToolTip("Save current parameters to user.yaml")
         button_layout.addWidget(save_button)
         
         layout.addLayout(button_layout)
@@ -297,6 +298,8 @@ class EasyOCRTuningTab(QWidget):
         self.crops_container = QWidget()
         self.crops_container.setStyleSheet("QWidget { background-color: #1a1a1a; }")  # Dark background
         self.crops_layout = QGridLayout()
+        self.crops_layout.setSpacing(8)  # Increased spacing for larger widgets
+        self.crops_layout.setContentsMargins(8, 8, 8, 8)  # Increased margins
         self.crops_container.setLayout(self.crops_layout)
         self.crops_scroll.setWidget(self.crops_container)
         
@@ -760,7 +763,7 @@ class EasyOCRTuningTab(QWidget):
         
         print(f"[EASYOCR_TUNING] Found {len(model_files)} detection models")
     
-    # Event Handlers
+    # ========== EVENT HANDLERS ==========
     def _on_video_selection_changed(self, row: int):
         """Handle video selection change."""
         if 0 <= row < len(self.video_files):
@@ -903,11 +906,11 @@ class EasyOCRTuningTab(QWidget):
         self.upscale_to_size_check.setEnabled(enabled)
         self.upscale_target_spin.setEnabled(enabled and self.upscale_to_size_check.isChecked())
     
-    # Core Processing Methods
+    # ========== CORE PROCESSING METHODS ==========
     def _run_easyocr_analysis(self):
         """Run combined inference and EasyOCR analysis."""
         if self.current_frame is None:
-            self.results_text.setText("No frame loaded")
+            print("[EASYOCR_TUNING] No frame loaded")
             return
         
         try:
@@ -950,7 +953,6 @@ class EasyOCRTuningTab(QWidget):
             self._clear_crops_display()
             error_msg = f"Analysis error: {str(e)}"
             print(f"[EASYOCR_TUNING] {error_msg}")
-            import traceback
             traceback.print_exc()
     
     def _extract_crops_from_detections(self):
@@ -1181,10 +1183,9 @@ class EasyOCRTuningTab(QWidget):
             self._clear_crops_display()
             error_msg = f"EasyOCR error: {str(e)}"
             print(f"[EASYOCR_TUNING] {error_msg}")
-            import traceback
             traceback.print_exc()
     
-    # Visualization Methods
+    # ========== VISUALIZATION METHODS ==========
     def _display_frame(self, frame: np.ndarray):
         """Display a frame in the video label."""
         if frame is None:
@@ -1241,8 +1242,8 @@ class EasyOCRTuningTab(QWidget):
         if not self.current_crops or not results:
             return
         
-        # Calculate grid layout (max 4 columns)
-        max_cols = 4
+        # Calculate grid layout (max 5 columns for optimal space usage with larger widgets)
+        max_cols = 5
         num_crops = len(self.current_crops)
         cols = min(num_crops, max_cols)
         rows = (num_crops + cols - 1) // cols
@@ -1262,19 +1263,22 @@ class EasyOCRTuningTab(QWidget):
         widget = QWidget()
         widget.setStyleSheet("QWidget { background-color: #2a2a2a; }")  # Dark background
         layout = QVBoxLayout()
-        layout.setSpacing(2)
+        layout.setSpacing(2)  # Increased spacing for larger layout
         
-        # Crop image display
+        # Crop image display - increased size to fill more space
         crop_label = QLabel()
         crop_label.setAlignment(Qt.AlignCenter)
-        crop_label.setFixedSize(120, 80)
+        crop_label.setFixedSize(160, 120)  # Increased from 100x60 to 160x120
         crop_label.setStyleSheet("border: 1px solid #555; background-color: #2a2a2a;")
         
-        # Convert processed crop to QPixmap
+        # Convert processed crop to QPixmap with OCR highlights
         processed_crop = crop_data['processed_crop']
         if processed_crop is not None and processed_crop.size > 0:
+            # Create annotated version of the crop with OCR detections highlighted
+            annotated_crop = self._draw_ocr_on_crop(processed_crop.copy(), result)
+            
             # Convert BGR to RGB
-            rgb_crop = cv2.cvtColor(processed_crop, cv2.COLOR_BGR2RGB)
+            rgb_crop = cv2.cvtColor(annotated_crop, cv2.COLOR_BGR2RGB)
             height, width, channel = rgb_crop.shape
             bytes_per_line = 3 * width
             q_image = QImage(rgb_crop.data, width, height, bytes_per_line, QImage.Format_RGB888)
@@ -1312,7 +1316,7 @@ class EasyOCRTuningTab(QWidget):
             result_text = "No text"
             conf_text = "0.000"
         
-        # Result label
+        # Result label - increased size for better visibility
         result_label = QLabel(result_text)
         result_label.setAlignment(Qt.AlignCenter)
         result_label.setStyleSheet(f"""
@@ -1328,7 +1332,7 @@ class EasyOCRTuningTab(QWidget):
         """)
         layout.addWidget(result_label)
         
-        # Confidence label
+        # Confidence label - increased size
         conf_label = QLabel(f"Conf: {conf_text}")
         conf_label.setAlignment(Qt.AlignCenter)
         conf_label.setStyleSheet("""
@@ -1339,7 +1343,7 @@ class EasyOCRTuningTab(QWidget):
         """)
         layout.addWidget(conf_label)
         
-        # Crop number label
+        # Crop number label - increased size
         num_label = QLabel(f"Crop {crop_num}")
         num_label.setAlignment(Qt.AlignCenter)
         num_label.setStyleSheet("""
@@ -1351,8 +1355,51 @@ class EasyOCRTuningTab(QWidget):
         layout.addWidget(num_label)
         
         widget.setLayout(layout)
-        widget.setFixedSize(130, 150)
+        widget.setFixedSize(170, 180)  # Increased from 110x120 to 170x180
         return widget
+    
+    def _draw_ocr_on_crop(self, crop_image: np.ndarray, result: Dict) -> np.ndarray:
+        """Draw OCR detection boxes and text on the crop image."""
+        if 'ocr_results' not in result or not result['ocr_results']:
+            return crop_image
+        
+        # Get image dimensions
+        img_height, img_width = crop_image.shape[:2]
+        
+        # Draw each OCR detection
+        for bbox, text, confidence in result['ocr_results']:
+            if confidence < 0.1:  # Skip very low confidence detections
+                continue
+                
+            # Convert bbox coordinates (EasyOCR returns normalized coordinates)
+            if isinstance(bbox[0], (list, tuple)):
+                # Polygon format: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+                points = np.array(bbox, dtype=np.int32)
+                points[:, 0] = np.clip(points[:, 0], 0, img_width - 1)
+                points[:, 1] = np.clip(points[:, 1], 0, img_height - 1)
+                
+                # Draw polygon outline
+                color = (0, 255, 0) if confidence > 0.5 else (0, 165, 255)  # Green for high conf, orange for low
+                cv2.polylines(crop_image, [points], True, color, 2)  # Increased thickness from 1 to 2
+                
+                # Fill polygon with semi-transparent overlay
+                overlay = crop_image.copy()
+                cv2.fillPoly(overlay, [points], color)
+                cv2.addWeighted(crop_image, 0.8, overlay, 0.2, 0, crop_image)
+                
+                # Draw text near the detection
+                if text.strip() and any(c.isdigit() for c in text):  # Only show if contains digits
+                    text_pos = (int(np.min(points[:, 0])), int(np.min(points[:, 1]) - 3))
+                    text_pos = (max(0, text_pos[0]), max(12, text_pos[1]))
+                    
+                    # Draw text background - increased font size
+                    text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]  # Increased from 0.3 to 0.5
+                    cv2.rectangle(crop_image, text_pos, 
+                                (text_pos[0] + text_size[0], text_pos[1] - text_size[1] - 3), 
+                                color, -1)
+                    cv2.putText(crop_image, text, text_pos, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)  # Increased from 0.3 to 0.5
+        
+        return crop_image
     
     def _clear_crops_display(self):
         """Clear all crop displays from the grid."""
@@ -1392,7 +1439,7 @@ class EasyOCRTuningTab(QWidget):
         
         return frame
     
-    # Configuration Methods
+    # ========== CONFIGURATION METHODS ==========
     def _load_parameters_from_config(self):
         """Load parameters from configuration."""
         try:
@@ -1490,12 +1537,8 @@ class EasyOCRTuningTab(QWidget):
             print("[EASYOCR_TUNING] Parameters loaded from configuration")
         except Exception as e:
             print(f"[EASYOCR_TUNING] Error loading parameters from config: {e}")
-            import traceback
             traceback.print_exc()
             # Continue with default values if config loading fails
-            
-        except Exception as e:
-            print(f"[EASYOCR_TUNING] Error loading parameters: {e}")
     
     def _load_user_config(self) -> Dict[str, Any]:
         """Load user.yaml configuration if it exists.
@@ -1766,7 +1809,22 @@ class EasyOCRTuningTab(QWidget):
     def _save_parameters_to_config(self):
         """Save current parameters to configuration file."""
         try:
-            # Create config updates
+            # Find project root and construct absolute path to user.yaml
+            current_dir = Path(__file__).parent
+            project_root = None
+            
+            for parent in current_dir.parents:
+                if (parent / "configs").exists():
+                    project_root = parent
+                    break
+            
+            if project_root is None:
+                print("[EASYOCR_TUNING] Error: Could not find project root with configs directory")
+                return
+            
+            config_path = project_root / "configs" / "user.yaml"
+            
+            # Create config updates with all parameters
             config_updates = {
                 'player_id': {
                     'preprocessing': {
@@ -1778,8 +1836,17 @@ class EasyOCRTuningTab(QWidget):
                         'resize_absolute_width': self.preprocess_params['resize_absolute_width'],
                         'resize_absolute_height': self.preprocess_params['resize_absolute_height'],
                         'enhance_contrast': self.preprocess_params['enhance_contrast'],
+                        'clahe_clip_limit': self.preprocess_params['clahe_clip_limit'],
+                        'clahe_grid_size': self.preprocess_params['clahe_grid_size'],
                         'denoise': self.preprocess_params['denoise'],
-                        'sharpen': self.preprocess_params['sharpen']
+                        'sharpen': self.preprocess_params['sharpen'],
+                        'sharpen_strength': self.preprocess_params['sharpen_strength'],
+                        'upscale': self.preprocess_params['upscale'],
+                        'upscale_factor': self.preprocess_params['upscale_factor'],
+                        'upscale_to_size': self.preprocess_params['upscale_to_size'],
+                        'upscale_target_size': self.preprocess_params['upscale_target_size'],
+                        'colour_mode': self.preprocess_params['colour_mode'],
+                        'bw_mode': self.preprocess_params['bw_mode']
                     }
                 }
             }
@@ -1808,28 +1875,37 @@ class EasyOCRTuningTab(QWidget):
                     'allowlist': self.ocr_params['allowlist']
                 }
             
-            # Save to user config
-            config_path = Path('configs') / 'user.yaml'
+            # Ensure configs directory exists
             config_path.parent.mkdir(exist_ok=True)
             
             # Load existing config or create new
+            existing_config = {}
             if config_path.exists():
-                with open(config_path, 'r') as f:
-                    existing_config = yaml.safe_load(f) or {}
-            else:
-                existing_config = {}
+                try:
+                    with open(config_path, 'r', encoding='utf-8') as f:
+                        existing_config = yaml.safe_load(f) or {}
+                except Exception as e:
+                    print(f"[EASYOCR_TUNING] Warning: Could not read existing config: {e}")
+                    existing_config = {}
             
             # Merge updates
             self._deep_update(existing_config, config_updates)
             
             # Save updated config
-            with open(config_path, 'w') as f:
+            with open(config_path, 'w', encoding='utf-8') as f:
                 yaml.dump(existing_config, f, default_flow_style=False, indent=2)
             
-            print(f"[EASYOCR_TUNING] Parameters saved to {config_path}")
+            print(f"[EASYOCR_TUNING] Parameters saved successfully to {config_path}")
+            print(f"[EASYOCR_TUNING]   - Preprocessing parameters: {len(config_updates['player_id']['preprocessing'])} saved")
+            if EASYOCR_AVAILABLE and 'easyocr' in config_updates['player_id']:
+                print(f"[EASYOCR_TUNING]   - EasyOCR parameters: {len(config_updates['player_id']['easyocr'])} saved")
+            
+            # Optional: Add visual feedback to user (you could replace this with a status bar message)
+            # For now, console output should be sufficient for debugging
             
         except Exception as e:
-            print(f"[EASYOCR_TUNING] Error saving parameters: {e}")
+            print(f"[EASYOCR_TUNING] Error saving parameters to config: {e}")
+            traceback.print_exc()
     
     def _deep_update(self, base_dict: Dict, update_dict: Dict):
         """Recursively update nested dictionaries."""
