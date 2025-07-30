@@ -22,9 +22,9 @@ from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont
 from .video_player import VideoPlayer
 from .visualization import draw_detections, draw_tracks, draw_tracks_with_player_ids
 from ..processing import (
-    run_inference, run_tracking, run_player_id, run_player_id_on_tracks, run_field_segmentation,
+    run_inference, run_tracking, run_player_id_on_tracks, run_field_segmentation,
     set_detection_model, set_field_model, set_tracker_type, 
-    set_player_id_method, reset_tracker, get_track_histories
+    reset_tracker, get_track_histories
 )
 from ..processing.field_segmentation import visualize_segmentation
 from ..config.settings import get_setting
@@ -184,7 +184,7 @@ class MainTab(QWidget):
         
         # Player ID method dropdown
         self.player_id_method_combo = QComboBox()
-        self.player_id_method_combo.addItems(["YOLO", "EasyOCR"])
+        self.player_id_method_combo.addItems(["EasyOCR"])
         self.player_id_method_combo.currentTextChanged.connect(self._on_player_id_method_changed)
         models_layout.addRow("Player ID Method:", self.player_id_method_combo)
         
@@ -648,9 +648,7 @@ class MainTab(QWidget):
             self.tracking_checkbox.setChecked(True)
             self.inference_checkbox.setChecked(True)
             
-            # Set player ID method to EasyOCR for jersey number recognition
-            set_player_id_method("easyocr")
-            print("[MAIN_TAB] Player ID method set to EasyOCR for jersey number recognition")
+            print("[MAIN_TAB] Player ID using EasyOCR for jersey number recognition")
     
     def _on_field_segmentation_toggled(self, checked: bool):
         """Handle field segmentation checkbox toggle."""
@@ -681,10 +679,8 @@ class MainTab(QWidget):
             print(f"[MAIN_TAB] Tracking method changed to: {method}")
     
     def _on_player_id_method_changed(self, method: str):
-        """Handle player ID method change."""
-        if method:
-            set_player_id_method(method.lower())
-            print(f"[MAIN_TAB] Player ID method changed to: {method}")
+        """Handle player ID method change. Only EasyOCR is supported."""
+        print(f"[MAIN_TAB] Player ID method: {method} (EasyOCR only)")
     
     def _on_field_model_changed(self, model_path: str):
         """Handle field model change."""

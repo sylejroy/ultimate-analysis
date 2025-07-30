@@ -83,7 +83,7 @@ def draw_detections(frame: np.ndarray, detections: List[Dict[str, Any]]) -> np.n
 def draw_tracks_with_player_ids(frame: np.ndarray, tracks: List[Any], 
                                 track_histories: Optional[Dict[int, List[Tuple[int, int]]]] = None,
                                 player_ids: Optional[Dict[int, Tuple[str, Any]]] = None) -> np.ndarray:
-    """Draw tracking bounding boxes, IDs, player jersey numbers, and history trails.
+    """Draw tracking bounding boxes with player jersey numbers and confidence.
     
     Args:
         frame: Input frame to draw on
@@ -122,38 +122,141 @@ def draw_tracks_with_player_ids(frame: np.ndarray, tracks: List[Any],
         # Generate unique color for each track ID
         color = _get_track_color(track_id)
         
-        # Draw bounding box with unique track color
-        cv2.rectangle(vis_frame, (x1, y1), (x2, y2), color, 3)
+        # Draw thinner bounding box (thickness 1 instead of 3)
+        cv2.rectangle(vis_frame, (x1, y1), (x2, y2), color, 1)
         
-        # Create track label with player ID if available
-        track_label = f"ID:{track_id}"
+        # Handle player ID display
         if player_ids and track_id in player_ids:
-            jersey_number, _ = player_ids[track_id]
+            jersey_number, details = player_ids[track_id]
+            
             if jersey_number != "Unknown":
-                track_label = f"ID:{track_id} #{jersey_number}"
-        
-        # Calculate label size and position
-        label_size = cv2.getTextSize(track_label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
-        
-        # Draw label background
-        cv2.rectangle(
-            vis_frame,
-            (x1, y1 - label_size[1] - 10),
-            (x1 + label_size[0] + 10, y1),
-            color,
-            -1
-        )
-        
-        # Draw track ID text
-        cv2.putText(
-            vis_frame,
-            track_label,
-            (x1 + 5, y1 - 5),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (255, 255, 255),
-            2
-        )
+                # Get confidence if available
+                confidence = 0.0
+                if isinstance(details, dict) and 'confidence' in details:
+                    confidence = details['confidence']
+                
+                # Create jersey number label with confidence
+                jersey_label = f"#{jersey_number} ({confidence:.2f})"
+                
+                # Calculate label size and position
+                label_size = cv2.getTextSize(jersey_label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+                
+                # Draw label background
+                cv2.rectangle(
+                    vis_frame,
+                    (x1, y1 - label_size[1] - 10),
+                    (x1 + label_size[0] + 10, y1),
+                    color,
+                    -1
+                )
+                
+                # Draw jersey number and confidence text
+                cv2.putText(
+                    vis_frame,
+                    jersey_label,
+                    (x1 + 5, y1 - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (255, 255, 255),
+                    2
+                )
+                
+                # Draw detection regions if OCR results are available
+                if isinstance(details, dict) and 'ocr_results' in details:
+                    ocr_results = details['ocr_results']
+                    if ocr_results:
+                        # Get transformation information
+                        original_width = details.get('original_width', x2 - x1)
+                        original_height = details.get('original_height', y2 - y1)
+                        crop_width = details.get('crop_width', original_width)
+                        crop_height = details.get('crop_height', original_height)
+                        final_width = details.get('final_width', crop_width)
+                        final_height = details.get('final_height', crop_height)
+                        crop_fraction = details.get('crop_fraction', 0.33)
+                        
+                        # Calculate the actual dimensions of the jersey area in the track
+                        track_width = x2 - x1
+                        track_height = y2 - y1
+                        jersey_area_height = int(track_height * crop_fraction)
+                        
+                        # Draw bounding boxes for each OCR detection
+                        for bbox_ocr, text, conf in ocr_results:
+                            if isinstance(bbox_ocr, list) and len(bbox_ocr) == 4:
+                                # EasyOCR bbox format: [[x1,y1], [x2,y1], [x2,y2], [x1,y2]]
+                                ocr_points = np.array(bbox_ocr, dtype=np.float32)
+                                ocr_x1 = int(np.min(ocr_points[:, 0]))
+                                ocr_y1 = int(np.min(ocr_points[:, 1]))
+                                ocr_x2 = int(np.max(ocr_points[:, 0]))
+                                ocr_y2 = int(np.max(ocr_points[:, 1]))
+                                
+                                # Correct coordinate transformation accounting for all processing steps:
+                                # 1. Original track -> Cropped jersey area (crop_fraction)
+                                # 2. Cropped area -> Resized for processing (128x64)
+                                # 3. OCR results are in the final processed image coordinates
+                                
+                                if final_width > 0 and final_height > 0 and crop_width > 0 and crop_height > 0:
+                                    # Step 1: Scale from final processed coordinates back to cropped coordinates
+                                    # The final processed image maintains aspect ratio, so we need to account for padding
+                                    crop_to_final_scale_x = crop_width / final_width
+                                    crop_to_final_scale_y = crop_height / final_height
+                                    
+                                    # Scale OCR coordinates back to cropped image space
+                                    crop_x1 = ocr_x1 * crop_to_final_scale_x
+                                    crop_y1 = ocr_y1 * crop_to_final_scale_y
+                                    crop_x2 = ocr_x2 * crop_to_final_scale_x
+                                    crop_y2 = ocr_y2 * crop_to_final_scale_y
+                                    
+                                    # Step 2: Scale from cropped coordinates to jersey area coordinates
+                                    # The cropped area is the top crop_fraction of the track
+                                    jersey_scale_x = track_width / crop_width
+                                    jersey_scale_y = jersey_area_height / crop_height
+                                    
+                                    # Scale and position within the jersey area of the track
+                                    final_x1 = x1 + int(crop_x1 * jersey_scale_x)
+                                    final_y1 = y1 + int(crop_y1 * jersey_scale_y)
+                                    final_x2 = x1 + int(crop_x2 * jersey_scale_x)
+                                    final_y2 = y1 + int(crop_y2 * jersey_scale_y)
+                                    
+                                    # Ensure minimum box size
+                                    if final_x2 - final_x1 < 3:
+                                        final_x2 = final_x1 + 3
+                                    if final_y2 - final_y1 < 3:
+                                        final_y2 = final_y1 + 3
+                                    
+                                    # Clamp to jersey area bounds
+                                    final_x1 = max(x1, min(final_x1, x2 - 3))
+                                    final_y1 = max(y1, min(final_y1, y1 + jersey_area_height - 3))
+                                    final_x2 = max(final_x1 + 3, min(final_x2, x2))
+                                    final_y2 = max(final_y1 + 3, min(final_y2, y1 + jersey_area_height))
+                                    
+                                    # Color based on confidence: Red (low) -> Orange -> Green (high)
+                                    if conf >= 0.7:
+                                        bbox_color = (0, 255, 0)  # Green for high confidence
+                                    elif conf >= 0.4:
+                                        bbox_color = (0, 165, 255)  # Orange for medium confidence
+                                    else:
+                                        bbox_color = (0, 0, 255)  # Red for low confidence
+                                    
+                                    # Draw the OCR bounding box
+                                    cv2.rectangle(vis_frame, (final_x1, final_y1), (final_x2, final_y2), bbox_color, 2)
+                                    
+                                    # Draw detected text and confidence
+                                    if text and text.strip():
+                                        text_label = f"'{text}' ({conf:.2f})"
+                                        # Draw text above the box
+                                        cv2.putText(
+                                            vis_frame,
+                                            text_label,
+                                            (final_x1, final_y1 - 5),
+                                            cv2.FONT_HERSHEY_SIMPLEX,
+                                            0.4,
+                                            bbox_color,
+                                            1
+                                        )
+                        
+                        # Also draw the jersey area outline for reference
+                        jersey_outline_color = (128, 128, 128)  # Gray
+                        cv2.rectangle(vis_frame, (x1, y1), (x2, y1 + jersey_area_height), jersey_outline_color, 1)
         
         # Draw trajectory history if available
         if track_histories and track_id in track_histories:

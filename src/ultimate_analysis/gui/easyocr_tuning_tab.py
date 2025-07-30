@@ -25,7 +25,6 @@ from PyQt5.QtGui import QPixmap, QImage, QFont
 
 from .video_player import VideoPlayer
 from ..processing import run_inference, set_detection_model
-from ..processing.player_id import run_player_id, _initialize_easyocr
 from ..config.settings import get_setting, get_config
 from ..constants import DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS, JERSEY_NUMBER_MIN, JERSEY_NUMBER_MAX
 

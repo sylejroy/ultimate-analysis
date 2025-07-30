@@ -21,15 +21,12 @@ from ..config.settings import get_setting
 from ..constants import JERSEY_NUMBER_MIN, JERSEY_NUMBER_MAX, SUPPORTED_OCR_LANGUAGES, DEFAULT_PATHS
 
 
-# Global player ID state
-_player_id_method = "yolo"  # "yolo" or "easyocr" 
+# Global player ID state - only EasyOCR is supported
 _easyocr_reader = None
-_digit_detection_model = None
-_current_model_path = None
 
 
 def run_player_id_on_tracks(frame: np.ndarray, tracks: List[Any]) -> Dict[int, Tuple[str, Any]]:
-    """Run player identification on tracked objects.
+    """Run player identification on tracked objects using EasyOCR.
     
     Args:
         frame: Current video frame
@@ -48,9 +45,9 @@ def run_player_id_on_tracks(frame: np.ndarray, tracks: List[Any]) -> Dict[int, T
     if not tracks:
         return player_identifications
     
-    # Set method to EasyOCR for jersey number detection
-    if _player_id_method != "easyocr":
-        set_player_id_method("easyocr")
+    # Initialize EasyOCR if needed
+    if _easyocr_reader is None:
+        _initialize_easyocr()
     
     for track in tracks:
         try:
@@ -84,8 +81,8 @@ def run_player_id_on_tracks(frame: np.ndarray, tracks: List[Any]) -> Dict[int, T
             crop = frame[y1:y2, x1:x2]
             
             if crop.size > 0:
-                # Run player ID on the crop
-                jersey_number, details = run_player_id(crop)
+                # Run EasyOCR player ID on the crop
+                jersey_number, details = _run_easyocr_detection(crop)
                 player_identifications[track_id] = (jersey_number, details)
                 
                 print(f"[PLAYER_ID] Track {track_id}: {jersey_number}")
@@ -99,155 +96,114 @@ def run_player_id_on_tracks(frame: np.ndarray, tracks: List[Any]) -> Dict[int, T
     return player_identifications
 
 
-def run_player_id(crop_image: np.ndarray) -> Tuple[str, Optional[Any]]:
-    """Run player identification on a cropped player image.
-    
-    Args:
-        crop_image: Cropped image containing player's jersey (H, W, C) in BGR format
-        
-    Returns:
-        Tuple of (jersey_number_string, detection_details)
-        - jersey_number_string: Detected number as string (e.g., "23", "Unknown")
-        - detection_details: Method-specific detection information
-            - For YOLO: List of (bbox, class_id) tuples for digit detections
-            - For EasyOCR: List of OCR bounding boxes and text
-            
-    Example:
-        jersey_str, details = run_player_id(player_crop)
-        if jersey_str != "Unknown":
-            print(f"Player #{jersey_str}")
-    """
-    print(f"[PLAYER_ID] Processing crop with shape {crop_image.shape} using {_player_id_method}")
-    
-    if crop_image.size == 0:
-        return "Unknown", None
-    
-    try:
-        if _player_id_method == "easyocr":
-            return _run_easyocr_detection(crop_image)
-        elif _player_id_method == "yolo":
-            return _run_yolo_digit_detection(crop_image)
-        else:
-            print(f"[PLAYER_ID] Unknown method: {_player_id_method}")
-            return "Unknown", None
-            
-    except Exception as e:
-        print(f"[PLAYER_ID] Error during player ID: {e}")
-        return "Unknown", None
-
-
-def set_player_id_method(method: str) -> bool:
-    """Set the player identification method.
-    
-    Args:
-        method: Method to use ("yolo" or "easyocr")
-        
-    Returns:
-        True if method set successfully, False otherwise
-    """
-    global _player_id_method
-    
-    method = method.lower()
-    if method not in ["yolo", "easyocr"]:
-        print(f"[PLAYER_ID] Unsupported method: {method}")
-        return False
-    
-    print(f"[PLAYER_ID] Setting player ID method to: {method}")
-    _player_id_method = method
-    
-    # Initialize the chosen method
-    if method == "easyocr":
-        _initialize_easyocr()
-    elif method == "yolo":
-        _initialize_yolo_digit_detector()
-    
-    return True
-
-
-def set_player_id_model(model_path: str) -> bool:
-    """Set the YOLO model for digit detection (only used when method is "yolo").
-    
-    Args:
-        model_path: Path to the YOLO digit detection model (.pt)
-        
-    Returns:
-        True if model loaded successfully, False otherwise
-    """
-    global _digit_detection_model, _current_model_path
-    
-    print(f"[PLAYER_ID] Setting digit detection model: {model_path}")
-    
-    try:
-        # TODO: Load actual YOLO digit detection model
-        # from ultralytics import YOLO
-        # _digit_detection_model = YOLO(model_path)
-        
-        _current_model_path = model_path
-        print(f"[PLAYER_ID] Digit detection model loaded: {model_path}")
-        return True
-        
-    except Exception as e:
-        print(f"[PLAYER_ID] Failed to load digit model {model_path}: {e}")
-        return False
-
-
-def get_player_id_method() -> str:
-    """Get the current player identification method.
-    
-    Returns:
-        Current method string ("yolo" or "easyocr")
-    """
-    return _player_id_method
-
-
-def get_player_id_model_path() -> Optional[str]:
-    """Get the path of the current digit detection model.
-    
-    Returns:
-        Path to current model or None if no model loaded
-    """
-    return _current_model_path
-
-
 def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List]]:
-    """Run EasyOCR text detection on player crop.
+    """Run EasyOCR text detection on player crop using the same algorithm as tuning tab.
     
     Args:
         crop_image: Cropped player image
         
     Returns:
-        Tuple of (jersey_number, ocr_boxes)
+        Tuple of (jersey_number, ocr_results)
     """
     if _easyocr_reader is None:
         _initialize_easyocr()
     
     if not EASYOCR_AVAILABLE or _easyocr_reader is None:
+        print("[PLAYER_ID] EasyOCR not available, returning Unknown")
         return "Unknown", []
     
     try:
-        # Load user configuration
+        # Load user configuration (same as tuning tab)
         user_config = _load_easyocr_config()
         
-        # Preprocess the image
-        processed_image = _preprocess_image(crop_image, user_config.get('preprocessing', {}))
+        # Apply top crop fraction like tuning tab
+        crop_config = user_config.get('preprocessing', {})
+        processed_crop = _apply_crop_fraction(crop_image, crop_config)
         
-        # Run EasyOCR with user settings
+        # Store original and processed dimensions for coordinate mapping
+        original_height, original_width = crop_image.shape[:2]
+        cropped_height, cropped_width = processed_crop.shape[:2]
+        
+        # Apply full preprocessing like tuning tab
+        final_processed_crop = _preprocess_crop(processed_crop, crop_config)
+        final_height, final_width = final_processed_crop.shape[:2]
+        
+        # Get EasyOCR parameters from config
         ocr_params = user_config.get('easyocr', {})
-        results = _easyocr_reader.readtext(
-            processed_image,
-            allowlist=ocr_params.get('allowlist', '0123456789'),
-            width_ths=ocr_params.get('width_ths', 0.7),
-            height_ths=ocr_params.get('height_ths', 0.7),
-            detail=ocr_params.get('detail', 1),
-            paragraph=ocr_params.get('paragraph', False),
-            batch_size=ocr_params.get('batch_size', 16)
-        )
         
-        # Process results to find jersey numbers
-        jersey_number = _extract_jersey_number(results)
+        # Prepare parameters for readtext (same as tuning tab)
+        readtext_params = {
+            'text_threshold': ocr_params.get('text_threshold', 0.7),
+            'low_text': ocr_params.get('low_text', 0.6),
+            'link_threshold': ocr_params.get('link_threshold', 0.4),
+            'width_ths': ocr_params.get('width_ths', 0.4),
+            'height_ths': ocr_params.get('height_ths', 0.7),
+            'canvas_size': ocr_params.get('canvas_size', 2560),
+            'mag_ratio': ocr_params.get('mag_ratio', 2.0),
+            'slope_ths': ocr_params.get('slope_ths', 0.1),
+            'ycenter_ths': ocr_params.get('ycenter_ths', 0.5),
+            'y_ths': ocr_params.get('y_ths', 0.5),
+            'x_ths': ocr_params.get('x_ths', 1.0),
+            'paragraph': ocr_params.get('paragraph', False),
+            'adjust_contrast': ocr_params.get('adjust_contrast', 0.5),
+            'filter_ths': ocr_params.get('filter_ths', 0.003),
+            'batch_size': ocr_params.get('batch_size', 1),
+            'workers': ocr_params.get('workers', 0),
+            'decoder': ocr_params.get('decoder', 'greedy'),
+            'beamWidth': ocr_params.get('beamWidth', 5),
+            'detail': ocr_params.get('detail', 1)
+        }
         
-        print(f"[PLAYER_ID] EasyOCR detected: {jersey_number} (from {len(results)} detections)")
-        return jersey_number, results
+        # Add character filtering if specified
+        if ocr_params.get('allowlist'):
+            readtext_params['allowlist'] = ocr_params['allowlist']
+        
+        # Run EasyOCR with user settings (same as tuning tab)
+        ocr_results = _easyocr_reader.readtext(final_processed_crop, **readtext_params)
+        
+        # Process results - find best numeric text (same as tuning tab)
+        best_text = ""
+        best_confidence = 0.0
+        
+        for bbox, text, confidence in ocr_results:
+            # Clean text and check if it's a valid jersey number
+            clean_text = ''.join(filter(str.isdigit, text))
+            if clean_text and confidence > best_confidence:
+                best_text = clean_text
+                best_confidence = confidence
+        
+        # Validate jersey number and prepare result with coordinate mapping info
+        if best_text and _validate_jersey_number(best_text):
+            jersey_number = best_text
+            result_details = {
+                'confidence': best_confidence,
+                'ocr_results': ocr_results,
+                'best_text': best_text,
+                'original_width': original_width,
+                'original_height': original_height,
+                'crop_width': cropped_width,
+                'crop_height': cropped_height,
+                'final_width': final_width,
+                'final_height': final_height,
+                'crop_fraction': crop_config.get('crop_top_fraction', 0.33)
+            }
+        else:
+            jersey_number = "Unknown"
+            result_details = {
+                'confidence': 0.0,
+                'ocr_results': ocr_results,
+                'best_text': None,
+                'original_width': original_width,
+                'original_height': original_height,
+                'crop_width': cropped_width,
+                'crop_height': cropped_height,
+                'final_width': final_width,
+                'final_height': final_height,
+                'crop_fraction': crop_config.get('crop_top_fraction', 0.33)
+            }
+        
+        print(f"[PLAYER_ID] EasyOCR detected: {jersey_number} (confidence: {best_confidence:.3f})")
+        return jersey_number, result_details
         
     except Exception as e:
         print(f"[PLAYER_ID] EasyOCR error: {e}")
@@ -257,7 +213,20 @@ def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List]]
 def _load_easyocr_config() -> Dict[str, Any]:
     """Load EasyOCR configuration from user.yaml file."""
     try:
-        config_path = Path(DEFAULT_PATHS['CONFIGS']) / 'user.yaml'
+        # Find project root by looking for configs directory
+        current_path = Path(__file__).parent
+        project_root = None
+        
+        for parent in [current_path] + list(current_path.parents):
+            if (parent / "configs").exists():
+                project_root = parent
+                break
+        
+        if project_root is None:
+            print("[PLAYER_ID] Could not find configs directory")
+            return {}
+        
+        config_path = project_root / "configs" / "user.yaml"
         
         if config_path.exists():
             with open(config_path, 'r') as f:
@@ -272,135 +241,115 @@ def _load_easyocr_config() -> Dict[str, Any]:
         return {}
 
 
-def _preprocess_image(image: np.ndarray, preprocess_config: Dict[str, Any]) -> np.ndarray:
-    """Preprocess image for better OCR recognition."""
-    processed = image.copy()
+def _apply_crop_fraction(image: np.ndarray, preprocess_config: Dict[str, Any]) -> np.ndarray:
+    """Apply crop fraction to image (same as tuning tab)."""
+    crop_fraction = preprocess_config.get('crop_top_fraction', 0.33)
+    if crop_fraction > 0:
+        h = image.shape[0]
+        crop_pixels = int(h * crop_fraction)
+        return image[:crop_pixels, :]
+    return image
+
+
+def _preprocess_crop(crop: np.ndarray, preprocess_params: Dict[str, Any]) -> np.ndarray:
+    """Apply preprocessing to a crop (copied from tuning tab)."""
+    processed = crop.copy()
     
-    try:
-        # Crop top fraction if specified
-        crop_fraction = preprocess_config.get('crop_top_fraction', 0.0)
-        if crop_fraction > 0:
-            h = processed.shape[0]
-            crop_pixels = int(h * crop_fraction)
-            processed = processed[crop_pixels:, :]
-        
-        # Resize if specified
-        resize_factor = preprocess_config.get('resize_factor', 1.0)
-        if resize_factor != 1.0:
-            h, w = processed.shape[:2]
-            new_h, new_w = int(h * resize_factor), int(w * resize_factor)
-            processed = cv2.resize(processed, (new_w, new_h))
-        
-        # Convert to grayscale if specified
-        if preprocess_config.get('bw_mode', False):
+    # Resize (absolute takes priority over factor)
+    abs_width = preprocess_params.get('resize_absolute_width', 0)
+    abs_height = preprocess_params.get('resize_absolute_height', 0)
+    resize_factor = preprocess_params.get('resize_factor', 1.0)
+    
+    if abs_width > 0 and abs_height > 0:
+        # Absolute resize
+        processed = cv2.resize(processed, (abs_width, abs_height))
+    elif abs_width > 0:
+        # Absolute width, maintain aspect ratio
+        current_height, current_width = processed.shape[:2]
+        new_height = int(current_height * abs_width / current_width)
+        processed = cv2.resize(processed, (abs_width, new_height))
+    elif abs_height > 0:
+        # Absolute height, maintain aspect ratio
+        current_height, current_width = processed.shape[:2]
+        new_width = int(current_width * abs_height / current_height)
+        processed = cv2.resize(processed, (new_width, abs_height))
+    elif resize_factor != 1.0:
+        # Factor-based resize
+        new_height = int(processed.shape[0] * resize_factor)
+        new_width = int(processed.shape[1] * resize_factor)
+        processed = cv2.resize(processed, (new_width, new_height))
+    
+    # Color mode conversion
+    if preprocess_params.get('bw_mode', True):
+        processed = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
+        processed = cv2.cvtColor(processed, cv2.COLOR_GRAY2BGR)
+    elif not preprocess_params.get('colour_mode', False):
+        # Default grayscale processing
+        if len(processed.shape) == 3:
             processed = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
             processed = cv2.cvtColor(processed, cv2.COLOR_GRAY2BGR)
+    
+    # Denoising
+    if preprocess_params.get('denoise', False):
+        if len(processed.shape) == 3:
+            processed = cv2.fastNlMeansDenoisingColored(processed, None, 10, 10, 7, 21)
+        else:
+            processed = cv2.fastNlMeansDenoising(processed, None, 10, 7, 21)
+    
+    # Contrast and brightness
+    alpha = preprocess_params.get('contrast_alpha', 1.0)
+    beta = preprocess_params.get('brightness_beta', 0)
+    if alpha != 1.0 or beta != 0:
+        processed = cv2.convertScaleAbs(processed, alpha=alpha, beta=beta)
+    
+    # Gaussian blur
+    blur_kernel = preprocess_params.get('gaussian_blur', 13)
+    if blur_kernel > 0:
+        # Ensure kernel size is odd
+        if blur_kernel % 2 == 0:
+            blur_kernel += 1
+        processed = cv2.GaussianBlur(processed, (blur_kernel, blur_kernel), 0)
+    
+    # CLAHE enhancement
+    if preprocess_params.get('enhance_contrast', False):
+        clip_limit = preprocess_params.get('clahe_clip_limit', 3.0)
+        grid_size = preprocess_params.get('clahe_grid_size', 8)
         
-        # Enhance contrast
-        if preprocess_config.get('enhance_contrast', False):
-            alpha = preprocess_config.get('contrast_alpha', 1.5)
-            beta = preprocess_config.get('brightness_beta', 0)
-            processed = cv2.convertScaleAbs(processed, alpha=alpha, beta=beta)
-        
-        # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
-        clahe_clip = preprocess_config.get('clahe_clip_limit', 2.0)
-        clahe_grid = preprocess_config.get('clahe_grid_size', 8)
-        if clahe_clip > 0:
-            # Convert to LAB color space for better contrast enhancement
+        if len(processed.shape) == 3:
+            # Convert to LAB, apply CLAHE to L channel
             lab = cv2.cvtColor(processed, cv2.COLOR_BGR2LAB)
-            clahe = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=(clahe_grid, clahe_grid))
+            clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(grid_size, grid_size))
             lab[:, :, 0] = clahe.apply(lab[:, :, 0])
             processed = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-        
-        # Denoise
-        if preprocess_config.get('denoise', False):
-            processed = cv2.fastNlMeansDenoisingColored(processed, None, 10, 10, 7, 21)
-        
-        # Gaussian blur
-        blur_size = preprocess_config.get('gaussian_blur', 0)
-        if blur_size > 0:
-            processed = cv2.GaussianBlur(processed, (blur_size, blur_size), 0)
-        
-        # Sharpen
-        if preprocess_config.get('sharpen', False):
-            strength = preprocess_config.get('sharpen_strength', 0.5)
-            kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]]) * strength
-            kernel[1,1] = kernel[1,1] + (1 - strength * 8)
-            processed = cv2.filter2D(processed, -1, kernel)
-        
-        # Upscale if specified
-        if preprocess_config.get('upscale', False):
-            target_size = preprocess_config.get('upscale_target_size', 256)
-            h, w = processed.shape[:2]
-            if max(h, w) < target_size:
-                scale = target_size / max(h, w)
-                new_h, new_w = int(h * scale), int(w * scale)
-                processed = cv2.resize(processed, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
-        
-    except Exception as e:
-        print(f"[PLAYER_ID] Preprocessing error: {e}")
-        return image
+        else:
+            # Grayscale
+            clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(grid_size, grid_size))
+            processed = clahe.apply(processed)
+    
+    # Sharpening
+    if preprocess_params.get('sharpen', True):
+        strength = preprocess_params.get('sharpen_strength', 0.05)
+        kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]]) * strength
+        kernel[1,1] = 1 + (8 * strength)  # Adjust center to maintain brightness
+        processed = cv2.filter2D(processed, -1, kernel)
+    
+    # Upscaling
+    if preprocess_params.get('upscale', True):
+        if preprocess_params.get('upscale_to_size', True):
+            # Upscale to fixed size
+            target_size = preprocess_params.get('upscale_target_size', 256)
+            processed = cv2.resize(processed, (target_size, target_size), interpolation=cv2.INTER_CUBIC)
+        else:
+            # Upscale by factor
+            factor = preprocess_params.get('upscale_factor', 3.0)
+            new_height = int(processed.shape[0] * factor)
+            new_width = int(processed.shape[1] * factor)
+            processed = cv2.resize(processed, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
     
     return processed
 
 
-def _extract_jersey_number(ocr_results: List[Tuple]) -> str:
-    """Extract the most likely jersey number from OCR results."""
-    if not ocr_results:
-        return "Unknown"
-    
-    # Filter results for numeric text only
-    numeric_results = []
-    for result in ocr_results:
-        if len(result) >= 2:
-            text = result[1].strip()
-            # Only consider numeric strings
-            if text.isdigit():
-                confidence = result[2] if len(result) > 2 else 1.0
-                numeric_results.append((text, confidence))
-    
-    if not numeric_results:
-        return "Unknown"
-    
-    # Sort by confidence and get the best result
-    numeric_results.sort(key=lambda x: x[1], reverse=True)
-    best_number = numeric_results[0][0]
-    
-    # Validate jersey number
-    if _validate_jersey_number(best_number):
-        return best_number
-    else:
-        return "Unknown"
 
-
-def _run_yolo_digit_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List]]:
-    """Run YOLO digit detection on player crop.
-    
-    Args:
-        crop_image: Cropped player image
-        
-    Returns:
-        Tuple of (jersey_number, digit_detections)
-    """
-    if _digit_detection_model is None:
-        _initialize_yolo_digit_detector()
-    
-    # TODO: Implement actual YOLO digit detection
-    # For now, return placeholder
-    jersey_number = "Unknown"
-    digit_detections = []
-    
-    # Placeholder: simulate digit detection for testing
-    if get_setting("app.debug", False):
-        h, w = crop_image.shape[:2]
-        digit_detections = [
-            ([w//4, h//4, w//2, 3*h//4], 2),  # Detected digit "2"
-            ([w//2, h//4, 3*w//4, 3*h//4], 3)  # Detected digit "3"
-        ]
-        jersey_number = "23"
-    
-    print(f"[PLAYER_ID] YOLO digit detection: {jersey_number}")
-    return jersey_number, digit_detections
 
 
 def _initialize_easyocr() -> None:
@@ -433,13 +382,6 @@ def _initialize_easyocr() -> None:
         _easyocr_reader = None
 
 
-def _initialize_yolo_digit_detector() -> None:
-    """Initialize YOLO digit detection model."""
-    if _digit_detection_model is None:
-        print("[PLAYER_ID] No YOLO digit detection model loaded")
-        # Could load a default model here if available
-
-
 def _validate_jersey_number(number_str: str) -> bool:
     """Validate that a detected jersey number is reasonable.
     
@@ -454,13 +396,3 @@ def _validate_jersey_number(number_str: str) -> bool:
         return JERSEY_NUMBER_MIN <= number <= JERSEY_NUMBER_MAX
     except ValueError:
         return False
-
-
-def set_easyocr() -> None:
-    """Convenience function to set EasyOCR as the player ID method."""
-    set_player_id_method("easyocr")
-
-
-def set_yolo_digit_detection() -> None:
-    """Convenience function to set YOLO as the player ID method."""
-    set_player_id_method("yolo")
