@@ -1,0 +1,33 @@
+# Ultimate Analysis - Requirements
+# Core GUI and video processing dependencies
+PyQt5>=5.15.0
+opencv-python>=4.8.0
+numpy>=1.21.0
+PyYAML>=6.0
+
+# Machine Learning and Computer Vision
+ultralytics>=8.0.0
+torch>=2.0.0
+torchvision>=0.15.0
+
+# OCR for player identification
+easyocr>=1.7.0
+
+# Object tracking
+deep-sort-realtime>=1.2.0
+
+# System monitoring
+psutil>=5.9.0
+
+# Optional tracking dependencies (uncomment when implementing actual tracking)
+# deep-sort-realtime>=1.2.0
+
+# Development dependencies (optional)
+pytest>=7.0.0
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.0.0
+
+# Documentation (optional)
+sphinx>=4.0.0
+sphinx-rtd-theme>=1.0.0

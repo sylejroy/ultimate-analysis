@@ -1,0 +1,42 @@
+player_id:
+  easyocr:
+    adjust_contrast: 0.5
+    allowlist: 0123456789
+    batch_size: 16
+    beamWidth: 5
+    canvas_size: 2560
+    detail: 1
+    filter_ths: 0.003
+    gpu: true
+    height_ths: 0.7
+    link_threshold: 0.2
+    low_text: 0.3
+    mag_ratio: 2.0
+    paragraph: false
+    slope_ths: 0.1
+    text_threshold: 0.4
+    width_ths: 0.3
+    workers: 0
+    x_ths: 1.0
+    y_ths: 0.5
+    ycenter_ths: 0.5
+  preprocessing:
+    brightness_beta: -10
+    bw_mode: false
+    clahe_clip_limit: 3.0
+    clahe_grid_size: 8
+    colour_mode: true
+    contrast_alpha: 1.5
+    crop_top_fraction: 0.45
+    denoise: true
+    enhance_contrast: false
+    gaussian_blur: 1
+    resize_absolute_height: 0
+    resize_absolute_width: 0
+    resize_factor: 1.0
+    sharpen: true
+    sharpen_strength: 0.15
+    upscale: true
+    upscale_factor: 1.0
+    upscale_target_size: 256
+    upscale_to_size: true
