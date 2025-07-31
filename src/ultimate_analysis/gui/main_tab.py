@@ -21,6 +21,7 @@ from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont
 
 from .video_player import VideoPlayer
 from .visualization import draw_detections, draw_tracks, draw_tracks_with_player_ids
+from .performance_widget import PerformanceWidget
 from ..processing import (
     run_inference, run_tracking, run_player_id_on_tracks, run_field_segmentation,
     set_detection_model, set_field_model, set_tracker_type, 
@@ -206,6 +207,10 @@ class MainTab(QWidget):
         
         models_group.setLayout(models_layout)
         layout.addWidget(models_group)
+        
+        # Performance metrics section
+        self.performance_widget = PerformanceWidget()
+        layout.addWidget(self.performance_widget)
         
         # Add stretch to push everything to top
         layout.addStretch()
@@ -497,22 +502,34 @@ class MainTab(QWidget):
         # Run inference if enabled
         if self.inference_checkbox.isChecked():
             print("[MAIN_TAB] Running inference...")
+            start_time = time.time()
             self.current_detections = run_inference(frame)
+            duration_ms = (time.time() - start_time) * 1000
+            self.performance_widget.add_processing_measurement("Inference", duration_ms)
         
         # Run tracking if enabled
         if self.tracking_checkbox.isChecked() and self.current_detections:
             print("[MAIN_TAB] Running tracking...")
+            start_time = time.time()
             self.current_tracks = run_tracking(frame, self.current_detections)
+            duration_ms = (time.time() - start_time) * 1000
+            self.performance_widget.add_processing_measurement("Tracking", duration_ms)
         
         # Run field segmentation if enabled
         if self.field_segmentation_checkbox.isChecked():
             print("[MAIN_TAB] Running field segmentation...")
+            start_time = time.time()
             self.current_field_results = run_field_segmentation(frame)
+            duration_ms = (time.time() - start_time) * 1000
+            self.performance_widget.add_processing_measurement("Field Segmentation", duration_ms)
         
         # Run player ID if enabled (requires tracking to be active)
         if self.player_id_checkbox.isChecked() and self.current_tracks:
             print("[MAIN_TAB] Running player identification...")
+            start_time = time.time()
             self.current_player_ids = run_player_id_on_tracks(frame, self.current_tracks)
+            duration_ms = (time.time() - start_time) * 1000
+            self.performance_widget.add_processing_measurement("Player ID", duration_ms)
             print(f"[MAIN_TAB] Identified {len(self.current_player_ids)} players")
         
         # Apply visualizations

@@ -18,6 +18,7 @@ deep-sort-realtime>=1.2.0
 
 # System monitoring
 psutil>=5.9.0
+GPUtil>=1.4.0
 
 # Optional tracking dependencies (uncomment when implementing actual tracking)
 # deep-sort-realtime>=1.2.0
