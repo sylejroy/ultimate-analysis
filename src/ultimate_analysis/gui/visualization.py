@@ -254,9 +254,7 @@ def draw_tracks_with_player_ids(frame: np.ndarray, tracks: List[Any],
                                             1
                                         )
                         
-                        # Also draw the jersey area outline for reference
-                        jersey_outline_color = (128, 128, 128)  # Gray
-                        cv2.rectangle(vis_frame, (x1, y1), (x2, y1 + jersey_area_height), jersey_outline_color, 1)
+                        # Jersey area outline removed - no longer drawing grey crop boxes
         
         # Draw trajectory history if available
         if track_histories and track_id in track_histories:

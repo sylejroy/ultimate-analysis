@@ -78,11 +78,21 @@ class MainTab(QWidget):
         self._init_shortcuts()
         self._load_videos()
         
-        # Load random video by default
+        # Load default video (portland_vs_san_francisco_2024_snippet_4_40912.mp4)
         if self.video_files:
-            import random
-            random_index = random.randint(0, len(self.video_files) - 1)
-            self.video_list.setCurrentRow(random_index)
+            default_video_name = "portland_vs_san_francisco_2024_snippet_4_40912.mp4"
+            default_index = 0  # Fallback to first video
+            
+            # Look for the specific default video
+            for i, video_path in enumerate(self.video_files):
+                if Path(video_path).name == default_video_name:
+                    default_index = i
+                    print(f"[MAIN_TAB] Loading default video: {default_video_name}")
+                    break
+            else:
+                print(f"[MAIN_TAB] Default video '{default_video_name}' not found, loading first available video")
+            
+            self.video_list.setCurrentRow(default_index)
             self._load_selected_video()
     
     def _init_ui(self):
