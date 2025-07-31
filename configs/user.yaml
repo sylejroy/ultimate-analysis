@@ -31,8 +31,8 @@ player_id:
     denoise: true
     enhance_contrast: false
     gaussian_blur: 1
-    min_crop_width: 40      # Minimum crop width in pixels for OCR processing
-    min_crop_height: 50     # Minimum crop height in pixels for OCR processing
+    min_crop_height: 35
+    min_crop_width: 35
     resize_absolute_height: 0
     resize_absolute_width: 0
     resize_factor: 1.0

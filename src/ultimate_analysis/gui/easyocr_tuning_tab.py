@@ -135,6 +135,28 @@ class EasyOCRTuningTab(QWidget):
         main_layout.addWidget(splitter)
         self.setLayout(main_layout)
     
+    def _create_section_header(self, text: str) -> QLabel:
+        """Create a styled section header label.
+        
+        Args:
+            text: The header text (should include === formatting)
+            
+        Returns:
+            Styled QLabel for section header
+        """
+        header = QLabel(text)
+        header.setStyleSheet("""
+            QLabel {
+                color: #ffffff;
+                font-weight: bold;
+                font-size: 11px;
+                padding: 5px 0px;
+                border-bottom: 1px solid #555555;
+                margin-top: 10px;
+            }
+        """)
+        return header
+    
     def _create_left_panel(self) -> QWidget:
         """Create the left panel with video list and parameter controls."""
         panel = QWidget()
@@ -346,7 +368,7 @@ class EasyOCRTuningTab(QWidget):
         layout.addRow("Gaussian Blur (ksize):", self.blur_spin)
         
         # Minimum Crop Size Filtering Section
-        layout.addRow(QLabel("=== Minimum Crop Size Filtering ==="))
+        layout.addRow(self._create_section_header("=== Minimum Crop Size Filtering ==="))
         
         # Minimum crop width
         self.min_crop_width_spin = QSpinBox()
@@ -366,11 +388,11 @@ class EasyOCRTuningTab(QWidget):
         
         # Add helpful text
         min_crop_info = QLabel("Skip OCR on crops smaller than these dimensions")
-        min_crop_info.setStyleSheet("color: gray; font-size: 10px;")
+        min_crop_info.setStyleSheet("color: #cccccc; font-size: 10px;")
         layout.addRow("", min_crop_info)
         
         # Contrast Enhancement Section
-        layout.addRow(QLabel("=== Contrast Enhancement ==="))
+        layout.addRow(self._create_section_header("=== Contrast Enhancement ==="))
         
         # CLAHE enhancement toggle
         self.enhance_check = QCheckBox()
@@ -394,7 +416,7 @@ class EasyOCRTuningTab(QWidget):
         layout.addRow("  → Grid Size:", self.clahe_grid_spin)
         
         # Denoising Section
-        layout.addRow(QLabel("=== Denoising ==="))
+        layout.addRow(self._create_section_header("=== Denoising ==="))
         
         # Denoising toggle
         self.denoise_check = QCheckBox()
@@ -403,7 +425,7 @@ class EasyOCRTuningTab(QWidget):
         layout.addRow("Enable Denoising:", self.denoise_check)
         
         # Sharpening Section
-        layout.addRow(QLabel("=== Sharpening ==="))
+        layout.addRow(self._create_section_header("=== Sharpening ==="))
         
         # Sharpening toggle
         self.sharpen_check = QCheckBox()
@@ -422,7 +444,7 @@ class EasyOCRTuningTab(QWidget):
         layout.addRow("  → Strength:", self.sharpen_strength_spin)
         
         # Upscaling Section
-        layout.addRow(QLabel("=== Upscaling ==="))
+        layout.addRow(self._create_section_header("=== Upscaling ==="))
         
         # Upscaling toggle
         self.upscale_check = QCheckBox()
@@ -453,7 +475,7 @@ class EasyOCRTuningTab(QWidget):
         layout.addRow("    → Target Size (px):", self.upscale_target_spin)
         
         # Color Processing Section
-        layout.addRow(QLabel("=== Color Processing ==="))
+        layout.addRow(self._create_section_header("=== Color Processing ==="))
         
         # Color mode processing
         self.colour_mode_check = QCheckBox()
@@ -468,7 +490,7 @@ class EasyOCRTuningTab(QWidget):
         layout.addRow("B&W Mode:", self.bw_mode_check)
         
         # Size Adjustment Section
-        layout.addRow(QLabel("=== Size Adjustment ==="))
+        layout.addRow(self._create_section_header("=== Size Adjustment ==="))
         
         # Resize factor
         self.resize_spin = QDoubleSpinBox()
@@ -508,7 +530,7 @@ class EasyOCRTuningTab(QWidget):
             return
         
         # Core detection parameters
-        layout.addRow(QLabel("=== Detection Parameters ==="))
+        layout.addRow(self._create_section_header("=== Detection Parameters ==="))
         
         # Text confidence threshold
         self.text_threshold_spin = QDoubleSpinBox()
@@ -535,7 +557,7 @@ class EasyOCRTuningTab(QWidget):
         layout.addRow("Link Threshold:", self.link_threshold_spin)
         
         # Geometric constraints
-        layout.addRow(QLabel("=== Geometric Constraints ==="))
+        layout.addRow(self._create_section_header("=== Geometric Constraints ==="))
         
         # Width threshold
         self.width_ths_spin = QDoubleSpinBox()
@@ -586,7 +608,7 @@ class EasyOCRTuningTab(QWidget):
         layout.addRow("Slope Threshold:", self.slope_ths_spin)
         
         # Image processing parameters
-        layout.addRow(QLabel("=== Image Processing ==="))
+        layout.addRow(self._create_section_header("=== Image Processing ==="))
         
         # Canvas size
         self.canvas_size_spin = QSpinBox()
@@ -622,7 +644,7 @@ class EasyOCRTuningTab(QWidget):
         layout.addRow("Filter Threshold:", self.filter_ths_spin)
         
         # Performance and parallel processing
-        layout.addRow(QLabel("=== Performance ==="))
+        layout.addRow(self._create_section_header("=== Performance ==="))
         
         # Number of workers
         self.workers_spin = QSpinBox()
@@ -647,7 +669,7 @@ class EasyOCRTuningTab(QWidget):
         layout.addRow("Beam Width:", self.beam_width_spin)
         
         # Options and flags
-        layout.addRow(QLabel("=== Options ==="))
+        layout.addRow(self._create_section_header("=== Options ==="))
         
         # GPU usage
         self.gpu_check = QCheckBox()
@@ -670,7 +692,7 @@ class EasyOCRTuningTab(QWidget):
         layout.addRow("Detail Level:", self.detail_spin)
         
         # Character filtering
-        layout.addRow(QLabel("=== Character Filtering ==="))
+        layout.addRow(self._create_section_header("=== Character Filtering ==="))
         
         # Allowlist (only allow these characters)
         self.allowlist_edit = QLineEdit()
@@ -681,7 +703,7 @@ class EasyOCRTuningTab(QWidget):
         layout.addRow("Allowlist:", self.allowlist_edit)
         
         # Additional parameters
-        layout.addRow(QLabel("=== Additional Options ==="))
+        layout.addRow(self._create_section_header("=== Additional Options ==="))
     
     def _load_videos(self):
         """Load and display available video files."""
