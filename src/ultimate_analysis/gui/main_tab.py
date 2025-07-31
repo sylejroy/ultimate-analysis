@@ -493,6 +493,9 @@ class MainTab(QWidget):
         Returns:
             Processed frame with visualizations
         """
+        # Start total runtime timer
+        total_start_time = time.time()
+        
         # Reset detection/tracking results
         self.current_detections = []
         self.current_tracks = []
@@ -532,8 +535,15 @@ class MainTab(QWidget):
             self.performance_widget.add_processing_measurement("Player ID", duration_ms)
             print(f"[MAIN_TAB] Identified {len(self.current_player_ids)} players")
         
-        # Apply visualizations
+        # Apply visualizations (with timing)
+        viz_start_time = time.time()
         frame = self._apply_visualizations(frame)
+        viz_duration_ms = (time.time() - viz_start_time) * 1000
+        self.performance_widget.add_processing_measurement("Visualization", viz_duration_ms)
+        
+        # Record total runtime
+        total_duration_ms = (time.time() - total_start_time) * 1000
+        self.performance_widget.add_processing_measurement("Total Runtime", total_duration_ms)
         
         return frame
     
