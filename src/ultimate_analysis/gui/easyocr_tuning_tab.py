@@ -101,6 +101,9 @@ class EasyOCRTuningTab(QWidget):
             'upscale_target_size': 256, # From provided config
             'colour_mode': True,       # From provided config
             'bw_mode': True,           # From provided config
+            # Minimum crop size filtering (skip OCR on crops too small to be readable)
+            'min_crop_width': 20,      # Minimum crop width in pixels for OCR processing
+            'min_crop_height': 30,     # Minimum crop height in pixels for OCR processing
         }
         
         # Initialize UI
@@ -341,6 +344,30 @@ class EasyOCRTuningTab(QWidget):
         self.blur_spin.setValue(self.preprocess_params['gaussian_blur'])
         self.blur_spin.valueChanged.connect(self._on_preprocess_param_changed)
         layout.addRow("Gaussian Blur (ksize):", self.blur_spin)
+        
+        # Minimum Crop Size Filtering Section
+        layout.addRow(QLabel("=== Minimum Crop Size Filtering ==="))
+        
+        # Minimum crop width
+        self.min_crop_width_spin = QSpinBox()
+        self.min_crop_width_spin.setRange(5, 200)
+        self.min_crop_width_spin.setValue(self.preprocess_params['min_crop_width'])
+        self.min_crop_width_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        self.min_crop_width_spin.setToolTip("Skip OCR on crops narrower than this width (pixels). \nRecommended: 1080p=25px, 720p=18px, 480p=12px")
+        layout.addRow("Min Crop Width (px):", self.min_crop_width_spin)
+        
+        # Minimum crop height
+        self.min_crop_height_spin = QSpinBox()
+        self.min_crop_height_spin.setRange(5, 200)
+        self.min_crop_height_spin.setValue(self.preprocess_params['min_crop_height'])
+        self.min_crop_height_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        self.min_crop_height_spin.setToolTip("Skip OCR on crops shorter than this height (pixels). \nRecommended: 1080p=35px, 720p=25px, 480p=18px")
+        layout.addRow("Min Crop Height (px):", self.min_crop_height_spin)
+        
+        # Add helpful text
+        min_crop_info = QLabel("Skip OCR on crops smaller than these dimensions")
+        min_crop_info.setStyleSheet("color: gray; font-size: 10px;")
+        layout.addRow("", min_crop_info)
         
         # Contrast Enhancement Section
         layout.addRow(QLabel("=== Contrast Enhancement ==="))
@@ -836,6 +863,8 @@ class EasyOCRTuningTab(QWidget):
         self.preprocess_params['contrast_alpha'] = self.contrast_spin.value()
         self.preprocess_params['brightness_beta'] = self.brightness_spin.value()
         self.preprocess_params['gaussian_blur'] = self.blur_spin.value()
+        self.preprocess_params['min_crop_width'] = self.min_crop_width_spin.value()
+        self.preprocess_params['min_crop_height'] = self.min_crop_height_spin.value()
         self.preprocess_params['enhance_contrast'] = self.enhance_check.isChecked()
         self.preprocess_params['clahe_clip_limit'] = self.clahe_clip_spin.value()
         self.preprocess_params['clahe_grid_size'] = self.clahe_grid_spin.value()
@@ -1117,6 +1146,25 @@ class EasyOCRTuningTab(QWidget):
             results = []
             
             for crop_data in self.current_crops:
+                # Check minimum crop size BEFORE OCR processing (using original crop size)
+                original_crop = crop_data['original_crop']
+                orig_height, orig_width = original_crop.shape[:2]
+                min_crop_width = self.preprocess_params['min_crop_width']
+                min_crop_height = self.preprocess_params['min_crop_height']
+                
+                if orig_width < min_crop_width or orig_height < min_crop_height:
+                    print(f"[EASYOCR_TUNING] Original crop too small ({orig_width}x{orig_height}), skipping OCR (min: {min_crop_width}x{min_crop_height})")
+                    # Add result showing crop was skipped
+                    results.append({
+                        'detection_idx': crop_data['detection_idx'],
+                        'text': "SKIPPED",
+                        'confidence': 0.0,
+                        'ocr_results': [],
+                        'skipped_reason': f"Original crop too small ({orig_width}x{orig_height})"
+                    })
+                    continue
+                
+                # Use processed crop for OCR
                 processed_crop = crop_data['processed_crop']
                 
                 # Prepare parameters for readtext
@@ -1175,7 +1223,10 @@ class EasyOCRTuningTab(QWidget):
                 annotated_frame = self._draw_ocr_results(self.current_frame.copy(), results)
                 self._display_frame(annotated_frame)
             
-            print(f"[EASYOCR_TUNING] EasyOCR complete: {len(results)} results")
+            # Print summary with skipped crop information
+            skipped_count = sum(1 for r in results if 'skipped_reason' in r)
+            processed_count = len(results) - skipped_count
+            print(f"[EASYOCR_TUNING] EasyOCR complete: {processed_count} crops processed, {skipped_count} crops skipped (too small)")
             
         except Exception as e:
             # Clear crops display and show error
@@ -1298,8 +1349,14 @@ class EasyOCRTuningTab(QWidget):
         # OCR result display
         text = result.get('text', '')
         confidence = result.get('confidence', 0.0)
+        skipped_reason = result.get('skipped_reason', '')
         
-        if text:
+        if skipped_reason:
+            # Crop was skipped due to minimum size filtering
+            color = "#888888"  # Gray for skipped
+            result_text = "SKIPPED"
+            conf_text = skipped_reason
+        elif text and text != "SKIPPED":
             # Color code based on confidence
             if confidence > 0.7:
                 color = "#00ff00"  # Green for high confidence
@@ -1332,14 +1389,23 @@ class EasyOCRTuningTab(QWidget):
         layout.addWidget(result_label)
         
         # Confidence label - increased size
-        conf_label = QLabel(f"Conf: {conf_text}")
+        if skipped_reason:
+            conf_label = QLabel(conf_text)  # Show skip reason instead of confidence
+            conf_label.setStyleSheet("""
+                QLabel {
+                    color: #999999;
+                    font-size: 9px;
+                }
+            """)
+        else:
+            conf_label = QLabel(f"Conf: {conf_text}")
+            conf_label.setStyleSheet("""
+                QLabel {
+                    color: #cccccc;
+                    font-size: 10px;
+                }
+            """)
         conf_label.setAlignment(Qt.AlignCenter)
-        conf_label.setStyleSheet("""
-            QLabel {
-                color: #cccccc;
-                font-size: 10px;
-            }
-        """)
         layout.addWidget(conf_label)
         
         # Crop number label - increased size
@@ -1359,6 +1425,26 @@ class EasyOCRTuningTab(QWidget):
     
     def _draw_ocr_on_crop(self, crop_image: np.ndarray, result: Dict) -> np.ndarray:
         """Draw OCR detection boxes and text on the crop image."""
+        # Check if crop was skipped
+        if 'skipped_reason' in result:
+            # Draw "SKIPPED" overlay on the image
+            overlay = crop_image.copy()
+            h, w = crop_image.shape[:2]
+            
+            # Add semi-transparent gray overlay
+            cv2.rectangle(overlay, (0, 0), (w, h), (128, 128, 128), -1)
+            cv2.addWeighted(crop_image, 0.7, overlay, 0.3, 0, crop_image)
+            
+            # Add "SKIPPED" text
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            text = "SKIPPED"
+            text_size = cv2.getTextSize(text, font, 0.7, 2)[0]
+            text_x = (w - text_size[0]) // 2
+            text_y = (h + text_size[1]) // 2
+            cv2.putText(crop_image, text, (text_x, text_y), font, 0.7, (255, 255, 255), 2)
+            
+            return crop_image
+        
         if 'ocr_results' not in result or not result['ocr_results']:
             return crop_image
         
@@ -1494,6 +1580,11 @@ class EasyOCRTuningTab(QWidget):
                 get_setting('player_id.preprocessing.resize_absolute_height', 0))
             self.preprocess_params['denoise'] = user_config.get('player_id', {}).get('preprocessing', {}).get('denoise',
                 get_setting('player_id.preprocessing.denoise', False))
+            # Load minimum crop size parameters
+            self.preprocess_params['min_crop_width'] = user_config.get('player_id', {}).get('preprocessing', {}).get('min_crop_width',
+                get_setting('player_id.preprocessing.min_crop_width', 20))
+            self.preprocess_params['min_crop_height'] = user_config.get('player_id', {}).get('preprocessing', {}).get('min_crop_height',
+                get_setting('player_id.preprocessing.min_crop_height', 30))
             
             # Load OCR parameters (using user overrides if available)
             if EASYOCR_AVAILABLE:
@@ -1587,6 +1678,11 @@ class EasyOCRTuningTab(QWidget):
             self.contrast_spin.setValue(self.preprocess_params['contrast_alpha'])
             self.brightness_spin.setValue(self.preprocess_params['brightness_beta'])
             self.blur_spin.setValue(self.preprocess_params['gaussian_blur'])
+            # Update minimum crop size controls
+            if hasattr(self, 'min_crop_width_spin'):
+                self.min_crop_width_spin.setValue(self.preprocess_params['min_crop_width'])
+            if hasattr(self, 'min_crop_height_spin'):
+                self.min_crop_height_spin.setValue(self.preprocess_params['min_crop_height'])
             if hasattr(self, 'enhance_check'):
                 self.enhance_check.setChecked(self.preprocess_params['enhance_contrast'])
             if hasattr(self, 'clahe_clip_spin'):
@@ -1666,6 +1762,12 @@ class EasyOCRTuningTab(QWidget):
         self.resize_width_spin.valueChanged.disconnect()
         self.resize_height_spin.valueChanged.disconnect()
         
+        # Disconnect minimum crop size signals
+        if hasattr(self, 'min_crop_width_spin'):
+            self.min_crop_width_spin.valueChanged.disconnect()
+        if hasattr(self, 'min_crop_height_spin'):
+            self.min_crop_height_spin.valueChanged.disconnect()
+        
         # Disconnect preprocessing signals - checkboxes
         self.denoise_check.stateChanged.disconnect()
         
@@ -1740,6 +1842,12 @@ class EasyOCRTuningTab(QWidget):
         self.resize_spin.valueChanged.connect(self._on_preprocess_param_changed)
         self.resize_width_spin.valueChanged.connect(self._on_preprocess_param_changed)
         self.resize_height_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        
+        # Reconnect minimum crop size signals
+        if hasattr(self, 'min_crop_width_spin'):
+            self.min_crop_width_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        if hasattr(self, 'min_crop_height_spin'):
+            self.min_crop_height_spin.valueChanged.connect(self._on_preprocess_param_changed)
         
         # Reconnect preprocessing signals - checkboxes
         self.denoise_check.stateChanged.connect(self._on_preprocess_param_changed)
@@ -1845,7 +1953,10 @@ class EasyOCRTuningTab(QWidget):
                         'upscale_to_size': self.preprocess_params['upscale_to_size'],
                         'upscale_target_size': self.preprocess_params['upscale_target_size'],
                         'colour_mode': self.preprocess_params['colour_mode'],
-                        'bw_mode': self.preprocess_params['bw_mode']
+                        'bw_mode': self.preprocess_params['bw_mode'],
+                        # Minimum crop size filtering parameters
+                        'min_crop_width': self.preprocess_params['min_crop_width'],
+                        'min_crop_height': self.preprocess_params['min_crop_height']
                     }
                 }
             }

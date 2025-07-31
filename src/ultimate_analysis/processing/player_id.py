@@ -131,6 +131,18 @@ def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List],
         # Load user configuration (same as tuning tab)
         user_config = _load_easyocr_config()
         
+        # Check minimum crop size before processing
+        crop_config = user_config.get('preprocessing', {})
+        min_crop_width = crop_config.get('min_crop_width', 20)  # Default 20 pixels
+        min_crop_height = crop_config.get('min_crop_height', 30)  # Default 30 pixels
+        
+        crop_height, crop_width = crop_image.shape[:2]
+        if crop_width < min_crop_width or crop_height < min_crop_height:
+            timing_info['preprocessing_ms'] = (time.time() - prep_start_time) * 1000
+            timing_info['ocr_ms'] = 0.0
+            print(f"[PLAYER_ID] Crop too small ({crop_width}x{crop_height}), skipping OCR (min: {min_crop_width}x{min_crop_height})")
+            return "Unknown", [], timing_info
+        
         # Apply top crop fraction like tuning tab
         crop_config = user_config.get('preprocessing', {})
         processed_crop = _apply_crop_fraction(crop_image, crop_config)

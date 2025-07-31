@@ -31,6 +31,14 @@ player_id:
     denoise: true
     enhance_contrast: false
     gaussian_blur: 1
+    # Minimum crop size filtering - skip OCR on crops too small to be readable
+    # This prevents wasted processing time on distant/small players
+    # Recommended values based on video resolution:
+    # - 1080p: 25x35 pixels (good balance)
+    # - 720p: 18x25 pixels (scaled down)
+    # - 480p: 12x18 pixels (minimum)
+    min_crop_width: 20      # Minimum crop width in pixels for OCR processing
+    min_crop_height: 30     # Minimum crop height in pixels for OCR processing
     resize_absolute_height: 0
     resize_absolute_width: 0
     resize_factor: 1.0
