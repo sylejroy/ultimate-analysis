@@ -530,10 +530,23 @@ class MainTab(QWidget):
         if self.player_id_checkbox.isChecked() and self.current_tracks:
             print("[MAIN_TAB] Running player identification...")
             start_time = time.time()
-            self.current_player_ids = run_player_id_on_tracks(frame, self.current_tracks)
+            self.current_player_ids, player_id_timing = run_player_id_on_tracks(frame, self.current_tracks)
             duration_ms = (time.time() - start_time) * 1000
-            self.performance_widget.add_processing_measurement("Player ID", duration_ms)
+            
+            # Debug timing values
+            print(f"[MAIN_TAB] Raw timing: {player_id_timing}")
+            print(f"[MAIN_TAB] Total duration: {duration_ms:.1f}ms")
+            
+            # Add detailed timing measurements (only if there are actual measurements)
+            if player_id_timing['preprocessing_ms'] > 0 or player_id_timing['ocr_ms'] > 0:
+                self.performance_widget.add_processing_measurement("Player ID - Preprocessing", player_id_timing['preprocessing_ms'])
+                self.performance_widget.add_processing_measurement("Player ID - EasyOCR", player_id_timing['ocr_ms'])
+            
             print(f"[MAIN_TAB] Identified {len(self.current_player_ids)} players")
+            print(f"[MAIN_TAB] Player ID timing - Preprocessing: {player_id_timing['preprocessing_ms']:.1f}ms, OCR: {player_id_timing['ocr_ms']:.1f}ms")
+        else:
+            # Clear player IDs when not running
+            self.current_player_ids = {}
         
         # Apply visualizations (with timing)
         viz_start_time = time.time()

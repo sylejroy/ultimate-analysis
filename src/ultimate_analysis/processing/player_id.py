@@ -7,6 +7,7 @@ EasyOCR for text recognition or YOLO models trained on digit detection.
 import cv2
 import numpy as np
 import yaml
+import time
 from typing import List, Dict, Any, Tuple, Optional
 from pathlib import Path
 
@@ -25,7 +26,7 @@ from ..constants import JERSEY_NUMBER_MIN, JERSEY_NUMBER_MAX, SUPPORTED_OCR_LANG
 _easyocr_reader = None
 
 
-def run_player_id_on_tracks(frame: np.ndarray, tracks: List[Any]) -> Dict[int, Tuple[str, Any]]:
+def run_player_id_on_tracks(frame: np.ndarray, tracks: List[Any]) -> Tuple[Dict[int, Tuple[str, Any]], Dict[str, float]]:
     """Run player identification on tracked objects using EasyOCR.
     
     Args:
@@ -33,17 +34,21 @@ def run_player_id_on_tracks(frame: np.ndarray, tracks: List[Any]) -> Dict[int, T
         tracks: List of track objects from tracking system
         
     Returns:
-        Dictionary mapping track_id -> (jersey_number, detection_details)
+        Tuple of (player_identifications, timing_info)
+        player_identifications: Dictionary mapping track_id -> (jersey_number, detection_details)
+        timing_info: Dictionary with 'preprocessing_ms' and 'ocr_ms' totals
         
     Example:
-        results = run_player_id_on_tracks(frame, current_tracks)
+        results, timing = run_player_id_on_tracks(frame, current_tracks)
         for track_id, (number, details) in results.items():
             print(f"Track {track_id}: Player #{number}")
+        print(f"Preprocessing: {timing['preprocessing_ms']:.1f}ms, OCR: {timing['ocr_ms']:.1f}ms")
     """
     player_identifications = {}
+    total_timing = {'preprocessing_ms': 0.0, 'ocr_ms': 0.0}
     
     if not tracks:
-        return player_identifications
+        return player_identifications, total_timing
     
     # Initialize EasyOCR if needed
     if _easyocr_reader is None:
@@ -82,8 +87,12 @@ def run_player_id_on_tracks(frame: np.ndarray, tracks: List[Any]) -> Dict[int, T
             
             if crop.size > 0:
                 # Run EasyOCR player ID on the crop
-                jersey_number, details = _run_easyocr_detection(crop)
+                jersey_number, details, timing = _run_easyocr_detection(crop)
                 player_identifications[track_id] = (jersey_number, details)
+                
+                # Add timing to totals
+                total_timing['preprocessing_ms'] += timing['preprocessing_ms']
+                total_timing['ocr_ms'] += timing['ocr_ms']
                 
                 print(f"[PLAYER_ID] Track {track_id}: {jersey_number}")
             else:
@@ -93,26 +102,32 @@ def run_player_id_on_tracks(frame: np.ndarray, tracks: List[Any]) -> Dict[int, T
             print(f"[PLAYER_ID] Error processing track: {e}")
             continue
     
-    return player_identifications
+    return player_identifications, total_timing
 
 
-def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List]]:
+def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List], Dict[str, float]]:
     """Run EasyOCR text detection on player crop using the same algorithm as tuning tab.
     
     Args:
         crop_image: Cropped player image
         
     Returns:
-        Tuple of (jersey_number, ocr_results)
+        Tuple of (jersey_number, ocr_results, timing_info)
+        timing_info contains 'preprocessing_ms' and 'ocr_ms'
     """
+    timing_info = {'preprocessing_ms': 0.0, 'ocr_ms': 0.0}
+    
     if _easyocr_reader is None:
         _initialize_easyocr()
-    
+
     if not EASYOCR_AVAILABLE or _easyocr_reader is None:
         print("[PLAYER_ID] EasyOCR not available, returning Unknown")
-        return "Unknown", []
-    
+        return "Unknown", [], timing_info
+
     try:
+        # Start preprocessing timer
+        prep_start_time = time.time()
+        
         # Load user configuration (same as tuning tab)
         user_config = _load_easyocr_config()
         
@@ -129,9 +144,7 @@ def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List]]
         final_height, final_width = final_processed_crop.shape[:2]
         
         # Get EasyOCR parameters from config
-        ocr_params = user_config.get('easyocr', {})
-        
-        # Prepare parameters for readtext (same as tuning tab)
+        ocr_params = user_config.get('easyocr', {})        # Prepare parameters for readtext (same as tuning tab)
         readtext_params = {
             'text_threshold': ocr_params.get('text_threshold', 0.7),
             'low_text': ocr_params.get('low_text', 0.6),
@@ -158,8 +171,17 @@ def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List]]
         if ocr_params.get('allowlist'):
             readtext_params['allowlist'] = ocr_params['allowlist']
         
+        # End preprocessing timer
+        timing_info['preprocessing_ms'] = (time.time() - prep_start_time) * 1000
+        
+        # Start OCR timer
+        ocr_start_time = time.time()
+        
         # Run EasyOCR with user settings (same as tuning tab)
         ocr_results = _easyocr_reader.readtext(final_processed_crop, **readtext_params)
+        
+        # End OCR timer
+        timing_info['ocr_ms'] = (time.time() - ocr_start_time) * 1000
         
         # Process results - find best numeric text (same as tuning tab)
         best_text = ""
@@ -203,11 +225,11 @@ def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List]]
             }
         
         print(f"[PLAYER_ID] EasyOCR detected: {jersey_number} (confidence: {best_confidence:.3f})")
-        return jersey_number, result_details
+        return jersey_number, result_details, timing_info
         
     except Exception as e:
         print(f"[PLAYER_ID] EasyOCR error: {e}")
-        return "Unknown", []
+        return "Unknown", [], timing_info
 
 
 def _load_easyocr_config() -> Dict[str, Any]:

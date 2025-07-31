@@ -230,7 +230,15 @@ class PerformanceWidget(QWidget):
     
     def _init_table_rows(self):
         """Initialize the table with processing function rows."""
-        processes = ["Inference", "Tracking", "Player ID", "Field Segmentation", "Visualization", "Total Runtime"]
+        processes = [
+            "Inference", 
+            "Tracking", 
+            "Player ID - Preprocessing",
+            "Player ID - EasyOCR", 
+            "Field Segmentation", 
+            "Visualization", 
+            "Total Runtime"
+        ]
         self.table.setRowCount(len(processes))
         
         for i, process in enumerate(processes):
@@ -245,6 +253,13 @@ class PerformanceWidget(QWidget):
                     item = self.table.item(i, col)
                     if item:
                         item.setBackground(QColor(60, 80, 100))  # Darker blue background
+            
+            # Style the Player ID rows with a subtle background
+            elif "Player ID" in process:
+                for col in range(4):
+                    item = self.table.item(i, col)
+                    if item:
+                        item.setBackground(QColor(50, 70, 50))  # Subtle green tint
         
         # Auto-resize table height to fit all rows
         self._resize_table_to_content()
@@ -315,7 +330,15 @@ class PerformanceWidget(QWidget):
     
     def _update_ui(self):
         """Update the UI with latest metrics."""
-        processes = ["Inference", "Tracking", "Player ID", "Field Segmentation", "Visualization", "Total Runtime"]
+        processes = [
+            "Inference", 
+            "Tracking", 
+            "Player ID - Preprocessing",
+            "Player ID - EasyOCR", 
+            "Field Segmentation", 
+            "Visualization", 
+            "Total Runtime"
+        ]
         
         for i, process in enumerate(processes):
             stats = self.metrics.get_stats(process)
