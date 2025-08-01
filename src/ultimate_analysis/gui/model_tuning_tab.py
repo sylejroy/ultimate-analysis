@@ -1344,6 +1344,18 @@ class ModelTuningTab(QWidget):
                 except (ValueError, IndexError):
                     pass
             
+            # Also try to extract epoch from YOLO format at start of line (e.g., "5/100    3.71G...")
+            if current_epoch == 0 and "/" in status:
+                try:
+                    # Look for pattern like "5/100" at the beginning of the status line
+                    epoch_match = re.match(r'^(\d+)/(\d+)\s+', status.strip())
+                    if epoch_match:
+                        current_epoch = int(epoch_match.group(1))
+                        total_epochs = int(epoch_match.group(2))
+                        print(f"[TRAINING_TIME_DEBUG] Parsed YOLO epoch format: {current_epoch}/{total_epochs}")
+                except (ValueError, IndexError):
+                    pass
+            
             # Try to extract iterations per second if available
             if "it/s" in status:
                 try:
@@ -1357,13 +1369,24 @@ class ModelTuningTab(QWidget):
             remaining_str = ""
             
             # Method 1: Use epoch-based estimation if we have valid epoch info and actual training time
-            if current_epoch > 0 and total_epochs > 0 and actual_training_elapsed > 0 and current_epoch != self.last_epoch:
+            if current_epoch > 0 and total_epochs > 0 and actual_training_elapsed > 0:
+                # Calculate regardless of last_epoch to ensure we always have an estimate
                 avg_time_per_epoch = actual_training_elapsed / current_epoch
                 remaining_epochs = total_epochs - current_epoch
                 estimated_remaining = avg_time_per_epoch * remaining_epochs
                 
                 if estimated_remaining > 0:
                     remaining_str = self._format_elapsed_time(estimated_remaining)
+                    
+                    # Debug logging for time calculation issues
+                    if current_epoch == 5 and total_epochs == 100:  # Specific case from logs
+                        print(f"[TRAINING_TIME_DEBUG] Epoch {current_epoch}/{total_epochs}")
+                        print(f"[TRAINING_TIME_DEBUG] Actual training elapsed: {actual_training_elapsed:.2f}s")
+                        print(f"[TRAINING_TIME_DEBUG] Avg time per epoch: {avg_time_per_epoch:.2f}s")
+                        print(f"[TRAINING_TIME_DEBUG] Remaining epochs: {remaining_epochs}")
+                        print(f"[TRAINING_TIME_DEBUG] Estimated remaining: {estimated_remaining:.2f}s")
+                        print(f"[TRAINING_TIME_DEBUG] Formatted remaining: {remaining_str}")
+                    
                     self.last_epoch = current_epoch
             
             # Method 2: Use iterations per second for more accurate short-term estimates
