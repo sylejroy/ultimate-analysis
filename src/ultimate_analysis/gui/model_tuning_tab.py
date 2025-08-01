@@ -39,6 +39,7 @@ class TrainingResultsWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.results_path = None
+        self.reference_path = Path("data/models/detection/object_detection_yolo11l/finetune3/results.csv")
         self.figure = Figure(figsize=(12, 8))
         self.canvas = FigureCanvas(self.figure)
         
@@ -61,6 +62,11 @@ class TrainingResultsWidget(QWidget):
         self.update_timer.stop()
         self.results_path = None
         
+    def set_reference_path(self, reference_path: str):
+        """Set the reference results.csv file for comparison."""
+        self.reference_path = Path(reference_path)
+        print(f"[TRAINING_RESULTS] Reference path set to: {self.reference_path}")
+        
     def update_plots(self):
         """Update the plots with latest data from results.csv"""
         # First, try to find the results.csv file
@@ -71,8 +77,19 @@ class TrainingResultsWidget(QWidget):
             return
             
         try:
-            # Read the CSV file
+            # Read the current training CSV file
             df = pd.read_csv(self.results_path)
+            
+            # Load reference data
+            reference_df = None
+            if self.reference_path.exists():
+                try:
+                    reference_df = pd.read_csv(self.reference_path)
+                    print(f"[TRAINING_RESULTS] Loaded reference data with {len(reference_df)} epochs from {self.reference_path}")
+                except Exception as e:
+                    print(f"[TRAINING_RESULTS] Could not load reference data: {e}")
+            else:
+                print(f"[TRAINING_RESULTS] Reference file not found: {self.reference_path}")
             
             if df.empty:
                 return
@@ -90,17 +107,25 @@ class TrainingResultsWidget(QWidget):
             
             # Plot training and validation losses
             if 'train/box_loss' in df.columns:
-                ax1.plot(epochs, df['train/box_loss'], label='Train Box Loss', color='blue')
+                ax1.plot(epochs, df['train/box_loss'], label='Train Box Loss', color='blue', linewidth=2)
             if 'train/cls_loss' in df.columns:
-                ax1.plot(epochs, df['train/cls_loss'], label='Train Cls Loss', color='red')
+                ax1.plot(epochs, df['train/cls_loss'], label='Train Cls Loss', color='red', linewidth=2)
             if 'train/dfl_loss' in df.columns:
-                ax1.plot(epochs, df['train/dfl_loss'], label='Train DFL Loss', color='green')
+                ax1.plot(epochs, df['train/dfl_loss'], label='Train DFL Loss', color='green', linewidth=2)
             if 'val/box_loss' in df.columns:
-                ax1.plot(epochs, df['val/box_loss'], label='Val Box Loss', color='cyan', linestyle='--')
+                ax1.plot(epochs, df['val/box_loss'], label='Val Box Loss', color='cyan', linestyle='--', linewidth=2)
             if 'val/cls_loss' in df.columns:
-                ax1.plot(epochs, df['val/cls_loss'], label='Val Cls Loss', color='magenta', linestyle='--')
+                ax1.plot(epochs, df['val/cls_loss'], label='Val Cls Loss', color='magenta', linestyle='--', linewidth=2)
             if 'val/dfl_loss' in df.columns:
-                ax1.plot(epochs, df['val/dfl_loss'], label='Val DFL Loss', color='orange', linestyle='--')
+                ax1.plot(epochs, df['val/dfl_loss'], label='Val DFL Loss', color='orange', linestyle='--', linewidth=2)
+                
+            # Add reference data to loss plot
+            if reference_df is not None:
+                ref_epochs = reference_df.index + 1
+                if 'train/box_loss' in reference_df.columns:
+                    ax1.plot(ref_epochs, reference_df['train/box_loss'], label='Ref Train Box', color='lightblue', alpha=0.6, linestyle='--', linewidth=1.5)
+                if 'val/box_loss' in reference_df.columns:
+                    ax1.plot(ref_epochs, reference_df['val/box_loss'], label='Ref Val Box', color='lightcyan', alpha=0.6, linestyle='--', linewidth=1.5)
                 
             ax1.set_title('Loss Curves')
             ax1.set_xlabel('Epoch')
@@ -110,9 +135,16 @@ class TrainingResultsWidget(QWidget):
             
             # Plot mAP metrics
             if 'metrics/mAP50(B)' in df.columns:
-                ax2.plot(epochs, df['metrics/mAP50(B)'], label='mAP@0.5', color='blue')
+                ax2.plot(epochs, df['metrics/mAP50(B)'], label='mAP@0.5', color='blue', linewidth=2)
             if 'metrics/mAP50-95(B)' in df.columns:
-                ax2.plot(epochs, df['metrics/mAP50-95(B)'], label='mAP@0.5:0.95', color='red')
+                ax2.plot(epochs, df['metrics/mAP50-95(B)'], label='mAP@0.5:0.95', color='red', linewidth=2)
+                
+            # Add reference mAP data
+            if reference_df is not None:
+                if 'metrics/mAP50(B)' in reference_df.columns:
+                    ax2.plot(ref_epochs, reference_df['metrics/mAP50(B)'], label='Ref mAP@0.5', color='lightblue', alpha=0.6, linestyle='--', linewidth=1.5)
+                if 'metrics/mAP50-95(B)' in reference_df.columns:
+                    ax2.plot(ref_epochs, reference_df['metrics/mAP50-95(B)'], label='Ref mAP@0.5:0.95', color='lightcoral', alpha=0.6, linestyle='--', linewidth=1.5)
                 
             ax2.set_title('mAP Metrics')
             ax2.set_xlabel('Epoch')
@@ -122,9 +154,16 @@ class TrainingResultsWidget(QWidget):
             
             # Plot precision and recall
             if 'metrics/precision(B)' in df.columns:
-                ax3.plot(epochs, df['metrics/precision(B)'], label='Precision', color='green')
+                ax3.plot(epochs, df['metrics/precision(B)'], label='Precision', color='green', linewidth=2)
             if 'metrics/recall(B)' in df.columns:
-                ax3.plot(epochs, df['metrics/recall(B)'], label='Recall', color='orange')
+                ax3.plot(epochs, df['metrics/recall(B)'], label='Recall', color='orange', linewidth=2)
+                
+            # Add reference precision/recall data
+            if reference_df is not None:
+                if 'metrics/precision(B)' in reference_df.columns:
+                    ax3.plot(ref_epochs, reference_df['metrics/precision(B)'], label='Ref Precision', color='lightgreen', alpha=0.6, linestyle='--', linewidth=1.5)
+                if 'metrics/recall(B)' in reference_df.columns:
+                    ax3.plot(ref_epochs, reference_df['metrics/recall(B)'], label='Ref Recall', color='wheat', alpha=0.6, linestyle='--', linewidth=1.5)
                 
             ax3.set_title('Precision & Recall')
             ax3.set_xlabel('Epoch')
@@ -134,19 +173,28 @@ class TrainingResultsWidget(QWidget):
             
             # Plot learning rate and other metrics
             if 'lr/pg0' in df.columns:
-                ax4.plot(epochs, df['lr/pg0'], label='Learning Rate', color='purple')
+                ax4.plot(epochs, df['lr/pg0'], label='Learning Rate', color='purple', linewidth=2)
                 ax4.set_ylabel('Learning Rate', color='purple')
                 ax4.tick_params(axis='y', labelcolor='purple')
+                
+                # Add reference learning rate
+                if reference_df is not None and 'lr/pg0' in reference_df.columns:
+                    ax4.plot(ref_epochs, reference_df['lr/pg0'], label='Ref LR', color='plum', alpha=0.6, linestyle='--', linewidth=1.5)
                 
                 # Add a second y-axis for fitness if available
                 if 'fitness' in df.columns:
                     ax4_twin = ax4.twinx()
-                    ax4_twin.plot(epochs, df['fitness'], label='Fitness', color='red')
+                    ax4_twin.plot(epochs, df['fitness'], label='Fitness', color='red', linewidth=2)
                     ax4_twin.set_ylabel('Fitness', color='red')
                     ax4_twin.tick_params(axis='y', labelcolor='red')
                     
+                    # Add reference fitness
+                    if reference_df is not None and 'fitness' in reference_df.columns:
+                        ax4_twin.plot(ref_epochs, reference_df['fitness'], label='Ref Fitness', color='lightcoral', alpha=0.6, linestyle='--', linewidth=1.5)
+                        
             ax4.set_title('Learning Rate & Fitness')
             ax4.set_xlabel('Epoch')
+            ax4.legend()
             ax4.grid(True)
             
             # Adjust layout and refresh
@@ -426,6 +474,11 @@ class ModelTrainingThread(QThread):
                     
                     # Only update if epoch changed and is reasonable
                     if current_epoch != epoch_count and 1 <= current_epoch <= total_epochs:
+                        # Set actual training start time on first epoch detection (excluding preprocessing)
+                        if not hasattr(self, 'actual_training_start_time') or self.actual_training_start_time is None:
+                            self.actual_training_start_time = time.time()
+                            print(f"[TRAINING_DEBUG] Actual training start time set at epoch {current_epoch}")
+                        
                         epoch_count = current_epoch
                         progress_percent = int((current_epoch / total_epochs) * 100)
                         status = f"Training • Epoch {current_epoch}/{total_epochs}"
@@ -522,7 +575,8 @@ class ModelTuningTab(QWidget):
         self.training_thread: Optional[ModelTrainingThread] = None
         self.training_config = {}
         self.current_results_dir = None
-        self.training_start_time = None
+        self.training_start_time = None  # When training subprocess starts (includes preprocessing)
+        self.actual_training_start_time = None  # When actual epoch training begins
         self.last_epoch = 0
         
         # Initialize UI
@@ -1152,11 +1206,9 @@ class ModelTuningTab(QWidget):
         # Extract dataset name
         dataset_name = Path(self.current_data_path).parent.name
         
-        # Create timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # Create directory name: task_model_dataset_timestamp
-        dir_name = f"{self.current_task}_{model_name}_{dataset_name}_{timestamp}"
+        # Create date prefix and find unique number
+        date_prefix = datetime.now().strftime("%Y%m%d")
+        base_name = f"{date_prefix}_{self.current_task}_{model_name}_{dataset_name}"
         
         # Determine output directory
         models_base = Path("data/models")
@@ -1165,8 +1217,17 @@ class ModelTuningTab(QWidget):
         else:
             base_dir = models_base / "segmentation"
             
-        output_dir = base_dir / dir_name
+        # Find unique directory name by incrementing number
+        counter = 1
+        while True:
+            dir_name = f"{base_name}_{counter}"
+            output_dir = base_dir / dir_name
+            if not output_dir.exists():
+                break
+            counter += 1
+        
         output_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[TRAINING] Created output directory: {output_dir}")
         
         # Collect all training parameters from UI
         training_params = {
@@ -1247,6 +1308,11 @@ class ModelTuningTab(QWidget):
             elapsed_time = time.time() - self.training_start_time
             elapsed_str = self._format_elapsed_time(elapsed_time)
             
+            # For time remaining estimates, use actual training time (excluding preprocessing)
+            actual_training_elapsed = 0
+            if hasattr(self, 'actual_training_start_time') and self.actual_training_start_time:
+                actual_training_elapsed = time.time() - self.actual_training_start_time
+            
             # Extract epoch info for time estimation
             current_epoch = 0
             total_epochs = 0
@@ -1274,9 +1340,9 @@ class ModelTuningTab(QWidget):
             # Calculate remaining time using multiple methods
             remaining_str = ""
             
-            # Method 1: Use epoch-based estimation if we have valid epoch info
-            if current_epoch > 0 and total_epochs > 0 and current_epoch != self.last_epoch:
-                avg_time_per_epoch = elapsed_time / current_epoch
+            # Method 1: Use epoch-based estimation if we have valid epoch info and actual training time
+            if current_epoch > 0 and total_epochs > 0 and actual_training_elapsed > 0 and current_epoch != self.last_epoch:
+                avg_time_per_epoch = actual_training_elapsed / current_epoch
                 remaining_epochs = total_epochs - current_epoch
                 estimated_remaining = avg_time_per_epoch * remaining_epochs
                 
@@ -1380,6 +1446,7 @@ class ModelTuningTab(QWidget):
         
         # Reset timing variables
         self.training_start_time = None
+        self.actual_training_start_time = None
         self.last_epoch = 0
         
         
