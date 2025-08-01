@@ -89,7 +89,7 @@ class EasyOCRTuningTab(QWidget):
             'resize_factor': 1.0,      # Resize factor (multiplier)
             'resize_absolute_width': 0,  # Absolute width in pixels (0 = use factor)
             'resize_absolute_height': 0, # Absolute height in pixels (0 = use factor)
-            'enhance_contrast': False,  # CLAHE enhancement (disabled per config)
+            'enhance_contrast': True,   # CLAHE enhancement (enabled by default)
             'clahe_clip_limit': 3.0,   # From provided config
             'clahe_grid_size': 8,      # From provided config
             'denoise': False,          # Apply denoising
@@ -101,6 +101,9 @@ class EasyOCRTuningTab(QWidget):
             'upscale_target_size': 256, # From provided config
             'colour_mode': True,       # From provided config
             'bw_mode': True,           # From provided config
+            # Minimum crop size filtering (skip OCR on crops too small to be readable)
+            'min_crop_width': 20,      # Minimum crop width in pixels for OCR processing
+            'min_crop_height': 30,     # Minimum crop height in pixels for OCR processing
         }
         
         # Initialize UI
@@ -173,19 +176,17 @@ class EasyOCRTuningTab(QWidget):
         model_group.setLayout(model_layout)
         layout.addWidget(model_group)
         
-        # Parameters in 2-column layout
-        params_group = QGroupBox("Parameters")
+        # Parameters in 2-column layout (no outer group box header)
         params_main_layout = QHBoxLayout()
         
         # Left column - Preprocessing
         left_column = QWidget()
         left_layout = QVBoxLayout()
         
-        preprocess_group = QGroupBox("Preprocessing Parameters")
+        # Preprocessing parameters (no group box header)
         preprocess_layout = QFormLayout()
         self._create_preprocessing_controls(preprocess_layout)
-        preprocess_group.setLayout(preprocess_layout)
-        left_layout.addWidget(preprocess_group)
+        left_layout.addLayout(preprocess_layout)
         left_layout.addStretch()
         left_column.setLayout(left_layout)
         
@@ -193,19 +194,17 @@ class EasyOCRTuningTab(QWidget):
         right_column = QWidget()
         right_layout = QVBoxLayout()
         
-        ocr_group = QGroupBox("EasyOCR Parameters")
+        # EasyOCR parameters (no group box header)
         ocr_layout = QFormLayout()
         self._create_ocr_controls(ocr_layout)
-        ocr_group.setLayout(ocr_layout)
-        right_layout.addWidget(ocr_group)
+        right_layout.addLayout(ocr_layout)
         right_layout.addStretch()
         right_column.setLayout(right_layout)
         
         # Add columns to main layout
         params_main_layout.addWidget(left_column)
         params_main_layout.addWidget(right_column)
-        params_group.setLayout(params_main_layout)
-        layout.addWidget(params_group)
+        layout.addLayout(params_main_layout)
         
         # Control buttons
         button_layout = QHBoxLayout()
@@ -317,6 +316,7 @@ class EasyOCRTuningTab(QWidget):
         self.crop_fraction_spin.setSingleStep(0.05)
         self.crop_fraction_spin.setValue(self.preprocess_params['crop_top_fraction'])
         self.crop_fraction_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        self.crop_fraction_spin.setToolTip("Fraction of the image to keep from the top (0.45 = keep top 45%, crop bottom 55%).\nUseful for removing score displays at bottom of screen.")
         layout.addRow("Top Crop Fraction:", self.crop_fraction_spin)
         
         # Contrast
@@ -325,6 +325,7 @@ class EasyOCRTuningTab(QWidget):
         self.contrast_spin.setSingleStep(0.1)
         self.contrast_spin.setValue(self.preprocess_params['contrast_alpha'])
         self.contrast_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        self.contrast_spin.setToolTip("Contrast multiplier (1.0 = no change, >1.0 = more contrast, <1.0 = less contrast).\nHigher values make text edges sharper for better OCR recognition.")
         layout.addRow("Contrast (α):", self.contrast_spin)
         
         # Brightness
@@ -332,6 +333,7 @@ class EasyOCRTuningTab(QWidget):
         self.brightness_spin.setRange(-100, 100)
         self.brightness_spin.setValue(self.preprocess_params['brightness_beta'])
         self.brightness_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        self.brightness_spin.setToolTip("Brightness adjustment (-100 = darker, 0 = no change, +100 = brighter).\nNegative values can help with bright jerseys on bright backgrounds.")
         layout.addRow("Brightness (β):", self.brightness_spin)
         
         # Gaussian blur
@@ -340,16 +342,36 @@ class EasyOCRTuningTab(QWidget):
         self.blur_spin.setSingleStep(2)
         self.blur_spin.setValue(self.preprocess_params['gaussian_blur'])
         self.blur_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        self.blur_spin.setToolTip("Gaussian blur kernel size (0 = no blur, higher = more blur).\nSlight blur (3-5) can reduce noise, but too much hurts text recognition.")
         layout.addRow("Gaussian Blur (ksize):", self.blur_spin)
         
-        # Contrast Enhancement Section
-        layout.addRow(QLabel("=== Contrast Enhancement ==="))
+        # Minimum crop width
+        self.min_crop_width_spin = QSpinBox()
+        self.min_crop_width_spin.setRange(5, 200)
+        self.min_crop_width_spin.setValue(self.preprocess_params['min_crop_width'])
+        self.min_crop_width_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        self.min_crop_width_spin.setToolTip("Skip OCR on crops narrower than this width (pixels). \nRecommended: 1080p=25px, 720p=18px, 480p=12px")
+        layout.addRow("Min Crop Width (px):", self.min_crop_width_spin)
+        
+        # Minimum crop height
+        self.min_crop_height_spin = QSpinBox()
+        self.min_crop_height_spin.setRange(5, 200)
+        self.min_crop_height_spin.setValue(self.preprocess_params['min_crop_height'])
+        self.min_crop_height_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        self.min_crop_height_spin.setToolTip("Skip OCR on crops shorter than this height (pixels). \nRecommended: 1080p=35px, 720p=25px, 480p=18px")
+        layout.addRow("Min Crop Height (px):", self.min_crop_height_spin)
+        
+        # Add helpful text
+        min_crop_info = QLabel("Skip OCR on crops smaller than these dimensions")
+        min_crop_info.setStyleSheet("color: #cccccc; font-size: 10px;")
+        layout.addRow("", min_crop_info)
         
         # CLAHE enhancement toggle
         self.enhance_check = QCheckBox()
         self.enhance_check.setChecked(self.preprocess_params['enhance_contrast'])
         self.enhance_check.stateChanged.connect(self._on_preprocess_param_changed)
         self.enhance_check.stateChanged.connect(self._update_clahe_controls)  # Update control states
+        self.enhance_check.setToolTip("Enable CLAHE (Contrast Limited Adaptive Histogram Equalization).\nImproves local contrast and can make numbers more visible in varying lighting.")
         layout.addRow("Enable CLAHE Enhancement:", self.enhance_check)
         
         # CLAHE parameters (indented to show dependency)
@@ -358,31 +380,29 @@ class EasyOCRTuningTab(QWidget):
         self.clahe_clip_spin.setSingleStep(0.5)
         self.clahe_clip_spin.setValue(self.preprocess_params['clahe_clip_limit'])
         self.clahe_clip_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        self.clahe_clip_spin.setToolTip("CLAHE clip limit (1.0-10.0). Higher values = stronger contrast enhancement.\nTypical range: 2.0-4.0. Too high can create artifacts.")
         layout.addRow("  → Clip Limit:", self.clahe_clip_spin)
         
         self.clahe_grid_spin = QSpinBox()
         self.clahe_grid_spin.setRange(2, 16)
         self.clahe_grid_spin.setValue(self.preprocess_params['clahe_grid_size'])
         self.clahe_grid_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        self.clahe_grid_spin.setToolTip("CLAHE grid size (2-16). Smaller = more localized enhancement, larger = more global.\nTypical range: 6-10. Smaller values for fine details, larger for broader areas.")
         layout.addRow("  → Grid Size:", self.clahe_grid_spin)
-        
-        # Denoising Section
-        layout.addRow(QLabel("=== Denoising ==="))
         
         # Denoising toggle
         self.denoise_check = QCheckBox()
         self.denoise_check.setChecked(self.preprocess_params['denoise'])
         self.denoise_check.stateChanged.connect(self._on_preprocess_param_changed)
+        self.denoise_check.setToolTip("Apply Non-Local Means denoising to reduce image noise.\nHelps with low-quality or compressed video, but adds processing time.")
         layout.addRow("Enable Denoising:", self.denoise_check)
-        
-        # Sharpening Section
-        layout.addRow(QLabel("=== Sharpening ==="))
         
         # Sharpening toggle
         self.sharpen_check = QCheckBox()
         self.sharpen_check.setChecked(self.preprocess_params['sharpen'])
         self.sharpen_check.stateChanged.connect(self._on_preprocess_param_changed)
         self.sharpen_check.stateChanged.connect(self._update_sharpen_controls)  # Update control states
+        self.sharpen_check.setToolTip("Apply unsharp mask sharpening to enhance text edges.\nCan improve OCR accuracy on blurry or soft images, but may amplify noise.")
         layout.addRow("Enable Sharpening:", self.sharpen_check)
         
         # Sharpen strength (indented to show dependency)
@@ -392,16 +412,15 @@ class EasyOCRTuningTab(QWidget):
         self.sharpen_strength_spin.setDecimals(3)
         self.sharpen_strength_spin.setValue(self.preprocess_params['sharpen_strength'])
         self.sharpen_strength_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        self.sharpen_strength_spin.setToolTip("Sharpening strength (0.01-1.0). Higher values = stronger sharpening effect.\nTypical range: 0.1-0.3. Too high can create artifacts and noise.")
         layout.addRow("  → Strength:", self.sharpen_strength_spin)
-        
-        # Upscaling Section
-        layout.addRow(QLabel("=== Upscaling ==="))
         
         # Upscaling toggle
         self.upscale_check = QCheckBox()
         self.upscale_check.setChecked(self.preprocess_params['upscale'])
         self.upscale_check.stateChanged.connect(self._on_preprocess_param_changed)
         self.upscale_check.stateChanged.connect(self._update_upscale_controls)  # Update control states
+        self.upscale_check.setToolTip("Enable image upscaling to improve OCR on small text.\nUses interpolation to increase image size before OCR processing.")
         layout.addRow("Enable Upscaling:", self.upscale_check)
         
         # Upscale parameters (indented to show dependency)
@@ -410,12 +429,14 @@ class EasyOCRTuningTab(QWidget):
         self.upscale_factor_spin.setSingleStep(0.5)
         self.upscale_factor_spin.setValue(self.preprocess_params['upscale_factor'])
         self.upscale_factor_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        self.upscale_factor_spin.setToolTip("Upscaling factor (1.0 = no scaling, 2.0 = double size, etc.).\nHigher values can help with very small text but increase processing time.")
         layout.addRow("  → Factor:", self.upscale_factor_spin)
         
         self.upscale_to_size_check = QCheckBox()
         self.upscale_to_size_check.setChecked(self.preprocess_params['upscale_to_size'])
         self.upscale_to_size_check.stateChanged.connect(self._on_preprocess_param_changed)
         self.upscale_to_size_check.stateChanged.connect(self._update_upscale_controls)  # Update target size control
+        self.upscale_to_size_check.setToolTip("Scale to a fixed target size instead of using a factor.\nUseful for consistent processing regardless of original crop size.")
         layout.addRow("  → Scale to Fixed Size:", self.upscale_to_size_check)
         
         self.upscale_target_spin = QSpinBox()
@@ -423,25 +444,22 @@ class EasyOCRTuningTab(QWidget):
         self.upscale_target_spin.setSingleStep(32)
         self.upscale_target_spin.setValue(self.preprocess_params['upscale_target_size'])
         self.upscale_target_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        self.upscale_target_spin.setToolTip("Target size in pixels for fixed-size upscaling.\nTypical values: 128-512px. Higher values = better quality but slower processing.")
         layout.addRow("    → Target Size (px):", self.upscale_target_spin)
-        
-        # Color Processing Section
-        layout.addRow(QLabel("=== Color Processing ==="))
         
         # Color mode processing
         self.colour_mode_check = QCheckBox()
         self.colour_mode_check.setChecked(self.preprocess_params['colour_mode'])
         self.colour_mode_check.stateChanged.connect(self._on_preprocess_param_changed)
+        self.colour_mode_check.setToolTip("Process image in color mode for EasyOCR.\nColor can help distinguish text from background, but uses more memory.")
         layout.addRow("Color Mode:", self.colour_mode_check)
         
         # Black & white mode
         self.bw_mode_check = QCheckBox()
         self.bw_mode_check.setChecked(self.preprocess_params['bw_mode'])
         self.bw_mode_check.stateChanged.connect(self._on_preprocess_param_changed)
+        self.bw_mode_check.setToolTip("Convert image to black and white (binary) mode.\nCan improve OCR on high-contrast text but may lose important color information.")
         layout.addRow("B&W Mode:", self.bw_mode_check)
-        
-        # Size Adjustment Section
-        layout.addRow(QLabel("=== Size Adjustment ==="))
         
         # Resize factor
         self.resize_spin = QDoubleSpinBox()
@@ -449,6 +467,7 @@ class EasyOCRTuningTab(QWidget):
         self.resize_spin.setSingleStep(0.1)
         self.resize_spin.setValue(self.preprocess_params['resize_factor'])
         self.resize_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        self.resize_spin.setToolTip("Global resize factor applied to all crops (0.5 = half size, 2.0 = double size).\nUse for overall scaling before other processing steps.")
         layout.addRow("Resize Factor:", self.resize_spin)
         
         # Absolute resize width
@@ -457,7 +476,7 @@ class EasyOCRTuningTab(QWidget):
         self.resize_width_spin.setSingleStep(32)
         self.resize_width_spin.setValue(self.preprocess_params['resize_absolute_width'])
         self.resize_width_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        self.resize_width_spin.setToolTip("Absolute width in pixels (0 = use factor)")
+        self.resize_width_spin.setToolTip("Absolute width in pixels (0 = use resize factor instead).\nForces all crops to this exact width, ignoring aspect ratio.")
         layout.addRow("Absolute Width (px):", self.resize_width_spin)
         
         # Absolute resize height
@@ -466,7 +485,7 @@ class EasyOCRTuningTab(QWidget):
         self.resize_height_spin.setSingleStep(32)
         self.resize_height_spin.setValue(self.preprocess_params['resize_absolute_height'])
         self.resize_height_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        self.resize_height_spin.setToolTip("Absolute height in pixels (0 = use factor)")
+        self.resize_height_spin.setToolTip("Absolute height in pixels (0 = use resize factor instead).\nForces all crops to this exact height, ignoring aspect ratio.")
         layout.addRow("Absolute Height (px):", self.resize_height_spin)
         
         # Initialize control states based on checkboxes
@@ -480,15 +499,13 @@ class EasyOCRTuningTab(QWidget):
             layout.addRow(QLabel("EasyOCR not available"))
             return
         
-        # Core detection parameters
-        layout.addRow(QLabel("=== Detection Parameters ==="))
-        
         # Text confidence threshold
         self.text_threshold_spin = QDoubleSpinBox()
         self.text_threshold_spin.setRange(0.1, 1.0)
         self.text_threshold_spin.setSingleStep(0.05)
         self.text_threshold_spin.setValue(self.ocr_params['text_threshold'])
         self.text_threshold_spin.valueChanged.connect(self._on_ocr_param_changed)
+        self.text_threshold_spin.setToolTip("Text detection confidence threshold (0.1-1.0).\nHigher values = stricter text detection, fewer false positives.\nLower values = more liberal detection, may include non-text.")
         layout.addRow("Text Threshold:", self.text_threshold_spin)
         
         # Low text threshold
@@ -497,6 +514,7 @@ class EasyOCRTuningTab(QWidget):
         self.low_text_spin.setSingleStep(0.05)
         self.low_text_spin.setValue(self.ocr_params['low_text'])
         self.low_text_spin.valueChanged.connect(self._on_ocr_param_changed)
+        self.low_text_spin.setToolTip("Low text confidence threshold for text region expansion.\nLower than text_threshold, used to extend detected text regions.")
         layout.addRow("Low Text:", self.low_text_spin)
         
         # Link threshold
@@ -505,10 +523,8 @@ class EasyOCRTuningTab(QWidget):
         self.link_threshold_spin.setSingleStep(0.05)
         self.link_threshold_spin.setValue(self.ocr_params['link_threshold'])
         self.link_threshold_spin.valueChanged.connect(self._on_ocr_param_changed)
+        self.link_threshold_spin.setToolTip("Threshold for linking text components together.\nLower values = more aggressive linking of nearby text regions.")
         layout.addRow("Link Threshold:", self.link_threshold_spin)
-        
-        # Geometric constraints
-        layout.addRow(QLabel("=== Geometric Constraints ==="))
         
         # Width threshold
         self.width_ths_spin = QDoubleSpinBox()
@@ -516,6 +532,7 @@ class EasyOCRTuningTab(QWidget):
         self.width_ths_spin.setSingleStep(0.1)
         self.width_ths_spin.setValue(self.ocr_params['width_ths'])
         self.width_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
+        self.width_ths_spin.setToolTip("Width threshold for text box filtering.\nFilters out text boxes that are too narrow relative to their height.")
         layout.addRow("Width Threshold:", self.width_ths_spin)
         
         # Height threshold
@@ -524,6 +541,7 @@ class EasyOCRTuningTab(QWidget):
         self.height_ths_spin.setSingleStep(0.1)
         self.height_ths_spin.setValue(self.ocr_params['height_ths'])
         self.height_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
+        self.height_ths_spin.setToolTip("Height threshold for text box filtering.\nFilters out text boxes that are too tall relative to their width.")
         layout.addRow("Height Threshold:", self.height_ths_spin)
         
         # X threshold
@@ -532,6 +550,7 @@ class EasyOCRTuningTab(QWidget):
         self.x_ths_spin.setSingleStep(0.1)
         self.x_ths_spin.setValue(self.ocr_params['x_ths'])
         self.x_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
+        self.x_ths_spin.setToolTip("X-axis threshold for text region grouping.\nControls horizontal spacing tolerance when grouping characters.")
         layout.addRow("X Threshold:", self.x_ths_spin)
         
         # Y threshold
@@ -540,6 +559,7 @@ class EasyOCRTuningTab(QWidget):
         self.y_ths_spin.setSingleStep(0.05)
         self.y_ths_spin.setValue(self.ocr_params['y_ths'])
         self.y_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
+        self.y_ths_spin.setToolTip("Y-axis threshold for text region grouping.\nControls vertical spacing tolerance when grouping characters.")
         layout.addRow("Y Threshold:", self.y_ths_spin)
         
         # Y-center threshold
@@ -548,6 +568,7 @@ class EasyOCRTuningTab(QWidget):
         self.ycenter_ths_spin.setSingleStep(0.05)
         self.ycenter_ths_spin.setValue(self.ocr_params['ycenter_ths'])
         self.ycenter_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
+        self.ycenter_ths_spin.setToolTip("Y-center threshold for text line grouping.\nControls how characters are grouped into text lines based on vertical alignment.")
         layout.addRow("Y-Center Threshold:", self.ycenter_ths_spin)
         
         # Slope threshold
@@ -556,10 +577,8 @@ class EasyOCRTuningTab(QWidget):
         self.slope_ths_spin.setSingleStep(0.05)
         self.slope_ths_spin.setValue(self.ocr_params['slope_ths'])
         self.slope_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
+        self.slope_ths_spin.setToolTip("Slope threshold for text line detection.\nControls tolerance for text line angle variations (rotation/skew).")
         layout.addRow("Slope Threshold:", self.slope_ths_spin)
-        
-        # Image processing parameters
-        layout.addRow(QLabel("=== Image Processing ==="))
         
         # Canvas size
         self.canvas_size_spin = QSpinBox()
@@ -567,6 +586,7 @@ class EasyOCRTuningTab(QWidget):
         self.canvas_size_spin.setSingleStep(256)
         self.canvas_size_spin.setValue(self.ocr_params['canvas_size'])
         self.canvas_size_spin.valueChanged.connect(self._on_ocr_param_changed)
+        self.canvas_size_spin.setToolTip("Maximum canvas size for text detection processing.\nLarger values can handle higher resolution images but use more memory.")
         layout.addRow("Canvas Size:", self.canvas_size_spin)
         
         # Magnification ratio
@@ -575,6 +595,7 @@ class EasyOCRTuningTab(QWidget):
         self.mag_ratio_spin.setSingleStep(0.1)
         self.mag_ratio_spin.setValue(self.ocr_params['mag_ratio'])
         self.mag_ratio_spin.valueChanged.connect(self._on_ocr_param_changed)
+        self.mag_ratio_spin.setToolTip("Magnification ratio for image processing.\nHigher values enlarge the image for better detection of small text.")
         layout.addRow("Mag Ratio:", self.mag_ratio_spin)
         
         # Adjust contrast
@@ -583,6 +604,7 @@ class EasyOCRTuningTab(QWidget):
         self.adjust_contrast_spin.setSingleStep(0.1)
         self.adjust_contrast_spin.setValue(self.ocr_params['adjust_contrast'])
         self.adjust_contrast_spin.valueChanged.connect(self._on_ocr_param_changed)
+        self.adjust_contrast_spin.setToolTip("EasyOCR internal contrast adjustment (0.0-2.0).\n0.5 = normal, >0.5 = higher contrast, <0.5 = lower contrast.")
         layout.addRow("Adjust Contrast:", self.adjust_contrast_spin)
         
         # Filter threshold
@@ -592,17 +614,15 @@ class EasyOCRTuningTab(QWidget):
         self.filter_ths_spin.setDecimals(4)
         self.filter_ths_spin.setValue(self.ocr_params['filter_ths'])
         self.filter_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
+        self.filter_ths_spin.setToolTip("Filtering threshold for removing small text regions.\nHigher values = more aggressive filtering of small/weak detections.")
         layout.addRow("Filter Threshold:", self.filter_ths_spin)
-        
-        # Performance and parallel processing
-        layout.addRow(QLabel("=== Performance ==="))
         
         # Number of workers
         self.workers_spin = QSpinBox()
         self.workers_spin.setRange(0, 16)
         self.workers_spin.setValue(self.ocr_params['workers'])
         self.workers_spin.valueChanged.connect(self._on_ocr_param_changed)
-        self.workers_spin.setToolTip("Number of parallel workers (0 = auto)")
+        self.workers_spin.setToolTip("Number of parallel workers for processing (0 = automatic detection).\nMore workers = faster processing but higher memory usage.")
         layout.addRow("Workers:", self.workers_spin)
         
         # Batch size
@@ -610,6 +630,7 @@ class EasyOCRTuningTab(QWidget):
         self.batch_size_spin.setRange(1, 32)
         self.batch_size_spin.setValue(self.ocr_params['batch_size'])
         self.batch_size_spin.valueChanged.connect(self._on_ocr_param_changed)
+        self.batch_size_spin.setToolTip("Batch size for processing multiple text regions simultaneously.\nHigher values = better GPU utilization but more memory usage.")
         layout.addRow("Batch Size:", self.batch_size_spin)
         
         # Beam width (for beam search decoder)
@@ -617,21 +638,21 @@ class EasyOCRTuningTab(QWidget):
         self.beam_width_spin.setRange(1, 20)
         self.beam_width_spin.setValue(self.ocr_params['beamWidth'])
         self.beam_width_spin.valueChanged.connect(self._on_ocr_param_changed)
+        self.beam_width_spin.setToolTip("Beam search width for text recognition decoder.\nHigher values = more thorough search but slower processing.")
         layout.addRow("Beam Width:", self.beam_width_spin)
-        
-        # Options and flags
-        layout.addRow(QLabel("=== Options ==="))
         
         # GPU usage
         self.gpu_check = QCheckBox()
         self.gpu_check.setChecked(self.ocr_params['gpu'])
         self.gpu_check.stateChanged.connect(self._on_ocr_param_changed)
+        self.gpu_check.setToolTip("Use GPU acceleration for EasyOCR processing.\nSignificantly faster if CUDA-compatible GPU is available.")
         layout.addRow("Use GPU:", self.gpu_check)
         
         # Paragraph mode
         self.paragraph_check = QCheckBox()
         self.paragraph_check.setChecked(self.ocr_params['paragraph'])
         self.paragraph_check.stateChanged.connect(self._on_ocr_param_changed)
+        self.paragraph_check.setToolTip("Enable paragraph mode to group text into paragraphs.\nUseful for multi-line text, not typically needed for jersey numbers.")
         layout.addRow("Paragraph Mode:", self.paragraph_check)
         
         # Detail level
@@ -639,11 +660,8 @@ class EasyOCRTuningTab(QWidget):
         self.detail_spin.setRange(0, 2)
         self.detail_spin.setValue(self.ocr_params['detail'])
         self.detail_spin.valueChanged.connect(self._on_ocr_param_changed)
-        self.detail_spin.setToolTip("0=no detail, 1=bbox, 2=polygon")
+        self.detail_spin.setToolTip("Detection detail level:\n0 = no bounding box details\n1 = bounding boxes\n2 = detailed polygons\nHigher levels provide more precise text boundaries.")
         layout.addRow("Detail Level:", self.detail_spin)
-        
-        # Character filtering
-        layout.addRow(QLabel("=== Character Filtering ==="))
         
         # Allowlist (only allow these characters)
         self.allowlist_edit = QLineEdit()
@@ -651,11 +669,9 @@ class EasyOCRTuningTab(QWidget):
             self.allowlist_edit.setText(self.ocr_params['allowlist'])
         self.allowlist_edit.textChanged.connect(self._on_ocr_param_changed)
         self.allowlist_edit.setPlaceholderText("e.g., 0123456789")
+        self.allowlist_edit.setToolTip("Characters allowed in OCR results (leave empty for all characters).\nFor jersey numbers, use '0123456789' to only detect digits.")
         layout.addRow("Allowlist:", self.allowlist_edit)
         
-        # Additional parameters
-        layout.addRow(QLabel("=== Additional Options ==="))
-    
     def _load_videos(self):
         """Load and display available video files."""
         print("[EASYOCR_TUNING] Loading video files...")
@@ -836,6 +852,8 @@ class EasyOCRTuningTab(QWidget):
         self.preprocess_params['contrast_alpha'] = self.contrast_spin.value()
         self.preprocess_params['brightness_beta'] = self.brightness_spin.value()
         self.preprocess_params['gaussian_blur'] = self.blur_spin.value()
+        self.preprocess_params['min_crop_width'] = self.min_crop_width_spin.value()
+        self.preprocess_params['min_crop_height'] = self.min_crop_height_spin.value()
         self.preprocess_params['enhance_contrast'] = self.enhance_check.isChecked()
         self.preprocess_params['clahe_clip_limit'] = self.clahe_clip_spin.value()
         self.preprocess_params['clahe_grid_size'] = self.clahe_grid_spin.value()
@@ -1117,6 +1135,25 @@ class EasyOCRTuningTab(QWidget):
             results = []
             
             for crop_data in self.current_crops:
+                # Check minimum crop size BEFORE OCR processing (using original crop size)
+                original_crop = crop_data['original_crop']
+                orig_height, orig_width = original_crop.shape[:2]
+                min_crop_width = self.preprocess_params['min_crop_width']
+                min_crop_height = self.preprocess_params['min_crop_height']
+                
+                if orig_width < min_crop_width or orig_height < min_crop_height:
+                    print(f"[EASYOCR_TUNING] Original crop too small ({orig_width}x{orig_height}), skipping OCR (min: {min_crop_width}x{min_crop_height})")
+                    # Add result showing crop was skipped
+                    results.append({
+                        'detection_idx': crop_data['detection_idx'],
+                        'text': "SKIPPED",
+                        'confidence': 0.0,
+                        'ocr_results': [],
+                        'skipped_reason': f"Original crop too small ({orig_width}x{orig_height})"
+                    })
+                    continue
+                
+                # Use processed crop for OCR
                 processed_crop = crop_data['processed_crop']
                 
                 # Prepare parameters for readtext
@@ -1175,7 +1212,10 @@ class EasyOCRTuningTab(QWidget):
                 annotated_frame = self._draw_ocr_results(self.current_frame.copy(), results)
                 self._display_frame(annotated_frame)
             
-            print(f"[EASYOCR_TUNING] EasyOCR complete: {len(results)} results")
+            # Print summary with skipped crop information
+            skipped_count = sum(1 for r in results if 'skipped_reason' in r)
+            processed_count = len(results) - skipped_count
+            print(f"[EASYOCR_TUNING] EasyOCR complete: {processed_count} crops processed, {skipped_count} crops skipped (too small)")
             
         except Exception as e:
             # Clear crops display and show error
@@ -1298,8 +1338,14 @@ class EasyOCRTuningTab(QWidget):
         # OCR result display
         text = result.get('text', '')
         confidence = result.get('confidence', 0.0)
+        skipped_reason = result.get('skipped_reason', '')
         
-        if text:
+        if skipped_reason:
+            # Crop was skipped due to minimum size filtering
+            color = "#888888"  # Gray for skipped
+            result_text = "SKIPPED"
+            conf_text = skipped_reason
+        elif text and text != "SKIPPED":
             # Color code based on confidence
             if confidence > 0.7:
                 color = "#00ff00"  # Green for high confidence
@@ -1332,14 +1378,23 @@ class EasyOCRTuningTab(QWidget):
         layout.addWidget(result_label)
         
         # Confidence label - increased size
-        conf_label = QLabel(f"Conf: {conf_text}")
+        if skipped_reason:
+            conf_label = QLabel(conf_text)  # Show skip reason instead of confidence
+            conf_label.setStyleSheet("""
+                QLabel {
+                    color: #999999;
+                    font-size: 9px;
+                }
+            """)
+        else:
+            conf_label = QLabel(f"Conf: {conf_text}")
+            conf_label.setStyleSheet("""
+                QLabel {
+                    color: #cccccc;
+                    font-size: 10px;
+                }
+            """)
         conf_label.setAlignment(Qt.AlignCenter)
-        conf_label.setStyleSheet("""
-            QLabel {
-                color: #cccccc;
-                font-size: 10px;
-            }
-        """)
         layout.addWidget(conf_label)
         
         # Crop number label - increased size
@@ -1359,6 +1414,26 @@ class EasyOCRTuningTab(QWidget):
     
     def _draw_ocr_on_crop(self, crop_image: np.ndarray, result: Dict) -> np.ndarray:
         """Draw OCR detection boxes and text on the crop image."""
+        # Check if crop was skipped
+        if 'skipped_reason' in result:
+            # Draw "SKIPPED" overlay on the image
+            overlay = crop_image.copy()
+            h, w = crop_image.shape[:2]
+            
+            # Add semi-transparent gray overlay
+            cv2.rectangle(overlay, (0, 0), (w, h), (128, 128, 128), -1)
+            cv2.addWeighted(crop_image, 0.7, overlay, 0.3, 0, crop_image)
+            
+            # Add "SKIPPED" text
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            text = "SKIPPED"
+            text_size = cv2.getTextSize(text, font, 0.7, 2)[0]
+            text_x = (w - text_size[0]) // 2
+            text_y = (h + text_size[1]) // 2
+            cv2.putText(crop_image, text, (text_x, text_y), font, 0.7, (255, 255, 255), 2)
+            
+            return crop_image
+        
         if 'ocr_results' not in result or not result['ocr_results']:
             return crop_image
         
@@ -1494,6 +1569,11 @@ class EasyOCRTuningTab(QWidget):
                 get_setting('player_id.preprocessing.resize_absolute_height', 0))
             self.preprocess_params['denoise'] = user_config.get('player_id', {}).get('preprocessing', {}).get('denoise',
                 get_setting('player_id.preprocessing.denoise', False))
+            # Load minimum crop size parameters
+            self.preprocess_params['min_crop_width'] = user_config.get('player_id', {}).get('preprocessing', {}).get('min_crop_width',
+                get_setting('player_id.preprocessing.min_crop_width', 20))
+            self.preprocess_params['min_crop_height'] = user_config.get('player_id', {}).get('preprocessing', {}).get('min_crop_height',
+                get_setting('player_id.preprocessing.min_crop_height', 30))
             
             # Load OCR parameters (using user overrides if available)
             if EASYOCR_AVAILABLE:
@@ -1587,6 +1667,11 @@ class EasyOCRTuningTab(QWidget):
             self.contrast_spin.setValue(self.preprocess_params['contrast_alpha'])
             self.brightness_spin.setValue(self.preprocess_params['brightness_beta'])
             self.blur_spin.setValue(self.preprocess_params['gaussian_blur'])
+            # Update minimum crop size controls
+            if hasattr(self, 'min_crop_width_spin'):
+                self.min_crop_width_spin.setValue(self.preprocess_params['min_crop_width'])
+            if hasattr(self, 'min_crop_height_spin'):
+                self.min_crop_height_spin.setValue(self.preprocess_params['min_crop_height'])
             if hasattr(self, 'enhance_check'):
                 self.enhance_check.setChecked(self.preprocess_params['enhance_contrast'])
             if hasattr(self, 'clahe_clip_spin'):
@@ -1666,6 +1751,12 @@ class EasyOCRTuningTab(QWidget):
         self.resize_width_spin.valueChanged.disconnect()
         self.resize_height_spin.valueChanged.disconnect()
         
+        # Disconnect minimum crop size signals
+        if hasattr(self, 'min_crop_width_spin'):
+            self.min_crop_width_spin.valueChanged.disconnect()
+        if hasattr(self, 'min_crop_height_spin'):
+            self.min_crop_height_spin.valueChanged.disconnect()
+        
         # Disconnect preprocessing signals - checkboxes
         self.denoise_check.stateChanged.disconnect()
         
@@ -1740,6 +1831,12 @@ class EasyOCRTuningTab(QWidget):
         self.resize_spin.valueChanged.connect(self._on_preprocess_param_changed)
         self.resize_width_spin.valueChanged.connect(self._on_preprocess_param_changed)
         self.resize_height_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        
+        # Reconnect minimum crop size signals
+        if hasattr(self, 'min_crop_width_spin'):
+            self.min_crop_width_spin.valueChanged.connect(self._on_preprocess_param_changed)
+        if hasattr(self, 'min_crop_height_spin'):
+            self.min_crop_height_spin.valueChanged.connect(self._on_preprocess_param_changed)
         
         # Reconnect preprocessing signals - checkboxes
         self.denoise_check.stateChanged.connect(self._on_preprocess_param_changed)
@@ -1845,7 +1942,10 @@ class EasyOCRTuningTab(QWidget):
                         'upscale_to_size': self.preprocess_params['upscale_to_size'],
                         'upscale_target_size': self.preprocess_params['upscale_target_size'],
                         'colour_mode': self.preprocess_params['colour_mode'],
-                        'bw_mode': self.preprocess_params['bw_mode']
+                        'bw_mode': self.preprocess_params['bw_mode'],
+                        # Minimum crop size filtering parameters
+                        'min_crop_width': self.preprocess_params['min_crop_width'],
+                        'min_crop_height': self.preprocess_params['min_crop_height']
                     }
                 }
             }

@@ -265,6 +265,84 @@ class UltimateAnalysisApp(QMainWindow):
                 color: #ffffff;
                 border-top: 1px solid #666666;
             }
+            
+            QLabel {
+                color: #ffffff;
+                background-color: transparent;
+            }
+            
+            QSpinBox, QDoubleSpinBox {
+                background-color: #3c3c3c;
+                border: 1px solid #666666;
+                padding: 4px 8px;
+                border-radius: 3px;
+                color: #ffffff;
+            }
+            
+            QSpinBox:hover, QDoubleSpinBox:hover {
+                border: 1px solid #777777;
+            }
+            
+            QLineEdit {
+                background-color: #3c3c3c;
+                border: 1px solid #666666;
+                padding: 4px 8px;
+                border-radius: 3px;
+                color: #ffffff;
+            }
+            
+            QLineEdit:hover {
+                border: 1px solid #777777;
+            }
+            
+            QLineEdit:focus {
+                border: 1px solid #42a5f5;
+            }
+            
+            QTextEdit {
+                background-color: #3c3c3c;
+                border: 1px solid #666666;
+                color: #ffffff;
+            }
+            
+            QFormLayout QLabel {
+                color: #ffffff;
+                font-weight: normal;
+            }
+            
+            QToolTip {
+                background-color: #3c3c3c;
+                color: #ffffff;
+                border: 1px solid #666666;
+                padding: 4px;
+                border-radius: 3px;
+            }
+            
+            QScrollArea {
+                background-color: #2d2d2d;
+                border: 1px solid #555555;
+            }
+            
+            QScrollBar:vertical {
+                background-color: #3c3c3c;
+                width: 12px;
+                border-radius: 6px;
+            }
+            
+            QScrollBar::handle:vertical {
+                background-color: #666666;
+                border-radius: 6px;
+                min-height: 20px;
+            }
+            
+            QScrollBar::handle:vertical:hover {
+                background-color: #777777;
+            }
+            
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                border: none;
+                background: none;
+            }
         """)
         
         print("[APP] Dark theme applied")

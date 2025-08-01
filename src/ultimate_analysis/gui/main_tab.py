@@ -21,6 +21,7 @@ from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont
 
 from .video_player import VideoPlayer
 from .visualization import draw_detections, draw_tracks, draw_tracks_with_player_ids
+from .performance_widget import PerformanceWidget
 from ..processing import (
     run_inference, run_tracking, run_player_id_on_tracks, run_field_segmentation,
     set_detection_model, set_field_model, set_tracker_type, 
@@ -68,6 +69,11 @@ class MainTab(QWidget):
         self.current_tracks: List[Any] = []
         self.current_field_results: List[Any] = []
         self.current_player_ids: Dict[int, Tuple[str, Any]] = {}
+        
+        # FPS tracking for processed frames
+        self.frame_times: List[float] = []
+        self.max_frame_samples = 30  # Rolling average over 30 frames
+        self.current_fps = 0.0
         
         # Playback timer
         self.playback_timer = QTimer()
@@ -206,6 +212,10 @@ class MainTab(QWidget):
         
         models_group.setLayout(models_layout)
         layout.addWidget(models_group)
+        
+        # Performance metrics section
+        self.performance_widget = PerformanceWidget()
+        layout.addWidget(self.performance_widget)
         
         # Add stretch to push everything to top
         layout.addStretch()
@@ -425,6 +435,10 @@ class MainTab(QWidget):
         # Stop playback
         self._stop_playback()
         
+        # Reset FPS tracking for new video
+        self.frame_times.clear()
+        self.current_fps = 0.0
+        
         # Load video
         if self.video_player.load_video(video_path):
             # Update UI
@@ -488,6 +502,9 @@ class MainTab(QWidget):
         Returns:
             Processed frame with visualizations
         """
+        # Start total runtime timer
+        total_start_time = time.time()
+        
         # Reset detection/tracking results
         self.current_detections = []
         self.current_tracks = []
@@ -497,26 +514,61 @@ class MainTab(QWidget):
         # Run inference if enabled
         if self.inference_checkbox.isChecked():
             print("[MAIN_TAB] Running inference...")
+            start_time = time.time()
             self.current_detections = run_inference(frame)
+            duration_ms = (time.time() - start_time) * 1000
+            self.performance_widget.add_processing_measurement("Inference", duration_ms)
         
         # Run tracking if enabled
         if self.tracking_checkbox.isChecked() and self.current_detections:
             print("[MAIN_TAB] Running tracking...")
+            start_time = time.time()
             self.current_tracks = run_tracking(frame, self.current_detections)
+            duration_ms = (time.time() - start_time) * 1000
+            self.performance_widget.add_processing_measurement("Tracking", duration_ms)
         
         # Run field segmentation if enabled
         if self.field_segmentation_checkbox.isChecked():
             print("[MAIN_TAB] Running field segmentation...")
+            start_time = time.time()
             self.current_field_results = run_field_segmentation(frame)
+            duration_ms = (time.time() - start_time) * 1000
+            self.performance_widget.add_processing_measurement("Field Segmentation", duration_ms)
         
         # Run player ID if enabled (requires tracking to be active)
         if self.player_id_checkbox.isChecked() and self.current_tracks:
             print("[MAIN_TAB] Running player identification...")
-            self.current_player_ids = run_player_id_on_tracks(frame, self.current_tracks)
+            start_time = time.time()
+            self.current_player_ids, player_id_timing = run_player_id_on_tracks(frame, self.current_tracks)
+            duration_ms = (time.time() - start_time) * 1000
+            
+            # Debug timing values
+            print(f"[MAIN_TAB] Raw timing: {player_id_timing}")
+            print(f"[MAIN_TAB] Total duration: {duration_ms:.1f}ms")
+            
+            # Add detailed timing measurements (only if there are actual measurements)
+            if player_id_timing['preprocessing_ms'] > 0 or player_id_timing['ocr_ms'] > 0:
+                self.performance_widget.add_processing_measurement("Player ID - Preprocessing", player_id_timing['preprocessing_ms'])
+                self.performance_widget.add_processing_measurement("Player ID - EasyOCR", player_id_timing['ocr_ms'])
+            
             print(f"[MAIN_TAB] Identified {len(self.current_player_ids)} players")
+            print(f"[MAIN_TAB] Player ID timing - Preprocessing: {player_id_timing['preprocessing_ms']:.1f}ms, OCR: {player_id_timing['ocr_ms']:.1f}ms")
+        else:
+            # Clear player IDs when not running
+            self.current_player_ids = {}
         
-        # Apply visualizations
+        # Apply visualizations (with timing)
+        viz_start_time = time.time()
         frame = self._apply_visualizations(frame)
+        viz_duration_ms = (time.time() - viz_start_time) * 1000
+        self.performance_widget.add_processing_measurement("Visualization", viz_duration_ms)
+        
+        # Record total runtime
+        total_duration_ms = (time.time() - total_start_time) * 1000
+        self.performance_widget.add_processing_measurement("Total Runtime", total_duration_ms)
+        
+        # Update FPS calculation
+        self._update_fps(total_duration_ms)
         
         return frame
     
@@ -548,7 +600,68 @@ class MainTab(QWidget):
             else:
                 frame = draw_tracks(frame, self.current_tracks, track_histories)
         
+        # Add FPS overlay to top right
+        self._draw_fps_overlay(frame)
+        
         return frame
+    
+    def _update_fps(self, frame_time_ms: float) -> None:
+        """Update FPS calculation with latest frame processing time.
+        
+        Args:
+            frame_time_ms: Processing time for the current frame in milliseconds
+        """
+        # Add current frame time
+        self.frame_times.append(frame_time_ms)
+        
+        # Keep only recent samples for rolling average
+        if len(self.frame_times) > self.max_frame_samples:
+            self.frame_times.pop(0)
+        
+        # Calculate average frame time and convert to FPS
+        if len(self.frame_times) > 0:
+            avg_frame_time_ms = sum(self.frame_times) / len(self.frame_times)
+            if avg_frame_time_ms > 0:
+                self.current_fps = 1000.0 / avg_frame_time_ms
+            else:
+                self.current_fps = 0.0
+    
+    def _draw_fps_overlay(self, frame) -> None:
+        """Draw FPS overlay on the top right of the frame.
+        
+        Args:
+            frame: OpenCV frame to draw on (modified in place)
+        """
+        if self.current_fps <= 0:
+            return
+            
+        # Format FPS text
+        fps_text = f"Processing: {self.current_fps:.1f} FPS"
+        
+        # Get frame dimensions
+        height, width = frame.shape[:2]
+        
+        # Set text properties
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.7
+        color = (0, 255, 0)  # Green color
+        thickness = 2
+        
+        # Get text size for positioning
+        (text_width, text_height), baseline = cv2.getTextSize(fps_text, font, font_scale, thickness)
+        
+        # Position in top right with some padding, moved down slightly
+        x = width - text_width - 15
+        y = text_height + 45  # Increased from 15 to 45 to lower the position
+        
+        # Draw background rectangle for better visibility
+        cv2.rectangle(frame, 
+                     (x - 5, y - text_height - 5), 
+                     (x + text_width + 5, y + baseline + 5), 
+                     (0, 0, 0), -1)  # Black background
+        
+        # Draw the FPS text
+        cv2.putText(frame, fps_text, (x, y), font, font_scale, color, thickness)
     
     def _toggle_play_pause(self):
         """Toggle video playback."""
