@@ -1,0 +1,1177 @@
+"""Model Tuning tab for training YOLO models.
+
+This module provides a GUI interface for training both detection and segmentation
+models using Ultralytics YOLO framework with custom datasets.
+"""
+
+import os
+import sys
+import yaml
+import subprocess
+import glob
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Any
+import json
+import time
+from datetime import datetime
+import shutil
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+import numpy as np
+
+from PyQt5.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QPushButton,
+    QGroupBox, QFormLayout, QSpinBox, QDoubleSpinBox, QTextEdit, QProgressBar,
+    QSplitter, QScrollArea, QFrame, QLineEdit, QFileDialog, QMessageBox,
+    QTableWidget, QTableWidgetItem, QHeaderView, QCheckBox
+)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt5.QtGui import QPixmap, QImage, QFont
+
+
+class TrainingResultsWidget(QWidget):
+    """Widget for displaying live training results from results.csv"""
+    
+    def __init__(self):
+        super().__init__()
+        self.results_path = None
+        self.figure = Figure(figsize=(12, 8))
+        self.canvas = FigureCanvas(self.figure)
+        
+        layout = QVBoxLayout()
+        layout.addWidget(self.canvas)
+        self.setLayout(layout)
+        
+        # Timer for updating plots
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self.update_plots)
+        
+    def start_monitoring(self, results_dir: str):
+        """Start monitoring a results directory for CSV updates."""
+        self.results_dir = Path(results_dir)
+        self.results_path = None
+        self.update_timer.start(2000)  # Update every 2 seconds
+        
+    def stop_monitoring(self):
+        """Stop monitoring for updates."""
+        self.update_timer.stop()
+        self.results_path = None
+        
+    def update_plots(self):
+        """Update the plots with latest data from results.csv"""
+        # First, try to find the results.csv file
+        if not self.results_path or not self.results_path.exists():
+            self._find_results_csv()
+            
+        if not self.results_path or not self.results_path.exists():
+            return
+            
+        try:
+            # Read the CSV file
+            df = pd.read_csv(self.results_path)
+            
+            if df.empty:
+                return
+                
+            # Clear the figure
+            self.figure.clear()
+            
+            # Create subplots
+            ax1 = self.figure.add_subplot(2, 2, 1)
+            ax2 = self.figure.add_subplot(2, 2, 2)
+            ax3 = self.figure.add_subplot(2, 2, 3)
+            ax4 = self.figure.add_subplot(2, 2, 4)
+            
+            epochs = df.index + 1
+            
+            # Plot training and validation losses
+            if 'train/box_loss' in df.columns:
+                ax1.plot(epochs, df['train/box_loss'], label='Train Box Loss', color='blue')
+            if 'train/cls_loss' in df.columns:
+                ax1.plot(epochs, df['train/cls_loss'], label='Train Cls Loss', color='red')
+            if 'train/dfl_loss' in df.columns:
+                ax1.plot(epochs, df['train/dfl_loss'], label='Train DFL Loss', color='green')
+            if 'val/box_loss' in df.columns:
+                ax1.plot(epochs, df['val/box_loss'], label='Val Box Loss', color='cyan', linestyle='--')
+            if 'val/cls_loss' in df.columns:
+                ax1.plot(epochs, df['val/cls_loss'], label='Val Cls Loss', color='magenta', linestyle='--')
+            if 'val/dfl_loss' in df.columns:
+                ax1.plot(epochs, df['val/dfl_loss'], label='Val DFL Loss', color='orange', linestyle='--')
+                
+            ax1.set_title('Loss Curves')
+            ax1.set_xlabel('Epoch')
+            ax1.set_ylabel('Loss')
+            ax1.legend()
+            ax1.grid(True)
+            
+            # Plot mAP metrics
+            if 'metrics/mAP50(B)' in df.columns:
+                ax2.plot(epochs, df['metrics/mAP50(B)'], label='mAP@0.5', color='blue')
+            if 'metrics/mAP50-95(B)' in df.columns:
+                ax2.plot(epochs, df['metrics/mAP50-95(B)'], label='mAP@0.5:0.95', color='red')
+                
+            ax2.set_title('mAP Metrics')
+            ax2.set_xlabel('Epoch')
+            ax2.set_ylabel('mAP')
+            ax2.legend()
+            ax2.grid(True)
+            
+            # Plot precision and recall
+            if 'metrics/precision(B)' in df.columns:
+                ax3.plot(epochs, df['metrics/precision(B)'], label='Precision', color='green')
+            if 'metrics/recall(B)' in df.columns:
+                ax3.plot(epochs, df['metrics/recall(B)'], label='Recall', color='orange')
+                
+            ax3.set_title('Precision & Recall')
+            ax3.set_xlabel('Epoch')
+            ax3.set_ylabel('Score')
+            ax3.legend()
+            ax3.grid(True)
+            
+            # Plot learning rate and other metrics
+            if 'lr/pg0' in df.columns:
+                ax4.plot(epochs, df['lr/pg0'], label='Learning Rate', color='purple')
+                ax4.set_ylabel('Learning Rate', color='purple')
+                ax4.tick_params(axis='y', labelcolor='purple')
+                
+                # Add a second y-axis for fitness if available
+                if 'fitness' in df.columns:
+                    ax4_twin = ax4.twinx()
+                    ax4_twin.plot(epochs, df['fitness'], label='Fitness', color='red')
+                    ax4_twin.set_ylabel('Fitness', color='red')
+                    ax4_twin.tick_params(axis='y', labelcolor='red')
+                    
+            ax4.set_title('Learning Rate & Fitness')
+            ax4.set_xlabel('Epoch')
+            ax4.grid(True)
+            
+            # Adjust layout and refresh
+            self.figure.tight_layout()
+            self.canvas.draw()
+            
+        except Exception as e:
+            print(f"[TRAINING_RESULTS] Error updating plots: {e}")
+            
+    def _find_results_csv(self):
+        """Find the results.csv file in subdirectories."""
+        if not hasattr(self, 'results_dir') or not self.results_dir.exists():
+            return
+            
+        # Look for results.csv in the directory and subdirectories
+        for csv_path in self.results_dir.rglob("results.csv"):
+            if csv_path.exists():
+                self.results_path = csv_path
+                print(f"[TRAINING_RESULTS] Found results.csv at: {csv_path}")
+                return
+                
+        # Also check direct path
+        direct_path = self.results_dir / "results.csv"
+        if direct_path.exists():
+            self.results_path = direct_path
+            print(f"[TRAINING_RESULTS] Found results.csv at: {direct_path}")
+            
+    def clear_plots(self):
+        """Clear all plots."""
+        self.figure.clear()
+        self.canvas.draw()
+
+
+class ModelTrainingThread(QThread):
+    """Background thread for model training to prevent GUI freezing."""
+    
+    progress_update = pyqtSignal(int, str)  # epoch, status message
+    training_complete = pyqtSignal(str, bool)  # results_path, success
+    error_occurred = pyqtSignal(str)  # error message
+    
+    def __init__(self, task_type: str, model_path: str, data_path: str, 
+                 epochs: int, patience: int, batch_size: int, lr: float,
+                 output_dir: str):
+        super().__init__()
+        self.task_type = task_type
+        self.model_path = model_path
+        self.data_path = data_path
+        self.epochs = epochs
+        self.patience = patience
+        self.batch_size = batch_size
+        self.lr = lr
+        self.output_dir = output_dir
+        self.should_stop = False
+        
+    def run(self):
+        """Run the training process."""
+        try:
+            # Disable the GUI's model loading during training to prevent conflicts
+            print("[TRAINING] Starting model training in separate process...")
+            
+            # Create training script content
+            script_content = f'''
+import os
+import sys
+import multiprocessing
+
+# Required for Windows multiprocessing
+if __name__ == '__main__':
+    multiprocessing.freeze_support()
+    
+    sys.path.insert(0, "src")
+
+    # Set environment variables to reduce conflicts
+    os.environ["PYTHONPATH"] = "src"
+
+    from ultralytics import YOLO
+    from datetime import datetime
+
+    # Load model
+    print(f"Loading model: {self.model_path}")
+    model = YOLO(r"{self.model_path}")
+
+    # Set up training arguments with reduced workers for Windows
+    train_args = {{
+        "data": r"{self.data_path}",
+        "epochs": {self.epochs},
+        "patience": {self.patience},
+        "batch": {self.batch_size},
+        "lr0": {self.lr},
+        "project": r"{self.output_dir}",
+        "name": "finetune_{{}}".format(datetime.now().strftime('%Y%m%d_%H%M%S')),
+        "exist_ok": True,
+        "verbose": True,
+        "plots": True,
+        "save": True,
+        "device": 0,  # Use GPU if available
+        "workers": 0  # Set to 0 to avoid multiprocessing issues on Windows
+    }}
+
+    print(f"Training arguments: {{train_args}}")
+
+    # Start training
+    results = model.train(**train_args)
+    print(f"Training completed. Results directory: {{str(results.save_dir)}}")
+
+    # Write results path to file for the GUI to read
+    with open("training_results.txt", "w") as f:
+        f.write(str(results.save_dir))
+'''
+            
+            # Write training script
+            script_path = "temp_training_script.py"
+            with open(script_path, 'w') as f:
+                f.write(script_content)
+            
+            try:
+                # Start training process
+                import subprocess
+                process = subprocess.Popen(
+                    [sys.executable, script_path],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    universal_newlines=True,
+                    cwd=os.getcwd()
+                )
+                
+                epoch_count = 0
+                last_status = ""
+                last_update_time = 0
+                import time
+                start_time = time.time()  # Track when training actually starts
+                
+                while True:
+                    if self.should_stop:
+                        process.terminate()
+                        process.wait()
+                        break
+                        
+                    # Read output line by line
+                    line = process.stdout.readline()
+                    
+                    if line == '' and process.poll() is not None:
+                        break
+                        
+                    if line:
+                        line = line.strip()
+                        current_time = time.time()
+                        
+                        # Always print all lines for debugging - user needs to see log output
+                        print(f"[TRAINING] {line}")
+                        
+                        # Extract epoch information with improved parsing
+                        epoch_updated = False
+                        
+                        # Look for actual training epoch patterns like "1/50" at start of line
+                        if line.strip().startswith(("1/", "2/", "3/", "4/", "5/", "6/", "7/", "8/", "9/")) or "/50" in line:
+                            try:
+                                import re
+                                # Match patterns like "1/50" for actual training epochs
+                                epoch_match = re.search(r'^(\d+)/(\d+)', line.strip())
+                                if epoch_match:
+                                    current_epoch = int(epoch_match.group(1))
+                                    total_epochs = int(epoch_match.group(2))
+                                    
+                                    # Only update if this is a real epoch change
+                                    if current_epoch != epoch_count and current_epoch <= total_epochs:
+                                        epoch_count = current_epoch
+                                        progress_percent = int((current_epoch / total_epochs) * 100)
+                                        
+                                        # Calculate time remaining based on elapsed time
+                                        elapsed_time = time.time() - start_time
+                                        if current_epoch > 0:
+                                            time_per_epoch = elapsed_time / current_epoch
+                                            remaining_epochs = total_epochs - current_epoch
+                                            estimated_remaining = time_per_epoch * remaining_epochs
+                                            
+                                            clean_status = f"Epoch {current_epoch}/{total_epochs} - ETA: {int(estimated_remaining)}s"
+                                        else:
+                                            clean_status = f"Epoch {current_epoch}/{total_epochs}"
+                                        
+                                        self.progress_update.emit(progress_percent, clean_status)
+                                        last_status = clean_status
+                                        last_update_time = current_time
+                                        epoch_updated = True
+                            except Exception as e:
+                                # Silently handle parsing errors to reduce noise
+                                pass
+                        
+                        # During preparation phase, show preparation status
+                        elif any(prep_keyword in line.lower() for prep_keyword in ["scanning", "loading", "autobatch", "computing", "transferring", "freezing"]):
+                            if current_time - last_update_time > 2:  # Update every 2 seconds during prep
+                                prep_status = "Preparing training..."
+                                if "scanning" in line.lower():
+                                    prep_status = "Scanning dataset..."
+                                elif "autobatch" in line.lower():
+                                    prep_status = "Computing optimal batch size..."
+                                elif "transferring" in line.lower():
+                                    prep_status = "Transferring pretrained weights..."
+                                elif "freezing" in line.lower():
+                                    prep_status = "Freezing model layers..."
+                                
+                                self.progress_update.emit(0, prep_status)  # 0% during preparation
+                                last_status = prep_status
+                                last_update_time = current_time
+                        
+                        # Show other important status updates occasionally
+                        elif not epoch_updated and current_time - last_update_time > 5:
+                            if any(keyword in line.lower() for keyword in ["starting training", "completed", "saving", "best"]):
+                                # Clean up long lines
+                                clean_line = line.strip()
+                                if len(clean_line) > 80:
+                                    clean_line = clean_line[:80] + "..."
+                                    
+                                if clean_line != last_status:
+                                    # Don't change progress percentage for status updates
+                                    progress_percent = max(0, int((epoch_count / 50) * 100)) if epoch_count > 0 else 0
+                                    self.progress_update.emit(progress_percent, clean_line)
+                                    last_status = clean_line
+                                    last_update_time = current_time
+                
+                # Check result
+                return_code = process.wait()
+                
+                if return_code == 0 and not self.should_stop:
+                    # Read results path
+                    results_path = self.output_dir
+                    if os.path.exists("training_results.txt"):
+                        with open("training_results.txt", "r") as f:
+                            results_path = f.read().strip()
+                        os.remove("training_results.txt")
+                    
+                    self.training_complete.emit(results_path, True)
+                elif self.should_stop:
+                    print("[TRAINING] Training stopped by user")
+                else:
+                    self.error_occurred.emit(f"Training failed with return code: {return_code}")
+                    
+            finally:
+                # Cleanup
+                if os.path.exists(script_path):
+                    os.remove(script_path)
+                if os.path.exists("training_results.txt"):
+                    os.remove("training_results.txt")
+                    
+        except Exception as e:
+            print(f"[TRAINING] Error: {e}")
+            self.error_occurred.emit(str(e))
+    
+    def stop_training(self):
+        """Request to stop training."""
+        self.should_stop = True
+
+
+class ModelTuningTab(QWidget):
+    """Tab for tuning YOLO models with custom datasets."""
+    
+    def __init__(self):
+        super().__init__()
+        
+        # State
+        self.current_task = "detection"
+        self.current_model_path = ""
+        self.current_data_path = ""
+        self.training_thread: Optional[ModelTrainingThread] = None
+        self.training_config = {}
+        self.current_results_dir = None
+        self.training_start_time = None
+        self.last_epoch = 0
+        
+        # Initialize UI
+        self._init_ui()
+        self._load_default_config()
+        self._update_model_options()
+        self._update_data_options()
+        
+    def _init_ui(self):
+        """Initialize the user interface."""
+        main_layout = QVBoxLayout()
+        
+        # Create splitter for main content
+        splitter = QSplitter(Qt.Horizontal)
+        
+        # Left panel - Configuration
+        config_panel = self._create_config_panel()
+        splitter.addWidget(config_panel)
+        
+        # Right panel - Training and Results
+        results_panel = self._create_results_panel()
+        splitter.addWidget(results_panel)
+        
+        # Set splitter proportions
+        splitter.setStretchFactor(0, 1)  # Config panel
+        splitter.setStretchFactor(1, 2)  # Results panel
+        
+        main_layout.addWidget(splitter)
+        self.setLayout(main_layout)
+        
+    def _create_config_panel(self) -> QWidget:
+        """Create the configuration panel."""
+        panel = QWidget()
+        layout = QVBoxLayout()
+        
+        # Task selection
+        task_group = QGroupBox("Training Task")
+        task_layout = QFormLayout()
+        
+        self.task_combo = QComboBox()
+        self.task_combo.addItems(["detection", "field segmentation"])
+        self.task_combo.currentTextChanged.connect(self._on_task_changed)
+        self.task_combo.setToolTip("Select the type of computer vision task:\n\n• Detection: Find and classify objects with bounding boxes\n  - Examples: players, disc, referees in Ultimate Frisbee\n  - Output: [class, x, y, width, height, confidence]\n\n• Field Segmentation: Pixel-level classification of field regions\n  - Examples: field boundaries, end zones, out-of-bounds areas\n  - Output: segmentation masks for each region\n\nDifferent tasks use specialized model architectures and datasets.")
+        task_layout.addRow("Task Type:", self.task_combo)
+        
+        task_group.setLayout(task_layout)
+        layout.addWidget(task_group)
+        
+        # Model selection
+        model_group = QGroupBox("Base Model Selection")
+        model_layout = QFormLayout()
+        
+        self.model_combo = QComboBox()
+        self.model_combo.currentTextChanged.connect(self._on_model_changed)
+        self.model_combo.setToolTip("Select the base YOLO model to start training from.\n\n• Model sizes: n (nano), s (small), m (medium), l (large), x (extra-large)\n• Examples: yolo11n.pt (fast, 2.6M params), yolo11l.pt (accurate, 25.3M params)\n• Pretrained models: learned features from COCO dataset (80 classes)\n• Trade-offs: Larger models = better accuracy but slower training/inference\n• Custom models: .pt files from previous training runs")
+        model_layout.addRow("Base Model:", self.model_combo)
+        
+        # Model info display
+        self.model_info_text = QTextEdit()
+        self.model_info_text.setMaximumHeight(100)
+        self.model_info_text.setReadOnly(True)
+        self.model_info_text.setToolTip("Displays information about the selected model including file size and type.")
+        model_layout.addRow("Model Info:", self.model_info_text)
+        
+        model_group.setLayout(model_layout)
+        layout.addWidget(model_group)
+        
+        # Dataset selection
+        data_group = QGroupBox("Training Dataset")
+        data_layout = QFormLayout()
+        
+        self.data_combo = QComboBox()
+        self.data_combo.currentTextChanged.connect(self._on_data_changed)
+        self.data_combo.setToolTip("Select the dataset to train on (YOLO format required).\n\n• Format: data.yaml file with train/val paths and class names\n• Examples: coco8.yaml (sample), custom_dataset_v3.yaml\n• Version numbers: v2, v3, v4 (higher = typically improved)\n• Structure: train/images/, train/labels/, valid/images/, valid/labels/\n• More training images = generally better model performance\n• Labels: .txt files with class_id x_center y_center width height")
+        data_layout.addRow("Dataset:", self.data_combo)
+        
+        # Dataset info display
+        self.dataset_info_text = QTextEdit()
+        self.dataset_info_text.setMaximumHeight(100)
+        self.dataset_info_text.setReadOnly(True)
+        self.dataset_info_text.setToolTip("Shows dataset information including number of classes, class names,\nand training/validation image counts.")
+        data_layout.addRow("Dataset Info:", self.dataset_info_text)
+        
+        data_group.setLayout(data_layout)
+        layout.addWidget(data_group)
+        
+        # Training parameters
+        params_group = QGroupBox("Training Parameters")
+        params_layout = QFormLayout()
+        
+        self.epochs_spin = QSpinBox()
+        self.epochs_spin.setRange(1, 1000)
+        self.epochs_spin.setValue(100)
+        self.epochs_spin.setToolTip("Number of complete passes through the training dataset.\n\n• Default: 100 epochs\n• Range: 1-1000+ epochs\n• Examples: 50 (quick test), 100 (standard), 300 (fine-tuning)\n• More epochs = longer training but potentially better performance\n• Use early stopping (patience) to prevent overfitting")
+        params_layout.addRow("Epochs:", self.epochs_spin)
+        
+        self.patience_spin = QSpinBox()
+        self.patience_spin.setRange(1, 100)
+        self.patience_spin.setValue(10)
+        self.patience_spin.setToolTip("Early stopping patience: number of epochs to wait for improvement\nbefore stopping training. Prevents overfitting and saves time.\n\n• Default: 100 epochs (detection), 15 (segmentation)\n• Range: 1-100+ epochs\n• Examples: 10 (aggressive), 50 (moderate), 100 (patient)\n• Higher values = more patient, lower values = stop sooner\n• Monitors validation metrics for improvement")
+        params_layout.addRow("Patience:", self.patience_spin)
+        
+        self.batch_spin = QDoubleSpinBox()
+        self.batch_spin.setRange(0.1, 128)
+        self.batch_spin.setDecimals(1)
+        self.batch_spin.setValue(16)
+        self.batch_spin.setToolTip("Batch size: integer (e.g. 16) or fraction for GPU memory (e.g. 0.8).\n\n• Default: 16 (detection), 8 (segmentation)\n• Integer: 1-128+ (exact number of images per batch)\n• Fraction: 0.1-1.0 (percentage of GPU memory to use)\n• Examples: 16 (fixed), 0.6 (60% GPU memory), -1 (auto 60%)\n• Auto modes: -1 (60% GPU memory), 0.7 (70% GPU memory)\n• Larger batches = more stable gradients but need more memory")
+        params_layout.addRow("Batch Size:", self.batch_spin)
+        
+        self.lr_spin = QDoubleSpinBox()
+        self.lr_spin.setRange(0.0001, 1.0)
+        self.lr_spin.setDecimals(4)
+        self.lr_spin.setSingleStep(0.0001)
+        self.lr_spin.setValue(0.01)
+        self.lr_spin.setToolTip("Initial learning rate (lr0) - controls how big steps the model takes.\n\n• Default: 0.01 (SGD), 0.001 (Adam)\n• Range: 0.0001-1.0 (typically 0.001-0.01)\n• Examples: 0.001 (conservative), 0.01 (standard), 0.1 (aggressive)\n• Higher values = faster learning but risk instability\n• Lower values = more stable but slower convergence\n• Automatically decays during training using schedulers")
+        params_layout.addRow("Learning Rate:", self.lr_spin)
+        
+        # Image size
+        self.imgsz_spin = QSpinBox()
+        self.imgsz_spin.setRange(320, 1280)
+        self.imgsz_spin.setSingleStep(32)
+        self.imgsz_spin.setValue(640)
+        self.imgsz_spin.setToolTip("Input image size for training (square images).\n\n• Default: 640 pixels\n• Range: 320-1280 (must be multiple of 32)\n• Examples: 416 (fast), 640 (standard), 832 (detailed), 1024 (high-res)\n• Larger sizes = better detail recognition but slower training\n• Smaller sizes = faster training but less detail\n• All images resized to this dimension before processing")
+        params_layout.addRow("Image Size:", self.imgsz_spin)
+        
+        # Optimizer
+        self.optimizer_combo = QComboBox()
+        self.optimizer_combo.addItems(['SGD', 'Adam', 'AdamW', 'RMSProp'])
+        self.optimizer_combo.setCurrentText('SGD')
+        self.optimizer_combo.setToolTip("Optimization algorithm for training:\n\n• Default: 'auto' (SGD for most cases)\n• SGD: Simple, stable, momentum-based (good for most cases)\n• Adam: Adaptive learning rates, faster convergence\n• AdamW: Adam with better weight decay handling\n• RMSProp: Good for noisy gradients and RNNs\n• NAdam, RAdam: Advanced Adam variants\n\nSGD with momentum (0.937) is proven effective for YOLO models.")
+        params_layout.addRow("Optimizer:", self.optimizer_combo)
+        
+        # Momentum
+        self.momentum_spin = QDoubleSpinBox()
+        self.momentum_spin.setRange(0.0, 1.0)
+        self.momentum_spin.setDecimals(3)
+        self.momentum_spin.setSingleStep(0.001)
+        self.momentum_spin.setValue(0.937)
+        self.momentum_spin.setToolTip("Momentum factor for SGD optimizer (or beta1 for Adam).\n\n• Default: 0.937 (proven optimal for YOLO)\n• Range: 0.0-1.0 (typically 0.8-0.99)\n• Examples: 0.9 (standard), 0.937 (YOLO optimized), 0.95 (high momentum)\n• Helps accelerate training in consistent directions\n• Higher values = smoother convergence, more momentum\n• Lower values = more responsive to gradient changes")
+        params_layout.addRow("Momentum:", self.momentum_spin)
+        
+        # Weight Decay
+        self.weight_decay_spin = QDoubleSpinBox()
+        self.weight_decay_spin.setRange(0.0, 0.01)
+        self.weight_decay_spin.setDecimals(4)
+        self.weight_decay_spin.setSingleStep(0.0001)
+        self.weight_decay_spin.setValue(0.0005)
+        self.weight_decay_spin.setToolTip("L2 regularization penalty to prevent overfitting.\n\n• Default: 0.0005 (YOLO optimized)\n• Range: 0.0-0.01 (typically 0.0001-0.001)\n• Examples: 0.0001 (light), 0.0005 (standard), 0.001 (strong)\n• Penalizes large weights to keep the model simple\n• Higher values = stronger regularization, lower overfitting risk\n• Too high = underfitting, too low = overfitting risk")
+        params_layout.addRow("Weight Decay:", self.weight_decay_spin)
+        
+        # Workers
+        self.workers_spin = QSpinBox()
+        self.workers_spin.setRange(0, 16)
+        self.workers_spin.setValue(0)  # Use 0 for Windows compatibility
+        self.workers_spin.setToolTip("Number of CPU threads for data loading (per GPU if multi-GPU).\n\n• Default: 8 (Linux/Mac), 0 (Windows recommended)\n• Range: 0-16+ (depends on CPU cores)\n• Examples: 0 (single-thread), 4 (quad-core), 8 (standard)\n• Higher values = faster data loading but more CPU usage\n• Set to 0 for Windows to avoid multiprocessing errors\n• Use 2x CPU cores for optimal performance on Linux/Mac")
+        params_layout.addRow("Workers:", self.workers_spin)
+        
+        # Augmentation checkbox
+        self.augment_check = QCheckBox()
+        self.augment_check.setChecked(True)
+        self.augment_check.setToolTip("Enable data augmentation during training.\n\n• Default: True (recommended for most cases)\n• Includes: rotation, scaling, flipping, color changes, mosaic\n• Benefits: Improves robustness, prevents overfitting, increases dataset variety\n• Examples: HSV shifts, geometric transforms, mixup, copy-paste\n• Disable only for: perfect datasets, specific requirements\n• Automatically disabled in final epochs (close_mosaic=10)")
+        params_layout.addRow("Data Augmentation:", self.augment_check)
+        
+        # Additional augmentation parameters
+        aug_group = QGroupBox("Augmentation Settings")
+        aug_layout = QFormLayout()
+        
+        # Mosaic probability
+        self.mosaic_spin = QDoubleSpinBox()
+        self.mosaic_spin.setRange(0.0, 1.0)
+        self.mosaic_spin.setDecimals(2)
+        self.mosaic_spin.setValue(1.0)
+        self.mosaic_spin.setToolTip("Probability of mosaic augmentation (combines 4 images).\n• Default: 1.0 (always on)\n• Range: 0.0-1.0\n• Highly effective for scene understanding")
+        aug_layout.addRow("Mosaic:", self.mosaic_spin)
+        
+        # Mixup probability
+        self.mixup_spin = QDoubleSpinBox()
+        self.mixup_spin.setRange(0.0, 1.0)
+        self.mixup_spin.setDecimals(2)
+        self.mixup_spin.setValue(0.0)
+        self.mixup_spin.setToolTip("Probability of mixup augmentation (blends images).\n• Default: 0.0\n• Range: 0.0-1.0\n• Enhances generalization")
+        aug_layout.addRow("Mixup:", self.mixup_spin)
+        
+        # Copy-paste probability
+        self.copy_paste_spin = QDoubleSpinBox()
+        self.copy_paste_spin.setRange(0.0, 1.0)
+        self.copy_paste_spin.setDecimals(2)
+        self.copy_paste_spin.setValue(0.0)
+        self.copy_paste_spin.setToolTip("Copy-paste augmentation (segmentation only).\n• Default: 0.0\n• Range: 0.0-1.0\n• Copies objects between images")
+        aug_layout.addRow("Copy-Paste:", self.copy_paste_spin)
+        
+        # HSV-H (Hue)
+        self.hsv_h_spin = QDoubleSpinBox()
+        self.hsv_h_spin.setRange(0.0, 1.0)
+        self.hsv_h_spin.setDecimals(3)
+        self.hsv_h_spin.setValue(0.015)
+        self.hsv_h_spin.setToolTip("HSV Hue augmentation range.\n• Default: 0.015\n• Range: 0.0-1.0\n• Adjusts color hue for lighting variety")
+        aug_layout.addRow("HSV-H (Hue):", self.hsv_h_spin)
+        
+        # HSV-S (Saturation)
+        self.hsv_s_spin = QDoubleSpinBox()
+        self.hsv_s_spin.setRange(0.0, 1.0)
+        self.hsv_s_spin.setDecimals(2)
+        self.hsv_s_spin.setValue(0.7)
+        self.hsv_s_spin.setToolTip("HSV Saturation augmentation range.\n• Default: 0.7\n• Range: 0.0-1.0\n• Adjusts color intensity")
+        aug_layout.addRow("HSV-S (Saturation):", self.hsv_s_spin)
+        
+        # HSV-V (Value/Brightness)
+        self.hsv_v_spin = QDoubleSpinBox()
+        self.hsv_v_spin.setRange(0.0, 1.0)
+        self.hsv_v_spin.setDecimals(2)
+        self.hsv_v_spin.setValue(0.4)
+        self.hsv_v_spin.setToolTip("HSV Value (brightness) augmentation range.\n• Default: 0.4\n• Range: 0.0-1.0\n• Adjusts brightness for lighting conditions")
+        aug_layout.addRow("HSV-V (Brightness):", self.hsv_v_spin)
+        
+        aug_group.setLayout(aug_layout)
+        layout.addWidget(aug_group)
+        
+        params_group.setLayout(params_layout)
+        layout.addWidget(params_group)
+        
+        # Config buttons
+        config_buttons_layout = QHBoxLayout()
+        
+        self.load_config_btn = QPushButton("Load Config")      
+        self.load_config_btn.clicked.connect(self._load_config)
+        self.load_config_btn.setToolTip("Load training parameters from a saved YAML configuration file.\nThis will update all parameter values in the interface.\nUseful for reusing proven parameter combinations.")
+        config_buttons_layout.addWidget(self.load_config_btn)
+        
+        self.save_config_btn = QPushButton("Save Config")
+        self.save_config_btn.clicked.connect(self._save_config)
+        self.save_config_btn.setToolTip("Save current training parameters to a YAML configuration file.\nAllows you to reuse these settings later or share with others.\nConfigurations are saved per task type (detection/segmentation).")
+        config_buttons_layout.addWidget(self.save_config_btn)
+        
+        layout.addLayout(config_buttons_layout)
+        
+        # Training controls
+        controls_group = QGroupBox("Training Controls")
+        controls_layout = QVBoxLayout()
+        
+        self.start_training_btn = QPushButton("Start Training")
+        self.start_training_btn.clicked.connect(self._start_training)
+        self.start_training_btn.setToolTip("Begin training the selected model on the chosen dataset.\nEnsure you have selected both a base model and dataset.\nTraining runs in background and shows live progress graphs.")
+        controls_layout.addWidget(self.start_training_btn)
+        
+        self.stop_training_btn = QPushButton("Stop Training")
+        self.stop_training_btn.clicked.connect(self._stop_training)
+        self.stop_training_btn.setEnabled(False)
+        self.stop_training_btn.setToolTip("Stop the current training process.\nThis will terminate training gracefully and save progress.\nThe model will be saved in its current state.")
+        controls_layout.addWidget(self.stop_training_btn)
+        
+        controls_group.setLayout(controls_layout)
+        layout.addWidget(controls_group)
+        
+        layout.addStretch()
+        panel.setLayout(layout)
+        return panel
+        
+    def _create_results_panel(self) -> QWidget:
+        """Create the training results panel."""
+        panel = QWidget()
+        layout = QVBoxLayout()
+        
+        # Progress section
+        progress_group = QGroupBox("Training Progress")
+        progress_layout = QVBoxLayout()
+        
+        self.progress_bar = QProgressBar()
+        progress_layout.addWidget(self.progress_bar)
+        
+        self.status_label = QLabel("Ready to start training")
+        progress_layout.addWidget(self.status_label)
+        
+        self.time_estimate_label = QLabel("")
+        progress_layout.addWidget(self.time_estimate_label)
+        
+        progress_group.setLayout(progress_layout)
+        layout.addWidget(progress_group)
+        
+        # Results visualization
+        results_group = QGroupBox("Training Results")
+        results_layout = QVBoxLayout()
+        
+        # Training results widget
+        self.results_widget = TrainingResultsWidget()
+        results_layout.addWidget(self.results_widget)
+        
+        results_group.setLayout(results_layout)
+        layout.addWidget(results_group)
+        
+        panel.setLayout(layout)
+        return panel
+        
+    def _load_default_config(self):
+        """Load default training configuration."""
+        try:
+            config_path = Path("configs/training.yaml")
+            if config_path.exists():
+                with open(config_path, 'r') as f:
+                    self.training_config = yaml.safe_load(f)
+                self._apply_config_to_ui()
+            else:
+                # Create default config
+                self.training_config = {
+                    'detection': {
+                        'epochs': 100,
+                        'patience': 10,
+                        'batch_size': 16,
+                        'learning_rate': 0.01
+                    },
+                    'segmentation': {
+                        'epochs': 150,
+                        'patience': 15,
+                        'batch_size': 8,
+                        'learning_rate': 0.01
+                    }
+                }
+        except Exception as e:
+            print(f"[MODEL_TUNING] Error loading config: {e}")
+            
+    def _apply_config_to_ui(self):
+        """Apply loaded configuration to UI elements."""
+        task_config = self.training_config.get(self.current_task, {})
+        
+        if 'epochs' in task_config:
+            self.epochs_spin.setValue(task_config['epochs'])
+        if 'patience' in task_config:
+            self.patience_spin.setValue(task_config['patience'])
+        if 'batch_size' in task_config:
+            self.batch_spin.setValue(task_config['batch_size'])
+        if 'learning_rate' in task_config:
+            self.lr_spin.setValue(task_config['learning_rate'])
+        if 'imgsz' in task_config:
+            self.imgsz_spin.setValue(task_config['imgsz'])
+        if 'optimizer' in task_config:
+            self.optimizer_combo.setCurrentText(task_config['optimizer'])
+        if 'momentum' in task_config:
+            self.momentum_spin.setValue(task_config['momentum'])
+        if 'weight_decay' in task_config:
+            self.weight_decay_spin.setValue(task_config['weight_decay'])
+        if 'workers' in task_config:
+            self.workers_spin.setValue(task_config['workers'])
+        if 'augment' in task_config:
+            self.augment_check.setChecked(task_config['augment'])
+        if 'mosaic' in task_config:
+            self.mosaic_spin.setValue(task_config['mosaic'])
+        if 'mixup' in task_config:
+            self.mixup_spin.setValue(task_config['mixup'])
+        if 'copy_paste' in task_config:
+            self.copy_paste_spin.setValue(task_config['copy_paste'])
+        if 'hsv_h' in task_config:
+            self.hsv_h_spin.setValue(task_config['hsv_h'])
+        if 'hsv_s' in task_config:
+            self.hsv_s_spin.setValue(task_config['hsv_s'])
+        if 'hsv_v' in task_config:
+            self.hsv_v_spin.setValue(task_config['hsv_v'])
+            
+    def _on_task_changed(self, task: str):
+        """Handle task type change."""
+        if task == "detection":
+            self.current_task = "detection"
+        else:  # field segmentation
+            self.current_task = "segmentation"
+            
+        self._update_model_options()
+        self._update_data_options()
+        self._apply_config_to_ui()
+        
+    def _update_model_options(self):
+        """Update available model options based on task."""
+        self.model_combo.clear()
+        
+        models_path = Path("data/models")
+        pretrained_path = models_path / "pretrained"
+        
+        available_models = []
+        
+        if self.current_task == "detection":
+            # Add pretrained detection models (non-seg)
+            if pretrained_path.exists():
+                for model_file in pretrained_path.glob("*.pt"):
+                    if "-seg" not in model_file.name and "-pose" not in model_file.name:
+                        available_models.append(str(model_file))
+            
+            # Add existing detection models for further tuning (including finetune directories)
+            detection_path = models_path / "detection"
+            if detection_path.exists():
+                for model_dir in detection_path.iterdir():
+                    if model_dir.is_dir():
+                        # Check for direct weights/best.pt
+                        weights_path = model_dir / "weights" / "best.pt"
+                        if weights_path.exists():
+                            available_models.append(str(weights_path))
+                        
+                        # Check for finetune subdirectories
+                        for subdir in model_dir.iterdir():
+                            if subdir.is_dir() and subdir.name.startswith("finetune"):
+                                finetune_weights = subdir / "weights" / "best.pt"
+                                if finetune_weights.exists():
+                                    available_models.append(str(finetune_weights))
+                            
+        else:  # segmentation
+            # Add pretrained segmentation models
+            if pretrained_path.exists():
+                for model_file in pretrained_path.glob("*-seg.pt"):
+                    available_models.append(str(model_file))
+            
+            # Add existing segmentation models for further tuning (including finetune directories)
+            seg_path = models_path / "segmentation"
+            if seg_path.exists():
+                for model_dir in seg_path.iterdir():
+                    if model_dir.is_dir():
+                        # Check for direct weights/best.pt
+                        weights_path = model_dir / "weights" / "best.pt"
+                        if weights_path.exists():
+                            available_models.append(str(weights_path))
+                        
+                        # Check for finetune subdirectories
+                        for subdir in model_dir.iterdir():
+                            if subdir.is_dir() and subdir.name.startswith("finetune"):
+                                finetune_weights = subdir / "weights" / "best.pt"
+                                if finetune_weights.exists():
+                                    available_models.append(str(finetune_weights))
+        
+        self.model_combo.addItems(available_models)
+        
+    def _update_data_options(self):
+        """Update available dataset options based on task."""
+        self.data_combo.clear()
+        
+        training_data_path = Path("data/raw/training_data")
+        if not training_data_path.exists():
+            return
+            
+        available_datasets = []
+        
+        if self.current_task == "detection":
+            # Look for object detection datasets
+            for dataset_dir in training_data_path.iterdir():
+                if dataset_dir.is_dir():
+                    name_lower = dataset_dir.name.lower()
+                    if any(keyword in name_lower for keyword in ["object_detection", "player", "disc", "detection"]):
+                        yaml_files = list(dataset_dir.glob("*.yaml"))
+                        if yaml_files:
+                            available_datasets.append(str(yaml_files[0]))
+        else:  # segmentation
+            # Look for field segmentation datasets
+            for dataset_dir in training_data_path.iterdir():
+                if dataset_dir.is_dir():
+                    name_lower = dataset_dir.name.lower()
+                    if "field" in name_lower:
+                        yaml_files = list(dataset_dir.glob("*.yaml"))
+                        if yaml_files:
+                            available_datasets.append(str(yaml_files[0]))
+        
+        # Sort datasets to prefer v3i specifically, then newer versions
+        def extract_version(path_str):
+            """Extract version number from dataset path for sorting, preferring v3i."""
+            import re
+            # Look for patterns like v3i, v4i, etc.
+            version_match = re.search(r'\.v(\d+)i', path_str)
+            if version_match:
+                version = int(version_match.group(1))
+                # Give v3i highest priority
+                if version == 3:
+                    return 1000  # High priority for v3i
+                return version
+            return 0  # Default for paths without version
+        
+        # Sort by version number (v3i first, then descending order)
+        available_datasets.sort(key=extract_version, reverse=True)
+        
+        self.data_combo.addItems(available_datasets)
+        
+        # Select the first (newest) dataset by default if available
+        if available_datasets:
+            self.data_combo.setCurrentIndex(0)
+            self._on_data_changed(available_datasets[0])
+        
+    def _on_model_changed(self, model_path: str):
+        """Handle model selection change."""
+        self.current_model_path = model_path
+        self._update_model_info()
+        
+    def _on_data_changed(self, data_path: str):
+        """Handle dataset selection change."""
+        self.current_data_path = data_path
+        self._update_dataset_info()
+        
+    def _update_model_info(self):
+        """Update model information display."""
+        if not self.current_model_path:
+            self.model_info_text.clear()
+            return
+            
+        info_lines = []
+        model_path = Path(self.current_model_path)
+        
+        info_lines.append(f"Path: {model_path.name}")
+        if model_path.exists():
+            size_mb = model_path.stat().st_size / (1024 * 1024)
+            info_lines.append(f"Size: {size_mb:.1f} MB")
+            
+        # Try to extract more info from the model
+        try:
+            from ultralytics import YOLO
+            model = YOLO(str(model_path))
+            if hasattr(model, 'model'):
+                info_lines.append(f"Type: {type(model.model).__name__}")
+        except Exception as e:
+            info_lines.append(f"Info: Could not load model details ({str(e)[:50]}...)")
+            
+        self.model_info_text.setPlainText("\n".join(info_lines))
+        
+    def _update_dataset_info(self):
+        """Update dataset information display."""
+        if not self.current_data_path:
+            self.dataset_info_text.clear()
+            return
+            
+        info_lines = []
+        data_path = Path(self.current_data_path)
+        
+        info_lines.append(f"Config: {data_path.name}")
+        
+        try:
+            with open(data_path, 'r') as f:
+                data_config = yaml.safe_load(f)
+                
+            if 'names' in data_config:
+                info_lines.append(f"Classes: {len(data_config['names'])}")
+                info_lines.append(f"Labels: {', '.join(data_config['names'])}")
+                
+            # Count images if possible
+            dataset_dir = data_path.parent
+            train_dir = dataset_dir / "train" / "images"
+            val_dir = dataset_dir / "valid" / "images"
+            
+            if train_dir.exists():
+                train_count = len(list(train_dir.glob("*")))
+                info_lines.append(f"Train images: {train_count}")
+                
+            if val_dir.exists():
+                val_count = len(list(val_dir.glob("*")))
+                info_lines.append(f"Validation images: {val_count}")
+                
+        except Exception as e:
+            info_lines.append(f"Error reading dataset: {str(e)[:50]}...")
+            
+        self.dataset_info_text.setPlainText("\n".join(info_lines))
+        
+    def _load_config(self):
+        """Load configuration from file."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Load Training Configuration", "configs/", "YAML files (*.yaml *.yml)"
+        )
+        
+        if file_path:
+            try:
+                with open(file_path, 'r') as f:
+                    self.training_config = yaml.safe_load(f)
+                self._apply_config_to_ui()
+                QMessageBox.information(self, "Success", "Configuration loaded successfully!")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to load configuration: {e}")
+                
+    def _save_config(self):
+        """Save current configuration to file."""
+        # Update config with current UI values
+        task_config = {
+            'epochs': self.epochs_spin.value(),
+            'patience': self.patience_spin.value(),
+            'batch_size': self.batch_spin.value(),
+            'learning_rate': self.lr_spin.value(),
+            'imgsz': self.imgsz_spin.value(),
+            'optimizer': self.optimizer_combo.currentText(),
+            'momentum': self.momentum_spin.value(),
+            'weight_decay': self.weight_decay_spin.value(),
+            'workers': self.workers_spin.value(),
+            'augment': self.augment_check.isChecked(),
+            'mosaic': self.mosaic_spin.value(),
+            'mixup': self.mixup_spin.value(),
+            'copy_paste': self.copy_paste_spin.value(),
+            'hsv_h': self.hsv_h_spin.value(),
+            'hsv_s': self.hsv_s_spin.value(),
+            'hsv_v': self.hsv_v_spin.value()
+        }
+        
+        self.training_config[self.current_task] = task_config
+        
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Training Configuration", "configs/training.yaml", "YAML files (*.yaml *.yml)"
+        )
+        
+        if file_path:
+            try:
+                with open(file_path, 'w') as f:
+                    yaml.dump(self.training_config, f, default_flow_style=False)
+                QMessageBox.information(self, "Success", "Configuration saved successfully!")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to save configuration: {e}")
+                
+    def _start_training(self):
+        """Start model training."""
+        if not self.current_model_path or not self.current_data_path:
+            QMessageBox.warning(self, "Warning", "Please select both a model and dataset.")
+            return
+            
+        # Create descriptive output directory name
+        from datetime import datetime
+        
+        # Extract model name from path
+        model_name = Path(self.current_model_path).stem
+        if model_name.endswith('.pt'):
+            model_name = model_name[:-3]
+            
+        # Extract dataset name
+        dataset_name = Path(self.current_data_path).parent.name
+        
+        # Create timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Create directory name: task_model_dataset_timestamp
+        dir_name = f"{self.current_task}_{model_name}_{dataset_name}_{timestamp}"
+        
+        # Determine output directory
+        models_base = Path("data/models")
+        if self.current_task == "detection":
+            base_dir = models_base / "detection"
+        else:
+            base_dir = models_base / "segmentation"
+            
+        output_dir = base_dir / dir_name
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create training thread
+        self.training_thread = ModelTrainingThread(
+            task_type=self.current_task,
+            model_path=self.current_model_path,
+            data_path=self.current_data_path,
+            epochs=self.epochs_spin.value(),
+            patience=self.patience_spin.value(),
+            batch_size=self.batch_spin.value(),
+            lr=self.lr_spin.value(),
+            output_dir=str(output_dir)
+        )
+        
+        # Connect signals
+        self.training_thread.progress_update.connect(self._on_training_progress)
+        self.training_thread.training_complete.connect(self._on_training_complete)
+        self.training_thread.error_occurred.connect(self._on_training_error)
+        
+        # Update UI
+        self.start_training_btn.setEnabled(False)
+        self.stop_training_btn.setEnabled(True)
+        self.progress_bar.setValue(0)
+        # Set maximum to epochs * 100 for fine-grained progress tracking
+        self.progress_bar.setMaximum(self.epochs_spin.value() * 100)
+        self.status_label.setText("Starting training...")
+        
+        # Start training
+        self.training_thread.start()
+        
+        # Initialize timing for progress estimation
+        import time
+        self.training_start_time = time.time()
+        self.last_epoch = 0
+        
+        # Set results directory for live monitoring
+        # The training will create a timestamped subdirectory, so we need to find the latest one
+        self.current_results_dir = output_dir
+        self.results_widget.start_monitoring(str(output_dir))
+        
+    def _stop_training(self):
+        """Stop current training."""
+        if self.training_thread and self.training_thread.isRunning():
+            self.training_thread.stop_training()
+            self.training_thread.wait()
+            
+        # Stop results monitoring
+        self.results_widget.stop_monitoring()
+        self.current_results_dir = None
+            
+        self._reset_training_ui()
+        self.status_label.setText("Training stopped by user")
+        
+    def _on_training_progress(self, progress_value: int, status: str):
+        """Handle training progress update."""
+        self.progress_bar.setValue(progress_value)
+        self.status_label.setText(status)
+        
+        # Calculate current epoch from progress value (progress_value is epoch * 100 for detailed tracking)
+        current_epoch = max(1, progress_value // 100)  # Convert back to epoch number
+        if current_epoch == 0:
+            current_epoch = 1
+            
+        # Calculate time estimation
+        if current_epoch > self.last_epoch and self.training_start_time and current_epoch > 0:
+            import time
+            elapsed_time = time.time() - self.training_start_time
+            avg_time_per_epoch = elapsed_time / current_epoch
+            remaining_epochs = self.epochs_spin.value() - current_epoch
+            estimated_remaining = avg_time_per_epoch * remaining_epochs
+            
+            # Format time (guard against negative values)
+            if estimated_remaining > 0:
+                if estimated_remaining > 3600:  # More than 1 hour
+                    hours = int(estimated_remaining // 3600)
+                    minutes = int((estimated_remaining % 3600) // 60)
+                    time_str = f"{hours}h {minutes}m remaining"
+                elif estimated_remaining > 60:  # More than 1 minute
+                    minutes = int(estimated_remaining // 60)
+                    seconds = int(estimated_remaining % 60)
+                    time_str = f"{minutes}m {seconds}s remaining"
+                else:
+                    seconds = int(estimated_remaining)
+                    time_str = f"{seconds}s remaining"
+                    
+                progress_pct = (current_epoch / self.epochs_spin.value()) * 100
+                self.time_estimate_label.setText(f"Progress: {progress_pct:.1f}% - {time_str}")
+            else:
+                progress_pct = (current_epoch / self.epochs_spin.value()) * 100
+                self.time_estimate_label.setText(f"Progress: {progress_pct:.1f}% - Calculating...")
+            
+            self.last_epoch = current_epoch
+            
+    def _on_training_complete(self, results_path: str, success: bool):
+        """Handle training completion."""
+        self._reset_training_ui()
+        
+        # Stop monitoring since training is complete
+        self.results_widget.stop_monitoring()
+        
+        if success:
+            self.status_label.setText("Training completed successfully!")
+            # The widget should show the final results already
+        else:
+            self.status_label.setText("Training completed with issues")
+            
+    def _on_training_error(self, error_msg: str):
+        """Handle training error."""
+        self._reset_training_ui()
+        
+        # Stop monitoring on error
+        self.results_widget.stop_monitoring()
+        self.current_results_dir = None
+        
+        self.status_label.setText(f"Training failed: {error_msg}")
+        QMessageBox.critical(self, "Training Error", f"Training failed:\n{error_msg}")
+        
+    def _reset_training_ui(self):
+        """Reset training UI elements."""
+        self.start_training_btn.setEnabled(True)
+        self.stop_training_btn.setEnabled(False)
+        self.progress_bar.setValue(0)
+        self.time_estimate_label.setText("")
+        
+        # Reset timing variables
+        self.training_start_time = None
+        self.last_epoch = 0
+        
+        

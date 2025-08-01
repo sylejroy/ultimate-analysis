@@ -1,0 +1,35 @@
+detection:
+  augment: false
+  batch_size: 0.6
+  epochs: 50
+  imgsz: 960
+  learning_rate: 0.01
+  momentum: 0.937
+  optimizer: SGD
+  patience: 10
+  weight_decay: 0.0005
+  workers: 8
+output:
+  save_models: true
+  save_plots: true
+  save_results: true
+  verbose: true
+segmentation:
+  augment: true
+  batch_size: 8
+  box: 7.5
+  cls: 0.5
+  copy_paste: 0.0
+  device: 0
+  dfl: 1.5
+  epochs: 150
+  imgsz: 640
+  learning_rate: 0.01
+  mask: 7.5
+  mixup: 0.0
+  momentum: 0.937
+  optimizer: SGD
+  patience: 15
+  save_period: -1
+  weight_decay: 0.0005
+  workers: 8

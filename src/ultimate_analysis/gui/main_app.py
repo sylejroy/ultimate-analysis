@@ -13,6 +13,7 @@ from PyQt5.QtGui import QPalette, QColor, QIcon
 
 from .main_tab import MainTab
 from .easyocr_tuning_tab import EasyOCRTuningTab
+from .model_tuning_tab import ModelTuningTab
 from ..config.settings import get_setting
 from ..constants import DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT
 
@@ -62,9 +63,12 @@ class UltimateAnalysisApp(QMainWindow):
         self.easyocr_tab = EasyOCRTuningTab()
         self.tab_widget.addTab(self.easyocr_tab, "EasyOCR Tuning")
         
+        # Create Model Tuning tab
+        self.model_tuning_tab = ModelTuningTab()
+        self.tab_widget.addTab(self.model_tuning_tab, "Model Training")
+        
         # TODO: Add more tabs as needed
         # Example placeholder tabs:
-        # self.tab_widget.addTab(QWidget(), "Model Training")
         # self.tab_widget.addTab(QWidget(), "Data Preprocessing") 
         # self.tab_widget.addTab(QWidget(), "Performance Analysis")
         
