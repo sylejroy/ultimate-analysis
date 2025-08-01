@@ -578,6 +578,11 @@ class ModelTuningTab(QWidget):
         self.training_start_time = None  # When training subprocess starts (includes preprocessing)
         self.actual_training_start_time = None  # When actual epoch training begins
         self.last_epoch = 0
+        self.last_status = ""  # Store last status for time updates
+        
+        # Timer for updating elapsed/remaining time every second
+        self.time_update_timer = QTimer()
+        self.time_update_timer.timeout.connect(self._update_time_display)
         
         # Initialize UI
         self._init_ui()
@@ -1208,7 +1213,7 @@ class ModelTuningTab(QWidget):
         
         # Create date prefix and find unique number
         date_prefix = datetime.now().strftime("%Y%m%d")
-        base_name = f"{date_prefix}_{self.current_task}_{model_name}_{dataset_name}"
+        base_name = f"{self.current_task}_{model_name}_{dataset_name}"
         
         # Determine output directory
         models_base = Path("data/models")
@@ -1220,7 +1225,7 @@ class ModelTuningTab(QWidget):
         # Find unique directory name by incrementing number
         counter = 1
         while True:
-            dir_name = f"{base_name}_{counter}"
+            dir_name = f"{date_prefix}_{counter}_{base_name}"
             output_dir = base_dir / dir_name
             if not output_dir.exists():
                 break
@@ -1280,6 +1285,9 @@ class ModelTuningTab(QWidget):
         self.training_start_time = time.time()
         self.last_epoch = 0
         
+        # Start timer for updating time display every second
+        self.time_update_timer.start(1000)  # Update every 1000ms (1 second)
+        
         # Set results directory for live monitoring
         # The training will create a timestamped subdirectory, so we need to find the latest one
         self.current_results_dir = output_dir
@@ -1300,6 +1308,14 @@ class ModelTuningTab(QWidget):
         
     def _on_training_progress(self, progress_value: int, status: str):
         """Handle training progress update."""
+        # Store the status for time updates
+        self.last_status = status
+        
+        # Update progress display with time calculations
+        self._update_progress_display(progress_value, status)
+        
+    def _update_progress_display(self, progress_value: int, status: str):
+        """Update progress display with current time calculations."""
         # Set progress bar value (0-100)
         self.progress_bar.setValue(progress_value)
         
@@ -1435,6 +1451,14 @@ class ModelTuningTab(QWidget):
         else:
             seconds = int(elapsed_seconds)
             return f"{seconds}s"
+    
+    def _update_time_display(self):
+        """Update the time display every second during training."""
+        if not self.training_start_time or not hasattr(self, 'last_status') or not self.last_status:
+            return
+            
+        # Recalculate time information using the last known status
+        self._update_progress_display(self.progress_bar.value(), self.last_status)
         
     def _reset_training_ui(self):
         """Reset training UI elements."""
@@ -1448,5 +1472,9 @@ class ModelTuningTab(QWidget):
         self.training_start_time = None
         self.actual_training_start_time = None
         self.last_epoch = 0
+        self.last_status = ""
+        
+        # Stop time update timer
+        self.time_update_timer.stop()
         
         
