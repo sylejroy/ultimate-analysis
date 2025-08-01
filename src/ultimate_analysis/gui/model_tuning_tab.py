@@ -11,13 +11,14 @@ import subprocess
 import glob
 import re
 import time
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
 import json
-from datetime import datetime
+import tempfile
 import shutil
 import pandas as pd
 import matplotlib.pyplot as plt
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple, Any
+from datetime import datetime
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import numpy as np
@@ -183,12 +184,13 @@ class ModelTrainingThread(QThread):
     """Background thread for model training to prevent GUI freezing."""
     
     progress_update = pyqtSignal(int, str)  # epoch, status message
+    raw_output = pyqtSignal(str)  # raw training output line
     training_complete = pyqtSignal(str, bool)  # results_path, success
     error_occurred = pyqtSignal(str)  # error message
     
     def __init__(self, task_type: str, model_path: str, data_path: str, 
-                 epochs: int, patience: int, batch_size: int, lr: float,
-                 output_dir: str):
+                 epochs: int, patience: int, batch_size: float, lr: float,
+                 output_dir: str, training_params: dict = None):
         super().__init__()
         self.task_type = task_type
         self.model_path = model_path
@@ -198,74 +200,64 @@ class ModelTrainingThread(QThread):
         self.batch_size = batch_size
         self.lr = lr
         self.output_dir = output_dir
+        self.training_params = training_params or {}
         self.should_stop = False
         
     def run(self):
         """Run the training process."""
+        import subprocess
+        import json
+        import tempfile
+        
         try:
-            # Disable the GUI's model loading during training to prevent conflicts
             print("[TRAINING] Starting model training in separate process...")
             
-            # Create training script content
-            script_content = f'''
-import os
-import sys
-import multiprocessing
-
-# Required for Windows multiprocessing
-if __name__ == '__main__':
-    multiprocessing.freeze_support()
-    
-    sys.path.insert(0, "src")
-
-    # Set environment variables to reduce conflicts
-    os.environ["PYTHONPATH"] = "src"
-
-    from ultralytics import YOLO
-    from datetime import datetime
-
-    # Load model
-    print(f"Loading model: {self.model_path}")
-    model = YOLO(r"{self.model_path}")
-
-    # Set up training arguments with reduced workers for Windows
-    train_args = {{
-        "data": r"{self.data_path}",
-        "epochs": {self.epochs},
-        "patience": {self.patience},
-        "batch": {self.batch_size},
-        "lr0": {self.lr},
-        "project": r"{self.output_dir}",
-        "name": "finetune_{{}}".format(datetime.now().strftime('%Y%m%d_%H%M%S')),
-        "exist_ok": True,
-        "verbose": True,
-        "plots": True,
-        "save": True,
-        "device": 0,  # Use GPU if available
-        "workers": 0  # Set to 0 to avoid multiprocessing issues on Windows
-    }}
-
-    print(f"Training arguments: {{train_args}}")
-
-    # Start training
-    results = model.train(**train_args)
-    print(f"Training completed. Results directory: {{str(results.save_dir)}}")
-
-    # Write results path to file for the GUI to read
-    with open("training_results.txt", "w") as f:
-        f.write(str(results.save_dir))
-'''
+            # Create training configuration
+            training_config = {
+                'model_path': self.model_path,
+                'data_path': self.data_path,
+                'output_dir': self.output_dir,
+                'epochs': self.epochs,
+                'patience': self.patience,
+                'batch_size': self.batch_size,
+                'learning_rate': self.lr,
+                'device': self.training_params.get('device', 0),
+                'workers': self.training_params.get('workers', 0),
+                'imgsz': self.training_params.get('imgsz', 640),
+                'optimizer': self.training_params.get('optimizer', 'SGD'),
+                'momentum': self.training_params.get('momentum', 0.937),
+                'weight_decay': self.training_params.get('weight_decay', 0.0005),
+                'augment': self.training_params.get('augment', True),
+                'mosaic': self.training_params.get('mosaic', 1.0),
+                'mixup': self.training_params.get('mixup', 0.0),
+                'copy_paste': self.training_params.get('copy_paste', 0.0),
+                'hsv_h': self.training_params.get('hsv_h', 0.015),
+                'hsv_s': self.training_params.get('hsv_s', 0.7),
+                'hsv_v': self.training_params.get('hsv_v', 0.4),
+                'results_file': 'training_results.txt'
+            }
             
-            # Write training script
-            script_path = "temp_training_script.py"
-            with open(script_path, 'w') as f:
-                f.write(script_content)
+            # Write config to temporary file
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+                json.dump(training_config, f, indent=2)
+                config_path = f.name
+            
+            # Path to training script
+            script_path = Path(__file__).parent.parent / "training" / "train_model_subprocess.py"
             
             try:
+                # Reset training state flags
+                if hasattr(self, '_training_started'):
+                    delattr(self, '_training_started')
+                if hasattr(self, '_last_prep_update'):
+                    delattr(self, '_last_prep_update')
+                if hasattr(self, '_fallback_sent'):
+                    delattr(self, '_fallback_sent')
+                
                 # Start training process
                 import subprocess
                 process = subprocess.Popen(
-                    [sys.executable, script_path],
+                    [sys.executable, str(script_path), '--config', config_path],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -274,9 +266,9 @@ if __name__ == '__main__':
                 )
                 
                 epoch_count = 0
-                last_status = ""
+                total_epochs = self.epochs
                 last_update_time = 0
-                start_time = time.time()  # Track when training actually starts
+                start_time = time.time()
                 
                 while True:
                     if self.should_stop:
@@ -294,147 +286,12 @@ if __name__ == '__main__':
                         line = line.strip()
                         current_time = time.time()
                         
-                        # Always print all lines for debugging - user needs to see log output
-                        print(f"[TRAINING] {line}")
+                        # Emit raw output for display
+                        if line:  # Only emit non-empty lines
+                            self.raw_output.emit(line)
                         
-                        # Extract epoch information with improved parsing
-                        epoch_updated = False
-                        
-                        # Look for iteration/batch progress patterns first (YOLO uses various formats)
-                        iter_patterns = [
-                            # Standard tqdm format: "100%|██████████| 123/123 [00:30<00:00, 4.11it/s]"
-                            r'(\d+)%\|[█▏▎▍▌▋▊▉ ]*\|\s*(\d+)/(\d+)\s*\[.*?,\s*([0-9.]+)it/s\]',
-                            # Simple format: "123/123 [4.11it/s]"
-                            r'(\d+)/(\d+)\s*\[.*?([0-9.]+)it/s\]',
-                            # Percentage with iterations: "50% 123/246"
-                            r'(\d+)%\s+(\d+)/(\d+)',
-                            # YOLO training format: "      5/100    1.23G      3.45      2.67"
-                            r'^\s*(\d+)/(\d+)\s+[0-9.]+[GM]B?\s',
-                            # YOLO simple format: "      5/100"
-                            r'^\s+(\d+)/(\d+)\s*$',
-                            # Batch format: "batch 123/246"  
-                            r'batch\s+(\d+)/(\d+)',
-                            # Loss format with batch: "123/246: loss=1.23"
-                            r'(\d+)/(\d+):\s*(?:loss|Loss)',
-                            # Just iterations: "Processing 123/246" or simply "123/246"
-                            r'(?:Processing\s+)?(\d+)/(\d+)\s*(?:batches?|iterations?|it)?'
-                        ]
-                        
-                        iter_match = None
-                        for pattern in iter_patterns:
-                            iter_match = re.search(pattern, line)
-                            if iter_match:
-                                break
-                        
-                        if iter_match:
-                            try:
-                                groups = iter_match.groups()
-                                if len(groups) >= 3 and groups[0].isdigit():  # Has percentage
-                                    iter_percent = int(groups[0])
-                                    current_iter = int(groups[1])
-                                    total_iter = int(groups[2])
-                                elif len(groups) >= 2:  # Just iterations
-                                    current_iter = int(groups[0])
-                                    total_iter = int(groups[1])
-                                    iter_percent = int((current_iter / total_iter) * 100) if total_iter > 0 else 0
-                                else:
-                                    continue
-                                
-                                # Only update if we have epoch info to provide context
-                                if epoch_count > 0:
-                                    clean_status = f"Epoch {epoch_count}/{total_epochs} • Batch {current_iter}/{total_iter} ({iter_percent}%)"
-                                    
-                                    # Calculate overall progress including within-epoch progress
-                                    if total_epochs > 0:
-                                        epoch_progress = (epoch_count - 1) / total_epochs  # Previous completed epochs
-                                        current_epoch_progress = (current_iter / total_iter) / total_epochs  # Current epoch progress
-                                        overall_progress = int((epoch_progress + current_epoch_progress) * 100)
-                                        overall_progress = min(100, max(0, overall_progress))
-                                    else:
-                                        overall_progress = iter_percent
-                                    
-                                    self.progress_update.emit(overall_progress, clean_status)
-                                    last_status = clean_status
-                                    last_update_time = current_time
-                                    epoch_updated = True
-                            except Exception as e:
-                                pass
-                        
-                        # Look for actual training epoch patterns like "1/X" at start of line
-                        elif line.strip().startswith(("1/", "2/", "3/", "4/", "5/", "6/", "7/", "8/", "9/")) or re.search(r'/\d+', line):
-                            try:
-                                # Match patterns like "1/100" for actual training epochs
-                                epoch_match = re.search(r'^(\d+)/(\d+)', line.strip())
-                                if epoch_match:
-                                    current_epoch = int(epoch_match.group(1))
-                                    total_epochs = int(epoch_match.group(2))
-                                    
-                                    # Only update if this is a real epoch change
-                                    if current_epoch != epoch_count and current_epoch <= total_epochs:
-                                        epoch_count = current_epoch
-                                        progress_percent = int((current_epoch / total_epochs) * 100)
-                                        
-                                        clean_status = f"Epoch {current_epoch}/{total_epochs}"
-                                        
-                                        self.progress_update.emit(progress_percent, clean_status)
-                                        last_status = clean_status
-                                        last_update_time = current_time
-                                        epoch_updated = True
-                            except Exception as e:
-                                # Silently handle parsing errors to reduce noise
-                                pass
-                        
-                        # During preparation phase, show preparation status
-                        elif any(prep_keyword in line.lower() for prep_keyword in ["scanning", "loading", "autobatch", "computing", "transferring", "freezing", "optimizer", "albumentations", "train:", "val:"]):
-                            if current_time - last_update_time > 2:  # Update every 2 seconds during prep
-                                prep_status = "Preparing training..."
-                                if "scanning" in line.lower():
-                                    prep_status = "Scanning dataset..."
-                                elif "autobatch" in line.lower():
-                                    prep_status = "Computing optimal batch size..."
-                                elif "transferring" in line.lower():
-                                    prep_status = "Transferring pretrained weights..."
-                                elif "freezing" in line.lower():
-                                    prep_status = "Freezing model layers..."
-                                elif "optimizer" in line.lower():
-                                    prep_status = "Initializing optimizer..."
-                                elif "albumentations" in line.lower():
-                                    prep_status = "Setting up data augmentation..."
-                                elif "train:" in line.lower() or "val:" in line.lower():
-                                    prep_status = "Loading datasets..."
-                                
-                                self.progress_update.emit(0, prep_status)  # 0% during preparation
-                                last_status = prep_status
-                                last_update_time = current_time
-                        
-                        # Check for training start indicators that might not have epoch numbers yet
-                        elif any(start_keyword in line.lower() for start_keyword in ["starting training", "train epoch", "model summary", "layer", "params"]):
-                            if current_time - last_update_time > 3:  # Less frequent updates for these
-                                if epoch_count == 0:  # Still in preparation but training is starting
-                                    self.progress_update.emit(1, "Starting training...")  # 1% to show progress
-                                    last_status = "Starting training..."
-                                    last_update_time = current_time
-                        
-                        # Show other important status updates occasionally
-                        elif not epoch_updated and current_time - last_update_time > 5:
-                            # If we've been running for more than 60 seconds without epoch info, 
-                            # assume training started but we're not detecting the format
-                            if current_time - start_time > 60 and epoch_count == 0:
-                                self.progress_update.emit(5, "Training in progress... (epoch detection unavailable)")
-                                last_status = "Training in progress... (epoch detection unavailable)"
-                                last_update_time = current_time
-                            elif any(keyword in line.lower() for keyword in ["starting training", "completed", "saving", "best", "loss", "metrics"]):
-                                # Clean up long lines
-                                clean_line = line.strip()
-                                if len(clean_line) > 80:
-                                    clean_line = clean_line[:80] + "..."
-                                    
-                                if clean_line != last_status:
-                                    # Keep current progress percentage for status updates
-                                    current_progress = max(0, int((epoch_count / self.epochs) * 100)) if epoch_count > 0 and self.epochs > 0 else 5
-                                    self.progress_update.emit(current_progress, clean_line)
-                                    last_status = clean_line
-                                    last_update_time = current_time
+                        # Simple progress detection
+                        epoch_count = self._process_training_line(line, current_time, start_time, epoch_count, total_epochs)
                 
                 # Check result
                 return_code = process.wait()
@@ -454,9 +311,9 @@ if __name__ == '__main__':
                     self.error_occurred.emit(f"Training failed with return code: {return_code}")
                     
             finally:
-                # Cleanup
-                if os.path.exists(script_path):
-                    os.remove(script_path)
+                # Cleanup temporary files
+                if os.path.exists(config_path):
+                    os.remove(config_path)
                 if os.path.exists("training_results.txt"):
                     os.remove("training_results.txt")
                     
@@ -481,6 +338,175 @@ if __name__ == '__main__':
         else:
             seconds = int(elapsed_seconds)
             return f"{seconds}s"
+    
+    def _process_training_line(self, line: str, current_time: float, start_time: float, epoch_count: int, total_epochs: int):
+        """Process a single line of training output and emit progress updates."""
+        # Skip empty lines
+        if not line.strip():
+            return epoch_count
+            
+        # Check for training start indicators (transition from preparation to training)
+        training_start_keywords = [
+            "starting training",
+            "train:",
+            "starting epoch",
+            "beginning training", 
+            "training started",
+            "optimizer:",
+            "lr0=",  # Learning rate initialization
+            "momentum=",  # Training hyperparameters
+            "ultralytics yolo",  # Ultralytics banner
+            "python train.py",  # Training command
+            "model summary:",  # Model summary output
+            "freezing",  # Layer freezing
+            "amp:",  # Mixed precision
+            "epochs:",  # Epoch configuration
+            "image sizes",  # Image size configuration
+            "starting training for",  # Common ultralytics phrase
+            "training parameters:",  # Parameter listing
+            "wandb:",  # Weights & Biases integration
+            "tensorboard:",  # TensorBoard logging
+        ]
+        
+        # Check for preparation phase - look for common pre-training keywords
+        prep_keywords = [
+            "scanning", "loading", "cache", "labels", "dataset", "images",
+            "caching", "reading", "found", "missing", "empty", "checking"
+        ]
+        is_preparing = any(keyword in line.lower() for keyword in prep_keywords)
+        is_training_starting = any(keyword in line.lower() for keyword in training_start_keywords)
+        
+        # Debug logging to help identify patterns
+        if is_training_starting:
+            print(f"[TRAINING_DEBUG] Training start detected: {line}")
+        elif is_preparing:
+            print(f"[TRAINING_DEBUG] Preparation detected: {line}")
+        else:
+            # Check for any number patterns that might be epochs
+            if re.search(r'\b(\d+)/(\d+)\b', line) and epoch_count == 0:
+                print(f"[TRAINING_DEBUG] Unclassified number pattern: {line}")
+        
+        # Detect transition from preparation to training
+        if is_training_starting and epoch_count == 0:
+            # Mark that training has started but no epochs detected yet
+            if not hasattr(self, '_training_started'):
+                print(f"[TRAINING_DEBUG] Setting training started flag")
+                self.progress_update.emit(1, "Training starting • Epoch ??/?? • Batch ??/??")
+                self._training_started = True
+            return epoch_count
+        
+        # During preparation, avoid interpreting numbers as epochs/batches
+        if is_preparing and epoch_count == 0 and not hasattr(self, '_training_started'):
+            # Only update every 3 seconds during prep to avoid spam
+            if not hasattr(self, '_last_prep_update') or current_time - self._last_prep_update > 3:
+                self.progress_update.emit(0, "Preparing training • Epoch ??/?? • Batch ??/??")
+                self._last_prep_update = current_time
+            return epoch_count
+        
+        # Look for actual epoch training patterns (usually after preparation)
+        # More specific patterns to avoid false positives during preparation
+        epoch_patterns = [
+            r'Epoch\s+(\d+)/(\d+)',  # "Epoch 1/100"
+            r'(\d+)/(\d+).*?epochs?',  # "1/100 epochs"
+            r'^(\d+)/(\d+)\s+[\d.]+[GM]?',  # Ultralytics format: "1/10      4.96G" (start of line)
+            r'^(\d+)/(\d+)\s+',  # Simpler start of line pattern: "1/10 " 
+        ]
+        
+        for pattern in epoch_patterns:
+            epoch_match = re.search(pattern, line, re.IGNORECASE)
+            if epoch_match:
+                print(f"[TRAINING_DEBUG] Epoch pattern matched: '{pattern}' -> groups: {epoch_match.groups()} from line: {line[:100]}...")
+                try:
+                    current_epoch = int(epoch_match.group(1))
+                    detected_total = int(epoch_match.group(2))
+                    
+                    # Update total epochs if we detect a different value
+                    if detected_total != total_epochs and detected_total > 0:
+                        total_epochs = detected_total
+                    
+                    # Only update if epoch changed and is reasonable
+                    if current_epoch != epoch_count and 1 <= current_epoch <= total_epochs:
+                        epoch_count = current_epoch
+                        progress_percent = int((current_epoch / total_epochs) * 100)
+                        status = f"Training • Epoch {current_epoch}/{total_epochs}"
+                        print(f"[TRAINING_DEBUG] Epoch detected: {current_epoch}/{total_epochs}")
+                        self.progress_update.emit(progress_percent, status)
+                        # Mark that actual training has started
+                        self._training_started = True
+                        return epoch_count
+                except (ValueError, ZeroDivisionError):
+                    pass
+        
+        # Alternative detection: Look for progress bars or percentage indicators
+        # This catches cases where ultralytics uses different output formats
+        progress_indicators = [
+            r'(\d+)%.*?(\d+)/(\d+)',  # Progress percentage with counts
+            r'\|.*?\|.*?(\d+)/(\d+)',  # Progress bar format
+            r'(\d+)/(\d+).*?\[.*?\]',  # Count with time brackets
+        ]
+        
+        for pattern in progress_indicators:
+            progress_match = re.search(pattern, line)
+            if progress_match and not is_preparing:
+                # If we see progress indicators and we're not in preparation,
+                # we're likely in training even without explicit epoch markers
+                if not hasattr(self, '_training_started') and epoch_count == 0:
+                    print(f"[TRAINING_DEBUG] Progress indicator detected, marking training as started: {line}")
+                    self.progress_update.emit(2, "Training • Epoch ??/?? • Batch ??/??")
+                    self._training_started = True
+                return epoch_count
+        
+        # Look for batch/iteration progress within epochs (with iterations/sec info)
+        # Pattern like: "50%|███████ | 25/50 [00:30<00:15, 1.67it/s]"
+        batch_match = re.search(r'(\d+)%.*?(\d+)/(\d+).*?\[([\d:]+)<([\d:]+),\s*([\d.]+)it/s\]', line)
+        if batch_match and epoch_count > 0:
+            try:
+                batch_percent = int(batch_match.group(1))
+                current_batch = int(batch_match.group(2))
+                total_batches = int(batch_match.group(3))
+                iterations_per_sec = float(batch_match.group(6))
+                
+                # Calculate overall progress: completed epochs + current epoch progress
+                epoch_progress = ((epoch_count - 1) / total_epochs) * 100
+                current_epoch_progress = (batch_percent / 100) * (1 / total_epochs) * 100
+                overall_progress = min(100, int(epoch_progress + current_epoch_progress))
+                
+                status = f"Training • Epoch {epoch_count}/{total_epochs} • Batch {current_batch}/{total_batches} • {iterations_per_sec:.1f}it/s"
+                self.progress_update.emit(overall_progress, status)
+                return epoch_count
+            except (ValueError, ZeroDivisionError):
+                pass
+        
+        # Simpler batch progress without timing info
+        elif re.search(r'(\d+)%.*?(\d+)/(\d+)', line) and epoch_count > 0:
+            batch_match = re.search(r'(\d+)%.*?(\d+)/(\d+)', line)
+            try:
+                batch_percent = int(batch_match.group(1))
+                current_batch = int(batch_match.group(2))
+                total_batches = int(batch_match.group(3))
+                
+                # Calculate overall progress
+                epoch_progress = ((epoch_count - 1) / total_epochs) * 100
+                current_epoch_progress = (batch_percent / 100) * (1 / total_epochs) * 100
+                overall_progress = min(100, int(epoch_progress + current_epoch_progress))
+                
+                status = f"Training • Epoch {epoch_count}/{total_epochs} • Batch {current_batch}/{total_batches}"
+                self.progress_update.emit(overall_progress, status)
+                return epoch_count
+            except (ValueError, ZeroDivisionError):
+                pass
+        
+        # Fallback: if training has been running for a while without clear state detection
+        if current_time - start_time > 30 and epoch_count == 0:
+            if not hasattr(self, '_fallback_sent'):
+                if hasattr(self, '_training_started'):
+                    self.progress_update.emit(2, "Training • Epoch ??/?? • Batch ??/??")
+                else:
+                    self.progress_update.emit(1, "Training starting • Epoch ??/?? • Batch ??/??")
+                    self._training_started = True
+                self._fallback_sent = True
+        
+        return epoch_count
 
 
 class ModelTuningTab(QWidget):
@@ -762,18 +788,28 @@ class ModelTuningTab(QWidget):
         
         # Progress section
         progress_group = QGroupBox("Training Progress")
+        progress_group.setMaximumHeight(200)  # Make section smaller
         progress_layout = QVBoxLayout()
-        progress_layout.setSpacing(2)  # Reduce spacing between elements
-        progress_layout.setContentsMargins(10, 5, 10, 5)  # Reduce margins
+        progress_layout.setSpacing(1)  # Minimal spacing
+        progress_layout.setContentsMargins(8, 3, 8, 3)  # Smaller margins
         
         self.progress_bar = QProgressBar()
+        self.progress_bar.setMaximumHeight(18)  # Smaller progress bar
         progress_layout.addWidget(self.progress_bar)
         
-        self.status_label = QLabel("Ready to start training")
-        progress_layout.addWidget(self.status_label)
+        # Single line for progress info and elapsed time
+        self.progress_info_label = QLabel("Ready to start training")
+        self.progress_info_label.setMaximumHeight(16)  # Compact text
+        progress_layout.addWidget(self.progress_info_label)
         
-        self.time_estimate_label = QLabel("")
-        progress_layout.addWidget(self.time_estimate_label)
+        # Raw output display
+        self.raw_output_text = QTextEdit()
+        self.raw_output_text.setMaximumHeight(120)  # Compact but readable
+        self.raw_output_text.setReadOnly(True)
+        self.raw_output_text.setFont(QFont("Consolas", 8))  # Small monospace font
+        self.raw_output_text.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.raw_output_text.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        progress_layout.addWidget(self.raw_output_text)
         
         progress_group.setLayout(progress_layout)
         layout.addWidget(progress_group)
@@ -1132,6 +1168,23 @@ class ModelTuningTab(QWidget):
         output_dir = base_dir / dir_name
         output_dir.mkdir(parents=True, exist_ok=True)
         
+        # Collect all training parameters from UI
+        training_params = {
+            'device': 0,  # Use first GPU if available, otherwise CPU
+            'workers': self.workers_spin.value(),
+            'imgsz': self.imgsz_spin.value(),
+            'optimizer': self.optimizer_combo.currentText(),
+            'momentum': self.momentum_spin.value(),
+            'weight_decay': self.weight_decay_spin.value(),
+            'augment': self.augment_check.isChecked(),
+            'mosaic': self.mosaic_spin.value(),
+            'mixup': self.mixup_spin.value(),
+            'copy_paste': self.copy_paste_spin.value(),
+            'hsv_h': self.hsv_h_spin.value(),
+            'hsv_s': self.hsv_s_spin.value(),
+            'hsv_v': self.hsv_v_spin.value()
+        }
+
         # Create training thread
         self.training_thread = ModelTrainingThread(
             task_type=self.current_task,
@@ -1141,11 +1194,13 @@ class ModelTuningTab(QWidget):
             patience=self.patience_spin.value(),
             batch_size=self.batch_spin.value(),
             lr=self.lr_spin.value(),
-            output_dir=str(output_dir)
+            output_dir=str(output_dir),
+            training_params=training_params
         )
         
         # Connect signals
         self.training_thread.progress_update.connect(self._on_training_progress)
+        self.training_thread.raw_output.connect(self._on_raw_output)
         self.training_thread.training_complete.connect(self._on_training_complete)
         self.training_thread.error_occurred.connect(self._on_training_error)
         
@@ -1155,7 +1210,7 @@ class ModelTuningTab(QWidget):
         self.progress_bar.setValue(0)
         # Set maximum to 100 for percentage-based progress
         self.progress_bar.setMaximum(100)
-        self.status_label.setText("Starting training...")
+        self.progress_info_label.setText("Starting training...")
         
         # Start training
         self.training_thread.start()
@@ -1180,66 +1235,102 @@ class ModelTuningTab(QWidget):
         self.current_results_dir = None
             
         self._reset_training_ui()
-        self.status_label.setText("Training stopped by user")
+        self.progress_info_label.setText("Training stopped by user")
         
     def _on_training_progress(self, progress_value: int, status: str):
         """Handle training progress update."""
         # Set progress bar value (0-100)
         self.progress_bar.setValue(progress_value)
-        self.status_label.setText(status)
         
-        # Update time estimation display (separate from status)
+        # Update combined progress info with elapsed time on one line
         if self.training_start_time:
             elapsed_time = time.time() - self.training_start_time
-            elapsed_formatted = self._format_elapsed_time(elapsed_time)
+            elapsed_str = self._format_elapsed_time(elapsed_time)
             
             # Extract epoch info for time estimation
             current_epoch = 0
-            try:
-                if "Epoch " in status:
-                    # Extract epoch number from status like "Epoch 5/100"
-                    epoch_part = status.split("Epoch ")[1].split(" ")[0]  # Get "5/100"
-                    if "/" in epoch_part:
-                        current_epoch = int(epoch_part.split("/")[0])
-            except (ValueError, IndexError):
-                pass
+            total_epochs = 0
+            iterations_per_sec = 0
             
-            # Calculate and display time estimation
-            if current_epoch > 0 and current_epoch > self.last_epoch:
+            # Try to extract epoch numbers
+            if "Epoch " in status and "/" in status:
+                try:
+                    epoch_part = status.split("Epoch ")[1].split()[0]  # Get "5/100"
+                    if "/" in epoch_part and epoch_part != "??/??":
+                        current_epoch = int(epoch_part.split("/")[0])
+                        total_epochs = int(epoch_part.split("/")[1])
+                except (ValueError, IndexError):
+                    pass
+            
+            # Try to extract iterations per second if available
+            if "it/s" in status:
+                try:
+                    it_match = re.search(r'([\d.]+)it/s', status)
+                    if it_match:
+                        iterations_per_sec = float(it_match.group(1))
+                except (ValueError, IndexError):
+                    pass
+            
+            # Calculate remaining time using multiple methods
+            remaining_str = ""
+            
+            # Method 1: Use epoch-based estimation if we have valid epoch info
+            if current_epoch > 0 and total_epochs > 0 and current_epoch != self.last_epoch:
                 avg_time_per_epoch = elapsed_time / current_epoch
-                remaining_epochs = self.epochs_spin.value() - current_epoch
+                remaining_epochs = total_epochs - current_epoch
                 estimated_remaining = avg_time_per_epoch * remaining_epochs
                 
                 if estimated_remaining > 0:
-                    if estimated_remaining > 3600:  # More than 1 hour
-                        hours = int(estimated_remaining // 3600)
-                        minutes = int((estimated_remaining % 3600) // 60)
-                        time_str = f"{hours}h {minutes}m remaining"
-                    elif estimated_remaining > 60:  # More than 1 minute
-                        minutes = int(estimated_remaining // 60)
-                        seconds = int(estimated_remaining % 60)
-                        time_str = f"{minutes}m {seconds}s remaining"
-                    else:
-                        seconds = int(estimated_remaining)
-                        time_str = f"{seconds}s remaining"
-                    
-                    self.time_estimate_label.setText(f"{elapsed_formatted} elapsed • {time_str}")
-                else:
-                    self.time_estimate_label.setText(f"{elapsed_formatted} elapsed • Calculating...")
-                
-                self.last_epoch = current_epoch
+                    remaining_str = self._format_elapsed_time(estimated_remaining)
+                    self.last_epoch = current_epoch
+            
+            # Method 2: Use iterations per second for more accurate short-term estimates
+            elif iterations_per_sec > 0 and current_epoch > 0 and total_epochs > 0:
+                # Extract batch info if available
+                if "Batch " in status:
+                    try:
+                        batch_part = status.split("Batch ")[1].split()[0]  # Get "25/50"
+                        if "/" in batch_part:
+                            current_batch = int(batch_part.split("/")[0])
+                            total_batches = int(batch_part.split("/")[1])
+                            
+                            # Estimate remaining batches in current epoch
+                            remaining_batches_epoch = total_batches - current_batch
+                            # Estimate remaining batches in all remaining epochs
+                            remaining_epochs = total_epochs - current_epoch
+                            total_remaining_batches = remaining_batches_epoch + (remaining_epochs * total_batches)
+                            
+                            # Estimate time based on iteration speed
+                            estimated_remaining = total_remaining_batches / iterations_per_sec
+                            remaining_str = self._format_elapsed_time(estimated_remaining)
+                    except (ValueError, IndexError):
+                        pass
+            
+            # Method 3: Use overall progress percentage as fallback
+            elif progress_value > 5:  # Only if we have meaningful progress
+                time_per_percent = elapsed_time / progress_value
+                remaining_percent = 100 - progress_value
+                estimated_remaining = time_per_percent * remaining_percent
+                remaining_str = self._format_elapsed_time(estimated_remaining)
+            
+            # Build the display string
+            if remaining_str:
+                self.progress_info_label.setText(f"{status} • {elapsed_str} elapsed • {remaining_str} remaining")
             else:
-                # Just show elapsed time during preparation or when no epoch data
-                if progress_value == 0:
-                    self.time_estimate_label.setText(f"{elapsed_formatted} elapsed • Preparing...")
-                else:
-                    self.time_estimate_label.setText(f"{elapsed_formatted} elapsed")
+                self.progress_info_label.setText(f"{status} • {elapsed_str} elapsed")
         else:
-            # No start time yet
-            if progress_value == 0:
-                self.time_estimate_label.setText("Preparing training...")
-            else:
-                self.time_estimate_label.setText(f"Progress: {progress_value}%")
+            # No timing info available yet
+            self.progress_info_label.setText(status)
+    
+    def _on_raw_output(self, line: str):
+        """Handle raw training output."""
+        # Append new line to the output display
+        self.raw_output_text.append(line)
+        
+        # Auto-scroll to bottom to show latest output
+        cursor = self.raw_output_text.textCursor()
+        cursor.movePosition(cursor.End)
+        self.raw_output_text.setTextCursor(cursor)
             
     def _on_training_complete(self, results_path: str, success: bool):
         """Handle training completion."""
@@ -1249,10 +1340,10 @@ class ModelTuningTab(QWidget):
         self.results_widget.stop_monitoring()
         
         if success:
-            self.status_label.setText("Training completed successfully!")
+            self.progress_info_label.setText("Training completed successfully!")
             # The widget should show the final results already
         else:
-            self.status_label.setText("Training completed with issues")
+            self.progress_info_label.setText("Training completed with issues")
             
     def _on_training_error(self, error_msg: str):
         """Handle training error."""
@@ -1262,7 +1353,7 @@ class ModelTuningTab(QWidget):
         self.results_widget.stop_monitoring()
         self.current_results_dir = None
         
-        self.status_label.setText(f"Training failed: {error_msg}")
+        self.progress_info_label.setText(f"Training failed: {error_msg}")
         QMessageBox.critical(self, "Training Error", f"Training failed:\n{error_msg}")
     
     def _format_elapsed_time(self, elapsed_seconds: float) -> str:
@@ -1284,7 +1375,8 @@ class ModelTuningTab(QWidget):
         self.start_training_btn.setEnabled(True)
         self.stop_training_btn.setEnabled(False)
         self.progress_bar.setValue(0)
-        self.time_estimate_label.setText("")
+        self.progress_info_label.setText("Ready to start training")
+        self.raw_output_text.clear()
         
         # Reset timing variables
         self.training_start_time = None
