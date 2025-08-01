@@ -1,10 +1,16 @@
 detection:
   augment: false
-  batch_size: 0.6
-  epochs: 50
+  batch_size: 0.8
+  copy_paste: 0.0
+  epochs: 10
+  hsv_h: 0.015
+  hsv_s: 0.7
+  hsv_v: 0.4
   imgsz: 960
   learning_rate: 0.01
+  mixup: 0.0
   momentum: 0.937
+  mosaic: 1.0
   optimizer: SGD
   patience: 10
   weight_decay: 0.0005
