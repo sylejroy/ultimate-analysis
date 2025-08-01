@@ -70,6 +70,11 @@ class MainTab(QWidget):
         self.current_field_results: List[Any] = []
         self.current_player_ids: Dict[int, Tuple[str, Any]] = {}
         
+        # FPS tracking for processed frames
+        self.frame_times: List[float] = []
+        self.max_frame_samples = 30  # Rolling average over 30 frames
+        self.current_fps = 0.0
+        
         # Playback timer
         self.playback_timer = QTimer()
         self.playback_timer.timeout.connect(self._on_timer_tick)
@@ -430,6 +435,10 @@ class MainTab(QWidget):
         # Stop playback
         self._stop_playback()
         
+        # Reset FPS tracking for new video
+        self.frame_times.clear()
+        self.current_fps = 0.0
+        
         # Load video
         if self.video_player.load_video(video_path):
             # Update UI
@@ -558,6 +567,9 @@ class MainTab(QWidget):
         total_duration_ms = (time.time() - total_start_time) * 1000
         self.performance_widget.add_processing_measurement("Total Runtime", total_duration_ms)
         
+        # Update FPS calculation
+        self._update_fps(total_duration_ms)
+        
         return frame
     
     def _apply_visualizations(self, frame):
@@ -588,7 +600,68 @@ class MainTab(QWidget):
             else:
                 frame = draw_tracks(frame, self.current_tracks, track_histories)
         
+        # Add FPS overlay to top right
+        self._draw_fps_overlay(frame)
+        
         return frame
+    
+    def _update_fps(self, frame_time_ms: float) -> None:
+        """Update FPS calculation with latest frame processing time.
+        
+        Args:
+            frame_time_ms: Processing time for the current frame in milliseconds
+        """
+        # Add current frame time
+        self.frame_times.append(frame_time_ms)
+        
+        # Keep only recent samples for rolling average
+        if len(self.frame_times) > self.max_frame_samples:
+            self.frame_times.pop(0)
+        
+        # Calculate average frame time and convert to FPS
+        if len(self.frame_times) > 0:
+            avg_frame_time_ms = sum(self.frame_times) / len(self.frame_times)
+            if avg_frame_time_ms > 0:
+                self.current_fps = 1000.0 / avg_frame_time_ms
+            else:
+                self.current_fps = 0.0
+    
+    def _draw_fps_overlay(self, frame) -> None:
+        """Draw FPS overlay on the top right of the frame.
+        
+        Args:
+            frame: OpenCV frame to draw on (modified in place)
+        """
+        if self.current_fps <= 0:
+            return
+            
+        # Format FPS text
+        fps_text = f"Processing: {self.current_fps:.1f} FPS"
+        
+        # Get frame dimensions
+        height, width = frame.shape[:2]
+        
+        # Set text properties
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.7
+        color = (0, 255, 0)  # Green color
+        thickness = 2
+        
+        # Get text size for positioning
+        (text_width, text_height), baseline = cv2.getTextSize(fps_text, font, font_scale, thickness)
+        
+        # Position in top right with some padding, moved down slightly
+        x = width - text_width - 15
+        y = text_height + 45  # Increased from 15 to 45 to lower the position
+        
+        # Draw background rectangle for better visibility
+        cv2.rectangle(frame, 
+                     (x - 5, y - text_height - 5), 
+                     (x + text_width + 5, y + baseline + 5), 
+                     (0, 0, 0), -1)  # Black background
+        
+        # Draw the FPS text
+        cv2.putText(frame, fps_text, (x, y), font, font_scale, color, thickness)
     
     def _toggle_play_pause(self):
         """Toggle video playback."""
