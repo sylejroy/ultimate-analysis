@@ -45,6 +45,10 @@ models:
     nms_overlap: 1           # Non-maximum suppression overlap threshold
     max_cosine_distance: 0.2 # Feature similarity threshold
     nn_budget: 100           # Feature budget per class
+    
+    # Histogram tracking specific settings
+    histogram_match_threshold: 0.3  # Minimum similarity for track matching
+    histogram_bins: 32              # Number of histogram bins per channel
   
   player_id:
     ocr_enabled: true

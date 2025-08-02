@@ -4,6 +4,7 @@ This module handles tracking of detected objects across video frames.
 Maintains consistent identities for players and discs throughout the game.
 """
 
+import cv2
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 from collections import defaultdict
@@ -28,6 +29,10 @@ _deepsort_tracker = None
 _histogram_tracker = None
 _track_histories = defaultdict(list)
 _frame_count = 0
+
+# Histogram tracker state
+_active_tracks = {}  # track_id -> track info
+_next_track_id = 1
 
 
 class Track:
@@ -350,7 +355,7 @@ def _run_deepsort_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) 
 
 
 def _run_histogram_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) -> List[Track]:
-    """Run histogram-based tracking on detections.
+    """Run histogram-based tracking on detections using color histograms and IoU matching.
     
     Args:
         frame: Input video frame
@@ -359,9 +364,303 @@ def _run_histogram_tracking(frame: np.ndarray, detections: List[Dict[str, Any]])
     Returns:
         List of Track objects with consistent IDs
     """
-    # TODO: Implement histogram-based tracking
-    print("[TRACKING] Histogram tracking not yet implemented, using simple tracking")
-    return _run_simple_tracking(detections)
+    global _active_tracks, _next_track_id
+    
+    if not detections:
+        # Age all tracks and remove old ones
+        _age_and_clean_tracks()
+        return []
+    
+    print(f"[TRACKING] Histogram tracking: processing {len(detections)} detections")
+    
+    # Extract features for current detections
+    current_features = []
+    for det in detections:
+        try:
+            bbox = det['bbox']
+            x1, y1, x2, y2 = map(int, bbox)
+            
+            # Clamp coordinates to frame bounds
+            x1 = max(0, min(x1, frame.shape[1] - 1))
+            y1 = max(0, min(y1, frame.shape[0] - 1))
+            x2 = max(x1 + 1, min(x2, frame.shape[1]))
+            y2 = max(y1 + 1, min(y2, frame.shape[0]))
+            
+            # Extract region and compute histogram
+            region = frame[y1:y2, x1:x2]
+            if region.size > 0:
+                hist = _compute_color_histogram(region)
+                feature = {
+                    'bbox': [x1, y1, x2, y2],
+                    'histogram': hist,
+                    'center': [(x1 + x2) / 2, (y1 + y2) / 2],
+                    'area': (x2 - x1) * (y2 - y1),
+                    'class_id': det['class_id'],
+                    'confidence': det['confidence'],
+                    'class_name': det.get('class_name', 'unknown')
+                }
+                current_features.append(feature)
+        except Exception as e:
+            print(f"[TRACKING] Error extracting features for detection: {e}")
+            continue
+    
+    if not current_features:
+        _age_and_clean_tracks()
+        return []
+    
+    # Match current detections with existing tracks
+    matched_tracks, unmatched_detections = _match_detections_to_tracks(current_features)
+    
+    # Update matched tracks
+    tracks = []
+    for track_id, detection_idx in matched_tracks:
+        detection_feature = current_features[detection_idx]
+        
+        # Update track information
+        _active_tracks[track_id]['bbox'] = detection_feature['bbox']
+        _active_tracks[track_id]['histogram'] = detection_feature['histogram']
+        _active_tracks[track_id]['center'] = detection_feature['center']
+        _active_tracks[track_id]['area'] = detection_feature['area']
+        _active_tracks[track_id]['age'] = 0  # Reset age
+        _active_tracks[track_id]['confidence'] = detection_feature['confidence']
+        _active_tracks[track_id]['class_id'] = detection_feature['class_id']
+        _active_tracks[track_id]['class_name'] = detection_feature['class_name']
+        
+        # Create Track object
+        track = Track(
+            track_id=track_id,
+            bbox=detection_feature['bbox'],
+            class_id=detection_feature['class_id'],
+            confidence=detection_feature['confidence'],
+            class_name=detection_feature['class_name']
+        )
+        tracks.append(track)
+        
+        # Update track history
+        _update_track_history(track_id, (int(detection_feature['center'][0]), int(detection_feature['center'][1])))
+    
+    # Create new tracks for unmatched detections
+    for detection_idx in unmatched_detections:
+        detection_feature = current_features[detection_idx]
+        
+        # Create new track
+        track_id = _next_track_id
+        _next_track_id += 1
+        
+        _active_tracks[track_id] = {
+            'bbox': detection_feature['bbox'],
+            'histogram': detection_feature['histogram'],
+            'center': detection_feature['center'],
+            'area': detection_feature['area'],
+            'age': 0,
+            'confidence': detection_feature['confidence'],
+            'class_id': detection_feature['class_id'],
+            'class_name': detection_feature['class_name'],
+            'created_frame': _frame_count
+        }
+        
+        # Create Track object
+        track = Track(
+            track_id=track_id,
+            bbox=detection_feature['bbox'],
+            class_id=detection_feature['class_id'],
+            confidence=detection_feature['confidence'],
+            class_name=detection_feature['class_name']
+        )
+        tracks.append(track)
+        
+        # Update track history
+        _update_track_history(track_id, (int(detection_feature['center'][0]), int(detection_feature['center'][1])))
+    
+    # Age and clean up tracks
+    _age_and_clean_tracks()
+    
+    print(f"[TRACKING] Histogram tracking: {len(tracks)} tracks (updated: {len(matched_tracks)}, new: {len(unmatched_detections)})")
+    return tracks
+
+
+def _compute_color_histogram(region: np.ndarray, bins: int = None) -> np.ndarray:
+    """Compute color histogram for a region.
+    
+    Args:
+        region: Image region as numpy array
+        bins: Number of histogram bins per channel (uses config default if None)
+        
+    Returns:
+        Normalized histogram as numpy array
+    """
+    if bins is None:
+        bins = get_setting("models.tracking.histogram_bins", 32)
+    
+    if region.size == 0:
+        return np.zeros(bins * 3)
+    
+    try:
+        # Convert BGR to HSV for better color representation
+        hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+        
+        # Compute histogram for each channel
+        hist_h = cv2.calcHist([hsv], [0], None, [bins], [0, 180])
+        hist_s = cv2.calcHist([hsv], [1], None, [bins], [0, 256])
+        hist_v = cv2.calcHist([hsv], [2], None, [bins], [0, 256])
+        
+        # Concatenate and normalize
+        hist = np.concatenate([hist_h.flatten(), hist_s.flatten(), hist_v.flatten()])
+        hist = hist / (np.sum(hist) + 1e-7)  # Normalize with small epsilon
+        
+        return hist
+        
+    except Exception as e:
+        print(f"[TRACKING] Error computing histogram: {e}")
+        return np.zeros(bins * 3)
+
+
+def _match_detections_to_tracks(current_features: List[Dict]) -> Tuple[List[Tuple[int, int]], List[int]]:
+    """Match current detections to existing tracks using IoU and histogram similarity.
+    
+    Args:
+        current_features: List of detection features
+        
+    Returns:
+        Tuple of (matched_pairs, unmatched_detection_indices)
+        matched_pairs: List of (track_id, detection_idx) pairs
+    """
+    if not _active_tracks:
+        return [], list(range(len(current_features)))
+    
+    # Compute similarity matrix
+    track_ids = list(_active_tracks.keys())
+    similarity_matrix = np.zeros((len(track_ids), len(current_features)))
+    
+    for i, track_id in enumerate(track_ids):
+        track_info = _active_tracks[track_id]
+        
+        for j, detection in enumerate(current_features):
+            # IoU similarity
+            iou = _compute_iou(track_info['bbox'], detection['bbox'])
+            
+            # Histogram similarity (only if IoU > 0)
+            hist_sim = 0.0
+            if iou > 0.1:  # Only compute histogram if objects overlap
+                hist_sim = _compute_histogram_similarity(track_info['histogram'], detection['histogram'])
+            
+            # Combined similarity (weighted)
+            similarity = 0.7 * iou + 0.3 * hist_sim
+            similarity_matrix[i, j] = similarity
+    
+    # Hungarian algorithm would be ideal, but let's use greedy matching for simplicity
+    matched_pairs = []
+    unmatched_detections = list(range(len(current_features)))
+    matched_tracks = set()
+    
+    # Greedy matching: find best matches above threshold
+    threshold = get_setting("models.tracking.histogram_match_threshold", 0.3)
+    
+    while True:
+        # Find best unmatched pair
+        best_similarity = 0
+        best_track_idx = -1
+        best_det_idx = -1
+        
+        for i, track_id in enumerate(track_ids):
+            if track_id in matched_tracks:
+                continue
+                
+            for j in unmatched_detections:
+                if similarity_matrix[i, j] > best_similarity and similarity_matrix[i, j] > threshold:
+                    best_similarity = similarity_matrix[i, j]
+                    best_track_idx = i
+                    best_det_idx = j
+        
+        if best_track_idx == -1:  # No more matches above threshold
+            break
+            
+        # Match found
+        track_id = track_ids[best_track_idx]
+        matched_pairs.append((track_id, best_det_idx))
+        matched_tracks.add(track_id)
+        unmatched_detections.remove(best_det_idx)
+    
+    return matched_pairs, unmatched_detections
+
+
+def _compute_iou(bbox1: List[float], bbox2: List[float]) -> float:
+    """Compute Intersection over Union (IoU) between two bounding boxes.
+    
+    Args:
+        bbox1: First bounding box [x1, y1, x2, y2]
+        bbox2: Second bounding box [x1, y1, x2, y2]
+        
+    Returns:
+        IoU value between 0 and 1
+    """
+    x1_1, y1_1, x2_1, y2_1 = bbox1
+    x1_2, y1_2, x2_2, y2_2 = bbox2
+    
+    # Intersection coordinates
+    x1_i = max(x1_1, x1_2)
+    y1_i = max(y1_1, y1_2)
+    x2_i = min(x2_1, x2_2)
+    y2_i = min(y2_1, y2_2)
+    
+    # Check if there's an intersection
+    if x2_i <= x1_i or y2_i <= y1_i:
+        return 0.0
+    
+    # Intersection area
+    intersection = (x2_i - x1_i) * (y2_i - y1_i)
+    
+    # Union area
+    area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
+    area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
+    union = area1 + area2 - intersection
+    
+    return intersection / union if union > 0 else 0.0
+
+
+def _compute_histogram_similarity(hist1: np.ndarray, hist2: np.ndarray) -> float:
+    """Compute similarity between two histograms using correlation.
+    
+    Args:
+        hist1: First histogram
+        hist2: Second histogram
+        
+    Returns:
+        Similarity value between 0 and 1
+    """
+    if hist1.size == 0 or hist2.size == 0:
+        return 0.0
+    
+    try:
+        # Use correlation coefficient
+        correlation = cv2.compareHist(hist1.astype(np.float32), hist2.astype(np.float32), cv2.HISTCMP_CORREL)
+        return max(0.0, correlation)  # Clamp to [0, 1]
+    except Exception as e:
+        print(f"[TRACKING] Error computing histogram similarity: {e}")
+        return 0.0
+
+
+def _age_and_clean_tracks() -> None:
+    """Age all tracks and remove old ones."""
+    global _active_tracks
+    
+    max_age = get_setting("models.tracking.max_age", 10)
+    tracks_to_remove = []
+    
+    for track_id, track_info in _active_tracks.items():
+        track_info['age'] += 1
+        if track_info['age'] > max_age:
+            tracks_to_remove.append(track_id)
+    
+    # Remove old tracks
+    for track_id in tracks_to_remove:
+        del _active_tracks[track_id]
+        # Remove from track histories as well
+        if track_id in _track_histories:
+            del _track_histories[track_id]
+    
+    if tracks_to_remove:
+        print(f"[TRACKING] Removed {len(tracks_to_remove)} old tracks")
 
 
 def _run_simple_tracking(detections: List[Dict[str, Any]]) -> List[Track]:
@@ -453,7 +752,7 @@ def reset_tracker() -> None:
     
     This should be called when switching videos or when tracking quality degrades.
     """
-    global _deepsort_tracker, _histogram_tracker, _track_histories, _frame_count
+    global _deepsort_tracker, _histogram_tracker, _track_histories, _frame_count, _active_tracks, _next_track_id
     
     print("[TRACKING] Resetting tracker state")
     
@@ -464,6 +763,10 @@ def reset_tracker() -> None:
     # Reset histogram tracker
     if _histogram_tracker is not None:
         _histogram_tracker = None
+    
+    # Reset histogram tracker state
+    _active_tracks.clear()
+    _next_track_id = 1
     
     # Clear track histories and reset frame count
     _track_histories.clear()
