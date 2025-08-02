@@ -7,6 +7,7 @@ Maintains consistent identities for players and discs throughout the game.
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ..config.settings import get_setting
 from ..constants import MAX_TRACKS_ACTIVE, TRACK_HISTORY_MAX_LENGTH, FALLBACK_DEFAULTS
@@ -121,6 +122,117 @@ def run_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) -> List[Tr
     else:
         print(f"[TRACKING] Unknown tracker type: {_tracker_type}")
         return []
+
+
+def run_batch_tracking(frames: List[np.ndarray], batch_detections: List[List[Dict[str, Any]]], 
+                      use_parallel: bool = True) -> List[List[Track]]:
+    """Run object tracking on a batch of frames with their detections.
+    
+    Args:
+        frames: List of input video frames
+        batch_detections: List of detection lists (one per frame)
+        use_parallel: Whether to use parallel processing for track post-processing
+        
+    Returns:
+        List of Track lists (one per frame)
+        
+    Performance Benefits:
+        - Efficient batch processing of tracks
+        - Parallel post-processing of track data
+        - Maintains temporal consistency across batch
+    """
+    if not frames or not batch_detections or len(frames) != len(batch_detections):
+        return [[] for _ in frames]
+    
+    print(f"[TRACKING] Processing batch of {len(frames)} frames with tracking")
+    
+    batch_tracks = []
+    
+    # For tracking, we need to process frames sequentially to maintain temporal consistency
+    # But we can parallelize the post-processing of track results
+    for i, (frame, detections) in enumerate(zip(frames, batch_detections)):
+        try:
+            # Run tracking on this frame (must be sequential for temporal consistency)
+            tracks = run_tracking(frame, detections)
+            batch_tracks.append(tracks)
+        except Exception as e:
+            print(f"[TRACKING] Error processing frame {i} in batch: {e}")
+            batch_tracks.append([])
+    
+    # Parallel post-processing of tracks if requested and beneficial
+    if use_parallel and len(frames) > 2:
+        # Post-process tracks in parallel (coordinate normalization, metadata, etc.)
+        def enhance_tracks(frame_data):
+            frame_idx, (frame, tracks) = frame_data
+            return frame_idx, _enhance_track_metadata(frame, tracks)
+        
+        # Determine optimal number of workers
+        max_workers = min(len(frames), 4)
+        enhanced_batch_tracks = [[] for _ in frames]
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            print(f"[TRACKING] Using {max_workers} parallel workers for track enhancement")
+            
+            # Submit all tasks
+            indexed_data = [(i, (frame, tracks)) for i, (frame, tracks) in enumerate(zip(frames, batch_tracks))]
+            future_to_index = {
+                executor.submit(enhance_tracks, frame_data): frame_data[0] 
+                for frame_data in indexed_data
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_index):
+                try:
+                    frame_idx, enhanced_tracks = future.result()
+                    enhanced_batch_tracks[frame_idx] = enhanced_tracks
+                except Exception as e:
+                    frame_idx = future_to_index[future]
+                    print(f"[TRACKING] Parallel track enhancement failed for frame {frame_idx}: {e}")
+                    enhanced_batch_tracks[frame_idx] = batch_tracks[frame_idx]  # Use original tracks
+        
+        batch_tracks = enhanced_batch_tracks
+    
+    print(f"[TRACKING] Batch tracking complete: {[len(tracks) for tracks in batch_tracks]} tracks per frame")
+    return batch_tracks
+
+
+def _enhance_track_metadata(frame: np.ndarray, tracks: List[Track]) -> List[Track]:
+    """Enhance track objects with additional metadata for better performance.
+    
+    Args:
+        frame: Video frame for context
+        tracks: List of track objects
+        
+    Returns:
+        Enhanced list of track objects
+    """
+    try:
+        enhanced_tracks = []
+        frame_height, frame_width = frame.shape[:2]
+        
+        for track in tracks:
+            # Add normalized coordinates for faster processing
+            x1, y1, x2, y2 = track.bbox
+            track.normalized_bbox = [
+                x1 / frame_width,
+                y1 / frame_height,
+                x2 / frame_width,
+                y2 / frame_height
+            ]
+            
+            # Add center point for quick access
+            track.center = [(x1 + x2) / 2, (y1 + y2) / 2]
+            
+            # Add track area for filtering
+            track.area = (x2 - x1) * (y2 - y1)
+            
+            enhanced_tracks.append(track)
+        
+        return enhanced_tracks
+        
+    except Exception as e:
+        print(f"[TRACKING] Error enhancing track metadata: {e}")
+        return tracks  # Return original tracks on error
 
 
 def _run_deepsort_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) -> List[Track]:
