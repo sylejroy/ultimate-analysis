@@ -272,14 +272,25 @@ def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List],
         # Run EasyOCR with user settings (same as tuning tab)
         ocr_results = _easyocr_reader.readtext(final_processed_crop, **readtext_params)
         
+        # Filter out low confidence detections (below 0.5)
+        min_confidence = 0.5
+        filtered_ocr_results = []
+        for bbox, text, confidence in ocr_results:
+            if confidence >= min_confidence:
+                filtered_ocr_results.append((bbox, text, confidence))
+            else:
+                print(f"[PLAYER_ID] Filtered out low confidence detection: '{text}' ({confidence:.3f} < {min_confidence})")
+        
+        print(f"[PLAYER_ID] OCR results: {len(ocr_results)} total, {len(filtered_ocr_results)} after confidence filter")
+        
         # End OCR timer
         timing_info['ocr_ms'] = (time.time() - ocr_start_time) * 1000
         
-        # Process results - find best numeric text (same as tuning tab)
+        # Process filtered results - find best numeric text (same as tuning tab)
         best_text = ""
         best_confidence = 0.0
         
-        for bbox, text, confidence in ocr_results:
+        for bbox, text, confidence in filtered_ocr_results:
             # Clean text and check if it's a valid jersey number
             clean_text = ''.join(filter(str.isdigit, text))
             if clean_text and confidence > best_confidence:
@@ -291,7 +302,7 @@ def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List],
             jersey_number = best_text
             result_details = {
                 'confidence': best_confidence,
-                'ocr_results': ocr_results,
+                'ocr_results': filtered_ocr_results,  # Use filtered results
                 'best_text': best_text,
                 'original_width': original_width,
                 'original_height': original_height,
@@ -305,7 +316,7 @@ def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List],
             jersey_number = "Unknown"
             result_details = {
                 'confidence': 0.0,
-                'ocr_results': ocr_results,
+                'ocr_results': filtered_ocr_results,  # Use filtered results
                 'best_text': None,
                 'original_width': original_width,
                 'original_height': original_height,
