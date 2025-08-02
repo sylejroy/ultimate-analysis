@@ -636,7 +636,7 @@ class ModelTuningTab(QWidget):
         
         self.model_combo = QComboBox()
         self.model_combo.currentTextChanged.connect(self._on_model_changed)
-        self.model_combo.setToolTip("Select the base YOLO model to start training from.\n\n• Model sizes: n (nano), s (small), m (medium), l (large), x (extra-large)\n• Examples: yolo11n.pt (fast, 2.6M params), yolo11l.pt (accurate, 25.3M params)\n• Pretrained models: learned features from COCO dataset (80 classes)\n• Trade-offs: Larger models = better accuracy but slower training/inference\n• Custom models: .pt files from previous training runs")
+        self.model_combo.setToolTip("Select the base YOLO model to start training from.\n\n• Model sizes: n (nano), s (small), m (medium), l (large), x (extra-large)\n• Examples: yolo11n.pt (fast, 2.6M params), yolo11s.pt (6.5M params), yolo11l.pt (accurate, 25.3M params)\n• Pretrained models: learned features from COCO dataset (80 classes)\n• Auto-download: Missing YOLO11 models will be downloaded automatically\n• Trade-offs: Larger models = better accuracy but slower training/inference\n• Custom models: .pt files from previous training runs")
         model_layout.addRow("Base Model:", self.model_combo)
         
         # Model info display
@@ -972,11 +972,27 @@ class ModelTuningTab(QWidget):
         available_models = []
         
         if self.current_task == "detection":
+            # Add common YOLO11 models (Ultralytics will auto-download if missing)
+            common_detection_models = [
+                "yolo11n.pt",
+                "yolo11s.pt", 
+                "yolo11m.pt",
+                "yolo11l.pt",
+                "yolo11x.pt",
+                "yolov8l.pt"  # Legacy support
+            ]
+            
             # Add pretrained detection models (non-seg)
             if pretrained_path.exists():
                 for model_file in pretrained_path.glob("*.pt"):
                     if "-seg" not in model_file.name and "-pose" not in model_file.name:
                         available_models.append(str(model_file))
+                        
+            # Add common models that aren't already in the list
+            for model_name in common_detection_models:
+                model_path = pretrained_path / model_name
+                if str(model_path) not in available_models:
+                    available_models.append(str(model_path))
             
             # Add existing detection models for further tuning (including finetune directories)
             detection_path = models_path / "detection"
@@ -996,10 +1012,25 @@ class ModelTuningTab(QWidget):
                                     available_models.append(str(finetune_weights))
                             
         else:  # segmentation
+            # Add common YOLO11 segmentation models (Ultralytics will auto-download if missing)
+            common_seg_models = [
+                "yolo11n-seg.pt",
+                "yolo11s-seg.pt",
+                "yolo11m-seg.pt", 
+                "yolo11l-seg.pt",
+                "yolo11x-seg.pt"
+            ]
+            
             # Add pretrained segmentation models
             if pretrained_path.exists():
                 for model_file in pretrained_path.glob("*-seg.pt"):
                     available_models.append(str(model_file))
+                    
+            # Add common seg models that aren't already in the list
+            for model_name in common_seg_models:
+                model_path = pretrained_path / model_name
+                if str(model_path) not in available_models:
+                    available_models.append(str(model_path))
             
             # Add existing segmentation models for further tuning (including finetune directories)
             seg_path = models_path / "segmentation"
