@@ -84,6 +84,12 @@ def run_player_id_on_tracks(frame: np.ndarray, tracks: List[Any]) -> Tuple[Dict[
             else:
                 continue
 
+            # Skip disc tracks - only process players for jersey number detection
+            if hasattr(track, 'class_id') and track.class_id == 0:  # 0 = disc
+                continue
+            elif hasattr(track, 'class_name') and track.class_name.lower() == 'disc':
+                continue
+
             # Ensure bbox is within frame bounds
             h, w = frame.shape[:2]
             x1 = max(0, min(x1, w-1))

@@ -336,3 +336,14 @@ def get_best_jersey_number(track_id: int) -> Tuple[Optional[str], float]:
     """
     tracker = get_jersey_tracker()
     return tracker.get_best_jersey_number(track_id)
+
+
+def reset_jersey_tracker() -> None:
+    """Reset the jersey tracker state and clear all tracking history.
+    
+    This should be called when the main tracker is reset or when switching videos.
+    """
+    global _jersey_tracker
+    print("[JERSEY_TRACKER] Resetting jersey tracking state")
+    _jersey_tracker = None  # This will force recreation on next access
+    print("[JERSEY_TRACKER] Jersey tracking state reset complete")

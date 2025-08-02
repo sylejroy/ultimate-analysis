@@ -152,7 +152,7 @@ def draw_tracks_with_player_ids(frame: np.ndarray, tracks: List[Any],
             -1
         )
         
-        # Draw jersey number text using smaller, non-bold font
+        # Draw jersey number text using smaller, slightly bold font
         cv2.putText(
             vis_frame,
             jersey_label,
@@ -160,7 +160,7 @@ def draw_tracks_with_player_ids(frame: np.ndarray, tracks: List[Any],
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
             (255, 255, 255),
-            1
+            2
         )
         
         # Draw detection regions if OCR results are available for known players
