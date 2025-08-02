@@ -51,6 +51,17 @@ models:
     ocr_languages: ["en"]
     ocr_confidence_threshold: 0.7
     cache_player_ids: true
+    
+    # Jersey number tracking settings
+    tracking:
+      max_history_length: 30              # Maximum measurements to keep per track
+      confidence_decay_factor: 0.95       # Decay factor for old measurements per frame
+      spatial_weight_center_bonus: 0.3    # Bonus weight for center-positioned digits
+      min_confidence_threshold: 0.1       # Minimum probability to keep in memory
+      center_region_width: 0.4            # Width of "center" region (fraction of bbox)
+      measurement_weight_recent: 1.0      # Weight for recent measurements
+      measurement_weight_old: 0.5         # Weight for old measurements
+      probability_smoothing: 0.1          # Smoothing factor for probability updates
 
 # GUI Settings
 gui:

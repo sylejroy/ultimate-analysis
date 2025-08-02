@@ -126,135 +126,135 @@ def draw_tracks_with_player_ids(frame: np.ndarray, tracks: List[Any],
         cv2.rectangle(vis_frame, (x1, y1), (x2, y2), color, 1)
         
         # Handle player ID display
+        jersey_number = "Unknown"
+        details = None
+        
         if player_ids and track_id in player_ids:
             jersey_number, details = player_ids[track_id]
-            
-            if jersey_number != "Unknown":
-                # Get confidence if available
-                confidence = 0.0
-                if isinstance(details, dict) and 'confidence' in details:
-                    confidence = details['confidence']
+        
+        # Always show track ID and jersey number when using player ID mode
+        if jersey_number != "Unknown":
+            # Create simple jersey number label without confidence
+            jersey_label = f"#{jersey_number}"
+        else:
+            # Show compact "?" for unknown tracks
+            jersey_label = f"{track_id}:?"
+        
+        # Calculate label size and position using smaller font
+        label_size = cv2.getTextSize(jersey_label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
+        
+        # Draw label background
+        cv2.rectangle(
+            vis_frame,
+            (x1, y1 - label_size[1] - 10),
+            (x1 + label_size[0] + 10, y1),
+            color,
+            -1
+        )
+        
+        # Draw jersey number text using smaller, slightly bold font
+        cv2.putText(
+            vis_frame,
+            jersey_label,
+            (x1 + 5, y1 - 5),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (255, 255, 255),
+            2
+        )
+        
+        # Draw detection regions if OCR results are available for known players
+        if jersey_number != "Unknown" and isinstance(details, dict) and 'ocr_results' in details:
+            ocr_results = details['ocr_results']
+            if ocr_results:
+                # Get transformation information
+                original_width = details.get('original_width', x2 - x1)
+                original_height = details.get('original_height', y2 - y1)
+                crop_width = details.get('crop_width', original_width)
+                crop_height = details.get('crop_height', original_height)
+                final_width = details.get('final_width', crop_width)
+                final_height = details.get('final_height', crop_height)
+                crop_fraction = details.get('crop_fraction', 0.33)
                 
-                # Create jersey number label with confidence
-                jersey_label = f"#{jersey_number} ({confidence:.2f})"
+                # Calculate the actual dimensions of the jersey area in the track
+                track_width = x2 - x1
+                track_height = y2 - y1
+                jersey_area_height = int(track_height * crop_fraction)
                 
-                # Calculate label size and position
-                label_size = cv2.getTextSize(jersey_label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-                
-                # Draw label background
-                cv2.rectangle(
-                    vis_frame,
-                    (x1, y1 - label_size[1] - 10),
-                    (x1 + label_size[0] + 10, y1),
-                    color,
-                    -1
-                )
-                
-                # Draw jersey number and confidence text
-                cv2.putText(
-                    vis_frame,
-                    jersey_label,
-                    (x1 + 5, y1 - 5),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (255, 255, 255),
-                    2
-                )
-                
-                # Draw detection regions if OCR results are available
-                if isinstance(details, dict) and 'ocr_results' in details:
-                    ocr_results = details['ocr_results']
-                    if ocr_results:
-                        # Get transformation information
-                        original_width = details.get('original_width', x2 - x1)
-                        original_height = details.get('original_height', y2 - y1)
-                        crop_width = details.get('crop_width', original_width)
-                        crop_height = details.get('crop_height', original_height)
-                        final_width = details.get('final_width', crop_width)
-                        final_height = details.get('final_height', crop_height)
-                        crop_fraction = details.get('crop_fraction', 0.33)
+                # Draw bounding boxes for each OCR detection
+                for bbox_ocr, text, conf in ocr_results:
+                    if isinstance(bbox_ocr, list) and len(bbox_ocr) == 4:
+                        # EasyOCR bbox format: [[x1,y1], [x2,y1], [x2,y2], [x1,y2]]
+                        ocr_points = np.array(bbox_ocr, dtype=np.float32)
+                        ocr_x1 = int(np.min(ocr_points[:, 0]))
+                        ocr_y1 = int(np.min(ocr_points[:, 1]))
+                        ocr_x2 = int(np.max(ocr_points[:, 0]))
+                        ocr_y2 = int(np.max(ocr_points[:, 1]))
                         
-                        # Calculate the actual dimensions of the jersey area in the track
-                        track_width = x2 - x1
-                        track_height = y2 - y1
-                        jersey_area_height = int(track_height * crop_fraction)
+                        # Correct coordinate transformation accounting for all processing steps:
+                        # 1. Original track -> Cropped jersey area (crop_fraction)
+                        # 2. Cropped area -> Resized for processing (128x64)
+                        # 3. OCR results are in the final processed image coordinates
                         
-                        # Draw bounding boxes for each OCR detection
-                        for bbox_ocr, text, conf in ocr_results:
-                            if isinstance(bbox_ocr, list) and len(bbox_ocr) == 4:
-                                # EasyOCR bbox format: [[x1,y1], [x2,y1], [x2,y2], [x1,y2]]
-                                ocr_points = np.array(bbox_ocr, dtype=np.float32)
-                                ocr_x1 = int(np.min(ocr_points[:, 0]))
-                                ocr_y1 = int(np.min(ocr_points[:, 1]))
-                                ocr_x2 = int(np.max(ocr_points[:, 0]))
-                                ocr_y2 = int(np.max(ocr_points[:, 1]))
-                                
-                                # Correct coordinate transformation accounting for all processing steps:
-                                # 1. Original track -> Cropped jersey area (crop_fraction)
-                                # 2. Cropped area -> Resized for processing (128x64)
-                                # 3. OCR results are in the final processed image coordinates
-                                
-                                if final_width > 0 and final_height > 0 and crop_width > 0 and crop_height > 0:
-                                    # Step 1: Scale from final processed coordinates back to cropped coordinates
-                                    # The final processed image maintains aspect ratio, so we need to account for padding
-                                    crop_to_final_scale_x = crop_width / final_width
-                                    crop_to_final_scale_y = crop_height / final_height
-                                    
-                                    # Scale OCR coordinates back to cropped image space
-                                    crop_x1 = ocr_x1 * crop_to_final_scale_x
-                                    crop_y1 = ocr_y1 * crop_to_final_scale_y
-                                    crop_x2 = ocr_x2 * crop_to_final_scale_x
-                                    crop_y2 = ocr_y2 * crop_to_final_scale_y
-                                    
-                                    # Step 2: Scale from cropped coordinates to jersey area coordinates
-                                    # The cropped area is the top crop_fraction of the track
-                                    jersey_scale_x = track_width / crop_width
-                                    jersey_scale_y = jersey_area_height / crop_height
-                                    
-                                    # Scale and position within the jersey area of the track
-                                    final_x1 = x1 + int(crop_x1 * jersey_scale_x)
-                                    final_y1 = y1 + int(crop_y1 * jersey_scale_y)
-                                    final_x2 = x1 + int(crop_x2 * jersey_scale_x)
-                                    final_y2 = y1 + int(crop_y2 * jersey_scale_y)
-                                    
-                                    # Ensure minimum box size
-                                    if final_x2 - final_x1 < 3:
-                                        final_x2 = final_x1 + 3
-                                    if final_y2 - final_y1 < 3:
-                                        final_y2 = final_y1 + 3
-                                    
-                                    # Clamp to jersey area bounds
-                                    final_x1 = max(x1, min(final_x1, x2 - 3))
-                                    final_y1 = max(y1, min(final_y1, y1 + jersey_area_height - 3))
-                                    final_x2 = max(final_x1 + 3, min(final_x2, x2))
-                                    final_y2 = max(final_y1 + 3, min(final_y2, y1 + jersey_area_height))
-                                    
-                                    # Color based on confidence: Red (low) -> Orange -> Green (high)
-                                    if conf >= 0.7:
-                                        bbox_color = (0, 255, 0)  # Green for high confidence
-                                    elif conf >= 0.4:
-                                        bbox_color = (0, 165, 255)  # Orange for medium confidence
-                                    else:
-                                        bbox_color = (0, 0, 255)  # Red for low confidence
-                                    
-                                    # Draw the OCR bounding box
-                                    cv2.rectangle(vis_frame, (final_x1, final_y1), (final_x2, final_y2), bbox_color, 2)
-                                    
-                                    # Draw detected text and confidence
-                                    if text and text.strip():
-                                        text_label = f"'{text}' ({conf:.2f})"
-                                        # Draw text above the box
-                                        cv2.putText(
-                                            vis_frame,
-                                            text_label,
-                                            (final_x1, final_y1 - 5),
-                                            cv2.FONT_HERSHEY_SIMPLEX,
-                                            0.4,
-                                            bbox_color,
-                                            1
-                                        )
-                        
-                        # Jersey area outline removed - no longer drawing grey crop boxes
+                        if final_width > 0 and final_height > 0 and crop_width > 0 and crop_height > 0:
+                            # Step 1: Scale from final processed coordinates back to cropped coordinates
+                            # The final processed image maintains aspect ratio, so we need to account for padding
+                            crop_to_final_scale_x = crop_width / final_width
+                            crop_to_final_scale_y = crop_height / final_height
+                            
+                            # Scale OCR coordinates back to cropped image space
+                            crop_x1 = ocr_x1 * crop_to_final_scale_x
+                            crop_y1 = ocr_y1 * crop_to_final_scale_y
+                            crop_x2 = ocr_x2 * crop_to_final_scale_x
+                            crop_y2 = ocr_y2 * crop_to_final_scale_y
+                            
+                            # Step 2: Scale from cropped coordinates to jersey area coordinates
+                            # The cropped area is the top crop_fraction of the track
+                            jersey_scale_x = track_width / crop_width
+                            jersey_scale_y = jersey_area_height / crop_height
+                            
+                            # Scale and position within the jersey area of the track
+                            final_x1 = x1 + int(crop_x1 * jersey_scale_x)
+                            final_y1 = y1 + int(crop_y1 * jersey_scale_y)
+                            final_x2 = x1 + int(crop_x2 * jersey_scale_x)
+                            final_y2 = y1 + int(crop_y2 * jersey_scale_y)
+                            
+                            # Ensure minimum box size
+                            if final_x2 - final_x1 < 3:
+                                final_x2 = final_x1 + 3
+                            if final_y2 - final_y1 < 3:
+                                final_y2 = final_y1 + 3
+                            
+                            # Clamp to jersey area bounds
+                            final_x1 = max(x1, min(final_x1, x2 - 3))
+                            final_y1 = max(y1, min(final_y1, y1 + jersey_area_height - 3))
+                            final_x2 = max(final_x1 + 3, min(final_x2, x2))
+                            final_y2 = max(final_y1 + 3, min(final_y2, y1 + jersey_area_height))
+                            
+                            # Color based on confidence: Red (low) -> Orange -> Green (high)
+                            if conf >= 0.7:
+                                bbox_color = (0, 255, 0)  # Green for high confidence
+                            elif conf >= 0.4:
+                                bbox_color = (0, 165, 255)  # Orange for medium confidence
+                            else:
+                                bbox_color = (0, 0, 255)  # Red for low confidence
+                            
+                            # Draw the OCR bounding box
+                            cv2.rectangle(vis_frame, (final_x1, final_y1), (final_x2, final_y2), bbox_color, 2)
+                            
+                            # Draw detected text and confidence
+                            if text and text.strip():
+                                text_label = f"'{text}' ({conf:.2f})"
+                                # Draw text above the box
+                                cv2.putText(
+                                    vis_frame,
+                                    text_label,
+                                    (final_x1, final_y1 - 5),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.4,
+                                    bbox_color,
+                                    1
+                                )
         
         # Draw trajectory history if available
         if track_histories and track_id in track_histories:
@@ -389,7 +389,7 @@ def draw_tracks(frame: np.ndarray, tracks: List[Any], track_histories: Optional[
 
 
 def draw_player_ids(frame: np.ndarray, tracks: List[Any], player_id_results: Dict[int, Tuple[str, Any]]) -> np.ndarray:
-    """Draw player ID information on tracked players.
+    """Draw player ID information on tracked players with both single-frame and historical results.
     
     Args:
         frame: Input frame to draw on
@@ -425,32 +425,120 @@ def draw_player_ids(frame: np.ndarray, tracks: List[Any], player_id_results: Dic
         jersey_number, details = player_id_results[track_id]
         
         if jersey_number and jersey_number != "Unknown":
-            # Draw jersey number
-            color = VISUALIZATION_COLORS['PLAYER_ID_BOX']
+            # Extract tracking details if available
+            single_frame_result = None
+            tracking_history = []
+            best_tracked = None
             
-            # Draw background for jersey number
-            label = f"#{jersey_number}"
-            label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)[0]
+            if details and isinstance(details, dict):
+                single_frame_result = details.get('single_frame')
+                tracking_history = details.get('tracking_history', [])
+                best_tracked = details.get('best_tracked')
+            
+            # Main jersey number display (using primary result)
+            main_color = VISUALIZATION_COLORS['PLAYER_ID_BOX']
+            
+            # Distinguish colors for single-frame vs tracked
+            if best_tracked and best_tracked.get('probability', 0) > 0.5:
+                # High confidence tracked result - use green
+                main_color = (0, 200, 0)  # Green for reliable tracked result
+            else:
+                # Single-frame or low confidence - use orange  
+                main_color = (0, 165, 255)  # Orange for single-frame
+            
+            # Draw background for main jersey number
+            main_label = f"#{jersey_number}"
+            main_label_size = cv2.getTextSize(main_label, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)[0]
             
             cv2.rectangle(
                 vis_frame,
                 (x2 + 5, y1),
-                (x2 + 15 + label_size[0], y1 + label_size[1] + 10),
-                color,
+                (x2 + 15 + main_label_size[0], y1 + main_label_size[1] + 10),
+                main_color,
                 -1
             )
             
             cv2.putText(
                 vis_frame,
-                label,
-                (x2 + 10, y1 + label_size[1] + 5),
+                main_label,
+                (x2 + 10, y1 + main_label_size[1] + 5),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 1.0,
-                (0, 0, 0),  # Black text
+                (255, 255, 255),  # White text for better contrast
                 2
             )
             
-            # Draw digit detection boxes if available (for YOLO method)
+            # Draw tracking history (top 3 probabilities) below main label
+            if tracking_history:
+                y_offset = y1 + main_label_size[1] + 20
+                
+                for i, (hist_number, probability, count) in enumerate(tracking_history[:3]):
+                    # Color coding: highest probability in bright green, others in muted colors
+                    if i == 0:  # Highest probability
+                        hist_color = (0, 255, 0) if probability > 0.5 else (0, 200, 200)
+                    elif i == 1:  # Second highest
+                        hist_color = (0, 150, 255)  # Orange
+                    else:  # Third highest
+                        hist_color = (100, 100, 255)  # Light red
+                    
+                    # Create probability label
+                    prob_label = f"#{hist_number}: {probability:.1%}"
+                    if count > 1:
+                        prob_label += f" ({count})"
+                    
+                    prob_label_size = cv2.getTextSize(prob_label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
+                    
+                    # Draw probability background
+                    cv2.rectangle(
+                        vis_frame,
+                        (x2 + 5, y_offset),
+                        (x2 + 10 + prob_label_size[0], y_offset + prob_label_size[1] + 6),
+                        hist_color,
+                        -1
+                    )
+                    
+                    # Draw probability text
+                    cv2.putText(
+                        vis_frame,
+                        prob_label,
+                        (x2 + 7, y_offset + prob_label_size[1] + 3),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (255, 255, 255),  # White text
+                        1
+                    )
+                    
+                    y_offset += prob_label_size[1] + 10
+            
+            # Draw single-frame confidence if different from tracked result
+            if single_frame_result and single_frame_result.get('jersey_number') != jersey_number:
+                sf_number = single_frame_result.get('jersey_number', 'Unknown')
+                sf_confidence = single_frame_result.get('confidence', 0.0)
+                
+                if sf_number != "Unknown":
+                    sf_label = f"SF: #{sf_number} ({sf_confidence:.2f})"
+                    sf_label_size = cv2.getTextSize(sf_label, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)[0]
+                    
+                    # Use different position (top left)
+                    cv2.rectangle(
+                        vis_frame,
+                        (x1 - sf_label_size[0] - 10, y1 - sf_label_size[1] - 8),
+                        (x1 - 2, y1 - 2),
+                        (128, 128, 128),  # Gray for single-frame
+                        -1
+                    )
+                    
+                    cv2.putText(
+                        vis_frame,
+                        sf_label,
+                        (x1 - sf_label_size[0] - 7, y1 - 5),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.4,
+                        (255, 255, 255),
+                        1
+                    )
+            
+            # Draw digit detection boxes if available (legacy support)
             if details and isinstance(details, list):
                 for item in details:
                     if isinstance(item, tuple) and len(item) == 2:

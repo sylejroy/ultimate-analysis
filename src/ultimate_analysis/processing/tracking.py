@@ -357,6 +357,13 @@ def reset_tracker() -> None:
     _track_histories.clear()
     _frame_count = 0
     
+    # Reset jersey tracking as well
+    try:
+        from .jersey_tracker import reset_jersey_tracker
+        reset_jersey_tracker()
+    except ImportError:
+        print("[TRACKING] Jersey tracker not available for reset")
+    
     print("[TRACKING] Tracker reset complete")
 
 

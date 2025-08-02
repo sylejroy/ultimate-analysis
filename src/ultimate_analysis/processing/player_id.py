@@ -2,6 +2,7 @@
 
 This module handles identifying players by their jersey numbers using either
 EasyOCR for text recognition or YOLO models trained on digit detection.
+Includes probabilistic tracking for reliable jersey number identification.
 """
 
 import cv2
@@ -20,6 +21,7 @@ except ImportError:
 
 from ..config.settings import get_setting
 from ..constants import JERSEY_NUMBER_MIN, JERSEY_NUMBER_MAX, SUPPORTED_OCR_LANGUAGES, DEFAULT_PATHS
+from .jersey_tracker import add_jersey_measurement, get_jersey_probabilities, get_best_jersey_number, get_jersey_tracker
 
 
 # Global player ID state - only EasyOCR is supported
@@ -27,7 +29,7 @@ _easyocr_reader = None
 
 
 def run_player_id_on_tracks(frame: np.ndarray, tracks: List[Any]) -> Tuple[Dict[int, Tuple[str, Any]], Dict[str, float]]:
-    """Run player identification on tracked objects using EasyOCR.
+    """Run player identification on tracked objects using EasyOCR with probabilistic tracking.
     
     Args:
         frame: Current video frame
@@ -38,22 +40,29 @@ def run_player_id_on_tracks(frame: np.ndarray, tracks: List[Any]) -> Tuple[Dict[
         player_identifications: Dictionary mapping track_id -> (jersey_number, detection_details)
         timing_info: Dictionary with 'preprocessing_ms' and 'ocr_ms' totals
         
+    Detection details now include both single-frame and historical tracking results:
+        - 'single_frame': Single-frame EasyOCR result
+        - 'tracking_history': Top 3 probabilities from historical tracking
+        - 'best_tracked': Most probable jersey number from tracking
+        
     Example:
         results, timing = run_player_id_on_tracks(frame, current_tracks)
         for track_id, (number, details) in results.items():
             print(f"Track {track_id}: Player #{number}")
-        print(f"Preprocessing: {timing['preprocessing_ms']:.1f}ms, OCR: {timing['ocr_ms']:.1f}ms")
+            if 'tracking_history' in details:
+                for jersey, prob, count in details['tracking_history']:
+                    print(f"  {jersey}: {prob:.1%} ({count} measurements)")
     """
     player_identifications = {}
     total_timing = {'preprocessing_ms': 0.0, 'ocr_ms': 0.0}
-    
+
     if not tracks:
         return player_identifications, total_timing
-    
+
     # Initialize EasyOCR if needed
     if _easyocr_reader is None:
         _initialize_easyocr()
-    
+
     for track in tracks:
         try:
             # Extract track information
@@ -63,7 +72,7 @@ def run_player_id_on_tracks(frame: np.ndarray, tracks: List[Any]) -> Tuple[Dict[
                 track_id = track.id
             else:
                 continue
-            
+
             # Get bounding box
             if hasattr(track, 'to_tlbr'):
                 # DeepSORT format
@@ -74,37 +83,108 @@ def run_player_id_on_tracks(frame: np.ndarray, tracks: List[Any]) -> Tuple[Dict[
                 x1, y1, x2, y2 = map(int, track.bbox)
             else:
                 continue
-            
+
+            # Skip disc tracks - only process players for jersey number detection
+            if hasattr(track, 'class_id') and track.class_id == 0:  # 0 = disc
+                continue
+            elif hasattr(track, 'class_name') and track.class_name.lower() == 'disc':
+                continue
+
             # Ensure bbox is within frame bounds
             h, w = frame.shape[:2]
             x1 = max(0, min(x1, w-1))
             y1 = max(0, min(y1, h-1))
             x2 = max(x1+1, min(x2, w))
             y2 = max(y1+1, min(y2, h))
-            
+
             # Crop the tracked object
             crop = frame[y1:y2, x1:x2]
-            
+
             if crop.size > 0:
                 # Run EasyOCR player ID on the crop
                 jersey_number, details, timing = _run_easyocr_detection(crop)
-                player_identifications[track_id] = (jersey_number, details)
                 
+                # Add single-frame result to tracking history if valid
+                if jersey_number and jersey_number != "Unknown" and details:
+                    # Calculate bbox center position for spatial weighting
+                    crop_width = x2 - x1
+                    
+                    # Try to get OCR detection position, otherwise use bbox center
+                    bbox_center_x = 0.5  # Default to center
+                    if details and 'ocr_results' in details and details['ocr_results']:
+                        # Calculate average x position of detected text
+                        total_x = 0
+                        count = 0
+                        for ocr_result in details['ocr_results']:
+                            if len(ocr_result) >= 2:  # [bbox, text, confidence]
+                                ocr_bbox = ocr_result[0]
+                                if isinstance(ocr_bbox, (list, tuple)) and len(ocr_bbox) >= 4:
+                                    # Calculate center x of OCR detection
+                                    if isinstance(ocr_bbox[0], (list, tuple)):
+                                        # Polygon format: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+                                        xs = [point[0] for point in ocr_bbox]
+                                        center_x = sum(xs) / len(xs)
+                                    else:
+                                        # Box format: [x1, y1, x2, y2]
+                                        center_x = (ocr_bbox[0] + ocr_bbox[2]) / 2
+                                    
+                                    # Normalize to 0-1 within crop
+                                    bbox_center_x = center_x / crop_width
+                                    total_x += bbox_center_x
+                                    count += 1
+                        
+                        if count > 0:
+                            bbox_center_x = total_x / count
+                            # Clamp to [0, 1]
+                            bbox_center_x = max(0.0, min(1.0, bbox_center_x))
+                    
+                    # Add measurement to tracker
+                    confidence = details.get('confidence', 0.0)
+                    ocr_results = details.get('ocr_results', [])
+                    add_jersey_measurement(track_id, jersey_number, confidence, bbox_center_x, ocr_results)
+
+                # Get tracking history and best tracked result
+                tracking_history = get_jersey_probabilities(track_id, top_k=3)
+                best_tracked_number, best_tracked_prob = get_best_jersey_number(track_id)
+
+                # Prepare enhanced details
+                enhanced_details = details.copy() if details else {}
+                enhanced_details.update({
+                    'single_frame': {
+                        'jersey_number': jersey_number,
+                        'confidence': details.get('confidence', 0.0) if details else 0.0
+                    },
+                    'tracking_history': tracking_history,
+                    'best_tracked': {
+                        'jersey_number': best_tracked_number,
+                        'probability': best_tracked_prob
+                    },
+                    'jersey_tracker': get_jersey_tracker()  # Add tracker instance for top probabilities
+                })
+
+                # Decide which result to return as primary
+                if best_tracked_number and best_tracked_prob > 0.5:
+                    # Use tracked result if high confidence
+                    primary_result = best_tracked_number
+                else:
+                    # Fall back to single-frame detection
+                    primary_result = jersey_number
+
+                player_identifications[track_id] = (primary_result, enhanced_details)
+
                 # Add timing to totals
                 total_timing['preprocessing_ms'] += timing['preprocessing_ms']
                 total_timing['ocr_ms'] += timing['ocr_ms']
                 
-                print(f"[PLAYER_ID] Track {track_id}: {jersey_number}")
+                print(f"[PLAYER_ID] Track {track_id}: Single-frame='{jersey_number}', Tracked='{best_tracked_number}' ({best_tracked_prob:.2%}), Primary='{primary_result}'")
             else:
                 player_identifications[track_id] = ("Unknown", None)
                 
         except Exception as e:
             print(f"[PLAYER_ID] Error processing track: {e}")
             continue
-    
+
     return player_identifications, total_timing
-
-
 def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List], Dict[str, float]]:
     """Run EasyOCR text detection on player crop using the same algorithm as tuning tab.
     
@@ -192,14 +272,25 @@ def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List],
         # Run EasyOCR with user settings (same as tuning tab)
         ocr_results = _easyocr_reader.readtext(final_processed_crop, **readtext_params)
         
+        # Filter out low confidence detections (below 0.5)
+        min_confidence = 0.5
+        filtered_ocr_results = []
+        for bbox, text, confidence in ocr_results:
+            if confidence >= min_confidence:
+                filtered_ocr_results.append((bbox, text, confidence))
+            else:
+                print(f"[PLAYER_ID] Filtered out low confidence detection: '{text}' ({confidence:.3f} < {min_confidence})")
+        
+        print(f"[PLAYER_ID] OCR results: {len(ocr_results)} total, {len(filtered_ocr_results)} after confidence filter")
+        
         # End OCR timer
         timing_info['ocr_ms'] = (time.time() - ocr_start_time) * 1000
         
-        # Process results - find best numeric text (same as tuning tab)
+        # Process filtered results - find best numeric text (same as tuning tab)
         best_text = ""
         best_confidence = 0.0
         
-        for bbox, text, confidence in ocr_results:
+        for bbox, text, confidence in filtered_ocr_results:
             # Clean text and check if it's a valid jersey number
             clean_text = ''.join(filter(str.isdigit, text))
             if clean_text and confidence > best_confidence:
@@ -211,7 +302,7 @@ def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List],
             jersey_number = best_text
             result_details = {
                 'confidence': best_confidence,
-                'ocr_results': ocr_results,
+                'ocr_results': filtered_ocr_results,  # Use filtered results
                 'best_text': best_text,
                 'original_width': original_width,
                 'original_height': original_height,
@@ -225,7 +316,7 @@ def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List],
             jersey_number = "Unknown"
             result_details = {
                 'confidence': 0.0,
-                'ocr_results': ocr_results,
+                'ocr_results': filtered_ocr_results,  # Use filtered results
                 'best_text': None,
                 'original_width': original_width,
                 'original_height': original_height,
