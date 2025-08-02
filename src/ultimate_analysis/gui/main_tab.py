@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont
+from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont, QColor
 
 from .video_player import VideoPlayer
 from .visualization import draw_detections, draw_tracks, draw_tracks_with_player_ids
@@ -27,6 +27,7 @@ from ..processing import (
     set_detection_model, set_field_model, set_tracker_type, 
     reset_tracker, get_track_histories
 )
+from ..processing.jersey_tracker import get_jersey_tracker
 from ..processing.field_segmentation import visualize_segmentation
 from ..config.settings import get_setting
 from ..constants import SHORTCUTS, DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS
@@ -537,12 +538,16 @@ class MainTab(QWidget):
         
         # Run player ID if enabled (requires tracking to be active)
         if self.player_id_checkbox.isChecked() and self.current_tracks:
-            print("[MAIN_TAB] Running player identification...")
+            print(f"[MAIN_TAB] Running player identification on {len(self.current_tracks)} tracks...")
             start_time = time.time()
             self.current_player_ids, player_id_timing = run_player_id_on_tracks(frame, self.current_tracks)
             duration_ms = (time.time() - start_time) * 1000
             
-            # Debug timing values
+            # Debug timing values and results
+            print(f"[MAIN_TAB] Player ID results: {len(self.current_player_ids)} tracks processed")
+            for track_id, (jersey_number, details) in self.current_player_ids.items():
+                confidence = details.get('confidence', 0.0) if details else 0.0
+                print(f"[MAIN_TAB]   Track {track_id}: #{jersey_number} (conf: {confidence:.3f})")
             print(f"[MAIN_TAB] Raw timing: {player_id_timing}")
             print(f"[MAIN_TAB] Total duration: {duration_ms:.1f}ms")
             
@@ -594,14 +599,18 @@ class MainTab(QWidget):
             # Get track histories for trajectory visualization
             track_histories = get_track_histories()
             
-            # Use player ID visualization if player ID is enabled
-            if self.player_id_checkbox.isChecked() and self.current_player_ids:
+            # Use player ID visualization if player ID is enabled (even if no IDs detected yet)
+            if self.player_id_checkbox.isChecked():
                 frame = draw_tracks_with_player_ids(frame, self.current_tracks, track_histories, self.current_player_ids)
             else:
                 frame = draw_tracks(frame, self.current_tracks, track_histories)
         
         # Add FPS overlay to top right
         self._draw_fps_overlay(frame)
+        
+        # Add jersey tracking table overlay if player ID is enabled
+        if self.player_id_checkbox.isChecked():
+            self._draw_jersey_table_overlay(frame)
         
         return frame
     
@@ -812,6 +821,83 @@ class MainTab(QWidget):
             set_field_model(str(full_path))
             print(f"[MAIN_TAB] Field model changed to: {model_path}")
     
+    def _draw_jersey_table_overlay(self, frame):
+        """Draw jersey tracking information as an overlay on the frame."""
+        try:
+            tracker = get_jersey_tracker()
+            
+            # Get best and second-best jersey numbers for each track
+            tracked_data = []
+            for track_id in tracker._track_probabilities.keys():
+                top_probs = tracker.get_top_probabilities(track_id, top_k=2)
+                if top_probs:
+                    best_jersey, best_prob = top_probs[0][0], top_probs[0][1]
+                    second_jersey, second_prob = None, 0.0
+                    if len(top_probs) > 1:
+                        second_jersey, second_prob = top_probs[1][0], top_probs[1][1]
+                    
+                    tracked_data.append({
+                        'track_id': track_id,
+                        'best_jersey': best_jersey,
+                        'best_prob': best_prob,
+                        'second_jersey': second_jersey,
+                        'second_prob': second_prob
+                    })
+            
+            if not tracked_data:
+                return
+            
+            # Sort by track ID
+            tracked_data.sort(key=lambda x: x['track_id'])
+            
+            # Overlay position (top-left corner with margin, lowered slightly)
+            start_x = 20
+            start_y = 80  # Lowered from 30 to 80
+            line_height = 30  # Increased to accommodate two lines per track
+            
+            # Draw semi-transparent background
+            table_height = len(tracked_data) * line_height + 40
+            table_width = 250  # Increased width for second jersey
+            
+            # Create overlay
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (start_x - 10, start_y - 20), 
+                         (start_x + table_width, start_y + table_height - 20), 
+                         (0, 0, 0), -1)
+            cv2.addWeighted(frame, 0.7, overlay, 0.3, 0, frame)
+            
+            # Draw header
+            cv2.putText(frame, "Jersey Tracking", (start_x, start_y), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+            
+            # Draw table entries
+            y_offset = start_y + 25
+            for data in tracked_data:
+                # Determine color based on best confidence
+                if data['best_prob'] >= 0.7:
+                    color = (0, 255, 0)  # Green
+                elif data['best_prob'] >= 0.4:
+                    color = (0, 165, 255)  # Orange
+                else:
+                    color = (0, 0, 255)  # Red
+                
+                # Draw best jersey number (primary line)
+                best_text = f"Track {data['track_id']}: #{data['best_jersey']} ({data['best_prob']:.2f})"
+                cv2.putText(frame, best_text, (start_x, y_offset), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                
+                # Draw second jersey number (secondary line) if available
+                if data['second_jersey'] and data['second_prob'] > 0.1:  # Only show if reasonable confidence
+                    second_color = (128, 128, 128)  # Gray for secondary
+                    second_text = f"   Alt: #{data['second_jersey']} ({data['second_prob']:.2f})"
+                    cv2.putText(frame, second_text, (start_x, y_offset + 15), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, second_color, 1)
+                
+                y_offset += line_height
+                
+        except Exception as e:
+            print(f"[MAIN_TAB] Error drawing jersey overlay: {e}")
+
     def closeEvent(self, event):
         """Handle widget close event."""
         self._stop_playback()
