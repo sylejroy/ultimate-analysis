@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     from ultralytics import YOLO
@@ -92,6 +93,118 @@ def _create_mock_results(frame: np.ndarray) -> List[Any]:
             self.data = np.array([mask])  # Shape: (1, H, W)
     
     return [MockResult()]
+
+
+def run_batch_field_segmentation(frames: List[np.ndarray], use_parallel: bool = True) -> List[List[Any]]:
+    """Run field segmentation on a batch of video frames with optional parallel processing.
+    
+    Args:
+        frames: List of input video frames as numpy arrays (H, W, C) in BGR format
+        use_parallel: Whether to use parallel processing for post-processing
+        
+    Returns:
+        List of segmentation results for each frame, with same format as run_field_segmentation()
+        
+    Performance Benefits:
+        - Batch YOLO segmentation reduces model overhead
+        - Parallel post-processing of segmentation masks
+        - Optimal for processing video sequences
+    """
+    if not frames:
+        return []
+    
+    print(f"[FIELD_SEG] Processing batch of {len(frames)} frames")
+    
+    if _field_model is None:
+        print("[FIELD_SEG] No field segmentation model loaded")
+        # Return mock results for all frames
+        return [_create_mock_results(frame) for frame in frames]
+    
+    if not ULTRALYTICS_AVAILABLE:
+        print("[FIELD_SEG] YOLO not available, returning mock results")
+        return [_create_mock_results(frame) for frame in frames]
+    
+    try:
+        # Get segmentation parameters from config
+        confidence_threshold = get_setting("models.segmentation.confidence_threshold", 0.25)
+        iou_threshold = get_setting("models.segmentation.iou_threshold", 0.7)
+        
+        # Run batch YOLO segmentation
+        print(f"[FIELD_SEG] Running batch YOLO segmentation on {len(frames)} frames")
+        batch_results = _field_model.predict(
+            frames,  # YOLO can process multiple frames at once
+            conf=confidence_threshold,
+            iou=iou_threshold,
+            verbose=False,
+            save=False,
+            show=False
+        )
+        
+        # Process results - can be parallelized for large batches
+        if use_parallel and len(frames) > 2:
+            # Parallel post-processing for large batches
+            def process_single_segmentation(frame_data):
+                frame_idx, result = frame_data
+                return frame_idx, _process_segmentation_result(result)
+            
+            # Determine optimal number of workers
+            max_workers = min(len(frames), 4)  # Cap at 4 workers
+            batch_segmentations = [[] for _ in frames]
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                print(f"[FIELD_SEG] Using {max_workers} parallel workers for segmentation post-processing")
+                
+                # Submit all tasks
+                indexed_results = [(i, result) for i, result in enumerate(batch_results)]
+                future_to_index = {
+                    executor.submit(process_single_segmentation, frame_data): frame_data[0] 
+                    for frame_data in indexed_results
+                }
+                
+                # Collect results as they complete
+                for future in as_completed(future_to_index):
+                    try:
+                        frame_idx, segmentations = future.result()
+                        batch_segmentations[frame_idx] = segmentations
+                    except Exception as e:
+                        frame_idx = future_to_index[future]
+                        print(f"[FIELD_SEG] Parallel segmentation processing failed for frame {frame_idx}: {e}")
+                        batch_segmentations[frame_idx] = []
+        else:
+            # Sequential post-processing for small batches
+            print(f"[FIELD_SEG] Using sequential segmentation processing for {len(frames)} frames")
+            batch_segmentations = []
+            for result in batch_results:
+                segmentations = _process_segmentation_result(result)
+                batch_segmentations.append(segmentations)
+        
+        print(f"[FIELD_SEG] Batch segmentation complete: {[len(segs) for segs in batch_segmentations]} results per frame")
+        return batch_segmentations
+        
+    except Exception as e:
+        print(f"[FIELD_SEG] Error during batch field segmentation: {e}")
+        import traceback
+        traceback.print_exc()
+        # Return mock results for all frames on error
+        return [_create_mock_results(frame) for frame in frames]
+
+
+def _process_segmentation_result(result) -> List[Any]:
+    """Process a single YOLO segmentation result.
+    
+    Args:
+        result: Single YOLO segmentation prediction result
+        
+    Returns:
+        List of segmentation results (usually just one result per frame)
+    """
+    try:
+        # For field segmentation, we typically return the raw result
+        # The calling code will extract masks, boxes, and classes as needed
+        return [result] if result is not None else []
+    except Exception as e:
+        print(f"[FIELD_SEG] Error processing segmentation result: {e}")
+        return []
 
 
 def set_field_model(model_path: str) -> bool:

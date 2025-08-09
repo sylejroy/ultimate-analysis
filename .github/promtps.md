@@ -1,132 +1,212 @@
-Main Tab
+# Ultimate Analysis - Development Prompts
 
+This document contains structured development prompts optimized for AI coding agents working on the Ultimate Frisbee analysis application.
 
-Read all the repository to get an idea of the current status of the repository.
+## 📋 Project Context
 
-Keeping copilot-instructions.md in mind, lets implement the visualisation with empty processing functions for now - one separate file per processing feature. Visualisation related code should be cleanly separated intothe gui folder. For now implement the following tab:
-1) Main tab:
-- in a left bar, a list of all available video files in data\dev_data and the raw/videos folders. Make sure you add a column showing the length of the video. Add a button to update this list by searching the folders.
-- in the center, display the currently selected video. Load a random video by default
-- controls should be at the bottom, right under the video: 
-    - previous recording (loops to last recording if pressed while on first video)
-    - play/pause
-    - next recording (loops to first recording if pressed while on last video)
-    - check boxes to enable processing and visualisation of inference (using trained models to detect players and discs), object tracking, player identification (based on jersey numbers), field segmentation
-    - controls should all have corresponding keyboard shortcuts
+**Architecture**: PyQt5 GUI + YOLO ML processing + OpenCV visualization
+**Key Principle**: KISS (Keep It Simple, Stupid) - max 500 lines per file
+**Configuration**: YAML-based with environment overrides
+**Data Flow**: Video → YOLO Detection → Tracking → Player ID → Visualization
 
+**Required Reading**: Always review `copilot-instructions.md` before implementing any feature.
 
-## Inference implementation
+---
 
-Read all the repository to get an idea of the current status of the repository.
+## 🎯 Active Development Tasks
 
-Keeping copilot-instructions.md in mind, implement the inference processing function and the visualisation function.
+### ✅ COMPLETED
+- [x] Main Tab with video player and processing controls
+- [x] Inference processing (YOLO detection)
+- [x] Player ID with EasyOCR jersey number detection
+- [x] EasyOCR Tuning Tab with parameter optimization
+- [x] Performance monitoring display
+- [x] Jersey Number Tracking with probabilistic fusion
+- [x] Aggressive parallel processing optimization
 
+### 🚧 IN PROGRESS
+- [ ] Model Training Tab (current focus)
 
+### 📋 PENDING
+- [ ] Advanced field segmentation visualization
+- [ ] Batch video processing pipeline
+- [ ] Export/import functionality for analysis results
 
-## Player ID
+---
 
-Read all the repository to get an idea of the current status of the repository. Read copilot-instructions.md and apply it for all modifications.
+## 🏗️ Model Training Tab Specification
 
-Implement the player id functionality. For now it should work as follows:
-1) Using the tracks of class "player" use easyocr by default to find jersey numbers in the top third of the bounding box (likely position of jersey number).
-2) Display the detected jersey number along with the confidence
-3) Use the measurement of easyocr to estimate a fused jersey number based on the easyocr measurement history
-4) display fused jersey number with a confidence in a different colour to the one-shot easyocr detection
+**Objective**: Create a comprehensive model training interface using Ultralytics YOLO
 
-## Easyocr Tuning Tab
+### Core Requirements
 
-Read all the repository to get an idea of the current status of the repository. Read copilot-instructions.md and apply it for all modifications.
+#### Task Type Selection
+```
+Radio buttons: [Detection] [Field Segmentation]
+- Detection: Players, discs, general object detection
+- Field Segmentation: End zones, field boundaries, playing areas
+```
 
-Implement the Easyocr Tuning Tab
-- left bar should once again have a recording selection list for all videos available in data\dev_data and the raw/videos folders
-- there should be a bar to scroll through the selected recording
-- on the frame selected by the user, run inference using a model selected from a drop down list
-- on the detection bounding boxes, run pre-processing - cropping, contrast etc. and then run easyocr
-- make all parameters user selectable
-- add a button to store selected parameters to the defaults.yaml file and to load from the defaults.yaml file
+#### Model Selection Pipeline
+```
+1. Base Model Dropdown:
+   - Detection: Non-seg models from `data/models/pretrained/` and `data/models/detection/`
+   - Segmentation: -seg models from `data/models/pretrained/` and `data/models/segmentation/`
 
-## Performance Display
+2. Model Info Display:
+   - Model architecture (YOLOv11n/s/m/l/x)
+   - File size, parameters count
+   - Input resolution, class count
+   - Last modified date
+```
 
-In the empty space in the bottom left of the main tab, I would like to have live runtime performance metrics displayed
+#### Training Data Management
+```
+1. Dataset Dropdown:
+   - Detection: Scan `data/raw/training_data/` for "*object_detection*" or "*player*disc*"
+   - Segmentation: Look for "*field*finder*" datasets
 
-Following should be displayed:
-- table containing runtimes for each of the processing functionalities
-    - previous frame runtime in ms
-    - rolling average runtime in ms
-    - maximum runtime in ms
-- cpu core usage (if possible specifically by the app) - small graph of past x seconds
-- gpu usage (if possible specifically by the app) - small graph of past x seconds
+2. Dataset Info Display:
+   - Number of images (train/val/test splits)
+   - Class distribution chart
+   - Sample image with annotations overlay
+   - Data format (YOLO, COCO, etc.)
+```
 
-## Easyocr Tuning Tab Runtimes
+#### Training Configuration
+```
+Parameters Panel:
+├── Core Settings
+│   ├── Epochs: [50] (1-1000)
+│   ├── Patience: [10] (1-100)  
+│   ├── Batch Size: [16] or [0.8] (auto GPU memory)
+│   └── Learning Rate: [0.01] (0.0001-1.0)
+├── Advanced Settings
+│   ├── Image Size: [640] (320-1280)
+│   ├── Optimizer: [SGD|Adam|AdamW]
+│   ├── Workers: [8] (0-16)
+│   └── Device: [0|cpu] (GPU selection)
+└── Configuration Actions
+    ├── [Load from training.yaml]
+    ├── [Save to training.yaml]
+    └── [Reset to Defaults]
+```
 
-When the run easyocr button is pressed, I would like to measure the runtime for each pre-processing step as well as for the final easyocr call in order to measure the impact on runtime it has.
-Display this data in a table that can be displayed in the top right, next to the video
+#### Training Execution
+```
+Progress Monitoring:
+├── Status Bar: "Epoch 25/100 (ETA: 15:30)"
+├── Progress Bar: Visual epoch completion
+├── Live Metrics Table:
+│   ├── Current Loss (train/val)
+│   ├── mAP@0.5 (detection)
+│   ├── Precision/Recall
+│   └── Learning Rate Schedule
+└── Results Visualization:
+    ├── Training curves (from results.csv)
+    ├── Loss progression graph
+    └── Validation metrics plot
+```
 
-_____________________________________________________________________________
-# Jersey Number Tracking Enhancement
+#### Output Management
+```
+Save Strategy:
+- Create timestamped folders: `data/models/{task}/{model_name}/finetune_{timestamp}/`
+- Preserve all training artifacts: weights/, results.csv, args.yaml
+- Auto-backup previous training runs
+- Generate training summary report
+```
 
-We need to implement probabilistic jersey number tracking for player objects across their entire tracking history. Currently we have single-frame EasyOCR detection, but we need to filter and fuse these noisy measurements into reliable jersey number identification.
+### Implementation Architecture
 
-## Requirements
+#### File Structure
+```
+src/ultimate_analysis/gui/model_tuning_tab.py  # Main UI implementation
+src/ultimate_analysis/training/train_model.py  # Training logic wrapper
+configs/training.yaml                          # Training parameters
+```
 
-### Core Functionality
-- **Historical Tracking**: Maintain jersey number measurement history for each tracked player object
-- **Probabilistic Fusion**: Combine multiple noisy measurements with confidence scores into probability estimates
-- **Spatial Weighting**: Use digit position within bounding box to adjust confidence (center = higher weight)
-- **Real-time Updates**: Update probabilities as new measurements arrive
+#### Key Classes
+```python
+class ModelTuningTab(QWidget):
+    """Main training interface with all UI components"""
+    
+class TrainingThread(QThread):
+    """Background training execution with progress signals"""
+    
+class DatasetScanner:
+    """Utility for discovering and analyzing training datasets"""
+    
+class ModelAnalyzer:
+    """Extract metadata and info from YOLO model files"""
+```
 
-### Technical Implementation
-- **Input**: EasyOCR measurements with confidence scores and digit positions
-- **Processing**: Calculate probability distribution over possible jersey numbers using:
-  - EasyOCR confidence scores
-  - Spatial position weighting (lateral centering preference)
-  - Measurement history consistency
-- **Output**: Top 3 most probable jersey numbers with confidence percentages
+#### Integration Points
+- Configuration system: Use `get_setting()` for all parameters
+- Error handling: Graceful failures with user feedback
+- Resource monitoring: CPU/GPU usage during training
+- Logging: Comprehensive training logs in `logs/training/`
 
-### Visualization Requirements
-- **Display**: Show top 3 jersey number candidates with probabilities
-- **Highlighting**: Visually emphasize the highest probability jersey number
-- **Color Coding**: Use different colors to distinguish between single-frame detection and historical fusion
+### User Experience Flow
+1. **Select Task Type** → Updates available models and datasets
+2. **Choose Base Model** → Displays model information and capabilities  
+3. **Select Training Data** → Shows dataset stats and sample images
+4. **Configure Parameters** → Load/save configs, validation checks
+5. **Start Training** → Background execution with live progress
+6. **Monitor Results** → Real-time metrics and visualization
+7. **Completion** → Model saved, summary report generated
 
-## Architecture Guidelines
-- Follow KISS principle (max 500 lines per file)
-- Use existing configuration system for parameters (confidence thresholds, weighting factors)
-- Maintain clean separation between processing logic and GUI visualization
-- Type hints required for all functions
+### Success Criteria
+- [ ] Intuitive task-based workflow
+- [ ] Comprehensive model and dataset information
+- [ ] Robust training parameter management
+- [ ] Real-time progress monitoring
+- [ ] Reliable output organization
+- [ ] Integration with existing configuration system
+- [ ] Error handling and user feedback
+- [ ] Performance monitoring during training
 
-## Key Questions for Implementation
-1. What probability update algorithm should we use (Bayesian, weighted average, etc.)?
-2. How should spatial position weighting be calculated?
-3. What parameters need to be configurable via YAML settings?
-4. Should we implement confidence decay over time for old measurements?
+---
 
-Please implement this jersey number tracking enhancement following the project's established patterns and architecture.
-_____________________________________________________________________________
-## Model Tuning Tab
+## 🔧 Implementation Guidelines
 
-Read all the repository to get an idea of the current status of the repository. Read copilot-instructions.md and apply it for all modifications.
+### Code Quality Standards
+- **File Size Limit**: Maximum 500 lines per file
+- **Type Hints**: Required for all function signatures
+- **Documentation**: Docstrings for all public methods
+- **Error Handling**: Comprehensive try-catch with user feedback
+- **Configuration**: Use YAML settings, avoid hardcoded values
 
-Make a new tab which will be used to tune models using ultralytics. Currently we need to tune two types of model:
-- one for detection, which detects players and discs
-- one for field segmentation, which segments the image into endzones and central playing fields
+### Architecture Patterns
+- **Separation of Concerns**: GUI ↔ Processing ↔ Configuration
+- **Signal-Slot Communication**: PyQt signals for async operations
+- **Resource Management**: Proper cleanup of threads and file handles
+- **Performance**: Monitor memory usage, optimize for real-time processing
 
-Visualisation:
-- Type of task to be done:
-    - detection
-    - field segmentation
-- Base model selection - model to be tuned drop down list:
-    - drop down list based on the selected type of task
-        - detection uses non "-seg" models found in models/pretrained or maybe even models in the models/detection folder - to further tune models
-        - segmentation uses "-seg" models found in models/pretrained or maybe even models in models/segmentation folder
-- Training data selection drop down list:
-    - if detection task is selected, use raw data from the training dataset: data\raw\training_data. Suggest any data that has object_detection or player disc detection in the name
-    - if field segmentation has been selected, "field finder" is the correct dataset
-- When a model is selected, show some key pieces of information about the model
-- When a training data set is selected, show key pieces of information about the training data set & display an example of some data with labels
-- Training parameters:
-    - make parameters such as epochs and patience user-editable
-    - make a training.yaml file in configs and corresponding buttons "load to config" and "save to config"
-- Button to start training of the selected model, based on selected training data, with the selected parameters
-- Save the new parameters output by ultralytics in a new folder such as data\models\detection\object_detection_yolo11l\finetune - make sure you don't overwrite any previous data
-- Display a progress bar to show how many epochs have been processed, how many are left and based on that estimated time of completion
-- Show the current training results, either making your own graphs from results.csv or by using the results.png image in the ultralytics output folder
+### Testing Strategy
+- **Integration Testing**: Test with actual model files and datasets
+- **UI Testing**: Verify all controls work with valid/invalid inputs
+- **Performance Testing**: Monitor resource usage during training
+- **Error Testing**: Handle missing files, corrupted data, training failures
+
+---
+
+## 📝 Development Notes
+
+### Known Constraints
+- Windows PowerShell v5.1 environment
+- PyQt5 GUI framework (not Qt6)
+- YOLO model compatibility with Ultralytics library
+- Real-time processing requirements for video analysis
+
+### Future Enhancements
+- Multi-GPU training support
+- Custom data augmentation pipeline
+- Model ensemble training
+- Automated hyperparameter optimization
+- Integration with cloud training platforms
+
+---
+
+*Last Updated: August 2, 2025*
+*Branch: feature/parallel_processing*
