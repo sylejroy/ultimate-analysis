@@ -1,7 +1,7 @@
 """Visualization functions for Ultimate Analysis GUI.
 
 This module provides functions for drawing detection boxes, tracking overlays,
-player IDs, and field segmentation on video frames.
+player IDs, field segmentation, and unified field projection on video frames.
 """
 
 import cv2
@@ -678,6 +678,31 @@ def _draw_segmentation_masks(frame: np.ndarray, masks: np.ndarray) -> np.ndarray
     return overlay
 
 
+def draw_unified_field(frame: np.ndarray, unified_field) -> np.ndarray:
+    """Draw unified field projection with field lines and boundaries.
+    
+    Args:
+        frame: Input frame to draw on
+        unified_field: UnifiedField object from field_projection module
+        
+    Returns:
+        Frame with unified field visualization
+    """
+    if unified_field is None:
+        return frame
+    
+    # Import field projection module to avoid circular imports
+    try:
+        from ..processing.field_projection import visualize_unified_field
+        return visualize_unified_field(frame, unified_field)
+    except ImportError as e:
+        print(f"[VISUALIZATION] Failed to import field_projection: {e}")
+        return frame
+    except Exception as e:
+        print(f"[VISUALIZATION] Error drawing unified field: {e}")
+        return frame
+
+
 def _get_track_color(track_id: int) -> Tuple[int, int, int]:
     """Generate a consistent, distinct color for a track ID.
     
@@ -731,10 +756,12 @@ def apply_all_visualizations(
     track_histories: Dict[int, List[Tuple[int, int]]] = None,
     player_ids: List[Dict[str, Any]] = None,
     field_result: Any = None,
+    unified_field: Any = None,
     show_detections: bool = True,
     show_tracking: bool = True,
     show_player_ids: bool = True,
-    show_field_segmentation: bool = True
+    show_field_segmentation: bool = True,
+    show_unified_field: bool = False
 ) -> np.ndarray:
     """Apply all enabled visualizations to a frame.
     
@@ -745,10 +772,12 @@ def apply_all_visualizations(
         track_histories: Track history data for drawing trails
         player_ids: Player ID results from run_player_id
         field_result: Field segmentation results from run_field_segmentation
+        unified_field: UnifiedField object from field_projection module
         show_detections: Whether to show detection boxes
         show_tracking: Whether to show tracking overlays
         show_player_ids: Whether to show player IDs
         show_field_segmentation: Whether to show field segmentation
+        show_unified_field: Whether to show unified field projection
         
     Returns:
         Frame with all enabled visualizations applied
@@ -757,9 +786,12 @@ def apply_all_visualizations(
     
     # Apply visualizations in order (background to foreground)
     
-    # Field segmentation (background layer)
-    if show_field_segmentation and field_result is not None:
-        # Handle both single result and list of results
+    # Field segmentation or unified field (background layer)
+    if show_unified_field and unified_field is not None:
+        # Use unified field projection (preferred when available)
+        vis_frame = draw_unified_field(vis_frame, unified_field)
+    elif show_field_segmentation and field_result is not None:
+        # Fallback to standard field segmentation
         field_results = [field_result] if not isinstance(field_result, list) else field_result
         vis_frame = draw_field_segmentation(vis_frame, field_results)
     

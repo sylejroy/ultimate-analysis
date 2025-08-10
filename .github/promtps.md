@@ -210,3 +210,18 @@ class ModelAnalyzer:
 
 *Last Updated: August 2, 2025*
 *Branch: feature/parallel_processing*
+
+
+
+
+
+## Field projection
+
+Read through the repository to understand how it functionns. Keep the copilot-instructions.md in mind.
+
+New feature to be developed: from the field segmentation output, I need to map points in the image to real-world points on a 2 dimensional ultimate field of dimensions 100x37m in order to determine the position of each player. Make an algorithm suggestion keeping the following in mind:
+- you need to unify the field segmentation output, as the output is often several segmented areas which can overlap
+- ideally from the unified output, build up to 4 lines to describe the outer border of the field
+- bear in mind: most of the time only a portion of the field is in view. The footage is from a drone looking down the field towards the horizon. For the most part, the full width of the field is in view, but not the length
+- estimate the position of the field in the image (parts of the field will be outside the bounds of the image, you need to consider that)
+- use a probabilistic approach that seems reasonable (kalman, extended, particle filter etc. be sure to consider all options)

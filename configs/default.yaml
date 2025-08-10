@@ -32,6 +32,42 @@ models:
     default_model: "yolo11l-seg.pt"
     confidence_threshold: 0.6
     mask_alpha: 0.3
+    iou_threshold: 0.7
+    
+# Field Projection Settings
+field_projection:
+  # Line detection parameters
+  min_line_length: 80               # Minimum line length for Hough detection (increased)
+  max_line_gap: 15                  # Maximum gap in line segments to connect (tightened)
+  hough_threshold: 40               # Hough transform threshold for line detection (increased)
+  edge_margin: 15                   # Pixels from image edge to ignore (boundary artifacts)
+  
+  # Edge detection parameters
+  canny_low_threshold: 50           # Canny edge detection low threshold
+  canny_high_threshold: 150         # Canny edge detection high threshold
+  
+  # Morphological cleanup parameters for field mask denoising
+  erosion_kernel_size: 3            # Kernel size for erosion (removes noise)
+  dilation_kernel_size: 5           # Kernel size for dilation (restores main area)
+  closing_kernel_size: 7            # Kernel size for closing (fills holes, smooths boundaries)
+  
+  # Line merging and filtering
+  parallel_merge_distance: 10       # Distance threshold for merging parallel lines
+  min_line_confidence: 0.5          # Minimum confidence to keep detected lines
+  
+  # Perspective handling for drone footage
+  sideline_angle_min: 25            # Minimum angle for diagonal sidelines (degrees)
+  sideline_angle_max: 75            # Maximum angle for diagonal sidelines (degrees)
+  field_line_angle_max: 25          # Maximum angle for horizontal field lines (degrees)
+  
+  # Field coverage estimation
+  expected_field_coverage: 0.6      # Expected maximum field coverage in frame
+  
+  # Visualization settings
+  draw_unified_mask: true           # Show unified field mask overlay
+  draw_field_lines: true            # Show detected field lines
+  draw_extrapolated_lines: true     # Show extrapolated/estimated lines
+  line_thickness: 2                 # Base thickness for field lines
   
   tracking:
     default_tracker: "deepsort"

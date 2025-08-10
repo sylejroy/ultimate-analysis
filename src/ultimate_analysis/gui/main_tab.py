@@ -20,7 +20,10 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont, QColor
 
 from .video_player import VideoPlayer
-from .visualization import draw_detections, draw_tracks, draw_tracks_with_player_ids
+from .visualization import (
+    draw_detections, draw_tracks, draw_tracks_with_player_ids, 
+    apply_all_visualizations
+)
 from .performance_widget import PerformanceWidget
 from ..processing import (
     run_inference, run_tracking, run_player_id_on_tracks, run_field_segmentation,
@@ -29,6 +32,7 @@ from ..processing import (
 )
 from ..processing.jersey_tracker import get_jersey_tracker
 from ..processing.field_segmentation import visualize_segmentation
+from ..processing.field_projection import create_unified_field
 from ..config.settings import get_setting
 from ..constants import SHORTCUTS, DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS
 
@@ -69,6 +73,7 @@ class MainTab(QWidget):
         self.current_detections: List[Dict] = []
         self.current_tracks: List[Any] = []
         self.current_field_results: List[Any] = []
+        self.current_unified_field: Any = None
         self.current_player_ids: Dict[int, Tuple[str, Any]] = {}
         
         # FPS tracking for processed frames
@@ -510,6 +515,7 @@ class MainTab(QWidget):
         self.current_detections = []
         self.current_tracks = []
         self.current_field_results = []
+        self.current_unified_field = None
         self.current_player_ids = {}
         
         # Run inference if enabled
@@ -535,6 +541,21 @@ class MainTab(QWidget):
             self.current_field_results = run_field_segmentation(frame)
             duration_ms = (time.time() - start_time) * 1000
             self.performance_widget.add_processing_measurement("Field Segmentation", duration_ms)
+            
+            # Create unified field projection from segmentation results
+            if self.current_field_results:
+                print("[MAIN_TAB] Creating unified field projection...")
+                start_time = time.time()
+                self.current_unified_field = create_unified_field(
+                    self.current_field_results, 
+                    frame.shape[:2]  # (height, width)
+                )
+                duration_ms = (time.time() - start_time) * 1000
+                self.performance_widget.add_processing_measurement("Unified Field", duration_ms)
+        else:
+            # Clear field results when not enabled
+            self.current_field_results = []
+            self.current_unified_field = None
         
         # Run player ID if enabled (requires tracking to be active)
         if self.player_id_checkbox.isChecked() and self.current_tracks:
@@ -586,24 +607,37 @@ class MainTab(QWidget):
         Returns:
             Frame with visualizations applied
         """
-        # Apply field segmentation overlay first (as background)
-        if self.current_field_results and self.field_segmentation_checkbox.isChecked():
-            frame = visualize_segmentation(frame, self.current_field_results, alpha=0.3)
+        # Use the comprehensive visualization function
+        track_histories = get_track_histories() if self.tracking_checkbox.isChecked() else None
         
-        # Show detections only if tracking is NOT enabled (to avoid visual clutter)
-        if self.current_detections and not self.tracking_checkbox.isChecked():
-            frame = draw_detections(frame, self.current_detections)
+        # Convert player IDs to list format expected by apply_all_visualizations
+        player_ids_list = []
+        if self.current_player_ids:
+            for track_id, (jersey_number, details) in self.current_player_ids.items():
+                player_ids_list.append({
+                    'track_id': track_id,
+                    'jersey_number': jersey_number,
+                    'details': details
+                })
         
-        # Show tracking visualization if tracking is enabled
-        if self.current_tracks and self.tracking_checkbox.isChecked():
-            # Get track histories for trajectory visualization
-            track_histories = get_track_histories()
-            
-            # Use player ID visualization if player ID is enabled (even if no IDs detected yet)
-            if self.player_id_checkbox.isChecked():
-                frame = draw_tracks_with_player_ids(frame, self.current_tracks, track_histories, self.current_player_ids)
-            else:
-                frame = draw_tracks(frame, self.current_tracks, track_histories)
+        # Determine which field visualization to use
+        show_unified_field = self.field_segmentation_checkbox.isChecked() and self.current_unified_field is not None
+        show_standard_field = self.field_segmentation_checkbox.isChecked() and not show_unified_field
+        
+        frame = apply_all_visualizations(
+            frame=frame,
+            detections=self.current_detections if not self.tracking_checkbox.isChecked() else None,
+            tracks=self.current_tracks if self.tracking_checkbox.isChecked() else None,
+            track_histories=track_histories,
+            player_ids=player_ids_list if self.player_id_checkbox.isChecked() else None,
+            field_result=self.current_field_results[0] if show_standard_field and self.current_field_results else None,
+            unified_field=self.current_unified_field if show_unified_field else None,
+            show_detections=not self.tracking_checkbox.isChecked(),
+            show_tracking=self.tracking_checkbox.isChecked(),
+            show_player_ids=self.player_id_checkbox.isChecked(),
+            show_field_segmentation=show_standard_field,
+            show_unified_field=show_unified_field
+        )
         
         # Add FPS overlay to top right
         self._draw_fps_overlay(frame)
