@@ -495,39 +495,29 @@ def _classify_field_lines_perspective(lines: List[Tuple[int, int, int, int]],
         if dx == 0:  # Vertical line
             angle = 90.0
         else:
-            angle = math.atan2(dy, dx) * 180 / math.pi
-            # Normalize angle to 0-180 range (absolute orientation, not direction)
-            angle = abs(angle)
+            # Calculate raw angle
+            raw_angle = math.atan2(dy, dx) * 180 / math.pi
+            # Normalize to 0-180 range (take absolute value)
+            angle = abs(raw_angle)
+            # Convert obtuse angles to their acute equivalent
             if angle > 90:
-                angle = 180 - angle  # Convert obtuse to acute equivalent
+                angle = 180 - angle
+        
+        # Debug: show both raw and normalized angles
+        raw_angle_abs = abs(math.atan2(dy, dx) * 180 / math.pi)
         
         # In drone perspective:
-        # - Sidelines appear diagonal (configurable range, including steep angles)
-        # - Field lines appear more horizontal (configurable threshold)
+        # - Sidelines appear diagonal (25-75° range)
+        # - Field lines appear more horizontal (0-25° range)
         
-        # Check for diagonal sidelines (25-75° range covers most perspective angles)
-        is_diagonal = (sideline_min <= angle <= sideline_max)
-        
-        # Also accept steep diagonal lines that wrap around (e.g., 152° -> 28°)
-        # These are common in drone perspective where sidelines appear very angled
-        if not is_diagonal:
-            # Check if this is a steep sideline that appears as obtuse angle
-            raw_angle = abs(math.atan2(dy, dx) * 180 / math.pi)
-            if raw_angle > 90:
-                # Convert back: 152° means it's really 28° steep diagonal
-                equivalent_angle = 180 - raw_angle
-                is_diagonal = (sideline_min <= equivalent_angle <= sideline_max)
-                angle = equivalent_angle  # Use the equivalent acute angle
-        
-        if is_diagonal:  # Diagonal lines - likely sidelines
+        if sideline_min <= angle <= sideline_max:  # Diagonal lines - likely sidelines
             diagonal_lines.append((x1, y1, x2, y2, angle))
-            print(f"[FIELD_PROJ] Line ({x1},{y1})-({x2},{y2}) classified as SIDELINE (angle={angle:.1f}°)")
+            print(f"[FIELD_PROJ] Line ({x1},{y1})-({x2},{y2}) classified as SIDELINE (angle={angle:.1f}° from raw {raw_angle_abs:.1f}°)")
         elif angle <= field_line_max:  # More horizontal lines - likely field lines
             horizontal_lines.append((x1, y1, x2, y2, angle))
-            print(f"[FIELD_PROJ] Line ({x1},{y1})-({x2},{y2}) classified as FIELD LINE (angle={angle:.1f}°)")
+            print(f"[FIELD_PROJ] Line ({x1},{y1})-({x2},{y2}) classified as FIELD LINE (angle={angle:.1f}° from raw {raw_angle_abs:.1f}°)")
         else:
-            raw_angle = abs(math.atan2(dy, dx) * 180 / math.pi)
-            print(f"[FIELD_PROJ] Line ({x1},{y1})-({x2},{y2}) REJECTED (angle={angle:.1f}° from raw {raw_angle:.1f}°, not in valid ranges)")
+            print(f"[FIELD_PROJ] Line ({x1},{y1})-({x2},{y2}) REJECTED (angle={angle:.1f}° from raw {raw_angle_abs:.1f}°, not in valid ranges)")
         # Skip lines outside these ranges as they're likely artifacts
     
     print(f"[FIELD_PROJ] Classified lines: {len(diagonal_lines)} diagonal (sidelines), "

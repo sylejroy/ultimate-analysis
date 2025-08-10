@@ -33,6 +33,9 @@ from ..processing import (
 from ..processing.jersey_tracker import get_jersey_tracker
 from ..processing.field_segmentation import visualize_segmentation
 from ..processing.field_projection import create_unified_field
+from ..processing.field_mapping import (
+    create_perspective_transform, map_players_to_field, create_top_down_field_view
+)
 from ..config.settings import get_setting
 from ..constants import SHORTCUTS, DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS
 
@@ -230,14 +233,21 @@ class MainTab(QWidget):
         return panel
     
     def _create_right_panel(self) -> QWidget:
-        """Create the right panel with video display and controls."""
+        """Create the right panel with video display and top-down field view."""
         panel = QWidget()
         layout = QVBoxLayout()
+        
+        # Create horizontal splitter for video and field view
+        main_splitter = QSplitter(Qt.Horizontal)
+        
+        # Left side: Video display
+        video_widget = QWidget()
+        video_layout = QVBoxLayout()
         
         # Video display area
         self.video_label = QLabel("No video selected")
         self.video_label.setAlignment(Qt.AlignCenter)
-        self.video_label.setFixedHeight(1080)  # Much bigger for main tab - increased from 400 to 1080
+        self.video_label.setFixedHeight(600)  # Reduced to make room for field view
         self.video_label.setStyleSheet("""
             QLabel {
                 border: 2px solid #555;
@@ -246,7 +256,44 @@ class MainTab(QWidget):
                 font-size: 14px;
             }
         """)
-        layout.addWidget(self.video_label, 1)  # Takes most space
+        video_layout.addWidget(self.video_label, 1)
+        
+        video_widget.setLayout(video_layout)
+        main_splitter.addWidget(video_widget)
+        
+        # Right side: Top-down field view
+        field_widget = QWidget()
+        field_layout = QVBoxLayout()
+        
+        # Field view label
+        field_label = QLabel("Top-Down Field View")
+        field_label.setAlignment(Qt.AlignCenter)
+        field_label.setStyleSheet("font-weight: bold; color: #ddd; padding: 5px;")
+        field_layout.addWidget(field_label)
+        
+        # Top-down field display
+        self.field_view_label = QLabel("Enable Field Segmentation to see top-down view")
+        self.field_view_label.setAlignment(Qt.AlignCenter)
+        self.field_view_label.setFixedSize(222, 600)  # Swapped dimensions for correct field orientation
+        self.field_view_label.setStyleSheet("""
+            QLabel {
+                border: 2px solid #555;
+                background-color: #1a1a1a;
+                color: #999;
+                font-size: 12px;
+            }
+        """)
+        field_layout.addWidget(self.field_view_label)
+        
+        # Add stretch to center the field view
+        field_layout.addStretch()
+        
+        field_widget.setLayout(field_layout)
+        main_splitter.addWidget(field_widget)
+        
+        # Set splitter sizes (60% video, 40% field view)
+        main_splitter.setSizes([600, 400])
+        layout.addWidget(main_splitter)
         
         # Progress bar
         self.progress_bar = QSlider(Qt.Horizontal)
@@ -662,6 +709,9 @@ class MainTab(QWidget):
         if self.player_id_checkbox.isChecked():
             self._draw_jersey_table_overlay(frame)
         
+        # Update top-down field view
+        self._update_field_view()
+        
         return frame
     
     def _update_fps(self, frame_time_ms: float) -> None:
@@ -955,6 +1005,60 @@ class MainTab(QWidget):
                 
         except Exception as e:
             print(f"[MAIN_TAB] Error drawing jersey overlay: {e}")
+
+    def _update_field_view(self):
+        """Update the top-down field view with current player positions."""
+        try:
+            # Check if we have the required data for field mapping
+            if (not self.field_segmentation_checkbox.isChecked() or 
+                not self.current_unified_field or 
+                not self.current_tracks):
+                # Show placeholder message
+                self.field_view_label.setText("Enable Field Segmentation and tracking\nto see top-down player positions")
+                return
+            
+            # Extract field lines from unified field
+            if hasattr(self.current_unified_field, 'lines') and self.current_unified_field.lines:
+                field_lines = self.current_unified_field.lines
+                
+                # Create perspective transformation matrix
+                image_shape = self.current_unified_field.image_bounds[::-1]  # (height, width)
+                transform_matrix = create_perspective_transform(field_lines, image_shape)
+                
+                if transform_matrix is not None:
+                    # Map players to field coordinates
+                    player_positions = map_players_to_field(
+                        self.current_tracks, 
+                        self.current_player_ids, 
+                        transform_matrix
+                    )
+                    
+                    # Create top-down field view
+                    field_img = create_top_down_field_view(player_positions)
+                    
+                    # Convert to QPixmap and display
+                    height, width, channel = field_img.shape
+                    bytes_per_line = 3 * width
+                    q_image = QImage(field_img.data, width, height, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
+                    pixmap = QPixmap.fromImage(q_image)
+                    
+                    # Scale to fit the label
+                    scaled_pixmap = pixmap.scaled(
+                        self.field_view_label.size(), 
+                        Qt.KeepAspectRatio, 
+                        Qt.SmoothTransformation
+                    )
+                    self.field_view_label.setPixmap(scaled_pixmap)
+                    
+                    print(f"[MAIN_TAB] Updated top-down field view with {len(player_positions)} players")
+                else:
+                    self.field_view_label.setText("Insufficient field lines detected\nfor perspective mapping")
+            else:
+                self.field_view_label.setText("No field lines detected\nEnable field segmentation")
+                
+        except Exception as e:
+            print(f"[MAIN_TAB] Error updating field view: {e}")
+            self.field_view_label.setText("Error creating field view\nCheck console for details")
 
     def closeEvent(self, event):
         """Handle widget close event."""
