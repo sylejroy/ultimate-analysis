@@ -29,27 +29,31 @@ models:
     cache_results: true
   
   segmentation:
-    default_model: "yolo11l-seg.pt"
+    default_model: "data/models/segmentation/field_finder_yolo11x-seg/segmentation_finetune4/weights/best.pt"
     confidence_threshold: 0.6
     mask_alpha: 0.3
     iou_threshold: 0.7
     
 # Field Projection Settings
 field_projection:
-  # Line detection parameters
-  min_line_length: 80               # Minimum line length for Hough detection (increased)
-  max_line_gap: 15                  # Maximum gap in line segments to connect (tightened)
-  hough_threshold: 40               # Hough transform threshold for line detection (increased)
-  edge_margin: 15                   # Pixels from image edge to ignore (boundary artifacts)
+  # Polygon fitting parameters (new approach)
+  polygon_epsilon: 0.02             # Polygon approximation epsilon (fraction of perimeter)
+  min_polygon_line_length: 50       # Minimum length for polygon edges to keep
+  
+  # Line detection parameters (legacy - for Hough approach if needed)
+  min_line_length: 60               # Minimum line length for Hough detection - reduced
+  max_line_gap: 20                  # Maximum gap in line segments to connect - increased
+  hough_threshold: 25               # Hough transform threshold for line detection - reduced
+  edge_margin: 5                    # Pixels from image edge to ignore (boundary artifacts) - reduced to be less aggressive
   
   # Edge detection parameters
-  canny_low_threshold: 50           # Canny edge detection low threshold
-  canny_high_threshold: 150         # Canny edge detection high threshold
+  canny_low_threshold: 30           # Canny edge detection low threshold - more sensitive
+  canny_high_threshold: 100         # Canny edge detection high threshold - more sensitive
   
   # Morphological cleanup parameters for field mask denoising
-  erosion_kernel_size: 3            # Kernel size for erosion (removes noise)
-  dilation_kernel_size: 5           # Kernel size for dilation (restores main area)
-  closing_kernel_size: 7            # Kernel size for closing (fills holes, smooths boundaries)
+  erosion_kernel_size: 3            # Kernel size for erosion (removes noise) - balanced
+  dilation_kernel_size: 5           # Kernel size for dilation (restores main area) - balanced
+  closing_kernel_size: 5            # Kernel size for closing (fills holes, smooths boundaries) - reduced
   
   # Line merging and filtering
   parallel_merge_distance: 10       # Distance threshold for merging parallel lines

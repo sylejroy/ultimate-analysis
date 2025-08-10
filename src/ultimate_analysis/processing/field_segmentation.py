@@ -337,12 +337,15 @@ def transform_to_field_coordinates(points: List[Tuple[int, int]],
 def _load_default_model() -> None:
     """Load the default field segmentation model if none is loaded."""
     if _field_model is None:
-        # Use the specified default model path
-        default_model_path = "data/models/segmentation/field_finder_yolo11m-seg/segmentation_finetune/weights/best.pt"
-        
-        # Try the specified model first
+        # Get the default model path from configuration
+        default_model_path = get_setting("models.segmentation.default_model", "yolo11l-seg.pt")
         models_base = Path(get_setting("models.base_path", "data/models"))
-        full_path = models_base / "segmentation/field_finder_yolo11m-seg/segmentation_finetune/weights/best.pt"
+        
+        # If it's a relative path, make it absolute
+        if not Path(default_model_path).is_absolute():
+            full_path = models_base / default_model_path
+        else:
+            full_path = Path(default_model_path)
         
         if full_path.exists():
             print(f"[FIELD_SEG] Loading default field segmentation model: {full_path}")
@@ -351,8 +354,11 @@ def _load_default_model() -> None:
         
         # Fallback to other segmentation models
         fallback_paths = [
+            models_base / "segmentation/field_finder_yolo11x-seg/segmentation_finetune4/weights/best.pt",
+            models_base / "segmentation/field_finder_yolo11m-seg/segmentation_finetune/weights/best.pt",
             models_base / "segmentation/field_finder_yolo11m-seg/finetune/weights/best.pt",
             models_base / "segmentation/field_finder_yolo11n-seg/segmentation_finetune/weights/best.pt", 
+            models_base / "pretrained/yolo11x-seg.pt",
             models_base / "pretrained/yolo11m-seg.pt",
             models_base / "pretrained/yolo11n-seg.pt"
         ]

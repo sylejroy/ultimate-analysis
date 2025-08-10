@@ -131,7 +131,7 @@ def test_field_projection():
     # Step 3: Estimate field lines
     print("\n3. Estimating field lines...")
     try:
-        field_lines = estimate_field_lines(unified_mask)
+        field_lines = estimate_field_lines(unified_mask, frame)
         print(f"   Estimated {len(field_lines)} field lines:")
         for line in field_lines:
             print(f"     {line.line_type}: {line.point1} -> {line.point2} (conf: {line.confidence:.2f})")
@@ -143,7 +143,7 @@ def test_field_projection():
     # Step 4: Create unified field
     print("\n4. Creating unified field...")
     try:
-        unified_field = create_unified_field(segmentation_results, frame.shape[:2])
+        unified_field = create_unified_field(segmentation_results, frame.shape[:2], frame)
         if unified_field:
             print(f"   Unified field created:")
             print(f"     Lines: {len(unified_field.lines)}")

@@ -422,6 +422,15 @@ class MainTab(QWidget):
         model_files.sort()
         combo.addItems(model_files)
         
+        # Set the current selection to match the default model if it's a segmentation combo
+        if model_type == "segmentation":
+            default_model = get_setting("models.segmentation.default_model", "yolo11l-seg.pt")
+            # Find and select the default model in the dropdown
+            for i, model_file in enumerate(model_files):
+                if default_model in model_file or model_file in default_model:
+                    combo.setCurrentIndex(i)
+                    break
+        
         print(f"[MAIN_TAB] Found {len(model_files)} {model_type} models")
     
     def _on_video_selection_changed(self, row: int):
@@ -486,13 +495,19 @@ class MainTab(QWidget):
         
         q_image = QImage(processed_frame.data, width, height, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
         
-        # Scale to fit label
+        # Scale to fit label with 5% zoom out
         pixmap = QPixmap.fromImage(q_image)
         # Use fixed dimensions instead of current label size to prevent growth
         label_width = self.video_label.width()
         label_height = 1200  # Use the fixed height we set
+        
+        # Apply 5% zoom out (scale to 95% of available space)
+        zoom_factor = 0.95
+        target_width = int((label_width - 4) * zoom_factor)  # Account for 2px border on each side
+        target_height = int((label_height - 4) * zoom_factor)
+        
         scaled_pixmap = pixmap.scaled(
-            label_width - 4, label_height - 4,  # Account for 2px border on each side
+            target_width, target_height,
             Qt.KeepAspectRatio, 
             Qt.SmoothTransformation
         )
@@ -548,7 +563,8 @@ class MainTab(QWidget):
                 start_time = time.time()
                 self.current_unified_field = create_unified_field(
                     self.current_field_results, 
-                    frame.shape[:2]  # (height, width)
+                    frame.shape[:2],  # (height, width)
+                    frame  # Pass original frame for line detection
                 )
                 duration_ms = (time.time() - start_time) * 1000
                 self.performance_widget.add_processing_measurement("Unified Field", duration_ms)
@@ -821,13 +837,21 @@ class MainTab(QWidget):
         print(f"[MAIN_TAB] Field segmentation {'enabled' if checked else 'disabled'}")
         
         if checked:
-            # Ensure field segmentation model is loaded with the default path
-            default_model_path = Path(get_setting("models.base_path", DEFAULT_PATHS['MODELS'])) / "segmentation/field_finder_yolo11m-seg/segmentation_finetune/weights/best.pt"
-            if default_model_path.exists():
-                set_field_model(str(default_model_path))
-                print(f"[MAIN_TAB] Field segmentation model set to: {default_model_path}")
+            # Ensure field segmentation model is loaded with the default path from config
+            default_model_path = get_setting("models.segmentation.default_model", "yolo11l-seg.pt")
+            
+            # If it's a relative path, make it absolute
+            if not Path(default_model_path).is_absolute():
+                base_path = Path(get_setting("models.base_path", DEFAULT_PATHS['MODELS']))
+                full_model_path = base_path / default_model_path
             else:
-                print(f"[MAIN_TAB] Default field segmentation model not found at: {default_model_path}")
+                full_model_path = Path(default_model_path)
+            
+            if full_model_path.exists():
+                set_field_model(str(full_model_path))
+                print(f"[MAIN_TAB] Field segmentation model set to: {full_model_path}")
+            else:
+                print(f"[MAIN_TAB] Default field segmentation model not found at: {full_model_path}")
                 print("[MAIN_TAB] Will use fallback models or mock results")
     
     # Model selection event handlers

@@ -127,32 +127,168 @@ def unify_field_segmentation(segmentation_results: List[Any],
     return unified_mask
 
 
-def estimate_field_lines(unified_mask: np.ndarray) -> List[FieldLine]:
-    """Estimate field lines from unified field segmentation mask.
+def _fit_field_polygon(field_mask: np.ndarray) -> List[Tuple[int, int, int, int]]:
+    """Fit a polygon to the field mask boundary and extract field lines.
+    
+    Args:
+        field_mask: Binary mask of field area
+        
+    Returns:
+        List of line tuples (x1, y1, x2, y2) representing polygon edges
+    """
+    # Find contours of the field mask
+    contours, _ = cv2.findContours(
+        field_mask.astype(np.uint8), 
+        cv2.RETR_EXTERNAL, 
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+    
+    if not contours:
+        print("[FIELD_PROJ] No contours found in field mask")
+        return []
+    
+    # Get the largest contour (should be the main field boundary)
+    largest_contour = max(contours, key=cv2.contourArea)
+    
+    if len(largest_contour) < 4:
+        print("[FIELD_PROJ] Contour too small for polygon fitting")
+        return []
+    
+    print(f"[FIELD_PROJ] Found contour with {len(largest_contour)} points")
+    
+    # Approximate the contour with a polygon
+    # Start with a reasonable epsilon value (2% of perimeter)
+    epsilon = get_setting("field_projection.polygon_epsilon", 0.02) * cv2.arcLength(largest_contour, True)
+    polygon = cv2.approxPolyDP(largest_contour, epsilon, True)
+    
+    print(f"[FIELD_PROJ] Polygon approximation has {len(polygon)} vertices")
+    
+    if len(polygon) < 3:
+        print("[FIELD_PROJ] Polygon too simple (less than 3 vertices)")
+        return []
+    
+    # Convert polygon vertices to line segments
+    lines = []
+    for i in range(len(polygon)):
+        # Get current and next vertex (wrapping around)
+        p1 = polygon[i][0]
+        p2 = polygon[(i + 1) % len(polygon)][0]
+        
+        # Create line tuple (x1, y1, x2, y2)
+        line = (int(p1[0]), int(p1[1]), int(p2[0]), int(p2[1]))
+        lines.append(line)
+        
+        # Debug: print each polygon edge
+        x1, y1, x2, y2 = line
+        length = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+        dx = x2 - x1
+        dy = y2 - y1
+        if dx == 0:
+            angle = 90.0
+        else:
+            angle = abs(math.atan2(dy, dx) * 180 / math.pi)
+        print(f"[FIELD_PROJ] Polygon edge {i}: ({x1},{y1})-({x2},{y2}), length={length:.1f}, angle={angle:.1f}°")
+    
+    print(f"[FIELD_PROJ] Extracted {len(lines)} polygon edges as potential field lines")
+    
+    # Filter out very short lines and edge lines that are likely noise
+    min_line_length = get_setting("field_projection.min_polygon_line_length", 50)
+    edge_margin = get_setting("field_projection.edge_margin", 5)
+    h, w = field_mask.shape
+    filtered_lines = []
+    
+    for line in lines:
+        x1, y1, x2, y2 = line
+        length = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+        
+        # Check if line is too short
+        if length < min_line_length:
+            print(f"[FIELD_PROJ] Filtered out short line: length={length:.1f}")
+            continue
+            
+        # For polygon edges from field segmentation, be more permissive with edge filtering
+        # Only filter lines that are VERY close to edges (likely true artifacts)
+        # Use a smaller margin for polygon-based detection since these are real field boundaries
+        strict_margin = 3  # Much more permissive for polygon edges
+        if (_is_line_at_edge(x1, y1, x2, y2, w, h, strict_margin)):
+            print(f"[FIELD_PROJ] Filtered out edge artifact: ({x1},{y1})-({x2},{y2}) - within {strict_margin}px of image boundary")
+            continue
+            
+        print(f"[FIELD_PROJ] Kept field boundary: ({x1},{y1})-({x2},{y2}), length={length:.1f}")
+        filtered_lines.append(line)
+    
+    print(f"[FIELD_PROJ] {len(filtered_lines)} lines after length and edge filtering")
+    
+    return filtered_lines
+
+
+def _is_line_at_edge(x1: int, y1: int, x2: int, y2: int, w: int, h: int, margin: int) -> bool:
+    """Check if a line is an edge artifact (close to edge AND parallel to edge).
+    
+    Args:
+        x1, y1, x2, y2: Line endpoints
+        w, h: Image dimensions
+        margin: Distance from edge to consider as "at edge"
+        
+    Returns:
+        True if line is an edge artifact (close to edge AND parallel to edge), False otherwise
+    """
+    # Calculate line angle
+    dx = x2 - x1
+    dy = y2 - y1
+    if dx == 0:
+        angle = 90.0
+    else:
+        angle = abs(math.atan2(dy, dx) * 180 / math.pi)
+    
+    # Threshold for considering a line parallel to edges (nearly horizontal or vertical)
+    parallel_threshold = 15.0  # degrees
+    
+    # Check if line is nearly horizontal (parallel to top/bottom edges)
+    is_horizontal = angle <= parallel_threshold or angle >= (180 - parallel_threshold)
+    
+    # Check if line is nearly vertical (parallel to left/right edges)  
+    is_vertical = abs(angle - 90) <= parallel_threshold
+    
+    # Only filter lines that are BOTH near edges AND parallel to those edges
+    
+    # Check top/bottom edges (horizontal lines)
+    if is_horizontal:
+        if (y1 <= margin and y2 <= margin) or (y1 >= h - margin and y2 >= h - margin):
+            return True
+    
+    # Check left/right edges (vertical lines)
+    if is_vertical:
+        if (x1 <= margin and x2 <= margin) or (x1 >= w - margin and x2 >= w - margin):
+            return True
+    
+    # If line is near edge but NOT parallel to it, it's probably a real field line
+    return False
+
+
+def estimate_field_lines(unified_mask: np.ndarray, original_frame: np.ndarray = None) -> List[FieldLine]:
+    """Estimate field lines from unified field segmentation mask using polygon fitting.
     
     Args:
         unified_mask: Unified binary field mask
+        original_frame: Original video frame (not used in polygon approach)
         
     Returns:
         List of estimated field lines (sidelines and field lines)
         
     Implementation:
-        - Uses edge detection on the field mask
-        - Filters out edges touching image boundaries (artifacts)
-        - Applies Hough line transform to detect straight lines
-        - Classifies lines based on drone perspective (diagonal sidelines, horizontal field lines)
-        - Estimates missing lines by extrapolating from field geometry
+        - Finds the boundary contour of the unified field mask
+        - Fits a polygon to approximate the field boundary
+        - Identifies which polygon edges correspond to field lines based on perspective
+        - Returns the major field boundary lines (sidelines and field lines)
     """
     if unified_mask is None or np.sum(unified_mask) == 0:
         return []
         
-    print("[FIELD_PROJ] Estimating field lines from unified mask")
+    print("[FIELD_PROJ] Estimating field lines from unified mask using polygon fitting")
     
     # Get configuration parameters
-    min_line_length = get_setting("field_projection.min_line_length", 80)  # Increased for better lines
-    max_line_gap = get_setting("field_projection.max_line_gap", 15)
-    hough_threshold = get_setting("field_projection.hough_threshold", 40)  # Increased threshold
-    edge_margin = get_setting("field_projection.edge_margin", 10)  # Pixels from edge to ignore
+    edge_margin = get_setting("field_projection.edge_margin", 10)
     
     # Create a mask that excludes edge regions to avoid boundary artifacts
     h, w = unified_mask.shape
@@ -161,64 +297,33 @@ def estimate_field_lines(unified_mask: np.ndarray) -> List[FieldLine]:
     edge_free_mask[-edge_margin:, :] = 0  # Bottom edge
     edge_free_mask[:, :edge_margin] = 0  # Left edge
     edge_free_mask[:, -edge_margin:] = 0  # Right edge
+
+    # Find the field boundary using polygon fitting
+    field_lines = _fit_field_polygon(edge_free_mask)
     
-    # Detect edges in the field mask (excluding boundary regions)
-    # Use adaptive thresholds based on mask intensity
-    mask_uint8 = edge_free_mask * 255
-    
-    # Apply Gaussian blur before edge detection for smoother results
-    blurred_mask = cv2.GaussianBlur(mask_uint8, (3, 3), 0)
-    
-    # Use Canny edge detection with optimized parameters for field boundaries
-    low_threshold = get_setting("field_projection.canny_low_threshold", 50)
-    high_threshold = get_setting("field_projection.canny_high_threshold", 150)
-    edges = cv2.Canny(blurred_mask, low_threshold, high_threshold, apertureSize=3)
-    
-    # Apply morphological operations to connect nearby edges and clean up
-    edge_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, edge_kernel)
-    
-    # Remove very short edge segments that are likely noise
-    edges = cv2.morphologyEx(edges, cv2.MORPH_OPEN, edge_kernel)
-    
-    # Detect lines using Hough Line Transform
-    lines = cv2.HoughLinesP(
-        edges,
-        rho=1,
-        theta=np.pi/180,
-        threshold=hough_threshold,
-        minLineLength=min_line_length,
-        maxLineGap=max_line_gap
-    )
-    
-    if lines is None:
-        print("[FIELD_PROJ] No lines detected with Hough transform")
+    if not field_lines:
+        print("[FIELD_PROJ] No field lines detected from polygon fitting")
         return []
     
-    # Filter out lines that touch image boundaries (edge artifacts)
-    filtered_lines = _filter_boundary_lines(lines, unified_mask.shape, edge_margin)
+    print(f"[FIELD_PROJ] Polygon fitting detected {len(field_lines)} field lines")
     
-    if not filtered_lines:
-        print("[FIELD_PROJ] No valid lines after boundary filtering")
-        return []
+    # Classify the lines based on perspective and position
+    classified_lines = _classify_field_lines_perspective(field_lines, (h, w))
     
-    # Classify and filter lines for drone perspective
-    field_lines = _classify_field_lines_perspective(filtered_lines, unified_mask.shape)
+    print(f"[FIELD_PROJ] Classified {len(classified_lines)} field lines")
     
-    # Estimate missing lines by extrapolation
-    field_lines = _estimate_missing_lines(field_lines, unified_mask)
-    
-    print(f"[FIELD_PROJ] Estimated {len(field_lines)} field lines")
-    return field_lines
+    return classified_lines
 
 
 def create_unified_field(segmentation_results: List[Any], 
-                        frame_shape: Tuple[int, int]) -> Optional[UnifiedField]:
+                        frame_shape: Tuple[int, int],
+                        original_frame: np.ndarray = None) -> Optional[UnifiedField]:
     """Create a complete unified field representation with lines and metadata.
     
     Args:
         segmentation_results: Raw YOLO segmentation results
         frame_shape: Shape of the frame (height, width)
+        original_frame: Original video frame for line detection (optional)
         
     Returns:
         UnifiedField object with mask, lines, and metadata, or None if failed
@@ -231,7 +336,7 @@ def create_unified_field(segmentation_results: List[Any],
         return None
     
     # Step 2: Estimate field lines
-    field_lines = estimate_field_lines(unified_mask)
+    field_lines = estimate_field_lines(unified_mask, original_frame)
     
     # Step 3: Estimate field corners
     field_corners = _estimate_field_corners(field_lines, frame_shape)
@@ -390,15 +495,39 @@ def _classify_field_lines_perspective(lines: List[Tuple[int, int, int, int]],
         if dx == 0:  # Vertical line
             angle = 90.0
         else:
-            angle = abs(math.atan2(dy, dx) * 180 / math.pi)
+            angle = math.atan2(dy, dx) * 180 / math.pi
+            # Normalize angle to 0-180 range (absolute orientation, not direction)
+            angle = abs(angle)
+            if angle > 90:
+                angle = 180 - angle  # Convert obtuse to acute equivalent
         
         # In drone perspective:
-        # - Sidelines appear diagonal (configurable range)
+        # - Sidelines appear diagonal (configurable range, including steep angles)
         # - Field lines appear more horizontal (configurable threshold)
-        if sideline_min <= angle <= sideline_max:  # Diagonal lines - likely sidelines
+        
+        # Check for diagonal sidelines (25-75° range covers most perspective angles)
+        is_diagonal = (sideline_min <= angle <= sideline_max)
+        
+        # Also accept steep diagonal lines that wrap around (e.g., 152° -> 28°)
+        # These are common in drone perspective where sidelines appear very angled
+        if not is_diagonal:
+            # Check if this is a steep sideline that appears as obtuse angle
+            raw_angle = abs(math.atan2(dy, dx) * 180 / math.pi)
+            if raw_angle > 90:
+                # Convert back: 152° means it's really 28° steep diagonal
+                equivalent_angle = 180 - raw_angle
+                is_diagonal = (sideline_min <= equivalent_angle <= sideline_max)
+                angle = equivalent_angle  # Use the equivalent acute angle
+        
+        if is_diagonal:  # Diagonal lines - likely sidelines
             diagonal_lines.append((x1, y1, x2, y2, angle))
+            print(f"[FIELD_PROJ] Line ({x1},{y1})-({x2},{y2}) classified as SIDELINE (angle={angle:.1f}°)")
         elif angle <= field_line_max:  # More horizontal lines - likely field lines
             horizontal_lines.append((x1, y1, x2, y2, angle))
+            print(f"[FIELD_PROJ] Line ({x1},{y1})-({x2},{y2}) classified as FIELD LINE (angle={angle:.1f}°)")
+        else:
+            raw_angle = abs(math.atan2(dy, dx) * 180 / math.pi)
+            print(f"[FIELD_PROJ] Line ({x1},{y1})-({x2},{y2}) REJECTED (angle={angle:.1f}° from raw {raw_angle:.1f}°, not in valid ranges)")
         # Skip lines outside these ranges as they're likely artifacts
     
     print(f"[FIELD_PROJ] Classified lines: {len(diagonal_lines)} diagonal (sidelines), "
@@ -843,6 +972,57 @@ def _calculate_field_coverage(unified_mask: np.ndarray,
     return coverage_ratio
 
 
+def _draw_field_polygon(frame: np.ndarray, field_mask: np.ndarray) -> None:
+    """Draw the polygon boundary that was fitted to the field mask.
+    
+    Args:
+        frame: Frame to draw on (modified in place)
+        field_mask: Binary field mask used for polygon fitting
+    """
+    try:
+        # Find contours of the field mask
+        contours, _ = cv2.findContours(
+            field_mask.astype(np.uint8), 
+            cv2.RETR_EXTERNAL, 
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+        
+        if not contours:
+            return
+        
+        # Get the largest contour (should be the main field boundary)
+        largest_contour = max(contours, key=cv2.contourArea)
+        
+        if len(largest_contour) < 4:
+            return
+        
+        # Approximate the contour with a polygon
+        epsilon = get_setting("field_projection.polygon_epsilon", 0.02) * cv2.arcLength(largest_contour, True)
+        polygon = cv2.approxPolyDP(largest_contour, epsilon, True)
+        
+        if len(polygon) < 3:
+            return
+        
+        # Draw the polygon boundary
+        cv2.polylines(frame, [polygon], True, (255, 0, 255), 2)  # Magenta polygon outline
+        
+        # Draw polygon vertices
+        for i, point in enumerate(polygon):
+            pt = tuple(point[0])
+            cv2.circle(frame, pt, 4, (255, 0, 255), -1)  # Magenta vertices
+            # Label vertices with numbers
+            cv2.putText(frame, str(i), (pt[0] + 5, pt[1] - 5), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        
+        # Add polygon info text
+        polygon_text = f"Polygon: {len(polygon)} vertices"
+        cv2.putText(frame, polygon_text, (10, 60), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+                   
+    except Exception as e:
+        print(f"[FIELD_PROJ] Error drawing polygon: {e}")
+
+
 def visualize_unified_field(frame: np.ndarray, unified_field: UnifiedField) -> np.ndarray:
     """Visualize the unified field with detected lines on a frame.
     
@@ -865,6 +1045,9 @@ def visualize_unified_field(frame: np.ndarray, unified_field: UnifiedField) -> n
         field_color = (0, 200, 0)  # Green
         overlay[unified_field.mask > 0] = field_color
         vis_frame = cv2.addWeighted(vis_frame, 0.7, overlay, 0.3, 0)
+        
+        # Draw the polygon boundary used for line detection
+        _draw_field_polygon(vis_frame, unified_field.mask)
     
     # Draw field lines
     line_colors = {
