@@ -15,17 +15,8 @@ import math
 
 from ..config.settings import get_setting
 from ..constants import FIELD_DIMENSIONS
-
-
-@dataclass
-class FieldLine:
-    """Represents a field line with its endpoints and properties."""
-    line_type: str  # 'left_sideline', 'right_sideline', 'close_field', 'far_field'
-    point1: Tuple[float, float]  # (x, y) start point
-    point2: Tuple[float, float]  # (x, y) end point
-    confidence: float  # Confidence in line detection (0.0 to 1.0)
-    visible: bool  # Whether line is fully/partially visible in image
-    extrapolated: bool  # Whether line extends beyond image bounds
+from .field_coverage import estimate_field_coverage, FieldCoverage
+from .field_types import FieldLine
 
 
 @dataclass
@@ -36,6 +27,7 @@ class UnifiedField:
     field_corners: List[Tuple[float, float]]  # Estimated field corner points
     coverage_ratio: float  # Fraction of field visible (0.0 to 1.0)
     image_bounds: Tuple[int, int]  # (width, height) of source image
+    coverage_analysis: Optional[FieldCoverage]  # Detailed coverage analysis
 
 
 def unify_field_segmentation(segmentation_results: List[Any], 
@@ -341,8 +333,11 @@ def create_unified_field(segmentation_results: List[Any],
     # Step 3: Estimate field corners
     field_corners = _estimate_field_corners(field_lines, frame_shape)
     
-    # Step 4: Calculate field coverage ratio
-    coverage_ratio = _calculate_field_coverage(unified_mask, field_corners, frame_shape)
+    # Step 4: Analyze field coverage
+    coverage_analysis = estimate_field_coverage(field_lines, frame_shape) if field_lines else None
+    
+    # Step 5: Calculate simplified coverage ratio
+    coverage_ratio = coverage_analysis.visible_width_ratio * coverage_analysis.visible_length_ratio if coverage_analysis else _calculate_field_coverage(unified_mask, field_corners, frame_shape)
     
     # Create unified field object
     unified_field = UnifiedField(
@@ -350,7 +345,8 @@ def create_unified_field(segmentation_results: List[Any],
         lines=field_lines,
         field_corners=field_corners,
         coverage_ratio=coverage_ratio,
-        image_bounds=(frame_shape[1], frame_shape[0])  # (width, height)
+        image_bounds=(frame_shape[1], frame_shape[0]),  # (width, height)
+        coverage_analysis=coverage_analysis
     )
     
     print(f"[FIELD_PROJ] Created unified field with {len(field_lines)} lines, "

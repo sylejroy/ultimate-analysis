@@ -36,6 +36,7 @@ from ..processing.field_projection import create_unified_field
 from ..processing.field_mapping import (
     create_perspective_transform, map_players_to_field, create_top_down_field_view
 )
+from ..processing.jersey_color import get_jersey_colors_for_tracks
 from ..config.settings import get_setting
 from ..constants import SHORTCUTS, DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS
 
@@ -78,6 +79,7 @@ class MainTab(QWidget):
         self.current_field_results: List[Any] = []
         self.current_unified_field: Any = None
         self.current_player_ids: Dict[int, Tuple[str, Any]] = {}
+        self.current_jersey_colors: Dict[int, Tuple[int, int, int]] = {}
         
         # FPS tracking for processed frames
         self.frame_times: List[float] = []
@@ -274,7 +276,7 @@ class MainTab(QWidget):
         # Top-down field display
         self.field_view_label = QLabel("Enable Field Segmentation to see top-down view")
         self.field_view_label.setAlignment(Qt.AlignCenter)
-        self.field_view_label.setFixedSize(222, 600)  # Swapped dimensions for correct field orientation
+        self.field_view_label.setFixedSize(300, 800)  # Increased from 222x600 to 300x800
         self.field_view_label.setStyleSheet("""
             QLabel {
                 border: 2px solid #555;
@@ -579,6 +581,8 @@ class MainTab(QWidget):
         self.current_field_results = []
         self.current_unified_field = None
         self.current_player_ids = {}
+        self.current_jersey_colors = {}
+        self.current_jersey_colors = {}
         
         # Run inference if enabled
         if self.inference_checkbox.isChecked():
@@ -645,6 +649,19 @@ class MainTab(QWidget):
         else:
             # Clear player IDs when not running
             self.current_player_ids = {}
+            self.current_jersey_colors = {}
+        
+        # Estimate jersey colors if tracking is enabled
+        if self.tracking_checkbox.isChecked() and self.current_tracks:
+            print(f"[MAIN_TAB] Estimating jersey colors for {len(self.current_tracks)} tracks...")
+            start_time = time.time()
+            self.current_jersey_colors = get_jersey_colors_for_tracks(frame, self.current_tracks)
+            duration_ms = (time.time() - start_time) * 1000
+            self.performance_widget.add_processing_measurement("Jersey Colors", duration_ms)
+            print(f"[MAIN_TAB] Estimated colors for {len(self.current_jersey_colors)} players")
+        else:
+            # Clear jersey colors when not running
+            self.current_jersey_colors = {}
         
         # Apply visualizations (with timing)
         viz_start_time = time.time()
@@ -1020,21 +1037,25 @@ class MainTab(QWidget):
             # Extract field lines from unified field
             if hasattr(self.current_unified_field, 'lines') and self.current_unified_field.lines:
                 field_lines = self.current_unified_field.lines
+                coverage_analysis = getattr(self.current_unified_field, 'coverage_analysis', None)
                 
                 # Create perspective transformation matrix
                 image_shape = self.current_unified_field.image_bounds[::-1]  # (height, width)
-                transform_matrix = create_perspective_transform(field_lines, image_shape)
+                transform_matrix = create_perspective_transform(
+                    field_lines, image_shape, coverage_analysis
+                )
                 
                 if transform_matrix is not None:
                     # Map players to field coordinates
                     player_positions = map_players_to_field(
                         self.current_tracks, 
                         self.current_player_ids, 
-                        transform_matrix
+                        transform_matrix,
+                        self.current_jersey_colors
                     )
                     
                     # Create top-down field view
-                    field_img = create_top_down_field_view(player_positions)
+                    field_img = create_top_down_field_view(player_positions, coverage_analysis=coverage_analysis)
                     
                     # Convert to QPixmap and display
                     height, width, channel = field_img.shape

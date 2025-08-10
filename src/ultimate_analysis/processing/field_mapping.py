@@ -12,7 +12,8 @@ import math
 
 from ..config.settings import get_setting
 from ..constants import FIELD_DIMENSIONS
-from .field_projection import FieldLine, UnifiedField
+from .field_projection import UnifiedField
+from .field_types import FieldLine
 
 
 @dataclass
@@ -30,23 +31,27 @@ class PlayerPosition:
     jersey_number: Optional[str]
     field_coord: FieldCoordinate
     pixel_coord: Tuple[int, int]  # Original pixel position (feet center)
+    jersey_color: Optional[Tuple[int, int, int]]  # RGB jersey color
 
 
 def create_perspective_transform(field_lines: List[FieldLine], 
-                                image_shape: Tuple[int, int]) -> Optional[np.ndarray]:
+                                image_shape: Tuple[int, int],
+                                coverage_analysis: Any = None) -> Optional[np.ndarray]:
     """Create perspective transformation matrix from field lines to top-down view.
     
     Args:
         field_lines: Detected field lines (sidelines and field lines)
         image_shape: Shape of the image (height, width)
+        coverage_analysis: Optional FieldCoverage analysis for better estimation
         
     Returns:
         3x3 transformation matrix, or None if insufficient lines detected
         
     Strategy:
         1. Identify key field boundaries (left/right sidelines, near/far field lines)
-        2. Map these to real field dimensions (100m x 37m)
-        3. Use cv2.getPerspectiveTransform() to create mapping
+        2. Use coverage analysis to extrapolate missing boundaries if available
+        3. Map these to real field dimensions (100m x 37m)
+        4. Use cv2.getPerspectiveTransform() to create mapping
     """
     if len(field_lines) < 3:  # Need at least 3 lines for reasonable mapping
         print(f"[FIELD_MAP] Insufficient field lines ({len(field_lines)}) for perspective transform")
@@ -137,7 +142,14 @@ def create_perspective_transform(field_lines: List[FieldLine],
         if corner:
             field_corners.append(corner)
     
-    # If we don't have enough corners, estimate based on available lines
+    # If we don't have enough corners, use coverage analysis to estimate them
+    if len(field_corners) < 4 and coverage_analysis:
+        print("[FIELD_MAP] Using coverage analysis to estimate missing corners")
+        field_corners = coverage_analysis.estimated_full_field
+        if len(field_corners) >= 4:
+            print(f"[FIELD_MAP] Coverage analysis provided {len(field_corners)} corners")
+    
+    # Fallback estimation if still insufficient corners
     if len(field_corners) < 4:
         field_corners = _estimate_field_corners(field_lines, image_shape)
     
@@ -264,7 +276,8 @@ def _sort_field_corners(corners: List[Tuple[float, float]],
 
 
 def map_players_to_field(tracks: List[Any], player_ids: Dict[int, Tuple[str, Any]], 
-                        transform_matrix: np.ndarray) -> List[PlayerPosition]:
+                        transform_matrix: np.ndarray,
+                        jersey_colors: Dict[int, Tuple[int, int, int]] = None) -> List[PlayerPosition]:
     """Map player pixel positions to field coordinates.
     
     Args:
@@ -312,12 +325,17 @@ def map_players_to_field(tracks: List[Any], player_ids: Dict[int, Tuple[str, Any
         field_point = cv2.perspectiveTransform(pixel_point.reshape(1, 1, 2), transform_matrix)
         field_x, field_y = field_point[0, 0]
         
-        # Get jersey number
+        # Get jersey number and color
         jersey_number = None
+        jersey_color = None
+        
         if track_id in player_ids:
             jersey_number = player_ids[track_id][0]
             if jersey_number == "Unknown":
                 jersey_number = None
+        
+        if jersey_colors and track_id in jersey_colors:
+            jersey_color = jersey_colors[track_id]
         
         # Create field coordinate with confidence based on jersey detection
         confidence = 0.8 if jersey_number else 0.5  # Higher confidence if player ID detected
@@ -332,7 +350,8 @@ def map_players_to_field(tracks: List[Any], player_ids: Dict[int, Tuple[str, Any
             track_id=track_id,
             jersey_number=jersey_number,
             field_coord=field_coord,
-            pixel_coord=(int(feet_x), int(feet_y))
+            pixel_coord=(int(feet_x), int(feet_y)),
+            jersey_color=jersey_color
         )
         
         player_positions.append(player_position)
@@ -342,7 +361,8 @@ def map_players_to_field(tracks: List[Any], player_ids: Dict[int, Tuple[str, Any
 
 
 def create_top_down_field_view(player_positions: List[PlayerPosition], 
-                              field_size: Tuple[int, int] = (222, 600)) -> np.ndarray:
+                              field_size: Tuple[int, int] = (300, 800),  # Increased size
+                              coverage_analysis: Any = None) -> np.ndarray:
     """Create a top-down view of the Ultimate field with player positions.
     
     Args:
@@ -406,9 +426,13 @@ def create_top_down_field_view(player_positions: List[PlayerPosition],
         if img_x < 0 or img_x >= img_width or img_y < 0 or img_y >= img_height:
             continue
         
-        # Player color based on jersey number
-        if player_pos.jersey_number:
-            # Different colors for different jersey numbers
+        # Player color based on estimated jersey color
+        if player_pos.jersey_color:
+            # Use the estimated jersey color (convert from RGB to BGR for OpenCV)
+            r, g, b = player_pos.jersey_color
+            player_color = (b, g, r)  # BGR format for OpenCV
+        elif player_pos.jersey_number:
+            # Fallback: Different colors for different jersey numbers
             jersey_hash = hash(player_pos.jersey_number) % 6
             colors = [
                 (255, 0, 0),    # Red
@@ -459,10 +483,32 @@ def create_top_down_field_view(player_positions: List[PlayerPosition],
             cv2.putText(field_img, track_text, (text_x, text_y),
                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, (128, 128, 128), 1)  # Gray text
     
-    # Add field labels
+    # Add field labels and coverage information
     cv2.putText(field_img, "Ultimate Field Top-Down View", (10, 20),
                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-    cv2.putText(field_img, f"Players: {len(player_positions)}", (10, img_height - 10),
+    cv2.putText(field_img, f"Players: {len(player_positions)}", (10, img_height - 30),
                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+    
+    # Add coverage information if available
+    if coverage_analysis:
+        coverage_text = f"Coverage: {coverage_analysis.visible_width_ratio:.1%}w x {coverage_analysis.visible_length_ratio:.1%}l"
+        cv2.putText(field_img, coverage_text, (10, img_height - 10),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.3, (200, 200, 200), 1)
+        
+        # Add cut indicators
+        cut_indicators = []
+        if coverage_analysis.left_sideline_cut:
+            cut_indicators.append("L")
+        if coverage_analysis.right_sideline_cut:
+            cut_indicators.append("R")
+        if coverage_analysis.near_boundary_cut:
+            cut_indicators.append("N")
+        if coverage_analysis.far_boundary_cut:
+            cut_indicators.append("F")
+        
+        if cut_indicators:
+            cut_text = f"Cut: {','.join(cut_indicators)}"
+            cv2.putText(field_img, cut_text, (10, 40),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.3, (255, 255, 0), 1)
     
     return field_img
