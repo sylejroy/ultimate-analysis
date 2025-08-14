@@ -210,3 +210,63 @@ class ModelAnalyzer:
 
 *Last Updated: August 2, 2025*
 *Branch: feature/parallel_processing*
+
+
+"""
+Feature: Sideline-based homography estimation from YOLO field segmentation
+File: src/ultimate_analysis/processing/homography.py (new file under 500 lines)
+
+Goal:
+Given:
+  - A video frame (np.ndarray, BGR)
+  - A YOLO segmentation mask of the field (same resolution as frame)
+  - Known world coordinates for a regulation ultimate field (100m x 37m)
+Only the two far corners are visible in each frame. The near corners are hidden.
+We want to estimate a homography that maps the world field coordinates to image coordinates.
+
+Steps for implementation:
+1. **Inputs**
+   - image: np.ndarray
+   - field_mask: np.ndarray (binary mask from YOLO segmentation model)
+   - template_corners: np.ndarray([[0,0],[100,0],[100,37],[0,37]]) in meters
+   - num_steps: int (resolution of near-corner search along sidelines)
+
+2. **Edge Detection**
+   - Apply morphological cleanup to `field_mask` to smooth edges.
+   - Detect boundaries and fit:
+     a) Far endline (Hough or RANSAC)
+     b) Left sideline
+     c) Right sideline
+
+3. **Fixed Points**
+   - Find far-left corner = intersection of far endline and left sideline.
+   - Find far-right corner = intersection of far endline and right sideline.
+
+4. **Search**
+   - For s_L in linspace(0,1,num_steps) and s_R in linspace(0,1,num_steps):
+       - Near-left = far_left + s_L * (vector along left sideline toward camera)
+       - Near-right = far_right + s_R * (vector along right sideline toward camera)
+       - Assemble world→image correspondences:
+           (0,0) → far_left
+           (100,0) → far_right
+           (0,37) → near_left
+           (100,37) → near_right
+       - Compute H_candidate = cv2.getPerspectiveTransform()
+       - Warp a binary field template (scaled to meters) into image space
+       - Compute IoU between warped template and `field_mask`
+
+5. **Selection**
+   - Keep track of H with the highest IoU.
+   - Return H_best and best IoU score.
+
+6. **Integration**
+   - This should be callable from existing processing pipeline after YOLO segmentation step.
+   - Expose via `estimate_field_homography(image, field_mask, template_corners, num_steps=50) -> Tuple[np.ndarray, float]`.
+
+Constraints:
+- Keep file under 500 lines.
+- Use type hints and docstrings.
+- Follow import order (standard, third-party, local).
+- Use get_setting() for configurable parameters.
+- Do not break real-time performance: allow optional `frame_skip` from config.
+"""
