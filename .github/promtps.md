@@ -270,3 +270,50 @@ Constraints:
 - Use get_setting() for configurable parameters.
 - Do not break real-time performance: allow optional `frame_skip` from config.
 """
+
+"""
+Feature: GUI Tab for Interactive Homography Estimation
+File: src/ultimate_analysis/gui/tabs/homography_tab.py (new file under 500 lines)
+
+Goal:
+Create a new experimental PyQt5 tab that allows a user to:
+  - Select a video recording from the left column (reuse existing video selection UI).
+  - Scroll through frames of the selected recording.
+  - Adjust each of the 8 homography parameters (H[0,0] ... H[2,1], H[2,2] fixed at 1.0) with sliders.
+  - See side-by-side display:
+      Left: raw frame
+      Right: frame warped with current homography matrix (cv2.warpPerspective).
+  - Update warp in real time as sliders move.
+
+Layout & Interaction:
+1. **Base Layout**
+   - Split into two main sections:
+       a) Left sidebar: video selection list + frame scroll slider (reuse existing tab pattern).
+       b) Main display: two QLabel widgets for images (original + warped), stacked horizontally.
+
+2. **Homography Controls**
+   - Under the displays, add 8 sliders (QSlider, horizontal), one per homography matrix parameter except H[2,2].
+   - Sliders should be labeled with parameter index (e.g., "H00", "H01", ... "H21").
+   - Sliders map to float ranges: default -0.005 to 0.005 for first two rows, -1e-5 to 1e-5 for third row (fine tuning perspective). These ranges should be configurable via `get_setting()`.
+   - Also include a "Reset" button to restore the identity homography.
+
+3. **Video Frame Navigation**
+   - Use existing frame seek/scroll implementation from other experimental tabs.
+   - When frame changes, update both displays immediately with current H.
+
+4. **Warping**
+   - Implement `apply_homography(frame: np.ndarray, H: np.ndarray) -> np.ndarray` using `cv2.warpPerspective`.
+   - Output should be same resolution as input frame.
+
+5. **Integration**
+   - Tab should register in GUI alongside other experimental tabs.
+   - No heavy processing — must remain interactive at video framerate.
+   - Ensure consistent styling and naming with existing experimental tabs.
+
+Constraints:
+- Keep file under 500 lines.
+- Use type hints and docstrings for all public methods.
+- Follow repo import order (standard, third-party, local).
+- Configuration (slider ranges, step size, video dir) should use get_setting().
+- Do not block the GUI thread — use PyQt signals/slots if needed for slider updates.
+"""
