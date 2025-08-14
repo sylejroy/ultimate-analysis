@@ -272,7 +272,7 @@ Constraints:
 """
 
 """
-Feature: GUI Tab for Interactive Homography Estimation
+Feature: GUI Tab for Interactive Homography Estimation with Save/Load YAML Parameters
 File: src/ultimate_analysis/gui/tabs/homography_tab.py (new file under 500 lines)
 
 Goal:
@@ -284,11 +284,12 @@ Create a new experimental PyQt5 tab that allows a user to:
       Left: raw frame
       Right: frame warped with current homography matrix (cv2.warpPerspective).
   - Update warp in real time as sliders move.
+  - Save and load homography parameter sets to/from a YAML file.
 
 Layout & Interaction:
 1. **Base Layout**
    - Split into two main sections:
-       a) Left sidebar: video selection list + frame scroll slider (reuse existing tab pattern).
+       a) Left sidebar: video selection list + frame scroll slider (reuse existing video selection code).
        b) Main display: two QLabel widgets for images (original + warped), stacked horizontally.
 
 2. **Homography Controls**
@@ -297,15 +298,26 @@ Layout & Interaction:
    - Sliders map to float ranges: default -0.005 to 0.005 for first two rows, -1e-5 to 1e-5 for third row (fine tuning perspective). These ranges should be configurable via `get_setting()`.
    - Also include a "Reset" button to restore the identity homography.
 
-3. **Video Frame Navigation**
-   - Use existing frame seek/scroll implementation from other experimental tabs.
+3. **YAML Save/Load**
+   - Add "Save Params" and "Load Params" buttons.
+   - Saving:
+       - Collect current slider values into a dict with keys `H00`..`H21`.
+       - Save to a YAML file in `data/homography_params/` (create folder if missing).
+       - Use standard PyYAML to dump file with a timestamp in filename unless user specifies otherwise.
+   - Loading:
+       - Open a QFileDialog to select a `.yaml` file from `data/homography_params/`.
+       - Read values and update sliders, triggering display refresh.
+   - Use `get_setting()` where applicable for default paths.
+
+4. **Video Frame Navigation**
+   - Reuse frame seek/scroll from existing experimental tabs.
    - When frame changes, update both displays immediately with current H.
 
-4. **Warping**
+5. **Warping**
    - Implement `apply_homography(frame: np.ndarray, H: np.ndarray) -> np.ndarray` using `cv2.warpPerspective`.
    - Output should be same resolution as input frame.
 
-5. **Integration**
+6. **Integration**
    - Tab should register in GUI alongside other experimental tabs.
    - No heavy processing — must remain interactive at video framerate.
    - Ensure consistent styling and naming with existing experimental tabs.
@@ -314,6 +326,7 @@ Constraints:
 - Keep file under 500 lines.
 - Use type hints and docstrings for all public methods.
 - Follow repo import order (standard, third-party, local).
-- Configuration (slider ranges, step size, video dir) should use get_setting().
-- Do not block the GUI thread — use PyQt signals/slots if needed for slider updates.
+- Configuration (slider ranges, default path) should use `get_setting()`.
+- Do not block the GUI thread — use PyQt signals/slots for slider updates.
+- Homography YAML files must be compatible with PyYAML load/dump for easy manual editing.
 """
