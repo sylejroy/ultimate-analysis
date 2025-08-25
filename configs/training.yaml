@@ -2,6 +2,7 @@ detection:
   augment: false
   batch_size: 0.8
   copy_paste: 0.0
+  cosine_lr: false
   epochs: 10
   hsv_h: 0.015
   hsv_s: 0.7
@@ -21,21 +22,20 @@ output:
   save_results: true
   verbose: true
 segmentation:
-  augment: true
-  batch_size: 8
-  box: 7.5
-  cls: 0.5
+  augment: false
+  batch_size: 0.8
   copy_paste: 0.0
-  device: 0
-  dfl: 1.5
-  epochs: 150
-  imgsz: 640
+  cosine_lr: true
+  epochs: 300
+  hsv_h: 0.015
+  hsv_s: 0.7
+  hsv_v: 0.4
+  imgsz: 1280
   learning_rate: 0.01
-  mask: 7.5
   mixup: 0.0
   momentum: 0.937
+  mosaic: 1.0
   optimizer: SGD
-  patience: 15
-  save_period: -1
+  patience: 20
   weight_decay: 0.0005
-  workers: 8
+  workers: 0

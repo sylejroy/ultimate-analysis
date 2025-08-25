@@ -6,6 +6,7 @@ identifying important field features like end zones and sidelines.
 
 import cv2
 import numpy as np
+import yaml
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,9 +25,90 @@ from ..constants import FIELD_DIMENSIONS, FALLBACK_DEFAULTS
 # Global field segmentation state
 _field_model = None
 _current_model_path = None
+_model_imgsz = None  # Store the model's training image size
 
 
 def run_field_segmentation(frame: np.ndarray) -> List[Any]:
+    """Run field segmentation on a single frame.
+    
+    Args:
+        frame: Input video frame as numpy array
+        
+    Returns:
+        List of segmentation results
+    """
+    global _field_model, _current_model_path, _model_imgsz
+    
+    if not ULTRALYTICS_AVAILABLE:
+        print("[FIELD_SEG] YOLO not available, returning mock results")
+        return _create_mock_results(frame)
+    
+    # Load default model if none is loaded
+    if _field_model is None:
+        _load_default_model()
+    
+    if _field_model is None:
+        print("[FIELD_SEG] No field segmentation model available")
+        return _create_mock_results(frame)
+    
+    try:
+        # Get segmentation parameters from config
+        confidence_threshold = get_setting("models.segmentation.confidence_threshold", 0.25)
+        iou_threshold = get_setting("models.segmentation.iou_threshold", 0.7)
+        
+        # Determine image size to use - prefer model's training size
+        imgsz = _model_imgsz if _model_imgsz else 640
+        
+        # Run YOLO segmentation with proper image size
+        results = _field_model.predict(
+            frame,
+            conf=confidence_threshold,
+            iou=iou_threshold,
+            imgsz=imgsz,  # Use model's training image size
+            verbose=False,
+            save=False,
+            show=False
+        )
+        
+        return list(results)
+        
+    except Exception as e:
+        print(f"[FIELD_SEG] Error during field segmentation: {e}")
+        import traceback
+        traceback.print_exc()
+        return _create_mock_results(frame)
+
+
+def _get_model_training_params(model_path: str) -> Dict[str, Any]:
+    """Extract training parameters from model's args.yaml file.
+    
+    Args:
+        model_path: Path to the model file (.pt)
+        
+    Returns:
+        Dictionary of training parameters, or empty dict if not found
+    """
+    try:
+        model_path = Path(model_path)
+        
+        # Look for args.yaml in the same directory as the model
+        args_yaml_path = model_path.parent / "args.yaml"
+        
+        if args_yaml_path.exists():
+            with open(args_yaml_path, 'r') as f:
+                args = yaml.safe_load(f)
+                print(f"[FIELD_SEG] Loaded training parameters from {args_yaml_path}")
+                return args if args else {}
+        else:
+            print(f"[FIELD_SEG] No args.yaml found at {args_yaml_path}")
+            
+    except Exception as e:
+        print(f"[FIELD_SEG] Error reading model training parameters: {e}")
+    
+    return {}
+
+
+def set_field_model(model_path: str) -> bool:
     """Run field segmentation on a video frame.
     
     Args:
@@ -129,12 +211,16 @@ def run_batch_field_segmentation(frames: List[np.ndarray], use_parallel: bool = 
         confidence_threshold = get_setting("models.segmentation.confidence_threshold", 0.25)
         iou_threshold = get_setting("models.segmentation.iou_threshold", 0.7)
         
+        # Determine image size to use - prefer model's training size
+        imgsz = _model_imgsz if _model_imgsz else 640
+        
         # Run batch YOLO segmentation
         print(f"[FIELD_SEG] Running batch YOLO segmentation on {len(frames)} frames")
         batch_results = _field_model.predict(
             frames,  # YOLO can process multiple frames at once
             conf=confidence_threshold,
             iou=iou_threshold,
+            imgsz=imgsz,  # Use model's training image size
             verbose=False,
             save=False,
             show=False
@@ -219,7 +305,7 @@ def set_field_model(model_path: str) -> bool:
     Example:
         success = set_field_model("data/models/segmentation/field_finder_best.pt")
     """
-    global _field_model, _current_model_path
+    global _field_model, _current_model_path, _model_imgsz
     
     print(f"[FIELD_SEG] Setting field segmentation model: {model_path}")
     
@@ -233,6 +319,11 @@ def set_field_model(model_path: str) -> bool:
             # Load actual YOLO segmentation model
             _field_model = YOLO(model_path)
             print(f"[FIELD_SEG] YOLO model loaded successfully: {model_path}")
+            
+            # Load training parameters to get the image size used during training
+            training_params = _get_model_training_params(model_path)
+            _model_imgsz = training_params.get('imgsz', 640)
+            print(f"[FIELD_SEG] Using model training image size: {_model_imgsz}")
         else:
             print(f"[FIELD_SEG] Ultralytics not available, model path stored for mock mode: {model_path}")
         

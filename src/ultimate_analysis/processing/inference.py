@@ -5,6 +5,7 @@ Detects players, discs, and other relevant objects in Ultimate Frisbee games.
 """
 
 import numpy as np
+import yaml
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -23,6 +24,36 @@ except ImportError:
 # Global model cache
 _detection_model = None
 _current_model_path = None
+_model_imgsz = None  # Store the model's training image size
+
+
+def _get_model_training_params(model_path: str) -> Dict[str, Any]:
+    """Extract training parameters from model's args.yaml file.
+    
+    Args:
+        model_path: Path to the model file (.pt)
+        
+    Returns:
+        Dictionary of training parameters, or empty dict if not found
+    """
+    try:
+        model_path = Path(model_path)
+        
+        # Look for args.yaml in the same directory as the model
+        args_yaml_path = model_path.parent / "args.yaml"
+        
+        if args_yaml_path.exists():
+            with open(args_yaml_path, 'r') as f:
+                args = yaml.safe_load(f)
+                print(f"[INFERENCE] Loaded training parameters from {args_yaml_path}")
+                return args if args else {}
+        else:
+            print(f"[INFERENCE] No args.yaml found at {args_yaml_path}")
+            
+    except Exception as e:
+        print(f"[INFERENCE] Error reading model training parameters: {e}")
+    
+    return {}
 
 
 def run_inference(frame: np.ndarray, model_name: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -83,11 +114,15 @@ def run_inference(frame: np.ndarray, model_name: Optional[str] = None) -> List[D
         confidence_threshold = get_setting("models.detection.confidence_threshold", 0.5)
         nms_threshold = get_setting("models.detection.nms_threshold", 0.45)
         
+        # Determine image size to use - prefer model's training size
+        imgsz = _model_imgsz if _model_imgsz else 640
+        
         # Run YOLO inference
         results = _detection_model.predict(
             frame,
             conf=confidence_threshold,
             iou=nms_threshold,
+            imgsz=imgsz,  # Use model's training image size
             verbose=False,
             save=False,
             show=False
@@ -182,12 +217,16 @@ def run_batch_inference(frames: List[np.ndarray], model_name: Optional[str] = No
         confidence_threshold = get_setting("models.detection.confidence_threshold", 0.5)
         nms_threshold = get_setting("models.detection.nms_threshold", 0.45)
         
+        # Determine image size to use - prefer model's training size
+        imgsz = _model_imgsz if _model_imgsz else 640
+        
         # Run batch YOLO inference - this is where the real performance gain comes from
         print(f"[INFERENCE] Running batch YOLO prediction on {len(frames)} frames")
         batch_results = _detection_model.predict(
             frames,  # YOLO can process multiple frames at once
             conf=confidence_threshold,
             iou=nms_threshold,
+            imgsz=imgsz,  # Use model's training image size
             verbose=False,
             save=False,
             show=False
@@ -307,7 +346,7 @@ def set_detection_model(model_path: str) -> bool:
         success = set_detection_model("data/models/detection/best.pt")
         success = set_detection_model("yolo11l.pt")
     """
-    global _detection_model, _current_model_path
+    global _detection_model, _current_model_path, _model_imgsz
     
     if not YOLO_AVAILABLE:
         print("[INFERENCE] YOLO not available, cannot load model")
@@ -348,6 +387,11 @@ def set_detection_model(model_path: str) -> bool:
         print(f"[INFERENCE] Loading YOLO model from: {model_file_path}")
         _detection_model = YOLO(model_file_path)
         _current_model_path = model_path
+        
+        # Load training parameters to get the image size used during training
+        training_params = _get_model_training_params(model_file_path)
+        _model_imgsz = training_params.get('imgsz', 640)
+        print(f"[INFERENCE] Using model training image size: {_model_imgsz}")
         
         # Log model information
         print(f"[INFERENCE] Model loaded successfully: {model_path}")

@@ -62,6 +62,7 @@ if __name__ == '__main__':
         "momentum": config.get('momentum', 0.937),
         "weight_decay": config.get('weight_decay', 0.0005),
         "augment": config.get('augment', True),
+        "cos_lr": config.get('cosine_lr', False),
         "mosaic": config.get('mosaic', 1.0),
         "mixup": config.get('mixup', 0.0),
         "copy_paste": config.get('copy_paste', 0.0),

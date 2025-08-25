@@ -276,6 +276,7 @@ class ModelTrainingThread(QThread):
                 'momentum': self.training_params.get('momentum', 0.937),
                 'weight_decay': self.training_params.get('weight_decay', 0.0005),
                 'augment': self.training_params.get('augment', True),
+                'cosine_lr': self.training_params.get('cosine_lr', False),
                 'mosaic': self.training_params.get('mosaic', 1.0),
                 'mixup': self.training_params.get('mixup', 0.0),
                 'copy_paste': self.training_params.get('copy_paste', 0.0),
@@ -590,6 +591,47 @@ class ModelTuningTab(QWidget):
         self._update_model_options()
         self._update_data_options()
         
+        # Set initial reference path for baseline comparison
+        if self.current_task == "detection":
+            detection_reference = Path("data/models/detection/object_detection_yolo11l/finetune3/results.csv")
+            self.results_widget.set_reference_path(str(detection_reference))
+        else:  # segmentation
+            segmentation_reference = Path("data/models/segmentation/field_finder_yolo11x-seg/segmentation_finetune4/results.csv")
+            self.results_widget.set_reference_path(str(segmentation_reference))
+        
+    def _get_preferred_model_file(self, weights_dir: Path) -> Optional[Path]:
+        """Get the preferred model file from a weights directory.
+        
+        Prioritizes best.pt over last.pt if both exist.
+        
+        Args:
+            weights_dir: Path to the weights directory
+            
+        Returns:
+            Path to the preferred model file, or None if no suitable file found
+        """
+        if not weights_dir.exists():
+            return None
+            
+        # Check for best.pt first (highest priority)
+        best_pt = weights_dir / "best.pt"
+        if best_pt.exists():
+            return best_pt
+            
+        # If no best.pt, check for last.pt
+        last_pt = weights_dir / "last.pt"
+        if last_pt.exists():
+            return last_pt
+            
+        # If neither best.pt nor last.pt exist, look for any .pt file
+        pt_files = list(weights_dir.glob("*.pt"))
+        if pt_files:
+            # Sort to get consistent results and prefer shorter names (often better)
+            pt_files.sort(key=lambda x: (len(x.name), x.name))
+            return pt_files[0]
+            
+        return None
+        
     def _init_ui(self):
         """Initialize the user interface."""
         main_layout = QVBoxLayout()
@@ -731,6 +773,12 @@ class ModelTuningTab(QWidget):
         self.weight_decay_spin.setValue(0.0005)
         self.weight_decay_spin.setToolTip("L2 regularization penalty to prevent overfitting.\n\n• Default: 0.0005 (YOLO optimized)\n• Range: 0.0-0.01 (typically 0.0001-0.001)\n• Examples: 0.0001 (light), 0.0005 (standard), 0.001 (strong)\n• Penalizes large weights to keep the model simple\n• Higher values = stronger regularization, lower overfitting risk\n• Too high = underfitting, too low = overfitting risk")
         params_layout.addRow("Weight Decay:", self.weight_decay_spin)
+        
+        # Cosine Learning Rate Scheduler
+        self.cosine_lr_check = QCheckBox()
+        self.cosine_lr_check.setChecked(False)
+        self.cosine_lr_check.setToolTip("Enable cosine learning rate scheduler.\n\n• Default: False (linear decay)\n• Cosine scheduler: Learning rate follows a cosine curve over epochs\n• Benefits: Smoother convergence, better final performance, avoids sharp drops\n• Best for: Long training runs, fine-tuning, when you want gradual learning rate decay\n• Alternative: Linear decay (default) or step-wise schedulers\n• Works well with warmup epochs for stable training start")
+        params_layout.addRow("Cosine LR Scheduler:", self.cosine_lr_check)
         
         # Workers
         self.workers_spin = QSpinBox()
@@ -902,13 +950,15 @@ class ModelTuningTab(QWidget):
                         'epochs': 100,
                         'patience': 10,
                         'batch_size': 16,
-                        'learning_rate': 0.01
+                        'learning_rate': 0.01,
+                        'cosine_lr': False
                     },
                     'segmentation': {
                         'epochs': 150,
                         'patience': 15,
                         'batch_size': 8,
-                        'learning_rate': 0.01
+                        'learning_rate': 0.01,
+                        'cosine_lr': False
                     }
                 }
         except Exception as e:
@@ -938,6 +988,8 @@ class ModelTuningTab(QWidget):
             self.workers_spin.setValue(task_config['workers'])
         if 'augment' in task_config:
             self.augment_check.setChecked(task_config['augment'])
+        if 'cosine_lr' in task_config:
+            self.cosine_lr_check.setChecked(task_config['cosine_lr'])
         if 'mosaic' in task_config:
             self.mosaic_spin.setValue(task_config['mosaic'])
         if 'mixup' in task_config:
@@ -955,8 +1007,14 @@ class ModelTuningTab(QWidget):
         """Handle task type change."""
         if task == "detection":
             self.current_task = "detection"
+            # Set reference path for detection baseline
+            detection_reference = Path("data/models/detection/object_detection_yolo11l/finetune3/results.csv")
+            self.results_widget.set_reference_path(str(detection_reference))
         else:  # field segmentation
             self.current_task = "segmentation"
+            # Set reference path for segmentation baseline
+            segmentation_reference = Path("data/models/segmentation/field_finder_yolo11x-seg/segmentation_finetune4/results.csv")
+            self.results_widget.set_reference_path(str(segmentation_reference))
             
         self._update_model_options()
         self._update_data_options()
@@ -999,17 +1057,19 @@ class ModelTuningTab(QWidget):
             if detection_path.exists():
                 for model_dir in detection_path.iterdir():
                     if model_dir.is_dir():
-                        # Check for direct weights/best.pt
-                        weights_path = model_dir / "weights" / "best.pt"
-                        if weights_path.exists():
-                            available_models.append(str(weights_path))
+                        # Check for direct weights directory
+                        weights_dir = model_dir / "weights"
+                        preferred_model = self._get_preferred_model_file(weights_dir)
+                        if preferred_model:
+                            available_models.append(str(preferred_model))
                         
                         # Check for finetune subdirectories
                         for subdir in model_dir.iterdir():
                             if subdir.is_dir() and subdir.name.startswith("finetune"):
-                                finetune_weights = subdir / "weights" / "best.pt"
-                                if finetune_weights.exists():
-                                    available_models.append(str(finetune_weights))
+                                finetune_weights_dir = subdir / "weights"
+                                preferred_finetune_model = self._get_preferred_model_file(finetune_weights_dir)
+                                if preferred_finetune_model:
+                                    available_models.append(str(preferred_finetune_model))
                             
         else:  # segmentation
             # Add common YOLO11 segmentation models (Ultralytics will auto-download if missing)
@@ -1037,17 +1097,19 @@ class ModelTuningTab(QWidget):
             if seg_path.exists():
                 for model_dir in seg_path.iterdir():
                     if model_dir.is_dir():
-                        # Check for direct weights/best.pt
-                        weights_path = model_dir / "weights" / "best.pt"
-                        if weights_path.exists():
-                            available_models.append(str(weights_path))
+                        # Check for direct weights directory
+                        weights_dir = model_dir / "weights"
+                        preferred_model = self._get_preferred_model_file(weights_dir)
+                        if preferred_model:
+                            available_models.append(str(preferred_model))
                         
                         # Check for finetune subdirectories
                         for subdir in model_dir.iterdir():
                             if subdir.is_dir() and subdir.name.startswith("finetune"):
-                                finetune_weights = subdir / "weights" / "best.pt"
-                                if finetune_weights.exists():
-                                    available_models.append(str(finetune_weights))
+                                finetune_weights_dir = subdir / "weights"
+                                preferred_finetune_model = self._get_preferred_model_file(finetune_weights_dir)
+                                if preferred_finetune_model:
+                                    available_models.append(str(preferred_finetune_model))
         
         self.model_combo.addItems(available_models)
         
@@ -1204,6 +1266,7 @@ class ModelTuningTab(QWidget):
             'weight_decay': self.weight_decay_spin.value(),
             'workers': self.workers_spin.value(),
             'augment': self.augment_check.isChecked(),
+            'cosine_lr': self.cosine_lr_check.isChecked(),
             'mosaic': self.mosaic_spin.value(),
             'mixup': self.mixup_spin.value(),
             'copy_paste': self.copy_paste_spin.value(),
@@ -1274,6 +1337,7 @@ class ModelTuningTab(QWidget):
             'momentum': self.momentum_spin.value(),
             'weight_decay': self.weight_decay_spin.value(),
             'augment': self.augment_check.isChecked(),
+            'cosine_lr': self.cosine_lr_check.isChecked(),
             'mosaic': self.mosaic_spin.value(),
             'mixup': self.mixup_spin.value(),
             'copy_paste': self.copy_paste_spin.value(),
