@@ -4,6 +4,7 @@ This module provides an interactive interface for adjusting homography parameter
 with real-time perspective transformation visualization and YAML save/load functionality.
 """
 
+import os
 import yaml
 import datetime
 from typing import List, Dict, Optional
@@ -15,7 +16,7 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, 
     QPushButton, QSlider, QListWidgetItem, QGroupBox,
     QFormLayout, QSplitter, QFileDialog, QMessageBox,
-    QScrollArea, QSizePolicy, QCheckBox, QSpinBox
+    QScrollArea, QSizePolicy, QCheckBox, QSpinBox, QComboBox
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QPoint
 from PyQt5.QtGui import QPixmap, QImage, QWheelEvent, QPainter, QPen, QColor, QMouseEvent
@@ -23,6 +24,8 @@ from PyQt5.QtGui import QPixmap, QImage, QWheelEvent, QPainter, QPen, QColor, QM
 from .video_player import VideoPlayer
 from ..config.settings import get_setting
 from ..constants import DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS
+from ..processing.field_segmentation import run_field_segmentation, set_field_model
+from ..gui.visualization import draw_field_segmentation
 
 
 class ZoomableImageLabel(QLabel):
@@ -284,43 +287,56 @@ class HomographyTab(QWidget):
         
         # UI components
         self.video_list: Optional[QListWidget] = None
-        self.frame_slider: Optional[QSlider] = None
         self.frame_label: Optional[QLabel] = None
         self.original_display: Optional[ZoomableImageLabel] = None
         self.warped_display: Optional[ZoomableImageLabel] = None
         self.param_sliders: Dict[str, QSlider] = {}
         self.param_labels: Dict[str, QLabel] = {}
         
+        # Scrubbing controls
+        self.scrubbing_slider: Optional[QSlider] = None
+        self.scrubbing_frame_label: Optional[QLabel] = None
+        self.current_video_label: Optional[QLabel] = None
+        
         # Zoom functionality
         self.original_scroll_area: Optional[QScrollArea] = None
         self.warped_scroll_area: Optional[QScrollArea] = None
         
+        # Field segmentation state
+        self.show_segmentation = False
+        self.current_segmentation_results = None
+        self.segmentation_model_combo: Optional[QComboBox] = None
+        self.show_segmentation_checkbox: Optional[QCheckBox] = None
+        self.available_segmentation_models: List[str] = []
+        
         # Initialize UI
         self._init_ui()
         self._load_videos()
+        self._load_segmentation_models()
         
         # Load default homography parameters from config
         self._load_default_parameters()
         
     def _init_ui(self):
         """Initialize the user interface."""
-        main_layout = QHBoxLayout()
+        main_layout = QVBoxLayout()
         
-        # Create splitter for resizable panels
-        splitter = QSplitter(Qt.Horizontal)
+        # Main content with splitter
+        content_splitter = QSplitter(Qt.Horizontal)
         
         # Left panel: Video list and parameter controls
         left_panel = self._create_left_panel()
-        splitter.addWidget(left_panel)
+        content_splitter.addWidget(left_panel)
         
         # Right panel: Side-by-side video displays
         right_panel = self._create_right_panel()
-        splitter.addWidget(right_panel)
+        content_splitter.addWidget(right_panel)
         
         # Set splitter proportions (25% left, 75% right for larger image display)
-        splitter.setSizes([300, 1200])
+        content_splitter.setSizes([300, 1200])
         
-        main_layout.addWidget(splitter)
+        main_layout.addWidget(content_splitter)
+        
         self.setLayout(main_layout)
         
     def _create_left_panel(self) -> QWidget:
@@ -358,14 +374,6 @@ class HomographyTab(QWidget):
         frame_nav_layout.addStretch()
         
         video_layout.addLayout(frame_nav_layout)
-        
-        # Frame slider
-        self.frame_slider = QSlider(Qt.Horizontal)
-        self.frame_slider.setMinimum(0)
-        self.frame_slider.setMaximum(0)
-        self.frame_slider.setValue(0)
-        self.frame_slider.valueChanged.connect(self._on_frame_changed)
-        video_layout.addWidget(self.frame_slider)
         
         video_group.setLayout(video_layout)
         layout.addWidget(video_group)
@@ -414,6 +422,35 @@ class HomographyTab(QWidget):
         params_group.setLayout(params_layout)
         layout.addWidget(params_group)
         
+        # Field Segmentation Controls
+        segmentation_group = QGroupBox("Field Segmentation")
+        segmentation_layout = QVBoxLayout()
+        
+        # Show segmentation checkbox
+        self.show_segmentation_checkbox = QCheckBox("Show Field Segmentation")
+        self.show_segmentation_checkbox.setChecked(self.show_segmentation)
+        self.show_segmentation_checkbox.stateChanged.connect(self._on_segmentation_toggled)
+        segmentation_layout.addWidget(self.show_segmentation_checkbox)
+        
+        # Model selection
+        model_layout = QHBoxLayout()
+        model_layout.addWidget(QLabel("Model:"))
+        
+        self.segmentation_model_combo = QComboBox()
+        self.segmentation_model_combo.setMinimumWidth(150)
+        self.segmentation_model_combo.currentTextChanged.connect(self._on_segmentation_model_changed)
+        model_layout.addWidget(self.segmentation_model_combo)
+        
+        refresh_models_button = QPushButton("↻")
+        refresh_models_button.setMaximumWidth(30)
+        refresh_models_button.setToolTip("Refresh model list")
+        refresh_models_button.clicked.connect(self._load_segmentation_models)
+        model_layout.addWidget(refresh_models_button)
+        
+        segmentation_layout.addLayout(model_layout)
+        segmentation_group.setLayout(segmentation_layout)
+        layout.addWidget(segmentation_group)
+        
         # Add stretch to push everything to top
         layout.addStretch()
         
@@ -431,7 +468,7 @@ class HomographyTab(QWidget):
         header.setStyleSheet("font-size: 14px; font-weight: bold; margin: 10px;")
         layout.addWidget(header)
         
-        # Original frame display with scroll area
+        # Original frame display with scroll area and scrubbing controls
         original_group = QGroupBox("Original Frame")
         original_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         original_layout = QVBoxLayout()
@@ -454,6 +491,11 @@ class HomographyTab(QWidget):
         
         self.original_scroll_area.setWidget(self.original_display)
         original_layout.addWidget(self.original_scroll_area)
+        
+        # Add video scrubbing controls under the original frame
+        scrubbing_panel = self._create_scrubbing_panel()
+        original_layout.addWidget(scrubbing_panel)
+        
         original_group.setLayout(original_layout)
         layout.addWidget(original_group)
         
@@ -526,6 +568,64 @@ class HomographyTab(QWidget):
         grid_layout.addStretch()  # Push controls to the left
         
         layout.addLayout(grid_layout)
+        
+        panel.setLayout(layout)
+        return panel
+    
+    def _create_scrubbing_panel(self) -> QWidget:
+        """Create the video scrubbing controls panel."""
+        panel = QWidget()
+        panel.setMaximumHeight(60)  # Compact size for under original frame
+        panel.setMinimumHeight(60)
+        layout = QVBoxLayout()
+        layout.setContentsMargins(5, 2, 5, 2)
+        layout.setSpacing(2)
+        
+        # Video info and controls
+        info_layout = QHBoxLayout()
+        info_layout.setSpacing(10)
+        
+        # Current video name
+        self.current_video_label = QLabel("No video loaded")
+        self.current_video_label.setStyleSheet("font-weight: bold; color: #fff; font-size: 11px;")
+        info_layout.addWidget(self.current_video_label)
+        
+        info_layout.addStretch()
+        
+        # Frame info
+        self.scrubbing_frame_label = QLabel("0 / 0")
+        self.scrubbing_frame_label.setStyleSheet("color: #ccc; font-family: monospace; font-size: 10px;")
+        info_layout.addWidget(self.scrubbing_frame_label)
+        
+        layout.addLayout(info_layout)
+        
+        # Compact scrubbing slider
+        self.scrubbing_slider = QSlider(Qt.Horizontal)
+        self.scrubbing_slider.setMinimum(0)
+        self.scrubbing_slider.setMaximum(0)
+        self.scrubbing_slider.setValue(0)
+        self.scrubbing_slider.setMinimumHeight(20)  # Smaller for compact layout
+        self.scrubbing_slider.valueChanged.connect(self._on_scrubbing_changed)
+        self.scrubbing_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                border: 1px solid #555;
+                height: 8px;
+                background: #2a2a2a;
+                border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: #0078d4;
+                border: 2px solid #005a9e;
+                width: 20px;
+                height: 20px;
+                border-radius: 10px;
+                margin: -6px 0;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #106ebe;
+            }
+        """)
+        layout.addWidget(self.scrubbing_slider)
         
         panel.setLayout(layout)
         return panel
@@ -654,9 +754,17 @@ class HomographyTab(QWidget):
             # Update UI
             video_info = self.video_player.get_video_info()
             total_frames = video_info['total_frames']
-            self.frame_slider.setMaximum(max(1, total_frames - 1))
-            self.frame_slider.setValue(0)
             self.frame_label.setText(f"0 / {total_frames}")
+            
+            # Update scrubbing controls
+            if hasattr(self, 'scrubbing_slider'):
+                self.scrubbing_slider.setMaximum(max(1, total_frames - 1))
+                self.scrubbing_slider.setValue(0)
+            if hasattr(self, 'scrubbing_frame_label'):
+                self.scrubbing_frame_label.setText(f"Frame: 0 / {total_frames}")
+            if hasattr(self, 'current_video_label'):
+                video_name = os.path.basename(video_path)
+                self.current_video_label.setText(video_name)
             
             # Display first frame
             first_frame = self.video_player.get_current_frame()
@@ -674,11 +782,31 @@ class HomographyTab(QWidget):
             total_frames = video_info['total_frames']
             self.frame_label.setText(f"{frame_idx} / {total_frames}")
             
+            # Sync scrubbing slider
+            if hasattr(self, 'scrubbing_slider'):
+                self.scrubbing_slider.blockSignals(True)
+                self.scrubbing_slider.setValue(frame_idx)
+                self.scrubbing_slider.blockSignals(False)
+                # Update scrubbing frame label
+                if hasattr(self, 'scrubbing_frame_label'):
+                    self.scrubbing_frame_label.setText(f"Frame: {frame_idx} / {total_frames}")
+            
             # Get and display current frame
             frame = self.video_player.get_current_frame()
             if frame is not None:
                 self.current_frame = frame.copy()
+                
+                # Run segmentation on new frame if enabled
+                if self.show_segmentation:
+                    self._run_segmentation_on_current_frame()
+                
                 self._update_displays()
+                
+    def _on_scrubbing_changed(self, frame_idx: int):
+        """Handle scrubbing slider change."""
+        if self.video_player.is_loaded():
+            # Update via main frame change handler
+            self._on_frame_changed(frame_idx)
                 
     def _on_parameter_changed(self, param_name: str, slider_value: int):
         """Handle homography parameter change from slider."""
@@ -716,13 +844,101 @@ class HomographyTab(QWidget):
         if self.current_frame is None:
             return
             
-        # Display original frame
-        self._display_frame(self.current_frame, self.original_display)
+        # Apply segmentation overlay to original frame if enabled
+        original_frame = self.current_frame.copy()
+        if self.show_segmentation and self.current_segmentation_results:
+            original_frame = draw_field_segmentation(original_frame, self.current_segmentation_results)
+            print(f"[HOMOGRAPHY] Applied segmentation to original frame: {len(self.current_segmentation_results)} results")
+        elif self.show_segmentation:
+            print("[HOMOGRAPHY] Segmentation enabled but no results available")
         
-        # Create and display warped frame
+        # Display original frame (with optional segmentation overlay)
+        self._display_frame(original_frame, self.original_display)
+        
+        # Create warped frame
         warped_frame = self._apply_homography(self.current_frame)
+        print(f"[HOMOGRAPHY] Warped frame shape: {warped_frame.shape}, dtype: {warped_frame.dtype}")
+        
+        # For warped view, apply segmentation overlay if enabled
+        if self.show_segmentation and self.current_segmentation_results:
+            try:
+                # Transform the segmentation masks to match the warped frame
+                warped_frame_with_segmentation = self._apply_segmentation_to_warped_frame(warped_frame, self.current_segmentation_results)
+                if warped_frame_with_segmentation is not None:
+                    warped_frame = warped_frame_with_segmentation
+                    print(f"[HOMOGRAPHY] Applied transformed segmentation to warped frame: {len(self.current_segmentation_results)} results")
+                else:
+                    print("[HOMOGRAPHY] Failed to apply transformed segmentation to warped frame")
+            except Exception as e:
+                print(f"[HOMOGRAPHY] Error applying segmentation to warped frame: {e}")
+        elif self.show_segmentation:
+            print("[HOMOGRAPHY] Segmentation enabled but no results available for warped frame")
+        
         self._display_frame(warped_frame, self.warped_display)
         
+    def _apply_segmentation_to_warped_frame(self, warped_frame: np.ndarray, segmentation_results: list) -> np.ndarray:
+        """Apply segmentation overlay to warped frame by transforming the masks."""
+        if not segmentation_results:
+            return warped_frame
+            
+        try:
+            # Create a copy to apply segmentation overlay
+            result_frame = warped_frame.copy()
+            
+            # Get homography matrix for transforming masks
+            h_matrix = self._get_homography_matrix()
+            
+            for seg_result in segmentation_results:
+                if hasattr(seg_result, 'masks') and seg_result.masks is not None:
+                    masks = seg_result.masks.data.cpu().numpy()
+                    
+                    for i, mask in enumerate(masks):
+                        # Transform the mask using the same homography matrix
+                        original_height, original_width = self.current_frame.shape[:2]
+                        mask_resized = cv2.resize(mask, (original_width, original_height))
+                        
+                        # Apply homography transformation to the mask
+                        warped_mask = cv2.warpPerspective(mask_resized, h_matrix, 
+                                                        (warped_frame.shape[1], warped_frame.shape[0]))
+                        
+                        # Apply color overlay where mask is present
+                        mask_binary = (warped_mask > 0.5).astype(np.uint8)
+                        if np.any(mask_binary):
+                            # Use the same color scheme as the visualization
+                            if hasattr(seg_result, 'boxes') and len(seg_result.boxes) > i:
+                                cls_id = int(seg_result.boxes[i].cls.item())
+                                color_dict = {0: (0, 255, 255), 1: (255, 0, 255)}  # Cyan for central, Magenta for endzones
+                                color = color_dict.get(cls_id, (0, 255, 255))
+                            else:
+                                color = (0, 255, 255)  # Default to cyan
+                            
+                            # Create colored overlay
+                            overlay = result_frame.copy()
+                            overlay[mask_binary == 1] = color
+                            
+                            # Blend with original frame
+                            alpha = 0.4
+                            result_frame = cv2.addWeighted(result_frame, 1-alpha, overlay, alpha, 0)
+                            
+                            print(f"[HOMOGRAPHY] Applied transformed mask {i} with color {color} to warped frame")
+            
+            return result_frame
+            
+        except Exception as e:
+            print(f"[HOMOGRAPHY] Error transforming segmentation to warped frame: {e}")
+            return warped_frame
+    
+    def _get_homography_matrix(self) -> np.ndarray:
+        """Get the homography transformation matrix from current parameters."""
+        # Construct homography matrix from H parameters
+        h_matrix = np.array([
+            [self.homography_params['H00'], self.homography_params['H01'], self.homography_params['H02']],
+            [self.homography_params['H10'], self.homography_params['H11'], self.homography_params['H12']],
+            [self.homography_params['H20'], self.homography_params['H21'], 1.0]
+        ], dtype=np.float32)
+        
+        return h_matrix
+    
     def _display_frame(self, frame: np.ndarray, label: ZoomableImageLabel):
         """Display a frame in the specified zoomable label widget."""
         if frame is None:
@@ -747,18 +963,14 @@ class HomographyTab(QWidget):
         Returns:
             Warped frame using original frame dimensions
         """
-        # Construct homography matrix
-        H = np.array([
-            [self.homography_params['H00'], self.homography_params['H01'], self.homography_params['H02']],
-            [self.homography_params['H10'], self.homography_params['H11'], self.homography_params['H12']],
-            [self.homography_params['H20'], self.homography_params['H21'], 1.0]
-        ], dtype=np.float32)
+        # Use the same homography matrix calculation as for segmentation
+        h_matrix = self._get_homography_matrix()
         
         # Get original dimensions
         original_height, original_width = frame.shape[:2]
         
         # Apply perspective transform using original frame size
-        warped = cv2.warpPerspective(frame, H, (original_width, original_height))
+        warped = cv2.warpPerspective(frame, h_matrix, (original_width, original_height))
         
         return warped
         
@@ -829,7 +1041,7 @@ class HomographyTab(QWidget):
                     'metadata': {
                         'created_at': datetime.datetime.now().isoformat(),
                         'video_file': Path(self.video_files[self.current_video_index]).name if self.video_files else None,
-                        'frame_index': self.frame_slider.value(),
+                        'frame_index': self.scrubbing_slider.value() if hasattr(self, 'scrubbing_slider') else 0,
                         'application': 'Ultimate Analysis',
                         'version': '1.0'
                     }
@@ -862,7 +1074,7 @@ class HomographyTab(QWidget):
                     'created_at': datetime.datetime.now().isoformat(),
                     'description': "Default homography parameters (updated by user)",
                     'video_file': Path(self.video_files[self.current_video_index]).name if self.video_files else None,
-                    'frame_index': self.frame_slider.value() if self.frame_slider else 0,
+                    'frame_index': self.scrubbing_slider.value() if hasattr(self, 'scrubbing_slider') else 0,
                     'application': 'Ultimate Analysis',
                     'version': '1.0'
                 }
@@ -1035,3 +1247,124 @@ class HomographyTab(QWidget):
             self.original_display.set_grid_spacing(spacing)
         if self.warped_display:
             self.warped_display.set_grid_spacing(spacing)
+    
+    def _run_segmentation_on_current_frame(self):
+        """Run field segmentation on the current frame."""
+        if self.current_frame is None:
+            print("[HOMOGRAPHY] No current frame available for segmentation")
+            return
+            
+        try:
+            print("[HOMOGRAPHY] Running field segmentation on current frame")
+            self.current_segmentation_results = run_field_segmentation(self.current_frame)
+            if self.current_segmentation_results:
+                print(f"[HOMOGRAPHY] Segmentation complete: {len(self.current_segmentation_results)} results")
+                # Debug: Check if results have masks
+                for i, result in enumerate(self.current_segmentation_results):
+                    if hasattr(result, 'masks') and result.masks is not None:
+                        print(f"[HOMOGRAPHY] Result {i}: has masks with shape {result.masks.data.shape if hasattr(result.masks, 'data') else 'unknown'}")
+                    else:
+                        print(f"[HOMOGRAPHY] Result {i}: no masks found")
+            else:
+                print("[HOMOGRAPHY] No segmentation results returned")
+        except Exception as e:
+            print(f"[HOMOGRAPHY] Error running field segmentation: {e}")
+            self.current_segmentation_results = None
+            
+    def _load_segmentation_models(self):
+        """Load available field segmentation models."""
+        self.available_segmentation_models.clear()
+        
+        # Add pretrained models
+        pretrained_path = Path(DEFAULT_PATHS['MODELS']) / 'pretrained'
+        if pretrained_path.exists():
+            for model_file in pretrained_path.glob('*seg*.pt'):
+                model_name = f"Pretrained: {model_file.stem}"
+                self.available_segmentation_models.append(str(model_file))
+                
+        # Add finetuned segmentation models
+        segmentation_path = Path(DEFAULT_PATHS['MODELS']) / 'segmentation'
+        if segmentation_path.exists():
+            for model_dir in segmentation_path.iterdir():
+                if model_dir.is_dir():
+                    # Look for weights files in standard locations
+                    weight_paths = [
+                        model_dir / 'weights' / 'best.pt',
+                        model_dir / 'segmentation_finetune' / 'weights' / 'best.pt',
+                        model_dir / 'runs' / 'segment' / 'train' / 'weights' / 'best.pt'
+                    ]
+                    
+                    for weight_path in weight_paths:
+                        if weight_path.exists():
+                            self.available_segmentation_models.append(str(weight_path))
+                            break
+        
+        # Update combo box
+        if self.segmentation_model_combo is not None:
+            self.segmentation_model_combo.clear()
+            for model_path in self.available_segmentation_models:
+                # Create display name from path
+                if 'pretrained' in model_path:
+                    display_name = f"Pretrained: {Path(model_path).stem}"
+                else:
+                    # Extract model name from path
+                    path_parts = Path(model_path).parts
+                    if 'segmentation' in path_parts:
+                        seg_index = path_parts.index('segmentation')
+                        if seg_index + 1 < len(path_parts):
+                            display_name = path_parts[seg_index + 1]
+                        else:
+                            display_name = Path(model_path).parent.parent.name
+                    else:
+                        display_name = Path(model_path).parent.parent.name
+                
+                self.segmentation_model_combo.addItem(display_name, model_path)
+                
+        print(f"[HOMOGRAPHY] Loaded {len(self.available_segmentation_models)} segmentation models")
+        
+        # Auto-select the new default model if available
+        if self.segmentation_model_combo is not None:
+            default_model_path = "data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt"
+            for i in range(self.segmentation_model_combo.count()):
+                item_path = self.segmentation_model_combo.itemData(i)
+                if item_path and default_model_path in str(item_path):
+                    self.segmentation_model_combo.setCurrentIndex(i)
+                    print(f"[HOMOGRAPHY] Auto-selected default segmentation model: {self.segmentation_model_combo.itemText(i)}")
+                    break
+        
+    def _on_segmentation_toggled(self, state: int):
+        """Handle segmentation checkbox toggle."""
+        self.show_segmentation = state == 2  # Qt.Checked = 2
+        
+        print(f"[HOMOGRAPHY] Segmentation toggle: state={state}, show_segmentation={self.show_segmentation}")
+        
+        if self.show_segmentation:
+            print("[HOMOGRAPHY] Field segmentation enabled")
+            self._run_segmentation_on_current_frame()
+        else:
+            print("[HOMOGRAPHY] Field segmentation disabled")
+            self.current_segmentation_results = None
+            
+        self._update_displays()
+        
+    def _on_segmentation_model_changed(self, display_name: str):
+        """Handle segmentation model selection change."""
+        if self.segmentation_model_combo is None:
+            return
+            
+        model_path = self.segmentation_model_combo.currentData()
+        if model_path and os.path.exists(model_path):
+            print(f"[HOMOGRAPHY] Changing segmentation model to: {model_path}")
+            try:
+                if set_field_model(model_path):
+                    print(f"[HOMOGRAPHY] Successfully loaded segmentation model: {display_name}")
+                    # Re-run segmentation with new model if currently enabled
+                    if self.show_segmentation:
+                        self._run_segmentation_on_current_frame()
+                        self._update_displays()
+                else:
+                    print(f"[HOMOGRAPHY] Failed to load segmentation model: {model_path}")
+            except Exception as e:
+                print(f"[HOMOGRAPHY] Error loading segmentation model: {e}")
+        else:
+            print(f"[HOMOGRAPHY] Invalid model path: {model_path}")

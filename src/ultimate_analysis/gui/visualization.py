@@ -613,10 +613,10 @@ def _draw_segmentation_masks(frame: np.ndarray, masks: np.ndarray) -> np.ndarray
     overlay = frame.copy()
     color_mask = np.zeros_like(frame)
     
-    # Define colors for different field regions
+    # Define colors for different field regions - made much brighter for better visibility
     color_dict = {
-        0: (200, 217, 37),   # Central Field: teal (BGR)
-        1: (114, 38, 249)    # Endzone: pink (BGR)
+        0: (0, 255, 255),    # Central Field: bright cyan (BGR)
+        1: (255, 0, 255)     # Endzone: bright magenta (BGR)
     }
     
     name_dict = {
@@ -672,8 +672,8 @@ def _draw_segmentation_masks(frame: np.ndarray, masks: np.ndarray) -> np.ndarray
                     cv2.LINE_AA
                 )
     
-    # Blend with low alpha for subtle overlay
-    cv2.addWeighted(color_mask, 0.12, overlay, 0.88, 0, overlay)
+    # Blend with higher alpha for maximum visibility
+    cv2.addWeighted(color_mask, 0.4, overlay, 0.6, 0, overlay)
     return overlay
 
 
