@@ -53,20 +53,24 @@ class ZoomableImageLabel(QLabel):
                 break
             parent = parent.parent()
         
-        if scroll_area is None:
-            # Fallback to center zoom if no scroll area found
-            zoom_in = event.angleDelta().y() > 0
-            zoom_delta = 0.15 if zoom_in else -0.15
-            new_zoom = max(0.1, min(10.0, self.zoom_factor + zoom_delta))
-            
-            if new_zoom != self.zoom_factor:
-                self.zoom_factor = new_zoom
-                self._update_display()
-                self.zoom_changed.emit(self.zoom_factor)
-            return
-        
         # Get mouse position relative to the widget
         mouse_pos = event.position().toPoint() if hasattr(event, 'position') else event.pos()
+        
+        # Calculate zoom change
+        zoom_in = event.angleDelta().y() > 0
+        zoom_delta = 0.15 if zoom_in else -0.15
+        old_zoom = self.zoom_factor
+        new_zoom = max(0.1, min(10.0, old_zoom + zoom_delta))
+        
+        if new_zoom == old_zoom:
+            return
+        
+        if scroll_area is None:
+            # Fallback to center zoom if no scroll area found
+            self.zoom_factor = new_zoom
+            self._update_display()
+            self.zoom_changed.emit(self.zoom_factor)
+            return
         
         # Get current scroll positions
         h_scroll = scroll_area.horizontalScrollBar()
@@ -74,54 +78,49 @@ class ZoomableImageLabel(QLabel):
         old_h_value = h_scroll.value()
         old_v_value = v_scroll.value()
         
-        # Calculate mouse position in the current scaled image coordinates
-        old_zoom = self.zoom_factor
-        zoom_in = event.angleDelta().y() > 0
-        zoom_delta = 0.15 if zoom_in else -0.15
-        new_zoom = max(0.1, min(10.0, old_zoom + zoom_delta))
-        
-        if new_zoom == old_zoom:
+        # Get current image display properties
+        if not self.pixmap():
             return
-        
-        # Get widget and image dimensions
+            
         widget_size = self.size()
-        if self.pixmap():
-            pixmap_size = self.pixmap().size()
-            
-            # Calculate the offset of the displayed image within the widget
-            x_offset = max(0, (widget_size.width() - pixmap_size.width()) // 2)
-            y_offset = max(0, (widget_size.height() - pixmap_size.height()) // 2)
-            
-            # Convert mouse position to image coordinates before zoom
-            image_mouse_x = (mouse_pos.x() - x_offset + old_h_value) / old_zoom
-            image_mouse_y = (mouse_pos.y() - y_offset + old_v_value) / old_zoom
-            
-            # Update zoom
-            self.zoom_factor = new_zoom
-            self._update_display()
-            
-            # Calculate new scroll positions to keep the mouse point fixed
-            # We want: (mouse_pos - new_offset + new_scroll) / new_zoom = image_mouse_pos
-            # So: new_scroll = image_mouse_pos * new_zoom - mouse_pos + new_offset
-            
-            # Get new pixmap size after zoom
-            if self.pixmap():
-                new_pixmap_size = self.pixmap().size()
-                new_x_offset = max(0, (widget_size.width() - new_pixmap_size.width()) // 2)
-                new_y_offset = max(0, (widget_size.height() - new_pixmap_size.height()) // 2)
-                
-                new_h_value = image_mouse_x * new_zoom - mouse_pos.x() + new_x_offset
-                new_v_value = image_mouse_y * new_zoom - mouse_pos.y() + new_y_offset
-                
-                # Clamp values to valid scroll range
-                new_h_value = max(0, min(h_scroll.maximum(), int(new_h_value)))
-                new_v_value = max(0, min(v_scroll.maximum(), int(new_v_value)))
-                
-                # Apply the new scroll positions
-                h_scroll.setValue(new_h_value)
-                v_scroll.setValue(new_v_value)
-            
-            self.zoom_changed.emit(self.zoom_factor)
+        old_pixmap_size = self.pixmap().size()
+        
+        # Calculate current image offset within widget
+        old_x_offset = max(0, (widget_size.width() - old_pixmap_size.width()) // 2)
+        old_y_offset = max(0, (widget_size.height() - old_pixmap_size.height()) // 2)
+        
+        # Calculate the point in the original image under the mouse cursor
+        # Account for widget offset, scroll position, and current zoom
+        original_image_x = (mouse_pos.x() - old_x_offset + old_h_value) / old_zoom
+        original_image_y = (mouse_pos.y() - old_y_offset + old_v_value) / old_zoom
+        
+        # Update the zoom
+        self.zoom_factor = new_zoom
+        self._update_display()
+        
+        # Calculate new image properties after zoom
+        new_pixmap_size = self.pixmap().size()
+        new_x_offset = max(0, (widget_size.width() - new_pixmap_size.width()) // 2)
+        new_y_offset = max(0, (widget_size.height() - new_pixmap_size.height()) // 2)
+        
+        # Calculate where that same point should be positioned to stay under the mouse
+        # We want: mouse_pos = (original_image_point * new_zoom + new_offset - new_scroll)
+        # So: new_scroll = original_image_point * new_zoom + new_offset - mouse_pos
+        target_x_in_widget = original_image_x * new_zoom + new_x_offset
+        target_y_in_widget = original_image_y * new_zoom + new_y_offset
+        
+        new_h_value = target_x_in_widget - mouse_pos.x()
+        new_v_value = target_y_in_widget - mouse_pos.y()
+        
+        # Clamp scroll values to valid ranges
+        new_h_value = max(0, min(h_scroll.maximum(), int(new_h_value)))
+        new_v_value = max(0, min(v_scroll.maximum(), int(new_v_value)))
+        
+        # Apply the new scroll positions
+        h_scroll.setValue(new_h_value)
+        v_scroll.setValue(new_v_value)
+        
+        self.zoom_changed.emit(self.zoom_factor)
     
     def set_image(self, pixmap: QPixmap):
         """Set the image and reset zoom to fit the container."""
@@ -201,6 +200,9 @@ class HomographyTab(QWidget):
         # Initialize UI
         self._init_ui()
         self._load_videos()
+        
+        # Load default homography parameters from config
+        self._load_default_parameters()
         
     def _init_ui(self):
         """Initialize the user interface."""
@@ -295,7 +297,22 @@ class HomographyTab(QWidget):
         load_button.setToolTip("Load parameters from YAML file")
         button_layout.addWidget(load_button)
         
+        # Second row of buttons
+        button_layout2 = QHBoxLayout()
+        
+        save_default_button = QPushButton("Save as Default")
+        save_default_button.clicked.connect(self._save_as_default_parameters)
+        save_default_button.setToolTip("Save current parameters as default startup values")
+        save_default_button.setStyleSheet("background-color: #2c5aa0; color: white; font-weight: bold;")
+        button_layout2.addWidget(save_default_button)
+        
+        load_default_button = QPushButton("Load Default")
+        load_default_button.clicked.connect(self._load_default_parameters)
+        load_default_button.setToolTip("Load default parameters from config")
+        button_layout2.addWidget(load_default_button)
+        
         params_layout.addLayout(button_layout)
+        params_layout.addLayout(button_layout2)
         params_group.setLayout(params_layout)
         layout.addWidget(params_group)
         
@@ -666,8 +683,8 @@ class HomographyTab(QWidget):
         
     def _save_parameters(self):
         """Save current homography parameters to YAML file."""
-        # Create homography directory if it doesn't exist
-        homography_dir = Path(get_setting("homography.save_directory", "data/homography_params"))
+        # Use configs directory as default save location
+        homography_dir = Path(get_setting("homography.save_directory", "configs"))
         homography_dir.mkdir(parents=True, exist_ok=True)
         
         # Generate default filename with timestamp
@@ -707,11 +724,46 @@ class HomographyTab(QWidget):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save parameters:\n{str(e)}")
                 print(f"[HOMOGRAPHY] Error saving parameters: {e}")
+    
+    def _save_as_default_parameters(self):
+        """Save current parameters as the default parameters file."""
+        try:
+            # Get the default parameters file path from config
+            default_params_file = get_setting("homography.default_params_file", "configs/homography_params.yaml")
+            
+            # Ensure the directory exists
+            Path(default_params_file).parent.mkdir(parents=True, exist_ok=True)
+            
+            # Prepare data for saving
+            save_data = {
+                'homography_parameters': self.homography_params.copy(),
+                'metadata': {
+                    'created_at': datetime.datetime.now().isoformat(),
+                    'description': "Default homography parameters (updated by user)",
+                    'video_file': Path(self.video_files[self.current_video_index]).name if self.video_files else None,
+                    'frame_index': self.frame_slider.value() if self.frame_slider else 0,
+                    'application': 'Ultimate Analysis',
+                    'version': '1.0'
+                }
+            }
+            
+            # Save to YAML
+            with open(default_params_file, 'w', encoding='utf-8') as f:
+                yaml.dump(save_data, f, default_flow_style=False, sort_keys=False)
+            
+            QMessageBox.information(self, "Success", 
+                                  f"Parameters saved as default to:\n{default_params_file}\n\n"
+                                  "These parameters will be loaded automatically on startup.")
+            print(f"[HOMOGRAPHY] Saved default parameters to: {default_params_file}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save default parameters:\n{str(e)}")
+            print(f"[HOMOGRAPHY] Error saving default parameters: {e}")
                 
     def _load_parameters(self):
         """Load homography parameters from YAML file."""
-        # Show load dialog
-        homography_dir = Path(get_setting("homography.save_directory", "data/homography_params"))
+        # Show load dialog - use configs directory as default
+        homography_dir = Path(get_setting("homography.save_directory", "configs"))
         
         filename, _ = QFileDialog.getOpenFileName(
             self,
@@ -771,6 +823,67 @@ class HomographyTab(QWidget):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load parameters:\n{str(e)}")
                 print(f"[HOMOGRAPHY] Error loading parameters: {e}")
+    
+    def _load_default_parameters(self):
+        """Load default homography parameters from config file on startup."""
+        try:
+            # Get the default parameters file path from config
+            default_params_file = get_setting("homography.default_params_file", "configs/homography_params.yaml")
+            
+            if not Path(default_params_file).exists():
+                print(f"[HOMOGRAPHY] Default parameters file not found: {default_params_file}")
+                return
+                
+            print(f"[HOMOGRAPHY] Loading default parameters from: {default_params_file}")
+            
+            # Load from YAML
+            with open(default_params_file, 'r', encoding='utf-8') as f:
+                data = yaml.safe_load(f)
+            
+            # Extract parameters
+            if 'homography_parameters' in data:
+                loaded_params = data['homography_parameters']
+            else:
+                # Try loading direct parameter format
+                loaded_params = data
+            
+            # Validate and update parameters
+            for param_name in self.homography_params.keys():
+                if param_name in loaded_params:
+                    value = float(loaded_params[param_name])
+                    self.homography_params[param_name] = value
+                    
+                    # Update slider position with proper type conversion
+                    if param_name in ['H00', 'H01', 'H10', 'H11']:
+                        param_range = get_setting("homography.slider_range_main", [-5.0, 5.0])
+                        if isinstance(param_range, list) and len(param_range) == 2:
+                            param_range = [float(param_range[0]), float(param_range[1])]
+                        else:
+                            param_range = [-5.0, 5.0]
+                    elif param_name in ['H20', 'H21']:
+                        param_range = get_setting("homography.slider_range_perspective", [-0.01, 0.01])
+                        if isinstance(param_range, list) and len(param_range) == 2:
+                            param_range = [float(param_range[0]), float(param_range[1])]
+                        else:
+                            param_range = [-0.01, 0.01]
+                    else:
+                        param_range = [-500.0, 500.0]
+                        
+                    slider_val = int(((value - param_range[0]) / (param_range[1] - param_range[0])) * 1000)
+                    slider_val = max(0, min(1000, slider_val))  # Clamp to valid range
+                    self.param_sliders[param_name].setValue(slider_val)
+                    
+                    # Update label
+                    self.param_labels[param_name].setText(f"{value:.6f}")
+            
+            # Update displays
+            self._update_displays()
+            
+            print(f"[HOMOGRAPHY] Default parameters loaded successfully from: {default_params_file}")
+            
+        except Exception as e:
+            print(f"[HOMOGRAPHY] Error loading default parameters: {e}")
+            # Don't show error dialog on startup - just log it
     
     def _reset_all_zoom(self):
         """Reset zoom for both image displays."""
