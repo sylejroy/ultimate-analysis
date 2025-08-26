@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, 
     QPushButton, QSlider, QListWidgetItem, QGroupBox,
     QFormLayout, QSplitter, QFileDialog, QMessageBox,
-    QScrollArea, QSizePolicy
+    QScrollArea, QSizePolicy, QCheckBox, QSpinBox
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QPoint
 from PyQt5.QtGui import QPixmap, QImage, QWheelEvent, QPainter, QPen, QColor, QMouseEvent
@@ -38,6 +38,12 @@ class ZoomableImageLabel(QLabel):
         self.setMinimumSize(400, 300)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setScaledContents(False)
+        
+        # Grid overlay properties
+        self.show_grid = True
+        self.grid_spacing = 50  # pixels at 1.0 zoom
+        self.grid_color = QColor(255, 255, 255, 80)  # Semi-transparent white
+        self.grid_line_width = 1
         
     def wheelEvent(self, event: QWheelEvent):
         """Handle mouse wheel for zooming to mouse position."""
@@ -191,6 +197,69 @@ class ZoomableImageLabel(QLabel):
         parent = self.parent()
         if isinstance(parent, QScrollArea):
             parent.updateGeometry()
+    
+    def paintEvent(self, event):
+        """Override paint event to draw grid overlay on top of the image."""
+        # First, let the parent QLabel draw the image
+        super().paintEvent(event)
+        
+        # Draw grid overlay if enabled and we have an image
+        if self.show_grid and self.pixmap() and not self.pixmap().isNull():
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            
+            # Set up the grid pen
+            pen = QPen(self.grid_color)
+            pen.setWidth(self.grid_line_width)
+            painter.setPen(pen)
+            
+            # Get the image area within the widget
+            pixmap_rect = self.pixmap().rect()
+            widget_rect = self.rect()
+            
+            # Calculate the image position (centered in widget)
+            x_offset = max(0, (widget_rect.width() - pixmap_rect.width()) // 2)
+            y_offset = max(0, (widget_rect.height() - pixmap_rect.height()) // 2)
+            
+            # Calculate actual grid spacing based on current zoom
+            actual_grid_spacing = self.grid_spacing * self.zoom_factor
+            
+            # Draw vertical lines
+            image_left = x_offset
+            image_right = x_offset + pixmap_rect.width()
+            image_top = y_offset
+            image_bottom = y_offset + pixmap_rect.height()
+            
+            # Start from the first grid line within the image
+            start_x = image_left + (actual_grid_spacing - (image_left % actual_grid_spacing)) % actual_grid_spacing
+            x = start_x
+            while x < image_right:
+                painter.drawLine(int(x), image_top, int(x), image_bottom)
+                x += actual_grid_spacing
+            
+            # Draw horizontal lines
+            start_y = image_top + (actual_grid_spacing - (image_top % actual_grid_spacing)) % actual_grid_spacing
+            y = start_y
+            while y < image_bottom:
+                painter.drawLine(image_left, int(y), image_right, int(y))
+                y += actual_grid_spacing
+            
+            painter.end()
+    
+    def set_grid_visible(self, visible: bool):
+        """Toggle grid visibility."""
+        self.show_grid = visible
+        self.update()  # Trigger a repaint
+    
+    def set_grid_spacing(self, spacing: int):
+        """Set grid spacing in pixels at 1.0 zoom."""
+        self.grid_spacing = spacing
+        self.update()  # Trigger a repaint
+    
+    def set_grid_color(self, color: QColor):
+        """Set grid color."""
+        self.grid_color = color
+        self.update()  # Trigger a repaint
 
 
 class HomographyTab(QWidget):
@@ -434,6 +503,29 @@ class HomographyTab(QWidget):
         zoom_layout.addWidget(reset_both_btn)
         
         layout.addLayout(zoom_layout)
+        
+        # Grid overlay controls
+        grid_layout = QHBoxLayout()
+        
+        # Grid toggle checkbox
+        self.grid_checkbox = QCheckBox("Show Grid")
+        self.grid_checkbox.setChecked(True)  # Grid enabled by default
+        self.grid_checkbox.toggled.connect(self._toggle_grid)
+        grid_layout.addWidget(self.grid_checkbox)
+        
+        # Grid spacing control
+        grid_layout.addWidget(QLabel("Spacing:"))
+        self.grid_spacing_spinbox = QSpinBox()
+        self.grid_spacing_spinbox.setMinimum(10)
+        self.grid_spacing_spinbox.setMaximum(200)
+        self.grid_spacing_spinbox.setValue(50)
+        self.grid_spacing_spinbox.setSuffix(" px")
+        self.grid_spacing_spinbox.valueChanged.connect(self._update_grid_spacing)
+        grid_layout.addWidget(self.grid_spacing_spinbox)
+        
+        grid_layout.addStretch()  # Push controls to the left
+        
+        layout.addLayout(grid_layout)
         
         panel.setLayout(layout)
         return panel
@@ -929,3 +1021,17 @@ class HomographyTab(QWidget):
         if self.warped_display and self.warped_display.original_pixmap:
             # Trigger a resize to fit current container  
             self.warped_display.set_image(self.warped_display.original_pixmap)
+    
+    def _toggle_grid(self, checked: bool):
+        """Toggle grid visibility on both image displays."""
+        if self.original_display:
+            self.original_display.set_grid_visible(checked)
+        if self.warped_display:
+            self.warped_display.set_grid_visible(checked)
+    
+    def _update_grid_spacing(self, spacing: int):
+        """Update grid spacing on both image displays."""
+        if self.original_display:
+            self.original_display.set_grid_spacing(spacing)
+        if self.warped_display:
+            self.warped_display.set_grid_spacing(spacing)
