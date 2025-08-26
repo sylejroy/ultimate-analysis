@@ -8,7 +8,6 @@ import cv2
 import numpy as np
 from typing import List, Dict, Any, Tuple, Optional
 
-from ..config.settings import get_setting
 from ..constants import VISUALIZATION_COLORS
 
 

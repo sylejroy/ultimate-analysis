@@ -6,12 +6,12 @@ Maintains consistent identities for players and discs throughout the game.
 
 import cv2
 import numpy as np
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Tuple
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ..config.settings import get_setting
-from ..constants import MAX_TRACKS_ACTIVE, TRACK_HISTORY_MAX_LENGTH, FALLBACK_DEFAULTS
+from ..constants import TRACK_HISTORY_MAX_LENGTH
 
 # Try to import DeepSORT
 try:

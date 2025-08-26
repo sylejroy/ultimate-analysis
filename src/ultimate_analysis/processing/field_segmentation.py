@@ -19,7 +19,7 @@ except ImportError:
     print("[FIELD_SEG] Warning: ultralytics not available, using mock results")
 
 from ..config.settings import get_setting
-from ..constants import FIELD_DIMENSIONS, FALLBACK_DEFAULTS
+from ..constants import FIELD_DIMENSIONS
 
 
 # Global field segmentation state
