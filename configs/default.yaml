@@ -115,6 +115,6 @@ data:
 # Homography Estimation Settings
 homography:
   save_directory: "data/homography_params"
-  slider_range_main: [-5.0, 5.0]           # Range for H00, H01, H10, H11 (scale/skew)
-  slider_range_perspective: [-0.01, 0.01]  # Range for H20, H21 (perspective)
-  buffer_factor: 1.5                       # Output canvas size multiplier (1.5 = 50% larger)
+  slider_range_main: [-20.0, 20.0]           # Range for H00, H01, H10, H11 (scale/skew/extreme)
+  slider_range_perspective: [-0.1, 0.1]      # Range for H20, H21 (perspective/extreme)
+  buffer_factor: 2.5                         # Output canvas size multiplier (2.5 = 150% larger)
