@@ -44,7 +44,7 @@ class ZoomableImageLabel(QLabel):
         if self.original_pixmap is None:
             return
             
-        # Get the scroll area parent to adjust scrollbars
+        # Get the scroll area parent
         scroll_area = None
         parent = self.parent()
         while parent:
@@ -53,7 +53,19 @@ class ZoomableImageLabel(QLabel):
                 break
             parent = parent.parent()
         
-        # Get mouse position relative to the widget
+        if scroll_area is None:
+            # Fallback to center zoom if no scroll area found
+            zoom_in = event.angleDelta().y() > 0
+            zoom_delta = 0.15 if zoom_in else -0.15
+            new_zoom = max(0.1, min(10.0, self.zoom_factor + zoom_delta))
+            
+            if new_zoom != self.zoom_factor:
+                self.zoom_factor = new_zoom
+                self._update_display()
+                self.zoom_changed.emit(self.zoom_factor)
+            return
+        
+        # Get mouse position
         mouse_pos = event.position().toPoint() if hasattr(event, 'position') else event.pos()
         
         # Calculate zoom change
@@ -65,60 +77,66 @@ class ZoomableImageLabel(QLabel):
         if new_zoom == old_zoom:
             return
         
-        if scroll_area is None:
-            # Fallback to center zoom if no scroll area found
-            self.zoom_factor = new_zoom
-            self._update_display()
-            self.zoom_changed.emit(self.zoom_factor)
-            return
-        
-        # Get current scroll positions
+        # Get scrollbars
         h_scroll = scroll_area.horizontalScrollBar()
         v_scroll = scroll_area.verticalScrollBar()
-        old_h_value = h_scroll.value()
-        old_v_value = v_scroll.value()
         
-        # Get current image display properties
-        if not self.pixmap():
-            return
+        # Store old scroll positions
+        old_h = h_scroll.value()
+        old_v = v_scroll.value()
+        
+        # Calculate mouse position in the "image coordinate system"
+        # This is the key: we need to find what point in the original image
+        # is currently under the mouse cursor
+        
+        # For a QLabel with pixmap, the coordinate calculation is:
+        # 1. Mouse position relative to the label widget
+        # 2. Account for the label's alignment (center alignment means offset)
+        # 3. Account for scroll position
+        # 4. Account for current zoom level
+        
+        widget_rect = self.rect()
+        if self.pixmap():
+            pixmap_size = self.pixmap().size()
             
-        widget_size = self.size()
-        old_pixmap_size = self.pixmap().size()
-        
-        # Calculate current image offset within widget
-        old_x_offset = max(0, (widget_size.width() - old_pixmap_size.width()) // 2)
-        old_y_offset = max(0, (widget_size.height() - old_pixmap_size.height()) // 2)
-        
-        # Calculate the point in the original image under the mouse cursor
-        # Account for widget offset, scroll position, and current zoom
-        original_image_x = (mouse_pos.x() - old_x_offset + old_h_value) / old_zoom
-        original_image_y = (mouse_pos.y() - old_y_offset + old_v_value) / old_zoom
-        
-        # Update the zoom
-        self.zoom_factor = new_zoom
-        self._update_display()
-        
-        # Calculate new image properties after zoom
-        new_pixmap_size = self.pixmap().size()
-        new_x_offset = max(0, (widget_size.width() - new_pixmap_size.width()) // 2)
-        new_y_offset = max(0, (widget_size.height() - new_pixmap_size.height()) // 2)
-        
-        # Calculate where that same point should be positioned to stay under the mouse
-        # We want: mouse_pos = (original_image_point * new_zoom + new_offset - new_scroll)
-        # So: new_scroll = original_image_point * new_zoom + new_offset - mouse_pos
-        target_x_in_widget = original_image_x * new_zoom + new_x_offset
-        target_y_in_widget = original_image_y * new_zoom + new_y_offset
-        
-        new_h_value = target_x_in_widget - mouse_pos.x()
-        new_v_value = target_y_in_widget - mouse_pos.y()
-        
-        # Clamp scroll values to valid ranges
-        new_h_value = max(0, min(h_scroll.maximum(), int(new_h_value)))
-        new_v_value = max(0, min(v_scroll.maximum(), int(new_v_value)))
-        
-        # Apply the new scroll positions
-        h_scroll.setValue(new_h_value)
-        v_scroll.setValue(new_v_value)
+            # Calculate where the pixmap is positioned within the widget
+            # QLabel centers the pixmap when it's smaller than the widget
+            x_offset = max(0, (widget_rect.width() - pixmap_size.width()) // 2)
+            y_offset = max(0, (widget_rect.height() - pixmap_size.height()) // 2)
+            
+            # Mouse position relative to the actual image (accounting for centering)
+            img_mouse_x = mouse_pos.x() - x_offset
+            img_mouse_y = mouse_pos.y() - y_offset
+            
+            # Account for scroll position and current zoom to get original image coordinates
+            orig_img_x = (img_mouse_x + old_h) / old_zoom
+            orig_img_y = (img_mouse_y + old_v) / old_zoom
+            
+            # Apply new zoom
+            self.zoom_factor = new_zoom
+            self._update_display()
+            
+            # Calculate new offsets after zoom
+            if self.pixmap():
+                new_pixmap_size = self.pixmap().size()
+                new_x_offset = max(0, (widget_rect.width() - new_pixmap_size.width()) // 2)
+                new_y_offset = max(0, (widget_rect.height() - new_pixmap_size.height()) // 2)
+                
+                # Calculate where the scroll position should be to keep the same
+                # original image point under the mouse
+                target_img_x = orig_img_x * new_zoom
+                target_img_y = orig_img_y * new_zoom
+                
+                new_h = target_img_x - (mouse_pos.x() - new_x_offset)
+                new_v = target_img_y - (mouse_pos.y() - new_y_offset)
+                
+                # Apply new scroll positions with bounds checking
+                h_scroll.setValue(max(0, min(h_scroll.maximum(), int(new_h))))
+                v_scroll.setValue(max(0, min(v_scroll.maximum(), int(new_v))))
+        else:
+            # If no pixmap, just update zoom
+            self.zoom_factor = new_zoom
+            self._update_display()
         
         self.zoom_changed.emit(self.zoom_factor)
     
@@ -162,6 +180,17 @@ class ZoomableImageLabel(QLabel):
         )
         
         self.setPixmap(scaled_pixmap)
+        
+        # Set the minimum size so the scroll area recognizes the content size
+        self.setMinimumSize(scaled_pixmap.size())
+        
+        # Also set the size hint for proper scroll area calculation
+        self.resize(scaled_pixmap.size())
+        
+        # Update the scroll area geometry
+        parent = self.parent()
+        if isinstance(parent, QScrollArea):
+            parent.updateGeometry()
 
 
 class HomographyTab(QWidget):
