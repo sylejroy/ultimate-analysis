@@ -890,35 +890,62 @@ class HomographyTab(QWidget):
             
             for seg_result in segmentation_results:
                 if hasattr(seg_result, 'masks') and seg_result.masks is not None:
-                    masks = seg_result.masks.data.cpu().numpy()
+                    # Get mask data
+                    if hasattr(seg_result.masks, 'data'):
+                        mask_data = seg_result.masks.data
+                    else:
+                        continue
+                        
+                    # Convert to numpy if needed
+                    if hasattr(mask_data, 'cpu'):
+                        masks = mask_data.cpu().numpy()
+                    elif hasattr(mask_data, 'numpy'):
+                        masks = mask_data.numpy()
+                    else:
+                        masks = mask_data
                     
+                    # Process each mask
                     for i, mask in enumerate(masks):
-                        # Transform the mask using the same homography matrix
+                        # Ensure mask is 2D and proper size
+                        if len(mask.shape) == 3:
+                            mask = mask[0]  # Take first channel if 3D
+                        
+                        # Resize mask to match original frame dimensions if needed
                         original_height, original_width = self.current_frame.shape[:2]
-                        mask_resized = cv2.resize(mask, (original_width, original_height))
+                        if mask.shape != (original_height, original_width):
+                            mask = cv2.resize(mask.astype(np.float32), (original_width, original_height))
                         
                         # Apply homography transformation to the mask
-                        warped_mask = cv2.warpPerspective(mask_resized, h_matrix, 
-                                                        (warped_frame.shape[1], warped_frame.shape[0]))
+                        warped_mask = cv2.warpPerspective(
+                            mask.astype(np.float32), 
+                            h_matrix, 
+                            (warped_frame.shape[1], warped_frame.shape[0])
+                        )
                         
                         # Apply color overlay where mask is present
                         mask_binary = (warped_mask > 0.5).astype(np.uint8)
                         if np.any(mask_binary):
                             # Use the same color scheme as the visualization
-                            if hasattr(seg_result, 'boxes') and len(seg_result.boxes) > i:
-                                cls_id = int(seg_result.boxes[i].cls.item())
-                                color_dict = {0: (0, 255, 255), 1: (255, 0, 255)}  # Cyan for central, Magenta for endzones
-                                color = color_dict.get(cls_id, (0, 255, 255))
-                            else:
-                                color = (0, 255, 255)  # Default to cyan
+                            # Color mapping: 0 = Central Field (cyan), 1 = Endzone (magenta)
+                            color_dict = {
+                                0: (0, 255, 255),    # Cyan for central field (BGR)
+                                1: (255, 0, 255)     # Magenta for endzone (BGR)
+                            }
+                            color = color_dict.get(i, (0, 255, 255))  # Default to cyan
                             
                             # Create colored overlay
                             overlay = result_frame.copy()
                             overlay[mask_binary == 1] = color
                             
-                            # Blend with original frame
+                            # Blend with original frame using same alpha as visualization
                             alpha = 0.4
                             result_frame = cv2.addWeighted(result_frame, 1-alpha, overlay, alpha, 0)
+                            
+                            # Draw contours for better visibility
+                            contours, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                            if contours:
+                                border_color = tuple(int(c * 0.7) for c in color)
+                                cv2.drawContours(result_frame, contours, -1, border_color, 2)
                             
                             print(f"[HOMOGRAPHY] Applied transformed mask {i} with color {color} to warped frame")
             
@@ -926,6 +953,8 @@ class HomographyTab(QWidget):
             
         except Exception as e:
             print(f"[HOMOGRAPHY] Error transforming segmentation to warped frame: {e}")
+            import traceback
+            traceback.print_exc()
             return warped_frame
     
     def _get_homography_matrix(self) -> np.ndarray:
