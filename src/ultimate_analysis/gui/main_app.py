@@ -14,6 +14,7 @@ from PyQt5.QtGui import QPalette, QColor, QIcon
 from .main_tab import MainTab
 from .easyocr_tuning_tab import EasyOCRTuningTab
 from .model_tuning_tab import ModelTuningTab
+from .homography_tab import HomographyTab
 from ..config.settings import get_setting
 from ..constants import DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT
 
@@ -66,6 +67,10 @@ class UltimateAnalysisApp(QMainWindow):
         # Create Model Tuning tab
         self.model_tuning_tab = ModelTuningTab()
         self.tab_widget.addTab(self.model_tuning_tab, "Model Training")
+        
+        # Create Homography Estimation tab
+        self.homography_tab = HomographyTab()
+        self.tab_widget.addTab(self.homography_tab, "Homography Estimation")
         
         # TODO: Add more tabs as needed
         # Example placeholder tabs:

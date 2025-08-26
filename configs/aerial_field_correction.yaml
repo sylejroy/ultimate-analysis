@@ -1,0 +1,15 @@
+homography_parameters:
+  H00: 0.8899999999999997
+  H01: 5.0
+  H02: 0.0
+  H10: 0.0
+  H11: 5.0
+  H12: 0.0
+  H20: 4.0000000000000105e-05
+  H21: 0.006140000000000001
+metadata:
+  created_at: '2025-08-26T09:32:54.623260'
+  video_file: chicago_vs_new_york_2024_snippet_3_74825.mp4
+  frame_index: 0
+  application: Ultimate Analysis
+  version: '1.0'
