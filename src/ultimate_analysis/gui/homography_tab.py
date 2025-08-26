@@ -633,28 +633,28 @@ class HomographyTab(QWidget):
     def _create_parameter_controls(self, layout: QVBoxLayout):
         """Create slider controls for homography parameters."""
         # Get slider ranges from configuration with proper type conversion
-        h_range_main = get_setting("homography.slider_range_main", [-5.0, 5.0])
-        h_range_persp = get_setting("homography.slider_range_perspective", [-0.01, 0.01])
+        h_range_main = get_setting("homography.slider_range_main", [-50.0, 50.0])
+        h_range_persp = get_setting("homography.slider_range_perspective", [-0.2, 0.2])
         
         # Ensure ranges are numeric (convert from strings if needed)
         if isinstance(h_range_main, list) and len(h_range_main) == 2:
             h_range_main = [float(h_range_main[0]), float(h_range_main[1])]
         else:
-            h_range_main = [-5.0, 5.0]  # Fallback
+            h_range_main = [-50.0, 50.0]  # Expanded fallback range
             
         if isinstance(h_range_persp, list) and len(h_range_persp) == 2:
             h_range_persp = [float(h_range_persp[0]), float(h_range_persp[1])]
         else:
-            h_range_persp = [-0.01, 0.01]  # Fallback
+            h_range_persp = [-0.2, 0.2]  # Expanded fallback range
         
         # Parameters with their ranges and default values
         param_config = [
             ('H00', h_range_main, 1.0, "Scale X"),
             ('H01', h_range_main, 0.0, "Skew X"),
-            ('H02', [-500.0, 500.0], 0.0, "Translate X"),
+            ('H02', [-10000.0, 10000.0], 0.0, "Translate X"),
             ('H10', h_range_main, 0.0, "Skew Y"), 
             ('H11', h_range_main, 1.0, "Scale Y"),
-            ('H12', [-500.0, 500.0], 0.0, "Translate Y"),
+            ('H12', [-10000.0, 10000.0], 0.0, "Translate Y"),
             ('H20', h_range_persp, 0.0, "Perspective X"),
             ('H21', h_range_persp, 0.0, "Perspective Y"),
         ]
@@ -812,19 +812,19 @@ class HomographyTab(QWidget):
         """Handle homography parameter change from slider."""
         # Get parameter range with proper type conversion
         if param_name in ['H00', 'H01', 'H10', 'H11']:
-            param_range = get_setting("homography.slider_range_main", [-5.0, 5.0])
+            param_range = get_setting("homography.slider_range_main", [-50.0, 50.0])
             if isinstance(param_range, list) and len(param_range) == 2:
                 param_range = [float(param_range[0]), float(param_range[1])]
             else:
-                param_range = [-5.0, 5.0]
+                param_range = [-50.0, 50.0]
         elif param_name in ['H20', 'H21']:
-            param_range = get_setting("homography.slider_range_perspective", [-0.01, 0.01])
+            param_range = get_setting("homography.slider_range_perspective", [-0.2, 0.2])
             if isinstance(param_range, list) and len(param_range) == 2:
                 param_range = [float(param_range[0]), float(param_range[1])]
             else:
-                param_range = [-0.01, 0.01]
+                param_range = [-0.2, 0.2]
         else:  # Translation parameters
-            param_range = [-500.0, 500.0]
+            param_range = [-10000.0, 10000.0]
             
         # Convert slider value (0-1000) to parameter value
         normalized_val = slider_value / 1000.0
@@ -989,19 +989,19 @@ class HomographyTab(QWidget):
             
             # Update slider position with proper type conversion
             if param_name in ['H00', 'H01', 'H10', 'H11']:
-                param_range = get_setting("homography.slider_range_main", [-5.0, 5.0])
+                param_range = get_setting("homography.slider_range_main", [-50.0, 50.0])
                 if isinstance(param_range, list) and len(param_range) == 2:
                     param_range = [float(param_range[0]), float(param_range[1])]
                 else:
-                    param_range = [-5.0, 5.0]
+                    param_range = [-50.0, 50.0]
             elif param_name in ['H20', 'H21']:
-                param_range = get_setting("homography.slider_range_perspective", [-0.01, 0.01])
+                param_range = get_setting("homography.slider_range_perspective", [-0.2, 0.2])
                 if isinstance(param_range, list) and len(param_range) == 2:
                     param_range = [float(param_range[0]), float(param_range[1])]
                 else:
-                    param_range = [-0.01, 0.01]
+                    param_range = [-0.2, 0.2]
             else:
-                param_range = [-500.0, 500.0]
+                param_range = [-10000.0, 10000.0]
                 
             slider_val = int(((value - param_range[0]) / (param_range[1] - param_range[0])) * 1000)
             self.param_sliders[param_name].setValue(slider_val)
@@ -1126,19 +1126,19 @@ class HomographyTab(QWidget):
                         
                         # Update slider position with proper type conversion
                         if param_name in ['H00', 'H01', 'H10', 'H11']:
-                            param_range = get_setting("homography.slider_range_main", [-5.0, 5.0])
+                            param_range = get_setting("homography.slider_range_main", [-50.0, 50.0])
                             if isinstance(param_range, list) and len(param_range) == 2:
                                 param_range = [float(param_range[0]), float(param_range[1])]
                             else:
-                                param_range = [-5.0, 5.0]
+                                param_range = [-50.0, 50.0]
                         elif param_name in ['H20', 'H21']:
-                            param_range = get_setting("homography.slider_range_perspective", [-0.01, 0.01])
+                            param_range = get_setting("homography.slider_range_perspective", [-0.2, 0.2])
                             if isinstance(param_range, list) and len(param_range) == 2:
                                 param_range = [float(param_range[0]), float(param_range[1])]
                             else:
-                                param_range = [-0.01, 0.01]
+                                param_range = [-0.2, 0.2]
                         else:
-                            param_range = [-500.0, 500.0]
+                            param_range = [-10000.0, 10000.0]
                             
                         slider_val = int(((value - param_range[0]) / (param_range[1] - param_range[0])) * 1000)
                         slider_val = max(0, min(1000, slider_val))  # Clamp to valid range
@@ -1188,19 +1188,19 @@ class HomographyTab(QWidget):
                     
                     # Update slider position with proper type conversion
                     if param_name in ['H00', 'H01', 'H10', 'H11']:
-                        param_range = get_setting("homography.slider_range_main", [-5.0, 5.0])
+                        param_range = get_setting("homography.slider_range_main", [-50.0, 50.0])
                         if isinstance(param_range, list) and len(param_range) == 2:
                             param_range = [float(param_range[0]), float(param_range[1])]
                         else:
-                            param_range = [-5.0, 5.0]
+                            param_range = [-50.0, 50.0]
                     elif param_name in ['H20', 'H21']:
-                        param_range = get_setting("homography.slider_range_perspective", [-0.01, 0.01])
+                        param_range = get_setting("homography.slider_range_perspective", [-0.2, 0.2])
                         if isinstance(param_range, list) and len(param_range) == 2:
                             param_range = [float(param_range[0]), float(param_range[1])]
                         else:
-                            param_range = [-0.01, 0.01]
+                            param_range = [-0.2, 0.2]
                     else:
-                        param_range = [-500.0, 500.0]
+                        param_range = [-10000.0, 10000.0]
                         
                     slider_val = int(((value - param_range[0]) / (param_range[1] - param_range[0])) * 1000)
                     slider_val = max(0, min(1000, slider_val))  # Clamp to valid range
