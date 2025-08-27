@@ -8,8 +8,8 @@ import sys
 from typing import Optional
 
 from PyQt5.QtWidgets import QApplication, QMainWindow, QTabWidget, QVBoxLayout, QWidget
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QPalette, QColor, QIcon
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QPalette, QColor
 
 from .main_tab import MainTab
 from .easyocr_tuning_tab import EasyOCRTuningTab
@@ -82,15 +82,6 @@ class UltimateAnalysisApp(QMainWindow):
         self.status_bar.showMessage("Ready")
         
         print("[APP] UI initialized with main tab")
-    
-    def _center_window(self):
-        """Center the application window on screen."""
-        screen = QApplication.desktop().screenGeometry()
-        window = self.geometry()
-        self.move(
-            (screen.width() - window.width()) // 2,
-            (screen.height() - window.height()) // 2
-        )
     
     def _setup_dark_theme(self):
         """Setup dark theme for the application."""

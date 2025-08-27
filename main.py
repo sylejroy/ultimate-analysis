@@ -1,7 +1,6 @@
 """Main entry point for Ultimate Analysis application."""
 
 import sys
-import os
 from pathlib import Path
 
 # Add the src directory to Python path for imports

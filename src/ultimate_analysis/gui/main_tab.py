@@ -13,8 +13,7 @@ from pathlib import Path
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, 
     QCheckBox, QPushButton, QSlider, QListWidgetItem, QGroupBox,
-    QFormLayout, QComboBox, QShortcut, QProgressBar, QSplitter,
-    QTableWidget, QTableWidgetItem, QHeaderView
+    QFormLayout, QComboBox, QShortcut, QSplitter
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont, QColor
