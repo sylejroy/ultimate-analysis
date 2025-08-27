@@ -7,13 +7,14 @@ playback controls, and processing options.
 import os
 import cv2
 import time
+import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, 
     QCheckBox, QPushButton, QSlider, QListWidgetItem, QGroupBox,
-    QFormLayout, QComboBox, QShortcut, QSplitter
+    QFormLayout, QComboBox, QShortcut, QSplitter, QSpinBox, QMessageBox
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont, QColor
@@ -28,6 +29,7 @@ from ..processing import (
 )
 from ..processing.jersey_tracker import get_jersey_tracker
 from ..processing.field_segmentation import visualize_segmentation
+from ..processing.particle_filter_homography import ParticleFilterHomography
 from ..config.settings import get_setting
 from ..constants import SHORTCUTS, DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS
 
@@ -69,6 +71,12 @@ class MainTab(QWidget):
         self.current_tracks: List[Any] = []
         self.current_field_results: List[Any] = []
         self.current_player_ids: Dict[int, Tuple[str, Any]] = {}
+        
+        # Particle filter for homography estimation
+        self.particle_filter = ParticleFilterHomography(num_particles=500)
+        self.show_field_lines = False
+        self.auto_update_homography = True  # Enable by default for constant updates
+        self.current_homography = np.eye(3)  # Identity matrix as default
         
         # FPS tracking for processed frames
         self.frame_times: List[float] = []
@@ -182,6 +190,62 @@ class MainTab(QWidget):
         processing_group.setLayout(processing_layout)
         layout.addWidget(processing_group)
         
+        # Particle Filter Homography Controls
+        particle_filter_group = QGroupBox("Homography Estimation")
+        pf_layout = QVBoxLayout()
+        
+        # Auto-update checkbox
+        self.auto_update_checkbox = QCheckBox("Auto-Update Homography")
+        self.auto_update_checkbox.setChecked(self.auto_update_homography)
+        self.auto_update_checkbox.stateChanged.connect(self._on_auto_update_toggled)
+        self.auto_update_checkbox.setToolTip("Automatically estimate homography when field segmentation is available")
+        pf_layout.addWidget(self.auto_update_checkbox)
+        
+        # Show field lines checkbox
+        self.show_field_lines_checkbox = QCheckBox("Show Field Lines")
+        self.show_field_lines_checkbox.setChecked(self.show_field_lines)
+        self.show_field_lines_checkbox.stateChanged.connect(self._on_show_field_lines_toggled)
+        self.show_field_lines_checkbox.setToolTip("Show detected field lines (sidelines and endzone)")
+        pf_layout.addWidget(self.show_field_lines_checkbox)
+        
+        # Particle filter controls
+        pf_controls_layout = QHBoxLayout()
+        
+        # Number of particles
+        pf_controls_layout.addWidget(QLabel("Particles:"))
+        self.particles_spinbox = QSpinBox()
+        self.particles_spinbox.setMinimum(100)
+        self.particles_spinbox.setMaximum(2000)
+        self.particles_spinbox.setValue(500)
+        self.particles_spinbox.valueChanged.connect(self._on_particles_changed)
+        self.particles_spinbox.setToolTip("Number of particles in the filter")
+        pf_controls_layout.addWidget(self.particles_spinbox)
+        
+        # Iterations
+        pf_controls_layout.addWidget(QLabel("Iterations:"))
+        self.iterations_spinbox = QSpinBox()
+        self.iterations_spinbox.setMinimum(1)
+        self.iterations_spinbox.setMaximum(50)
+        self.iterations_spinbox.setValue(10)
+        self.iterations_spinbox.setToolTip("Number of filter iterations")
+        pf_controls_layout.addWidget(self.iterations_spinbox)
+        
+        pf_layout.addLayout(pf_controls_layout)
+        
+        # Particle filter buttons
+        pf_button_layout = QHBoxLayout()
+        
+        run_pf_button = QPushButton("Run Particle Filter")
+        run_pf_button.clicked.connect(self._run_particle_filter)
+        run_pf_button.setToolTip("Run particle filter to estimate homography from field segmentation")
+        run_pf_button.setStyleSheet("background-color: #228B22; color: white; font-weight: bold;")
+        pf_button_layout.addWidget(run_pf_button)
+        
+        pf_layout.addLayout(pf_button_layout)
+        
+        particle_filter_group.setLayout(pf_layout)
+        layout.addWidget(particle_filter_group)
+        
         # Model selection section
         models_group = QGroupBox("Model Settings")
         models_layout = QFormLayout()
@@ -224,14 +288,21 @@ class MainTab(QWidget):
         return panel
     
     def _create_right_panel(self) -> QWidget:
-        """Create the right panel with video display and controls."""
+        """Create the right panel with video display and top-down view."""
         panel = QWidget()
         layout = QVBoxLayout()
+        
+        # Create horizontal splitter for video view and top-down view
+        video_splitter = QSplitter(Qt.Horizontal)
+        
+        # Left side: Original video display
+        video_panel = QWidget()
+        video_layout = QVBoxLayout()
         
         # Video display area
         self.video_label = QLabel("No video selected")
         self.video_label.setAlignment(Qt.AlignCenter)
-        self.video_label.setFixedHeight(1080)  # Much bigger for main tab - increased from 400 to 1080
+        self.video_label.setMinimumHeight(400)
         self.video_label.setStyleSheet("""
             QLabel {
                 border: 2px solid #555;
@@ -240,7 +311,42 @@ class MainTab(QWidget):
                 font-size: 14px;
             }
         """)
-        layout.addWidget(self.video_label, 1)  # Takes most space
+        video_layout.addWidget(self.video_label, 1)
+        
+        video_panel.setLayout(video_layout)
+        video_splitter.addWidget(video_panel)
+        
+        # Right side: Top-down view
+        topdown_panel = QWidget()
+        topdown_layout = QVBoxLayout()
+        
+        # Top-down view label
+        topdown_header = QLabel("Top-Down Field View (100m × 37m)")
+        topdown_header.setAlignment(Qt.AlignCenter)
+        topdown_header.setStyleSheet("font-weight: bold; color: #fff; padding: 5px;")
+        topdown_layout.addWidget(topdown_header)
+        
+        # Top-down display area
+        self.topdown_label = QLabel("Enable field segmentation to see top-down view")
+        self.topdown_label.setAlignment(Qt.AlignCenter)
+        self.topdown_label.setMinimumHeight(400)
+        self.topdown_label.setStyleSheet("""
+            QLabel {
+                border: 2px solid #555;
+                background-color: #1a1a1a;
+                color: #999;
+                font-size: 12px;
+            }
+        """)
+        topdown_layout.addWidget(self.topdown_label, 1)
+        
+        topdown_panel.setLayout(topdown_layout)
+        video_splitter.addWidget(topdown_panel)
+        
+        # Set splitter proportions (60% video, 40% top-down)
+        video_splitter.setSizes([600, 400])
+        
+        layout.addWidget(video_splitter, 1)
         
         # Progress bar
         self.progress_bar = QSlider(Qt.Horizontal)
@@ -467,7 +573,7 @@ class MainTab(QWidget):
             self.video_label.setText("Failed to load video")
     
     def _display_frame(self, frame):
-        """Display a frame in the video label.
+        """Display a frame in the video label and update top-down view.
         
         Args:
             frame: OpenCV frame (numpy array) to display
@@ -478,7 +584,7 @@ class MainTab(QWidget):
         # Apply processing if enabled
         processed_frame = self._process_frame(frame.copy())
         
-        # Convert to Qt format and display
+        # Convert to Qt format and display in main video label
         height, width, channel = processed_frame.shape
         bytes_per_line = 3 * width
         
@@ -486,9 +592,8 @@ class MainTab(QWidget):
         
         # Scale to fit label
         pixmap = QPixmap.fromImage(q_image)
-        # Use fixed dimensions instead of current label size to prevent growth
         label_width = self.video_label.width()
-        label_height = 1200  # Use the fixed height we set
+        label_height = self.video_label.height()
         scaled_pixmap = pixmap.scaled(
             label_width - 4, label_height - 4,  # Account for 2px border on each side
             Qt.KeepAspectRatio, 
@@ -496,6 +601,9 @@ class MainTab(QWidget):
         )
         
         self.video_label.setPixmap(scaled_pixmap)
+        
+        # Update top-down view if field segmentation is available
+        self._update_topdown_view(frame)
     
     def _process_frame(self, frame):
         """Apply enabled processing to a frame.
@@ -538,6 +646,33 @@ class MainTab(QWidget):
             self.current_field_results = run_field_segmentation(frame)
             duration_ms = (time.time() - start_time) * 1000
             self.performance_widget.add_processing_measurement("Field Segmentation", duration_ms)
+            
+            # Auto-update homography if enabled and particle filter is initialized
+            if self.auto_update_homography and self.current_field_results:
+                if not self.particle_filter.is_initialized():
+                    # Initialize particle filter from config if not done yet
+                    config_path = Path("configs/homography_params.yaml")
+                    if config_path.exists():
+                        self.particle_filter.initialize_particles_from_config(str(config_path))
+                        print("[MAIN_TAB] Particle filter initialized from config for auto-update")
+                    else:
+                        self.particle_filter._initialize_identity_particles()
+                        print("[MAIN_TAB] Particle filter initialized with identity for auto-update")
+                
+                # Run continuous homography update
+                start_time = time.time()
+                success, updated_homography = self.particle_filter.update_homography_continuously(
+                    self.current_field_results, frame, num_iterations=3
+                )
+                update_duration_ms = (time.time() - start_time) * 1000
+                
+                if success:
+                    self.current_homography = updated_homography
+                    self.performance_widget.add_processing_measurement("Homography Update", update_duration_ms)
+                    # Update top-down view silently (no user message)
+                else:
+                    # Still update performance measurement for failed attempts
+                    self.performance_widget.add_processing_measurement("Homography Update (Failed)", update_duration_ms)
         
         # Run player ID if enabled (requires tracking to be active)
         if self.player_id_checkbox.isChecked() and self.current_tracks:
@@ -592,6 +727,10 @@ class MainTab(QWidget):
         # Apply field segmentation overlay first (as background)
         if self.current_field_results and self.field_segmentation_checkbox.isChecked():
             frame = visualize_segmentation(frame, self.current_field_results, alpha=0.3)
+        
+        # Add field lines if enabled
+        if self.show_field_lines and self.particle_filter.detected_lines:
+            frame = self.particle_filter.visualize_field_lines(frame)
         
         # Show detections only if tracking is NOT enabled (to avoid visual clutter)
         if self.current_detections and not self.tracking_checkbox.isChecked():
@@ -906,3 +1045,131 @@ class MainTab(QWidget):
         self._stop_playback()
         self.video_player.close_video()
         super().closeEvent(event)
+
+    # Particle Filter Event Handlers
+    def _on_auto_update_toggled(self, state: int):
+        """Handle auto-update homography checkbox toggle."""
+        self.auto_update_homography = state == 2  # Qt.Checked = 2
+        print(f"[MAIN_TAB] Auto-update homography: {self.auto_update_homography}")
+    
+    def _on_show_field_lines_toggled(self, state: int):
+        """Handle show field lines checkbox toggle."""
+        self.show_field_lines = state == 2  # Qt.Checked = 2
+        print(f"[MAIN_TAB] Show field lines: {self.show_field_lines}")
+    
+    def _on_particles_changed(self, value: int):
+        """Handle particle count change."""
+        self.particle_filter = ParticleFilterHomography(num_particles=value)
+        print(f"[MAIN_TAB] Updated particle count to: {value}")
+    
+    def _run_particle_filter(self):
+        """Run particle filter to estimate homography."""
+        current_frame = self.video_player.get_current_frame()
+        if current_frame is None:
+            QMessageBox.warning(self, "No Frame", "Please load a video first.")
+            return
+        
+        try:
+            print("[MAIN_TAB] Running particle filter homography estimation...")
+            
+            # Make sure we have current field segmentation results
+            if not self.field_segmentation_checkbox.isChecked() or not self.current_field_results:
+                # Enable field segmentation and run it
+                self.field_segmentation_checkbox.setChecked(True)
+                self._process_frame(current_frame.copy())  # This will run field segmentation
+                
+                if not self.current_field_results:
+                    QMessageBox.warning(self, "No Segmentation", "No field segmentation results available. Please ensure field segmentation is enabled.")
+                    return
+            
+            # Initialize particles from homography config if available
+            config_path = Path("configs/homography_params.yaml")
+            if config_path.exists():
+                self.particle_filter.initialize_particles_from_config(str(config_path))
+            else:
+                # Fallback to identity initialization
+                self.particle_filter._initialize_identity_particles()
+            
+            # Get number of iterations from UI
+            iterations = self.iterations_spinbox.value()
+            
+            # Run the particle filter
+            best_homography = self.particle_filter.run_particle_filter(
+                self.current_field_results, 
+                current_frame,
+                num_iterations=iterations
+            )
+            
+            # Update current homography
+            if best_homography is not None:
+                self.current_homography = best_homography
+                print("[MAIN_TAB] Particle filter completed successfully")
+                
+                # Update top-down view
+                self._update_topdown_view(current_frame)
+                
+                QMessageBox.information(
+                    self,
+                    "Particle Filter Complete",
+                    f"Homography estimation completed successfully!\nDetected {len(self.particle_filter.detected_lines)} field lines."
+                )
+            else:
+                QMessageBox.warning(self, "Filter Failed", "Particle filter failed to converge to a valid homography.")
+                
+        except Exception as e:
+            print(f"[MAIN_TAB] Error running particle filter: {e}")
+            QMessageBox.critical(self, "Error", f"Error running particle filter: {e}")
+    
+    def _update_topdown_view(self, frame):
+        """Update the top-down view with current homography."""
+        if frame is None:
+            return
+            
+        try:
+            # Check if we have field segmentation enabled
+            if not self.field_segmentation_checkbox.isChecked():
+                self.topdown_label.setText("Enable field segmentation to see top-down view")
+                return
+            
+            # Use the particle filter's top-down view generator if available and initialized
+            if (self.particle_filter.is_initialized() and 
+                hasattr(self.particle_filter, 'detected_lines') and 
+                self.particle_filter.detected_lines):
+                
+                # Generate top-down view with field lines overlaid for debugging
+                output_size = (400, 300)  # Adjust size as needed
+                top_down_view = self.particle_filter.generate_top_down_view_with_lines(frame, output_size)
+                
+            elif not np.allclose(self.current_homography, np.eye(3)):
+                # Use manually computed homography
+                output_size = (400, 300)
+                top_down_view = cv2.warpPerspective(frame, self.current_homography, output_size)
+                
+            else:
+                # No homography available yet
+                if self.auto_update_homography:
+                    self.topdown_label.setText("Waiting for field segmentation data...")
+                else:
+                    self.topdown_label.setText("Run particle filter to generate top-down view")
+                return
+            
+            # Convert to Qt format and display
+            height, width, channel = top_down_view.shape
+            bytes_per_line = 3 * width
+            q_image = QImage(top_down_view.data, width, height, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
+            
+            # Scale to fit the label
+            pixmap = QPixmap.fromImage(q_image)
+            label_width = self.topdown_label.width()
+            label_height = self.topdown_label.height()
+            scaled_pixmap = pixmap.scaled(
+                label_width - 4, label_height - 4,  # Account for border
+                Qt.KeepAspectRatio, 
+                Qt.SmoothTransformation
+            )
+            
+            self.topdown_label.setPixmap(scaled_pixmap)
+            
+        except Exception as e:
+            print(f"[MAIN_TAB] Error updating top-down view: {e}")
+            self.topdown_label.setText(f"Error generating top-down view: {str(e)[:50]}...")
