@@ -22,8 +22,8 @@ output:
   save_results: true
   verbose: true
 segmentation:
-  augment: false
-  batch_size: 0.8
+  augment: true
+  batch_size: 4.0
   copy_paste: 0.0
   cosine_lr: true
   epochs: 300
