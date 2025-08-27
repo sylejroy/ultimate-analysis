@@ -5,9 +5,9 @@ with real-time perspective transformation visualization and YAML save/load funct
 """
 
 import os
-import random
 import yaml
-from typing import List, Dict, Any, Optional
+import datetime
+from typing import List, Dict, Optional
 from pathlib import Path
 
 import cv2
@@ -16,14 +16,253 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, 
     QPushButton, QSlider, QListWidgetItem, QGroupBox,
     QFormLayout, QSplitter, QFileDialog, QMessageBox,
-    QGridLayout
+    QScrollArea, QSizePolicy, QCheckBox, QSpinBox, QComboBox
 )
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QPixmap, QImage
+from PyQt5.QtCore import Qt, pyqtSignal, QPoint
+from PyQt5.QtGui import QPixmap, QImage, QWheelEvent, QPainter, QPen, QColor, QMouseEvent
 
 from .video_player import VideoPlayer
 from ..config.settings import get_setting
 from ..constants import DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS
+from ..processing.field_segmentation import run_field_segmentation, set_field_model
+from ..gui.visualization import draw_field_segmentation
+
+
+class ZoomableImageLabel(QLabel):
+    """Custom QLabel that supports mouse wheel zooming."""
+    
+    zoom_changed = pyqtSignal(float)
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.zoom_factor = 1.0
+        self.original_pixmap: Optional[QPixmap] = None
+        self.setAlignment(Qt.AlignCenter)
+        self.setMinimumSize(400, 300)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setScaledContents(False)
+        
+        # Grid overlay properties
+        self.show_grid = True
+        self.grid_spacing = 50  # pixels at 1.0 zoom
+        self.grid_color = QColor(255, 255, 255, 80)  # Semi-transparent white
+        self.grid_line_width = 1
+        
+    def wheelEvent(self, event: QWheelEvent):
+        """Handle mouse wheel for zooming to mouse position."""
+        if self.original_pixmap is None:
+            return
+            
+        # Get the scroll area parent
+        scroll_area = None
+        parent = self.parent()
+        while parent:
+            if isinstance(parent, QScrollArea):
+                scroll_area = parent
+                break
+            parent = parent.parent()
+        
+        if scroll_area is None:
+            # Fallback to center zoom if no scroll area found
+            zoom_in = event.angleDelta().y() > 0
+            zoom_delta = 0.15 if zoom_in else -0.15
+            new_zoom = max(0.1, min(10.0, self.zoom_factor + zoom_delta))
+            
+            if new_zoom != self.zoom_factor:
+                self.zoom_factor = new_zoom
+                self._update_display()
+                self.zoom_changed.emit(self.zoom_factor)
+            return
+        
+        # Get mouse position
+        mouse_pos = event.position().toPoint() if hasattr(event, 'position') else event.pos()
+        
+        # Calculate zoom change
+        zoom_in = event.angleDelta().y() > 0
+        zoom_delta = 0.15 if zoom_in else -0.15
+        old_zoom = self.zoom_factor
+        new_zoom = max(0.1, min(10.0, old_zoom + zoom_delta))
+        
+        if new_zoom == old_zoom:
+            return
+        
+        # Get scrollbars
+        h_scroll = scroll_area.horizontalScrollBar()
+        v_scroll = scroll_area.verticalScrollBar()
+        
+        # Store old scroll positions
+        old_h = h_scroll.value()
+        old_v = v_scroll.value()
+        
+        # Calculate mouse position in the "image coordinate system"
+        # This is the key: we need to find what point in the original image
+        # is currently under the mouse cursor
+        
+        # For a QLabel with pixmap, the coordinate calculation is:
+        # 1. Mouse position relative to the label widget
+        # 2. Account for the label's alignment (center alignment means offset)
+        # 3. Account for scroll position
+        # 4. Account for current zoom level
+        
+        widget_rect = self.rect()
+        if self.pixmap():
+            pixmap_size = self.pixmap().size()
+            
+            # Calculate where the pixmap is positioned within the widget
+            # QLabel centers the pixmap when it's smaller than the widget
+            x_offset = max(0, (widget_rect.width() - pixmap_size.width()) // 2)
+            y_offset = max(0, (widget_rect.height() - pixmap_size.height()) // 2)
+            
+            # Mouse position relative to the actual image (accounting for centering)
+            img_mouse_x = mouse_pos.x() - x_offset
+            img_mouse_y = mouse_pos.y() - y_offset
+            
+            # Account for scroll position and current zoom to get original image coordinates
+            orig_img_x = (img_mouse_x + old_h) / old_zoom
+            orig_img_y = (img_mouse_y + old_v) / old_zoom
+            
+            # Apply new zoom
+            self.zoom_factor = new_zoom
+            self._update_display()
+            
+            # Calculate new offsets after zoom
+            if self.pixmap():
+                new_pixmap_size = self.pixmap().size()
+                new_x_offset = max(0, (widget_rect.width() - new_pixmap_size.width()) // 2)
+                new_y_offset = max(0, (widget_rect.height() - new_pixmap_size.height()) // 2)
+                
+                # Calculate where the scroll position should be to keep the same
+                # original image point under the mouse
+                target_img_x = orig_img_x * new_zoom
+                target_img_y = orig_img_y * new_zoom
+                
+                new_h = target_img_x - (mouse_pos.x() - new_x_offset)
+                new_v = target_img_y - (mouse_pos.y() - new_y_offset)
+                
+                # Apply new scroll positions with bounds checking
+                h_scroll.setValue(max(0, min(h_scroll.maximum(), int(new_h))))
+                v_scroll.setValue(max(0, min(v_scroll.maximum(), int(new_v))))
+        else:
+            # If no pixmap, just update zoom
+            self.zoom_factor = new_zoom
+            self._update_display()
+        
+        self.zoom_changed.emit(self.zoom_factor)
+    
+    def set_image(self, pixmap: QPixmap):
+        """Set the image and reset zoom to fit the container."""
+        self.original_pixmap = pixmap
+        # Calculate initial zoom to fit the container while maintaining aspect ratio
+        if pixmap and not pixmap.isNull():
+            container_size = self.size()
+            pixmap_size = pixmap.size()
+            
+            # Calculate scale factors for width and height
+            scale_w = container_size.width() / pixmap_size.width() if pixmap_size.width() > 0 else 1.0
+            scale_h = container_size.height() / pixmap_size.height() if pixmap_size.height() > 0 else 1.0
+            
+            # Use the smaller scale factor to ensure the image fits completely
+            initial_zoom = min(scale_w, scale_h, 1.0)  # Don't scale up beyond original size initially
+            self.zoom_factor = max(0.1, initial_zoom)
+        else:
+            self.zoom_factor = 1.0
+            
+        self._update_display()
+        self.zoom_changed.emit(self.zoom_factor)
+    
+    def set_zoom(self, zoom_factor: float):
+        """Set zoom factor programmatically."""
+        self.zoom_factor = max(0.1, min(10.0, zoom_factor))
+        self._update_display()
+    
+    def _update_display(self):
+        """Update the displayed image with current zoom."""
+        if self.original_pixmap is None:
+            return
+            
+        # Scale the pixmap
+        scaled_size = self.original_pixmap.size() * self.zoom_factor
+        scaled_pixmap = self.original_pixmap.scaled(
+            scaled_size, 
+            Qt.KeepAspectRatio, 
+            Qt.SmoothTransformation
+        )
+        
+        self.setPixmap(scaled_pixmap)
+        
+        # Set the minimum size so the scroll area recognizes the content size
+        self.setMinimumSize(scaled_pixmap.size())
+        
+        # Also set the size hint for proper scroll area calculation
+        self.resize(scaled_pixmap.size())
+        
+        # Update the scroll area geometry
+        parent = self.parent()
+        if isinstance(parent, QScrollArea):
+            parent.updateGeometry()
+    
+    def paintEvent(self, event):
+        """Override paint event to draw grid overlay on top of the image."""
+        # First, let the parent QLabel draw the image
+        super().paintEvent(event)
+        
+        # Draw grid overlay if enabled and we have an image
+        if self.show_grid and self.pixmap() and not self.pixmap().isNull():
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            
+            # Set up the grid pen
+            pen = QPen(self.grid_color)
+            pen.setWidth(self.grid_line_width)
+            painter.setPen(pen)
+            
+            # Get the image area within the widget
+            pixmap_rect = self.pixmap().rect()
+            widget_rect = self.rect()
+            
+            # Calculate the image position (centered in widget)
+            x_offset = max(0, (widget_rect.width() - pixmap_rect.width()) // 2)
+            y_offset = max(0, (widget_rect.height() - pixmap_rect.height()) // 2)
+            
+            # Calculate actual grid spacing based on current zoom
+            actual_grid_spacing = self.grid_spacing * self.zoom_factor
+            
+            # Draw vertical lines
+            image_left = x_offset
+            image_right = x_offset + pixmap_rect.width()
+            image_top = y_offset
+            image_bottom = y_offset + pixmap_rect.height()
+            
+            # Start from the first grid line within the image
+            start_x = image_left + (actual_grid_spacing - (image_left % actual_grid_spacing)) % actual_grid_spacing
+            x = start_x
+            while x < image_right:
+                painter.drawLine(int(x), image_top, int(x), image_bottom)
+                x += actual_grid_spacing
+            
+            # Draw horizontal lines
+            start_y = image_top + (actual_grid_spacing - (image_top % actual_grid_spacing)) % actual_grid_spacing
+            y = start_y
+            while y < image_bottom:
+                painter.drawLine(image_left, int(y), image_right, int(y))
+                y += actual_grid_spacing
+            
+            painter.end()
+    
+    def set_grid_visible(self, visible: bool):
+        """Toggle grid visibility."""
+        self.show_grid = visible
+        self.update()  # Trigger a repaint
+    
+    def set_grid_spacing(self, spacing: int):
+        """Set grid spacing in pixels at 1.0 zoom."""
+        self.grid_spacing = spacing
+        self.update()  # Trigger a repaint
+    
+    def set_grid_color(self, color: QColor):
+        """Set grid color."""
+        self.grid_color = color
+        self.update()  # Trigger a repaint
 
 
 class HomographyTab(QWidget):
@@ -48,36 +287,56 @@ class HomographyTab(QWidget):
         
         # UI components
         self.video_list: Optional[QListWidget] = None
-        self.frame_slider: Optional[QSlider] = None
         self.frame_label: Optional[QLabel] = None
-        self.original_display: Optional[QLabel] = None
-        self.warped_display: Optional[QLabel] = None
+        self.original_display: Optional[ZoomableImageLabel] = None
+        self.warped_display: Optional[ZoomableImageLabel] = None
         self.param_sliders: Dict[str, QSlider] = {}
         self.param_labels: Dict[str, QLabel] = {}
+        
+        # Scrubbing controls
+        self.scrubbing_slider: Optional[QSlider] = None
+        self.scrubbing_frame_label: Optional[QLabel] = None
+        self.current_video_label: Optional[QLabel] = None
+        
+        # Zoom functionality
+        self.original_scroll_area: Optional[QScrollArea] = None
+        self.warped_scroll_area: Optional[QScrollArea] = None
+        
+        # Field segmentation state
+        self.show_segmentation = False
+        self.current_segmentation_results = None
+        self.segmentation_model_combo: Optional[QComboBox] = None
+        self.show_segmentation_checkbox: Optional[QCheckBox] = None
+        self.available_segmentation_models: List[str] = []
         
         # Initialize UI
         self._init_ui()
         self._load_videos()
+        self._load_segmentation_models()
+        
+        # Load default homography parameters from config
+        self._load_default_parameters()
         
     def _init_ui(self):
         """Initialize the user interface."""
-        main_layout = QHBoxLayout()
+        main_layout = QVBoxLayout()
         
-        # Create splitter for resizable panels
-        splitter = QSplitter(Qt.Horizontal)
+        # Main content with splitter
+        content_splitter = QSplitter(Qt.Horizontal)
         
         # Left panel: Video list and parameter controls
         left_panel = self._create_left_panel()
-        splitter.addWidget(left_panel)
+        content_splitter.addWidget(left_panel)
         
         # Right panel: Side-by-side video displays
         right_panel = self._create_right_panel()
-        splitter.addWidget(right_panel)
+        content_splitter.addWidget(right_panel)
         
-        # Set splitter proportions (30% left, 70% right)
-        splitter.setSizes([400, 1200])
+        # Set splitter proportions (25% left, 75% right for larger image display)
+        content_splitter.setSizes([300, 1200])
         
-        main_layout.addWidget(splitter)
+        main_layout.addWidget(content_splitter)
+        
         self.setLayout(main_layout)
         
     def _create_left_panel(self) -> QWidget:
@@ -116,14 +375,6 @@ class HomographyTab(QWidget):
         
         video_layout.addLayout(frame_nav_layout)
         
-        # Frame slider
-        self.frame_slider = QSlider(Qt.Horizontal)
-        self.frame_slider.setMinimum(0)
-        self.frame_slider.setMaximum(0)
-        self.frame_slider.setValue(0)
-        self.frame_slider.valueChanged.connect(self._on_frame_changed)
-        video_layout.addWidget(self.frame_slider)
-        
         video_group.setLayout(video_layout)
         layout.addWidget(video_group)
         
@@ -152,9 +403,53 @@ class HomographyTab(QWidget):
         load_button.setToolTip("Load parameters from YAML file")
         button_layout.addWidget(load_button)
         
+        # Second row of buttons
+        button_layout2 = QHBoxLayout()
+        
+        save_default_button = QPushButton("Save as Default")
+        save_default_button.clicked.connect(self._save_as_default_parameters)
+        save_default_button.setToolTip("Save current parameters as default startup values")
+        save_default_button.setStyleSheet("background-color: #2c5aa0; color: white; font-weight: bold;")
+        button_layout2.addWidget(save_default_button)
+        
+        load_default_button = QPushButton("Load Default")
+        load_default_button.clicked.connect(self._load_default_parameters)
+        load_default_button.setToolTip("Load default parameters from config")
+        button_layout2.addWidget(load_default_button)
+        
         params_layout.addLayout(button_layout)
+        params_layout.addLayout(button_layout2)
         params_group.setLayout(params_layout)
         layout.addWidget(params_group)
+        
+        # Field Segmentation Controls
+        segmentation_group = QGroupBox("Field Segmentation")
+        segmentation_layout = QVBoxLayout()
+        
+        # Show segmentation checkbox
+        self.show_segmentation_checkbox = QCheckBox("Show Field Segmentation")
+        self.show_segmentation_checkbox.setChecked(self.show_segmentation)
+        self.show_segmentation_checkbox.stateChanged.connect(self._on_segmentation_toggled)
+        segmentation_layout.addWidget(self.show_segmentation_checkbox)
+        
+        # Model selection
+        model_layout = QHBoxLayout()
+        model_layout.addWidget(QLabel("Model:"))
+        
+        self.segmentation_model_combo = QComboBox()
+        self.segmentation_model_combo.setMinimumWidth(150)
+        self.segmentation_model_combo.currentTextChanged.connect(self._on_segmentation_model_changed)
+        model_layout.addWidget(self.segmentation_model_combo)
+        
+        refresh_models_button = QPushButton("↻")
+        refresh_models_button.setMaximumWidth(30)
+        refresh_models_button.setToolTip("Refresh model list")
+        refresh_models_button.clicked.connect(self._load_segmentation_models)
+        model_layout.addWidget(refresh_models_button)
+        
+        segmentation_layout.addLayout(model_layout)
+        segmentation_group.setLayout(segmentation_layout)
+        layout.addWidget(segmentation_group)
         
         # Add stretch to push everything to top
         layout.addStretch()
@@ -163,23 +458,28 @@ class HomographyTab(QWidget):
         return panel
         
     def _create_right_panel(self) -> QWidget:
-        """Create the right panel with vertically stacked displays."""
+        """Create the right panel with vertically stacked zoomable displays."""
         panel = QWidget()
         layout = QVBoxLayout()
         
         # Display header
-        header = QLabel("Homography Transformation Comparison")
+        header = QLabel("Homography Transformation Comparison (Mouse wheel to zoom)")
         header.setAlignment(Qt.AlignCenter)
         header.setStyleSheet("font-size: 14px; font-weight: bold; margin: 10px;")
         layout.addWidget(header)
         
-        # Original frame display
+        # Original frame display with scroll area and scrubbing controls
         original_group = QGroupBox("Original Frame")
+        original_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         original_layout = QVBoxLayout()
         
-        self.original_display = QLabel("No video selected")
-        self.original_display.setAlignment(Qt.AlignCenter)
-        self.original_display.setFixedHeight(350)
+        self.original_scroll_area = QScrollArea()
+        self.original_scroll_area.setWidgetResizable(True)
+        self.original_scroll_area.setAlignment(Qt.AlignCenter)
+        self.original_scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        
+        self.original_display = ZoomableImageLabel()
+        self.original_display.setText("No video selected")
         self.original_display.setStyleSheet("""
             QLabel {
                 border: 2px solid #555;
@@ -188,17 +488,29 @@ class HomographyTab(QWidget):
                 font-size: 12px;
             }
         """)
-        original_layout.addWidget(self.original_display)
+        
+        self.original_scroll_area.setWidget(self.original_display)
+        original_layout.addWidget(self.original_scroll_area)
+        
+        # Add video scrubbing controls under the original frame
+        scrubbing_panel = self._create_scrubbing_panel()
+        original_layout.addWidget(scrubbing_panel)
+        
         original_group.setLayout(original_layout)
         layout.addWidget(original_group)
         
-        # Warped frame display
+        # Warped frame display with scroll area
         warped_group = QGroupBox("Warped Frame (with buffer)")
+        warped_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         warped_layout = QVBoxLayout()
         
-        self.warped_display = QLabel("No video selected")
-        self.warped_display.setAlignment(Qt.AlignCenter)
-        self.warped_display.setFixedHeight(350)
+        self.warped_scroll_area = QScrollArea()
+        self.warped_scroll_area.setWidgetResizable(True)
+        self.warped_scroll_area.setAlignment(Qt.AlignCenter)
+        self.warped_scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        
+        self.warped_display = ZoomableImageLabel()
+        self.warped_display.setText("No video selected")
         self.warped_display.setStyleSheet("""
             QLabel {
                 border: 2px solid #555;
@@ -207,12 +519,113 @@ class HomographyTab(QWidget):
                 font-size: 12px;
             }
         """)
-        warped_layout.addWidget(self.warped_display)
+        
+        self.warped_scroll_area.setWidget(self.warped_display)
+        warped_layout.addWidget(self.warped_scroll_area)
         warped_group.setLayout(warped_layout)
         layout.addWidget(warped_group)
         
-        # Add stretch to fill remaining space
-        layout.addStretch()
+        # Reset zoom buttons
+        zoom_layout = QHBoxLayout()
+        
+        reset_original_btn = QPushButton("Reset Original Zoom")
+        reset_original_btn.clicked.connect(lambda: self.original_display.set_zoom(1.0))
+        zoom_layout.addWidget(reset_original_btn)
+        
+        reset_warped_btn = QPushButton("Reset Warped Zoom")
+        reset_warped_btn.clicked.connect(lambda: self.warped_display.set_zoom(1.0))
+        zoom_layout.addWidget(reset_warped_btn)
+        
+        fit_to_window_btn = QPushButton("Fit to Window")
+        fit_to_window_btn.clicked.connect(self._fit_images_to_window)
+        zoom_layout.addWidget(fit_to_window_btn)
+        
+        reset_both_btn = QPushButton("Reset Both Zoom")
+        reset_both_btn.clicked.connect(self._reset_all_zoom)
+        zoom_layout.addWidget(reset_both_btn)
+        
+        layout.addLayout(zoom_layout)
+        
+        # Grid overlay controls
+        grid_layout = QHBoxLayout()
+        
+        # Grid toggle checkbox
+        self.grid_checkbox = QCheckBox("Show Grid")
+        self.grid_checkbox.setChecked(True)  # Grid enabled by default
+        self.grid_checkbox.toggled.connect(self._toggle_grid)
+        grid_layout.addWidget(self.grid_checkbox)
+        
+        # Grid spacing control
+        grid_layout.addWidget(QLabel("Spacing:"))
+        self.grid_spacing_spinbox = QSpinBox()
+        self.grid_spacing_spinbox.setMinimum(10)
+        self.grid_spacing_spinbox.setMaximum(200)
+        self.grid_spacing_spinbox.setValue(50)
+        self.grid_spacing_spinbox.setSuffix(" px")
+        self.grid_spacing_spinbox.valueChanged.connect(self._update_grid_spacing)
+        grid_layout.addWidget(self.grid_spacing_spinbox)
+        
+        grid_layout.addStretch()  # Push controls to the left
+        
+        layout.addLayout(grid_layout)
+        
+        panel.setLayout(layout)
+        return panel
+    
+    def _create_scrubbing_panel(self) -> QWidget:
+        """Create the video scrubbing controls panel."""
+        panel = QWidget()
+        panel.setMaximumHeight(60)  # Compact size for under original frame
+        panel.setMinimumHeight(60)
+        layout = QVBoxLayout()
+        layout.setContentsMargins(5, 2, 5, 2)
+        layout.setSpacing(2)
+        
+        # Video info and controls
+        info_layout = QHBoxLayout()
+        info_layout.setSpacing(10)
+        
+        # Current video name
+        self.current_video_label = QLabel("No video loaded")
+        self.current_video_label.setStyleSheet("font-weight: bold; color: #fff; font-size: 11px;")
+        info_layout.addWidget(self.current_video_label)
+        
+        info_layout.addStretch()
+        
+        # Frame info
+        self.scrubbing_frame_label = QLabel("0 / 0")
+        self.scrubbing_frame_label.setStyleSheet("color: #ccc; font-family: monospace; font-size: 10px;")
+        info_layout.addWidget(self.scrubbing_frame_label)
+        
+        layout.addLayout(info_layout)
+        
+        # Compact scrubbing slider
+        self.scrubbing_slider = QSlider(Qt.Horizontal)
+        self.scrubbing_slider.setMinimum(0)
+        self.scrubbing_slider.setMaximum(0)
+        self.scrubbing_slider.setValue(0)
+        self.scrubbing_slider.setMinimumHeight(20)  # Smaller for compact layout
+        self.scrubbing_slider.valueChanged.connect(self._on_scrubbing_changed)
+        self.scrubbing_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                border: 1px solid #555;
+                height: 8px;
+                background: #2a2a2a;
+                border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: #0078d4;
+                border: 2px solid #005a9e;
+                width: 20px;
+                height: 20px;
+                border-radius: 10px;
+                margin: -6px 0;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #106ebe;
+            }
+        """)
+        layout.addWidget(self.scrubbing_slider)
         
         panel.setLayout(layout)
         return panel
@@ -220,28 +633,28 @@ class HomographyTab(QWidget):
     def _create_parameter_controls(self, layout: QVBoxLayout):
         """Create slider controls for homography parameters."""
         # Get slider ranges from configuration with proper type conversion
-        h_range_main = get_setting("homography.slider_range_main", [-5.0, 5.0])
-        h_range_persp = get_setting("homography.slider_range_perspective", [-0.01, 0.01])
+        h_range_main = get_setting("homography.slider_range_main", [-50.0, 50.0])
+        h_range_persp = get_setting("homography.slider_range_perspective", [-0.2, 0.2])
         
         # Ensure ranges are numeric (convert from strings if needed)
         if isinstance(h_range_main, list) and len(h_range_main) == 2:
             h_range_main = [float(h_range_main[0]), float(h_range_main[1])]
         else:
-            h_range_main = [-5.0, 5.0]  # Fallback
+            h_range_main = [-50.0, 50.0]  # Expanded fallback range
             
         if isinstance(h_range_persp, list) and len(h_range_persp) == 2:
             h_range_persp = [float(h_range_persp[0]), float(h_range_persp[1])]
         else:
-            h_range_persp = [-0.01, 0.01]  # Fallback
+            h_range_persp = [-0.2, 0.2]  # Expanded fallback range
         
         # Parameters with their ranges and default values
         param_config = [
             ('H00', h_range_main, 1.0, "Scale X"),
             ('H01', h_range_main, 0.0, "Skew X"),
-            ('H02', [-500.0, 500.0], 0.0, "Translate X"),
+            ('H02', [-10000.0, 10000.0], 0.0, "Translate X"),
             ('H10', h_range_main, 0.0, "Skew Y"), 
             ('H11', h_range_main, 1.0, "Scale Y"),
-            ('H12', [-500.0, 500.0], 0.0, "Translate Y"),
+            ('H12', [-10000.0, 10000.0], 0.0, "Translate Y"),
             ('H20', h_range_persp, 0.0, "Perspective X"),
             ('H21', h_range_persp, 0.0, "Perspective Y"),
         ]
@@ -341,9 +754,17 @@ class HomographyTab(QWidget):
             # Update UI
             video_info = self.video_player.get_video_info()
             total_frames = video_info['total_frames']
-            self.frame_slider.setMaximum(max(1, total_frames - 1))
-            self.frame_slider.setValue(0)
             self.frame_label.setText(f"0 / {total_frames}")
+            
+            # Update scrubbing controls
+            if hasattr(self, 'scrubbing_slider'):
+                self.scrubbing_slider.setMaximum(max(1, total_frames - 1))
+                self.scrubbing_slider.setValue(0)
+            if hasattr(self, 'scrubbing_frame_label'):
+                self.scrubbing_frame_label.setText(f"Frame: 0 / {total_frames}")
+            if hasattr(self, 'current_video_label'):
+                video_name = os.path.basename(video_path)
+                self.current_video_label.setText(video_name)
             
             # Display first frame
             first_frame = self.video_player.get_current_frame()
@@ -361,29 +782,49 @@ class HomographyTab(QWidget):
             total_frames = video_info['total_frames']
             self.frame_label.setText(f"{frame_idx} / {total_frames}")
             
+            # Sync scrubbing slider
+            if hasattr(self, 'scrubbing_slider'):
+                self.scrubbing_slider.blockSignals(True)
+                self.scrubbing_slider.setValue(frame_idx)
+                self.scrubbing_slider.blockSignals(False)
+                # Update scrubbing frame label
+                if hasattr(self, 'scrubbing_frame_label'):
+                    self.scrubbing_frame_label.setText(f"Frame: {frame_idx} / {total_frames}")
+            
             # Get and display current frame
             frame = self.video_player.get_current_frame()
             if frame is not None:
                 self.current_frame = frame.copy()
+                
+                # Run segmentation on new frame if enabled
+                if self.show_segmentation:
+                    self._run_segmentation_on_current_frame()
+                
                 self._update_displays()
+                
+    def _on_scrubbing_changed(self, frame_idx: int):
+        """Handle scrubbing slider change."""
+        if self.video_player.is_loaded():
+            # Update via main frame change handler
+            self._on_frame_changed(frame_idx)
                 
     def _on_parameter_changed(self, param_name: str, slider_value: int):
         """Handle homography parameter change from slider."""
         # Get parameter range with proper type conversion
         if param_name in ['H00', 'H01', 'H10', 'H11']:
-            param_range = get_setting("homography.slider_range_main", [-5.0, 5.0])
+            param_range = get_setting("homography.slider_range_main", [-50.0, 50.0])
             if isinstance(param_range, list) and len(param_range) == 2:
                 param_range = [float(param_range[0]), float(param_range[1])]
             else:
-                param_range = [-5.0, 5.0]
+                param_range = [-50.0, 50.0]
         elif param_name in ['H20', 'H21']:
-            param_range = get_setting("homography.slider_range_perspective", [-0.01, 0.01])
+            param_range = get_setting("homography.slider_range_perspective", [-0.2, 0.2])
             if isinstance(param_range, list) and len(param_range) == 2:
                 param_range = [float(param_range[0]), float(param_range[1])]
             else:
-                param_range = [-0.01, 0.01]
+                param_range = [-0.2, 0.2]
         else:  # Translation parameters
-            param_range = [-500.0, 500.0]
+            param_range = [-10000.0, 10000.0]
             
         # Convert slider value (0-1000) to parameter value
         normalized_val = slider_value / 1000.0
@@ -403,15 +844,132 @@ class HomographyTab(QWidget):
         if self.current_frame is None:
             return
             
-        # Display original frame
-        self._display_frame(self.current_frame, self.original_display)
+        # Apply segmentation overlay to original frame if enabled
+        original_frame = self.current_frame.copy()
+        if self.show_segmentation and self.current_segmentation_results:
+            original_frame = draw_field_segmentation(original_frame, self.current_segmentation_results)
+            print(f"[HOMOGRAPHY] Applied segmentation to original frame: {len(self.current_segmentation_results)} results")
+        elif self.show_segmentation:
+            print("[HOMOGRAPHY] Segmentation enabled but no results available")
         
-        # Create and display warped frame
+        # Display original frame (with optional segmentation overlay)
+        self._display_frame(original_frame, self.original_display)
+        
+        # Create warped frame
         warped_frame = self._apply_homography(self.current_frame)
+        print(f"[HOMOGRAPHY] Warped frame shape: {warped_frame.shape}, dtype: {warped_frame.dtype}")
+        
+        # For warped view, apply segmentation overlay if enabled
+        if self.show_segmentation and self.current_segmentation_results:
+            try:
+                # Transform the segmentation masks to match the warped frame
+                warped_frame_with_segmentation = self._apply_segmentation_to_warped_frame(warped_frame, self.current_segmentation_results)
+                if warped_frame_with_segmentation is not None:
+                    warped_frame = warped_frame_with_segmentation
+                    print(f"[HOMOGRAPHY] Applied transformed segmentation to warped frame: {len(self.current_segmentation_results)} results")
+                else:
+                    print("[HOMOGRAPHY] Failed to apply transformed segmentation to warped frame")
+            except Exception as e:
+                print(f"[HOMOGRAPHY] Error applying segmentation to warped frame: {e}")
+        elif self.show_segmentation:
+            print("[HOMOGRAPHY] Segmentation enabled but no results available for warped frame")
+        
         self._display_frame(warped_frame, self.warped_display)
         
-    def _display_frame(self, frame: np.ndarray, label: QLabel):
-        """Display a frame in the specified label widget."""
+    def _apply_segmentation_to_warped_frame(self, warped_frame: np.ndarray, segmentation_results: list) -> np.ndarray:
+        """Apply segmentation overlay to warped frame by transforming the masks."""
+        if not segmentation_results:
+            return warped_frame
+            
+        try:
+            # Create a copy to apply segmentation overlay
+            result_frame = warped_frame.copy()
+            
+            # Get homography matrix for transforming masks
+            h_matrix = self._get_homography_matrix()
+            
+            for seg_result in segmentation_results:
+                if hasattr(seg_result, 'masks') and seg_result.masks is not None:
+                    # Get mask data
+                    if hasattr(seg_result.masks, 'data'):
+                        mask_data = seg_result.masks.data
+                    else:
+                        continue
+                        
+                    # Convert to numpy if needed
+                    if hasattr(mask_data, 'cpu'):
+                        masks = mask_data.cpu().numpy()
+                    elif hasattr(mask_data, 'numpy'):
+                        masks = mask_data.numpy()
+                    else:
+                        masks = mask_data
+                    
+                    # Process each mask
+                    for i, mask in enumerate(masks):
+                        # Ensure mask is 2D and proper size
+                        if len(mask.shape) == 3:
+                            mask = mask[0]  # Take first channel if 3D
+                        
+                        # Resize mask to match original frame dimensions if needed
+                        original_height, original_width = self.current_frame.shape[:2]
+                        if mask.shape != (original_height, original_width):
+                            mask = cv2.resize(mask.astype(np.float32), (original_width, original_height))
+                        
+                        # Apply homography transformation to the mask
+                        warped_mask = cv2.warpPerspective(
+                            mask.astype(np.float32), 
+                            h_matrix, 
+                            (warped_frame.shape[1], warped_frame.shape[0])
+                        )
+                        
+                        # Apply color overlay where mask is present
+                        mask_binary = (warped_mask > 0.5).astype(np.uint8)
+                        if np.any(mask_binary):
+                            # Use the same color scheme as the visualization
+                            # Color mapping: 0 = Central Field (cyan), 1 = Endzone (magenta)
+                            color_dict = {
+                                0: (0, 255, 255),    # Cyan for central field (BGR)
+                                1: (255, 0, 255)     # Magenta for endzone (BGR)
+                            }
+                            color = color_dict.get(i, (0, 255, 255))  # Default to cyan
+                            
+                            # Create colored overlay
+                            overlay = result_frame.copy()
+                            overlay[mask_binary == 1] = color
+                            
+                            # Blend with original frame using same alpha as visualization
+                            alpha = 0.4
+                            result_frame = cv2.addWeighted(result_frame, 1-alpha, overlay, alpha, 0)
+                            
+                            # Draw contours for better visibility
+                            contours, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                            if contours:
+                                border_color = tuple(int(c * 0.7) for c in color)
+                                cv2.drawContours(result_frame, contours, -1, border_color, 2)
+                            
+                            print(f"[HOMOGRAPHY] Applied transformed mask {i} with color {color} to warped frame")
+            
+            return result_frame
+            
+        except Exception as e:
+            print(f"[HOMOGRAPHY] Error transforming segmentation to warped frame: {e}")
+            import traceback
+            traceback.print_exc()
+            return warped_frame
+    
+    def _get_homography_matrix(self) -> np.ndarray:
+        """Get the homography transformation matrix from current parameters."""
+        # Construct homography matrix from H parameters
+        h_matrix = np.array([
+            [self.homography_params['H00'], self.homography_params['H01'], self.homography_params['H02']],
+            [self.homography_params['H10'], self.homography_params['H11'], self.homography_params['H12']],
+            [self.homography_params['H20'], self.homography_params['H21'], 1.0]
+        ], dtype=np.float32)
+        
+        return h_matrix
+    
+    def _display_frame(self, frame: np.ndarray, label: ZoomableImageLabel):
+        """Display a frame in the specified zoomable label widget."""
         if frame is None:
             return
             
@@ -421,55 +979,27 @@ class HomographyTab(QWidget):
         
         q_image = QImage(frame.data, width, height, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
         
-        # Scale to fit label
+        # Create pixmap and set it to the zoomable label
         pixmap = QPixmap.fromImage(q_image)
-        scaled_pixmap = pixmap.scaled(
-            label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
-        )
-        
-        label.setPixmap(scaled_pixmap)
+        label.set_image(pixmap)
         
     def _apply_homography(self, frame: np.ndarray) -> np.ndarray:
-        """Apply homography transformation to frame with buffer for extended transformations.
+        """Apply homography transformation to frame.
         
         Args:
             frame: Input frame to transform
             
         Returns:
-            Warped frame with buffer to show transformations beyond original bounds
+            Warped frame using original frame dimensions
         """
-        # Construct homography matrix
-        H = np.array([
-            [self.homography_params['H00'], self.homography_params['H01'], self.homography_params['H02']],
-            [self.homography_params['H10'], self.homography_params['H11'], self.homography_params['H12']],
-            [self.homography_params['H20'], self.homography_params['H21'], 1.0]
-        ], dtype=np.float32)
+        # Use the same homography matrix calculation as for segmentation
+        h_matrix = self._get_homography_matrix()
         
         # Get original dimensions
         original_height, original_width = frame.shape[:2]
         
-        # Create larger output canvas with buffer (50% larger in each direction)
-        buffer_factor = get_setting("homography.buffer_factor", 1.5)
-        output_width = int(original_width * buffer_factor)
-        output_height = int(original_height * buffer_factor)
-        
-        # Calculate offset to center the original frame in the larger canvas
-        offset_x = (output_width - original_width) // 2
-        offset_y = (output_height - original_height) // 2
-        
-        # Adjust homography matrix to account for the centering offset
-        # This ensures the transformation is centered in the larger canvas
-        center_offset_matrix = np.array([
-            [1, 0, offset_x],
-            [0, 1, offset_y], 
-            [0, 0, 1]
-        ], dtype=np.float32)
-        
-        # Combine the centering offset with the user's homography
-        H_buffered = center_offset_matrix @ H
-        
-        # Apply perspective transform to larger canvas
-        warped = cv2.warpPerspective(frame, H_buffered, (output_width, output_height))
+        # Apply perspective transform using original frame size
+        warped = cv2.warpPerspective(frame, h_matrix, (original_width, original_height))
         
         return warped
         
@@ -488,19 +1018,19 @@ class HomographyTab(QWidget):
             
             # Update slider position with proper type conversion
             if param_name in ['H00', 'H01', 'H10', 'H11']:
-                param_range = get_setting("homography.slider_range_main", [-5.0, 5.0])
+                param_range = get_setting("homography.slider_range_main", [-50.0, 50.0])
                 if isinstance(param_range, list) and len(param_range) == 2:
                     param_range = [float(param_range[0]), float(param_range[1])]
                 else:
-                    param_range = [-5.0, 5.0]
+                    param_range = [-50.0, 50.0]
             elif param_name in ['H20', 'H21']:
-                param_range = get_setting("homography.slider_range_perspective", [-0.01, 0.01])
+                param_range = get_setting("homography.slider_range_perspective", [-0.2, 0.2])
                 if isinstance(param_range, list) and len(param_range) == 2:
                     param_range = [float(param_range[0]), float(param_range[1])]
                 else:
-                    param_range = [-0.01, 0.01]
+                    param_range = [-0.2, 0.2]
             else:
-                param_range = [-500.0, 500.0]
+                param_range = [-10000.0, 10000.0]
                 
             slider_val = int(((value - param_range[0]) / (param_range[1] - param_range[0])) * 1000)
             self.param_sliders[param_name].setValue(slider_val)
@@ -515,8 +1045,8 @@ class HomographyTab(QWidget):
         
     def _save_parameters(self):
         """Save current homography parameters to YAML file."""
-        # Create homography directory if it doesn't exist
-        homography_dir = Path(get_setting("homography.save_directory", "data/homography_params"))
+        # Use configs directory as default save location
+        homography_dir = Path(get_setting("homography.save_directory", "configs"))
         homography_dir.mkdir(parents=True, exist_ok=True)
         
         # Generate default filename with timestamp
@@ -540,7 +1070,7 @@ class HomographyTab(QWidget):
                     'metadata': {
                         'created_at': datetime.datetime.now().isoformat(),
                         'video_file': Path(self.video_files[self.current_video_index]).name if self.video_files else None,
-                        'frame_index': self.frame_slider.value(),
+                        'frame_index': self.scrubbing_slider.value() if hasattr(self, 'scrubbing_slider') else 0,
                         'application': 'Ultimate Analysis',
                         'version': '1.0'
                     }
@@ -556,11 +1086,46 @@ class HomographyTab(QWidget):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to save parameters:\n{str(e)}")
                 print(f"[HOMOGRAPHY] Error saving parameters: {e}")
+    
+    def _save_as_default_parameters(self):
+        """Save current parameters as the default parameters file."""
+        try:
+            # Get the default parameters file path from config
+            default_params_file = get_setting("homography.default_params_file", "configs/homography_params.yaml")
+            
+            # Ensure the directory exists
+            Path(default_params_file).parent.mkdir(parents=True, exist_ok=True)
+            
+            # Prepare data for saving
+            save_data = {
+                'homography_parameters': self.homography_params.copy(),
+                'metadata': {
+                    'created_at': datetime.datetime.now().isoformat(),
+                    'description': "Default homography parameters (updated by user)",
+                    'video_file': Path(self.video_files[self.current_video_index]).name if self.video_files else None,
+                    'frame_index': self.scrubbing_slider.value() if hasattr(self, 'scrubbing_slider') else 0,
+                    'application': 'Ultimate Analysis',
+                    'version': '1.0'
+                }
+            }
+            
+            # Save to YAML
+            with open(default_params_file, 'w', encoding='utf-8') as f:
+                yaml.dump(save_data, f, default_flow_style=False, sort_keys=False)
+            
+            QMessageBox.information(self, "Success", 
+                                  f"Parameters saved as default to:\n{default_params_file}\n\n"
+                                  "These parameters will be loaded automatically on startup.")
+            print(f"[HOMOGRAPHY] Saved default parameters to: {default_params_file}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save default parameters:\n{str(e)}")
+            print(f"[HOMOGRAPHY] Error saving default parameters: {e}")
                 
     def _load_parameters(self):
         """Load homography parameters from YAML file."""
-        # Show load dialog
-        homography_dir = Path(get_setting("homography.save_directory", "data/homography_params"))
+        # Show load dialog - use configs directory as default
+        homography_dir = Path(get_setting("homography.save_directory", "configs"))
         
         filename, _ = QFileDialog.getOpenFileName(
             self,
@@ -590,19 +1155,19 @@ class HomographyTab(QWidget):
                         
                         # Update slider position with proper type conversion
                         if param_name in ['H00', 'H01', 'H10', 'H11']:
-                            param_range = get_setting("homography.slider_range_main", [-5.0, 5.0])
+                            param_range = get_setting("homography.slider_range_main", [-50.0, 50.0])
                             if isinstance(param_range, list) and len(param_range) == 2:
                                 param_range = [float(param_range[0]), float(param_range[1])]
                             else:
-                                param_range = [-5.0, 5.0]
+                                param_range = [-50.0, 50.0]
                         elif param_name in ['H20', 'H21']:
-                            param_range = get_setting("homography.slider_range_perspective", [-0.01, 0.01])
+                            param_range = get_setting("homography.slider_range_perspective", [-0.2, 0.2])
                             if isinstance(param_range, list) and len(param_range) == 2:
                                 param_range = [float(param_range[0]), float(param_range[1])]
                             else:
-                                param_range = [-0.01, 0.01]
+                                param_range = [-0.2, 0.2]
                         else:
-                            param_range = [-500.0, 500.0]
+                            param_range = [-10000.0, 10000.0]
                             
                         slider_val = int(((value - param_range[0]) / (param_range[1] - param_range[0])) * 1000)
                         slider_val = max(0, min(1000, slider_val))  # Clamp to valid range
@@ -620,3 +1185,219 @@ class HomographyTab(QWidget):
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to load parameters:\n{str(e)}")
                 print(f"[HOMOGRAPHY] Error loading parameters: {e}")
+    
+    def _load_default_parameters(self):
+        """Load default homography parameters from config file on startup."""
+        try:
+            # Get the default parameters file path from config
+            default_params_file = get_setting("homography.default_params_file", "configs/homography_params.yaml")
+            
+            if not Path(default_params_file).exists():
+                print(f"[HOMOGRAPHY] Default parameters file not found: {default_params_file}")
+                return
+                
+            print(f"[HOMOGRAPHY] Loading default parameters from: {default_params_file}")
+            
+            # Load from YAML
+            with open(default_params_file, 'r', encoding='utf-8') as f:
+                data = yaml.safe_load(f)
+            
+            # Extract parameters
+            if 'homography_parameters' in data:
+                loaded_params = data['homography_parameters']
+            else:
+                # Try loading direct parameter format
+                loaded_params = data
+            
+            # Validate and update parameters
+            for param_name in self.homography_params.keys():
+                if param_name in loaded_params:
+                    value = float(loaded_params[param_name])
+                    self.homography_params[param_name] = value
+                    
+                    # Update slider position with proper type conversion
+                    if param_name in ['H00', 'H01', 'H10', 'H11']:
+                        param_range = get_setting("homography.slider_range_main", [-50.0, 50.0])
+                        if isinstance(param_range, list) and len(param_range) == 2:
+                            param_range = [float(param_range[0]), float(param_range[1])]
+                        else:
+                            param_range = [-50.0, 50.0]
+                    elif param_name in ['H20', 'H21']:
+                        param_range = get_setting("homography.slider_range_perspective", [-0.2, 0.2])
+                        if isinstance(param_range, list) and len(param_range) == 2:
+                            param_range = [float(param_range[0]), float(param_range[1])]
+                        else:
+                            param_range = [-0.2, 0.2]
+                    else:
+                        param_range = [-10000.0, 10000.0]
+                        
+                    slider_val = int(((value - param_range[0]) / (param_range[1] - param_range[0])) * 1000)
+                    slider_val = max(0, min(1000, slider_val))  # Clamp to valid range
+                    self.param_sliders[param_name].setValue(slider_val)
+                    
+                    # Update label
+                    self.param_labels[param_name].setText(f"{value:.6f}")
+            
+            # Update displays
+            self._update_displays()
+            
+            print(f"[HOMOGRAPHY] Default parameters loaded successfully from: {default_params_file}")
+            
+        except Exception as e:
+            print(f"[HOMOGRAPHY] Error loading default parameters: {e}")
+            # Don't show error dialog on startup - just log it
+    
+    def _reset_all_zoom(self):
+        """Reset zoom for both image displays."""
+        if self.original_display:
+            self.original_display.set_zoom(1.0)
+        if self.warped_display:
+            self.warped_display.set_zoom(1.0)
+    
+    def _fit_images_to_window(self):
+        """Fit both images to their current window size."""
+        if self.original_display and self.original_display.original_pixmap:
+            # Trigger a resize to fit current container
+            self.original_display.set_image(self.original_display.original_pixmap)
+        if self.warped_display and self.warped_display.original_pixmap:
+            # Trigger a resize to fit current container  
+            self.warped_display.set_image(self.warped_display.original_pixmap)
+    
+    def _toggle_grid(self, checked: bool):
+        """Toggle grid visibility on both image displays."""
+        if self.original_display:
+            self.original_display.set_grid_visible(checked)
+        if self.warped_display:
+            self.warped_display.set_grid_visible(checked)
+    
+    def _update_grid_spacing(self, spacing: int):
+        """Update grid spacing on both image displays."""
+        if self.original_display:
+            self.original_display.set_grid_spacing(spacing)
+        if self.warped_display:
+            self.warped_display.set_grid_spacing(spacing)
+    
+    def _run_segmentation_on_current_frame(self):
+        """Run field segmentation on the current frame."""
+        if self.current_frame is None:
+            print("[HOMOGRAPHY] No current frame available for segmentation")
+            return
+            
+        try:
+            print("[HOMOGRAPHY] Running field segmentation on current frame")
+            self.current_segmentation_results = run_field_segmentation(self.current_frame)
+            if self.current_segmentation_results:
+                print(f"[HOMOGRAPHY] Segmentation complete: {len(self.current_segmentation_results)} results")
+                # Debug: Check if results have masks
+                for i, result in enumerate(self.current_segmentation_results):
+                    if hasattr(result, 'masks') and result.masks is not None:
+                        print(f"[HOMOGRAPHY] Result {i}: has masks with shape {result.masks.data.shape if hasattr(result.masks, 'data') else 'unknown'}")
+                    else:
+                        print(f"[HOMOGRAPHY] Result {i}: no masks found")
+            else:
+                print("[HOMOGRAPHY] No segmentation results returned")
+        except Exception as e:
+            print(f"[HOMOGRAPHY] Error running field segmentation: {e}")
+            self.current_segmentation_results = None
+            
+    def _load_segmentation_models(self):
+        """Load available field segmentation models using the same logic as main tab."""
+        self.available_segmentation_models.clear()
+        
+        # Look for models in the models directory (same logic as main tab)
+        models_path = Path(get_setting("models.base_path", DEFAULT_PATHS['MODELS']))
+        
+        if not models_path.exists():
+            print(f"[HOMOGRAPHY] Models directory not found: {models_path}")
+            return
+        
+        # Search for segmentation model files
+        model_files = []
+        for model_dir in models_path.rglob("*"):
+            if model_dir.is_file() and model_dir.suffix == ".pt":
+                # Skip last.pt files - we only want best.pt from finetuned models
+                if model_dir.name == "last.pt":
+                    continue
+                    
+                # Check if this is a segmentation model
+                if "segmentation" in str(model_dir).lower():
+                    model_files.append(str(model_dir))
+        
+        # Add pretrained segmentation models
+        pretrained_path = models_path / "pretrained"
+        if pretrained_path.exists():
+            for model_file in pretrained_path.glob("*seg*.pt"):
+                model_files.append(str(model_file))
+        
+        # Store the full paths
+        self.available_segmentation_models = model_files
+        
+        # Update combo box
+        if self.segmentation_model_combo is not None:
+            self.segmentation_model_combo.clear()
+            for model_path in self.available_segmentation_models:
+                # Create display name from path
+                if 'pretrained' in model_path:
+                    display_name = f"Pretrained: {Path(model_path).stem}"
+                else:
+                    # Extract model name from path
+                    path_parts = Path(model_path).parts
+                    if 'segmentation' in path_parts:
+                        seg_index = path_parts.index('segmentation')
+                        if seg_index + 1 < len(path_parts):
+                            display_name = path_parts[seg_index + 1]
+                        else:
+                            display_name = Path(model_path).parent.parent.name
+                    else:
+                        display_name = Path(model_path).parent.parent.name
+                
+                self.segmentation_model_combo.addItem(display_name, model_path)
+                
+        print(f"[HOMOGRAPHY] Loaded {len(self.available_segmentation_models)} segmentation models")
+        
+        # Auto-select the new default model if available
+        if self.segmentation_model_combo is not None:
+            default_model_path = "data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt"
+            for i in range(self.segmentation_model_combo.count()):
+                item_path = self.segmentation_model_combo.itemData(i)
+                if item_path and default_model_path in str(item_path):
+                    self.segmentation_model_combo.setCurrentIndex(i)
+                    print(f"[HOMOGRAPHY] Auto-selected default segmentation model: {self.segmentation_model_combo.itemText(i)}")
+                    break
+        
+    def _on_segmentation_toggled(self, state: int):
+        """Handle segmentation checkbox toggle."""
+        self.show_segmentation = state == 2  # Qt.Checked = 2
+        
+        print(f"[HOMOGRAPHY] Segmentation toggle: state={state}, show_segmentation={self.show_segmentation}")
+        
+        if self.show_segmentation:
+            print("[HOMOGRAPHY] Field segmentation enabled")
+            self._run_segmentation_on_current_frame()
+        else:
+            print("[HOMOGRAPHY] Field segmentation disabled")
+            self.current_segmentation_results = None
+            
+        self._update_displays()
+        
+    def _on_segmentation_model_changed(self, display_name: str):
+        """Handle segmentation model selection change."""
+        if self.segmentation_model_combo is None:
+            return
+            
+        model_path = self.segmentation_model_combo.currentData()
+        if model_path and os.path.exists(model_path):
+            print(f"[HOMOGRAPHY] Changing segmentation model to: {model_path}")
+            try:
+                if set_field_model(model_path):
+                    print(f"[HOMOGRAPHY] Successfully loaded segmentation model: {display_name}")
+                    # Re-run segmentation with new model if currently enabled
+                    if self.show_segmentation:
+                        self._run_segmentation_on_current_frame()
+                        self._update_displays()
+                else:
+                    print(f"[HOMOGRAPHY] Failed to load segmentation model: {model_path}")
+            except Exception as e:
+                print(f"[HOMOGRAPHY] Error loading segmentation model: {e}")
+        else:
+            print(f"[HOMOGRAPHY] Invalid model path: {model_path}")

@@ -8,7 +8,6 @@ import cv2
 import numpy as np
 from typing import List, Dict, Any, Tuple, Optional
 
-from ..config.settings import get_setting
 from ..constants import VISUALIZATION_COLORS
 
 
@@ -614,10 +613,10 @@ def _draw_segmentation_masks(frame: np.ndarray, masks: np.ndarray) -> np.ndarray
     overlay = frame.copy()
     color_mask = np.zeros_like(frame)
     
-    # Define colors for different field regions
+    # Define colors for different field regions - made much brighter for better visibility
     color_dict = {
-        0: (200, 217, 37),   # Central Field: teal (BGR)
-        1: (114, 38, 249)    # Endzone: pink (BGR)
+        0: (0, 255, 255),    # Central Field: bright cyan (BGR)
+        1: (255, 0, 255)     # Endzone: bright magenta (BGR)
     }
     
     name_dict = {
@@ -673,8 +672,8 @@ def _draw_segmentation_masks(frame: np.ndarray, masks: np.ndarray) -> np.ndarray
                     cv2.LINE_AA
                 )
     
-    # Blend with low alpha for subtle overlay
-    cv2.addWeighted(color_mask, 0.12, overlay, 0.88, 0, overlay)
+    # Blend with higher alpha for maximum visibility
+    cv2.addWeighted(color_mask, 0.4, overlay, 0.6, 0, overlay)
     return overlay
 
 
@@ -722,71 +721,3 @@ def _get_track_color(track_id: int) -> Tuple[int, int, int]:
         return (int(b), int(g), int(r))  # Return as BGR
     
     return base_color
-
-
-def apply_all_visualizations(
-    frame: np.ndarray,
-    detections: List[Dict[str, Any]] = None,
-    tracks: List[Any] = None,
-    track_histories: Dict[int, List[Tuple[int, int]]] = None,
-    player_ids: List[Dict[str, Any]] = None,
-    field_result: Any = None,
-    show_detections: bool = True,
-    show_tracking: bool = True,
-    show_player_ids: bool = True,
-    show_field_segmentation: bool = True
-) -> np.ndarray:
-    """Apply all enabled visualizations to a frame.
-    
-    Args:
-        frame: Input frame
-        detections: Detection results from run_inference
-        tracks: Tracking results from run_tracking
-        track_histories: Track history data for drawing trails
-        player_ids: Player ID results from run_player_id
-        field_result: Field segmentation results from run_field_segmentation
-        show_detections: Whether to show detection boxes
-        show_tracking: Whether to show tracking overlays
-        show_player_ids: Whether to show player IDs
-        show_field_segmentation: Whether to show field segmentation
-        
-    Returns:
-        Frame with all enabled visualizations applied
-    """
-    vis_frame = frame.copy()
-    
-    # Apply visualizations in order (background to foreground)
-    
-    # Field segmentation (background layer)
-    if show_field_segmentation and field_result is not None:
-        # Handle both single result and list of results
-        field_results = [field_result] if not isinstance(field_result, list) else field_result
-        vis_frame = draw_field_segmentation(vis_frame, field_results)
-    
-    # Detections (if tracking is not enabled, show raw detections)
-    if show_detections and detections and not show_tracking:
-        vis_frame = draw_detections(vis_frame, detections)
-    
-    # Tracking (includes bounding boxes, replaces detections)
-    if show_tracking and tracks:
-        vis_frame = draw_tracks(vis_frame, tracks, track_histories)
-    
-    # Player IDs (foreground layer)
-    if show_player_ids and player_ids and tracks:
-        # Convert player_ids list to dictionary format expected by draw_player_ids
-        player_id_dict = {}
-        if isinstance(player_ids, list):
-            # Assume player_ids is a list of dicts with track_id and jersey_number
-            for pid in player_ids:
-                if isinstance(pid, dict) and 'track_id' in pid:
-                    track_id = pid['track_id']
-                    jersey_number = pid.get('jersey_number', 'Unknown')
-                    details = pid.get('details', None)
-                    player_id_dict[track_id] = (jersey_number, details)
-        elif isinstance(player_ids, dict):
-            player_id_dict = player_ids
-        
-        if player_id_dict:
-            vis_frame = draw_player_ids(vis_frame, tracks, player_id_dict)
-    
-    return vis_frame

@@ -20,8 +20,7 @@ except ImportError:
     EASYOCR_AVAILABLE = False
     print("[PLAYER_ID] Warning: EasyOCR not available, using mock results")
 
-from ..config.settings import get_setting
-from ..constants import JERSEY_NUMBER_MIN, JERSEY_NUMBER_MAX, SUPPORTED_OCR_LANGUAGES, DEFAULT_PATHS
+from ..constants import JERSEY_NUMBER_MIN, JERSEY_NUMBER_MAX
 from .jersey_tracker import add_jersey_measurement, get_jersey_probabilities, get_best_jersey_number, get_jersey_tracker
 
 

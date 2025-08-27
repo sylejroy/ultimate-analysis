@@ -6,7 +6,7 @@ and basic playback controls.
 
 import cv2
 import numpy as np
-from typing import Optional, Tuple
+from typing import Optional
 from pathlib import Path
 
 from ..config.settings import get_setting
@@ -147,20 +147,6 @@ class VideoPlayer:
         
         return None
     
-    def get_frame_at_index(self, frame_idx: int) -> Optional[np.ndarray]:
-        """Get a specific frame by index without changing current position.
-        
-        Args:
-            frame_idx: Index of frame to retrieve
-            
-        Returns:
-            Frame as numpy array, or None if not available
-        """
-        if not self.seek_to_frame(frame_idx):
-            return None
-        
-        return self.get_current_frame()
-    
     def get_video_info(self) -> dict:
         """Get information about the currently loaded video.
         
@@ -213,14 +199,6 @@ class VideoPlayer:
             True if video is loaded and ready for playback
         """
         return self.cap is not None and self.cap.isOpened()
-    
-    def restart(self) -> bool:
-        """Restart the video from the beginning.
-        
-        Returns:
-            True if restart successful, False otherwise
-        """
-        return self.seek_to_frame(0)
     
     def __del__(self):
         """Cleanup when VideoPlayer is destroyed."""

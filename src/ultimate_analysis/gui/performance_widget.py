@@ -5,14 +5,12 @@ Performance monitoring widget for displaying live runtime metrics.
 
 import time
 import psutil
-import threading
 from collections import deque, defaultdict
 from typing import Dict, List, Optional, Deque
-import numpy as np
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
-    QLabel, QGroupBox, QFrame
+    QLabel, QGroupBox
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QPainter, QPen, QColor, QFont
@@ -349,8 +347,3 @@ class PerformanceWidget(QWidget):
     def add_processing_measurement(self, process_name: str, duration_ms: float):
         """Add a processing time measurement."""
         self.metrics.add_processing_time(process_name, duration_ms)
-    
-    def reset_metrics(self):
-        """Reset all performance metrics."""
-        self.metrics.reset()
-        self._init_table_rows()
