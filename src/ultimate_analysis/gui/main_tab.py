@@ -400,6 +400,10 @@ class MainTab(QWidget):
         model_files = []
         for model_dir in models_path.rglob("*"):
             if model_dir.is_file() and model_dir.suffix == ".pt":
+                # Skip last.pt files - we only want best.pt from finetuned models
+                if model_dir.name == "last.pt":
+                    continue
+                    
                 # Check if this model type is in the path
                 if model_type in str(model_dir).lower():
                     relative_path = model_dir.relative_to(models_path)

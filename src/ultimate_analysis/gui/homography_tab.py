@@ -1301,32 +1301,36 @@ class HomographyTab(QWidget):
             self.current_segmentation_results = None
             
     def _load_segmentation_models(self):
-        """Load available field segmentation models."""
+        """Load available field segmentation models using the same logic as main tab."""
         self.available_segmentation_models.clear()
         
-        # Add pretrained models
-        pretrained_path = Path(DEFAULT_PATHS['MODELS']) / 'pretrained'
-        if pretrained_path.exists():
-            for model_file in pretrained_path.glob('*seg*.pt'):
-                model_name = f"Pretrained: {model_file.stem}"
-                self.available_segmentation_models.append(str(model_file))
-                
-        # Add finetuned segmentation models
-        segmentation_path = Path(DEFAULT_PATHS['MODELS']) / 'segmentation'
-        if segmentation_path.exists():
-            for model_dir in segmentation_path.iterdir():
-                if model_dir.is_dir():
-                    # Look for weights files in standard locations
-                    weight_paths = [
-                        model_dir / 'weights' / 'best.pt',
-                        model_dir / 'segmentation_finetune' / 'weights' / 'best.pt',
-                        model_dir / 'runs' / 'segment' / 'train' / 'weights' / 'best.pt'
-                    ]
+        # Look for models in the models directory (same logic as main tab)
+        models_path = Path(get_setting("models.base_path", DEFAULT_PATHS['MODELS']))
+        
+        if not models_path.exists():
+            print(f"[HOMOGRAPHY] Models directory not found: {models_path}")
+            return
+        
+        # Search for segmentation model files
+        model_files = []
+        for model_dir in models_path.rglob("*"):
+            if model_dir.is_file() and model_dir.suffix == ".pt":
+                # Skip last.pt files - we only want best.pt from finetuned models
+                if model_dir.name == "last.pt":
+                    continue
                     
-                    for weight_path in weight_paths:
-                        if weight_path.exists():
-                            self.available_segmentation_models.append(str(weight_path))
-                            break
+                # Check if this is a segmentation model
+                if "segmentation" in str(model_dir).lower():
+                    model_files.append(str(model_dir))
+        
+        # Add pretrained segmentation models
+        pretrained_path = models_path / "pretrained"
+        if pretrained_path.exists():
+            for model_file in pretrained_path.glob("*seg*.pt"):
+                model_files.append(str(model_file))
+        
+        # Store the full paths
+        self.available_segmentation_models = model_files
         
         # Update combo box
         if self.segmentation_model_combo is not None:
