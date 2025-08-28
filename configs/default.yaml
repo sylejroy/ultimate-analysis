@@ -48,6 +48,24 @@ models:
       line_thickness: 3          # Thickness of contour lines
       point_radius: 5            # Radius of contour points
       draw_points: true          # Whether to draw individual contour points
+      
+      # Contour interpolation parameters
+      interpolation:
+        enabled: true            # Whether to interpolate contour points for denser sampling
+        max_point_distance: 10   # Maximum distance between consecutive points in pixels
+        min_point_distance: 3    # Minimum distance to avoid over-densification
+      
+      # RANSAC line fitting parameters
+      ransac:
+        enabled: true            # Whether to use RANSAC line fitting instead of contour
+        num_lines: 3            # Number of line segments to fit (3-4 for field boundaries)
+        distance_threshold: 10.0 # Maximum distance from point to line for inliers
+        min_samples: 2          # Minimum number of points needed to fit a line
+        max_trials: 1000        # Maximum RANSAC iterations per line segment
+        line_color: [0, 255, 0] # BGR color for RANSAC lines (green)
+        outlier_color: [0, 0, 255] # BGR color for RANSAC outlier points (red)
+        outlier_radius: 3       # Radius for outlier point visualization
+        show_outliers: true     # Whether to visualize RANSAC outliers
   
   tracking:
     default_tracker: "deepsort"

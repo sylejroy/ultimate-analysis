@@ -9,6 +9,68 @@ import numpy as np
 from typing import List, Dict, Any, Tuple, Optional
 
 from ..constants import VISUALIZATION_COLORS
+from ..config.settings import get_setting
+
+
+def interpolate_contour_points(contour: np.ndarray, 
+                              max_distance: float = 10.0,
+                              min_distance: float = 3.0) -> np.ndarray:
+    """Interpolate contour points to ensure even spacing.
+    
+    This function adds points between existing contour points to ensure 
+    that no two consecutive points are more than max_distance apart,
+    while avoiding over-densification with min_distance constraint.
+    
+    Args:
+        contour: Contour points as numpy array of shape (N, 1, 2) or (N, 2)
+        max_distance: Maximum allowed distance between consecutive points
+        min_distance: Minimum distance to maintain between points
+        
+    Returns:
+        Interpolated contour points as numpy array of shape (M, 1, 2)
+    """
+    if contour is None or len(contour) < 2:
+        return contour
+    
+    # Ensure contour is in shape (N, 2)
+    if contour.ndim == 3 and contour.shape[1] == 1:
+        points = contour.reshape(-1, 2)
+    else:
+        points = contour.reshape(-1, 2)
+    
+    interpolated_points = []
+    
+    for i in range(len(points)):
+        current_point = points[i]
+        next_point = points[(i + 1) % len(points)]  # Wrap around for closed contour
+        
+        # Always add the current point
+        interpolated_points.append(current_point)
+        
+        # Calculate distance to next point
+        distance = np.linalg.norm(next_point - current_point)
+        
+        # If distance is too large, add interpolated points
+        if distance > max_distance:
+            # Calculate number of points needed
+            num_intermediate = int(np.ceil(distance / max_distance)) - 1
+            
+            # Add intermediate points
+            for j in range(1, num_intermediate + 1):
+                alpha = j / (num_intermediate + 1)
+                intermediate_point = current_point + alpha * (next_point - current_point)
+                
+                # Check minimum distance constraint with the last added point
+                if len(interpolated_points) == 0 or \
+                   np.linalg.norm(intermediate_point - interpolated_points[-1]) >= min_distance:
+                    interpolated_points.append(intermediate_point)
+    
+    # Convert back to original format (N, 1, 2)
+    if len(interpolated_points) > 0:
+        interpolated_array = np.array(interpolated_points, dtype=np.float32)
+        return interpolated_array.reshape(-1, 1, 2)
+    else:
+        return contour
 
 
 def draw_detections(frame: np.ndarray, detections: List[Dict[str, Any]]) -> np.ndarray:
@@ -795,6 +857,457 @@ def draw_field_contour(frame: np.ndarray, contour: np.ndarray,
     return result
 
 
+def fit_field_lines_ransac(contour: np.ndarray, 
+                          num_lines: int = 3,
+                          distance_threshold: float = 10.0,
+                          min_samples: int = 2,
+                          max_trials: int = 1000) -> Optional[Tuple[List[Tuple[np.ndarray, np.ndarray]], List[np.ndarray]]]:
+    """Fit straight lines to contour segments using RANSAC.
+    
+    This function segments the contour and fits straight lines to each segment,
+    which is useful for field boundary detection where we expect rectangular shapes.
+    
+    Args:
+        contour: Contour points as numpy array of shape (N, 1, 2)
+        num_lines: Number of line segments to fit (typically 3-4 for field boundaries)
+        distance_threshold: Maximum distance from point to line to be considered inlier
+        min_samples: Minimum number of points needed to fit a line
+        max_trials: Maximum RANSAC iterations per line segment
+        
+    Returns:
+        Tuple of (fitted_lines, outlier_points) where:
+        - fitted_lines: List of (start_point, end_point) tuples for each fitted line
+        - outlier_points: List of outlier point arrays for each segment
+        Returns (None, None) if fitting fails
+    """
+    if contour is None or len(contour) < num_lines * min_samples:
+        return None, None
+    
+    try:
+        # Convert contour to 2D points array
+        points = contour.reshape(-1, 2).astype(np.float32)
+        
+        # Apply interpolation if enabled
+        interpolation_enabled = get_setting("models.segmentation.contour.interpolation.enabled", False)
+        if interpolation_enabled:
+            max_distance = get_setting("models.segmentation.contour.interpolation.max_point_distance", 10)
+            min_distance = get_setting("models.segmentation.contour.interpolation.min_point_distance", 3)
+            
+            # Convert to contour format for interpolation
+            contour_format = points.reshape(-1, 1, 2)
+            interpolated_contour = interpolate_contour_points(contour_format, max_distance, min_distance)
+            points = interpolated_contour.reshape(-1, 2).astype(np.float32)
+            
+            print(f"[VISUALIZATION] Interpolated contour: {len(contour.reshape(-1, 2))} -> {len(points)} points")
+        
+        # Segment the contour into approximately equal parts
+        segments = _segment_contour_points(points, num_lines)
+        
+        fitted_lines = []
+        all_outliers = []
+        
+        for i, segment_points in enumerate(segments):
+            if len(segment_points) < min_samples:
+                print(f"[VISUALIZATION] Segment {i} has insufficient points: {len(segment_points)}")
+                all_outliers.append(segment_points)  # All points are outliers if insufficient for fitting
+                continue
+            
+            # Fit line to this segment using RANSAC
+            result = _fit_line_ransac_with_outliers(segment_points, distance_threshold, min_samples, max_trials)
+            
+            if result is not None:
+                line_points, outliers = result
+                fitted_lines.append(line_points)
+                all_outliers.append(outliers)
+                print(f"[VISUALIZATION] Fitted line segment {i}: {len(segment_points)} points -> line")
+            else:
+                fitted_lines.append(None)
+                all_outliers.append(segment_points)  # All points are outliers if fitting failed
+                print(f"[VISUALIZATION] Failed to fit line to segment {i}")
+        
+        print(f"[VISUALIZATION] Successfully fitted {len([l for l in fitted_lines if l is not None])} out of {num_lines} line segments")
+        
+        # Filter out None entries from fitted_lines
+        valid_lines = [line for line in fitted_lines if line is not None]
+        return (valid_lines, all_outliers) if valid_lines else (None, None)
+        
+    except Exception as e:
+        print(f"[VISUALIZATION] Error in RANSAC line fitting: {e}")
+        return None, None
+
+
+def _segment_contour_points(points: np.ndarray, num_segments: int) -> List[np.ndarray]:
+    """Divide contour points into segments for line fitting.
+    
+    Args:
+        points: Array of 2D points (N, 2)
+        num_segments: Number of segments to create
+        
+    Returns:
+        List of point arrays, one for each segment
+    """
+    n_points = len(points)
+    segment_size = n_points // num_segments
+    segments = []
+    
+    for i in range(num_segments):
+        start_idx = i * segment_size
+        if i == num_segments - 1:  # Last segment gets remaining points
+            end_idx = n_points
+        else:
+            end_idx = (i + 1) * segment_size
+        
+        segment_points = points[start_idx:end_idx]
+        segments.append(segment_points)
+    
+    return segments
+
+
+def _fit_line_ransac(points: np.ndarray, 
+                    distance_threshold: float,
+                    min_samples: int,
+                    max_trials: int) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Fit a line to points using RANSAC algorithm.
+    
+    Args:
+        points: Array of 2D points (N, 2)
+        distance_threshold: Maximum distance for inliers
+        min_samples: Minimum samples to fit line
+        max_trials: Maximum RANSAC iterations
+        
+    Returns:
+        Tuple of (start_point, end_point) for the fitted line, or None if fitting fails
+    """
+    if len(points) < min_samples:
+        return None
+    
+    best_line = None
+    best_inliers = 0
+    
+    for trial in range(max_trials):
+        # Randomly sample minimum points needed to fit a line
+        sample_indices = np.random.choice(len(points), min_samples, replace=False)
+        sample_points = points[sample_indices]
+        
+        # Fit line to sample points
+        if min_samples == 2:
+            # Simple case: line through two points
+            p1, p2 = sample_points[0], sample_points[1]
+            
+            # Skip if points are too close (degenerate case)
+            if np.linalg.norm(p2 - p1) < 1e-6:
+                continue
+                
+            # Calculate distances from all points to this line
+            line_vec = p2 - p1
+            line_length = np.linalg.norm(line_vec)
+            line_unit = line_vec / line_length
+            
+        else:
+            # Fit line using least squares for more points
+            try:
+                # Use SVD to fit line
+                centroid = np.mean(sample_points, axis=0)
+                centered_points = sample_points - centroid
+                
+                # SVD: line direction is first principal component
+                _, _, vh = np.linalg.svd(centered_points.T)
+                line_unit = vh[0]  # First row is the principal direction
+                p1 = centroid
+                
+            except np.linalg.LinAlgError:
+                continue
+        
+        # Count inliers: points within distance_threshold of the line
+        inlier_count = 0
+        for point in points:
+            if min_samples == 2:
+                # Distance from point to line defined by p1, p2
+                to_point = point - p1
+                projection_length = np.dot(to_point, line_unit)
+                closest_point_on_line = p1 + projection_length * line_unit
+                distance = np.linalg.norm(point - closest_point_on_line)
+            else:
+                # Distance from point to line through centroid with direction line_unit
+                to_point = point - p1
+                projection_length = np.dot(to_point, line_unit)
+                closest_point_on_line = p1 + projection_length * line_unit
+                distance = np.linalg.norm(point - closest_point_on_line)
+            
+            if distance <= distance_threshold:
+                inlier_count += 1
+        
+        # Update best line if this one has more inliers
+        if inlier_count > best_inliers:
+            best_inliers = inlier_count
+            
+            # Find extent of inliers along the line
+            inlier_projections = []
+            for point in points:
+                if min_samples == 2:
+                    to_point = point - p1
+                    projection_length = np.dot(to_point, line_unit)
+                    closest_point_on_line = p1 + projection_length * line_unit
+                    distance = np.linalg.norm(point - closest_point_on_line)
+                else:
+                    to_point = point - p1
+                    projection_length = np.dot(to_point, line_unit)
+                    closest_point_on_line = p1 + projection_length * line_unit
+                    distance = np.linalg.norm(point - closest_point_on_line)
+                
+                if distance <= distance_threshold:
+                    if min_samples == 2:
+                        inlier_projections.append(np.dot(to_point, line_unit))
+                    else:
+                        inlier_projections.append(projection_length)
+            
+            if inlier_projections:
+                min_proj = min(inlier_projections)
+                max_proj = max(inlier_projections)
+                
+                if min_samples == 2:
+                    start_point = p1 + min_proj * line_unit
+                    end_point = p1 + max_proj * line_unit
+                else:
+                    start_point = p1 + min_proj * line_unit
+                    end_point = p1 + max_proj * line_unit
+                
+                best_line = (start_point, end_point)
+    
+    # Return best line if it has enough inliers
+    min_inliers = max(min_samples, len(points) // 4)  # At least 25% of points should be inliers
+    if best_inliers >= min_inliers:
+        return best_line
+    
+    return None
+
+
+def _fit_line_ransac_with_outliers(points: np.ndarray, 
+                                  distance_threshold: float,
+                                  min_samples: int,
+                                  max_trials: int) -> Optional[Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray]]:
+    """Fit a line to points using RANSAC algorithm and return outliers.
+    
+    Args:
+        points: Array of 2D points (N, 2)
+        distance_threshold: Maximum distance for inliers
+        min_samples: Minimum samples to fit line
+        max_trials: Maximum RANSAC iterations
+        
+    Returns:
+        Tuple of ((start_point, end_point), outlier_points) for the fitted line and outliers,
+        or None if fitting fails
+    """
+    if len(points) < min_samples:
+        return None
+    
+    best_line = None
+    best_inliers = 0
+    best_inlier_mask = None
+    
+    for trial in range(max_trials):
+        # Randomly sample minimum points needed to fit a line
+        sample_indices = np.random.choice(len(points), min_samples, replace=False)
+        sample_points = points[sample_indices]
+        
+        # Fit line to sample points
+        if min_samples == 2:
+            # Simple case: line through two points
+            p1, p2 = sample_points[0], sample_points[1]
+            
+            # Skip if points are too close (degenerate case)
+            if np.linalg.norm(p2 - p1) < 1e-6:
+                continue
+                
+            # Calculate distances from all points to this line
+            line_vec = p2 - p1
+            line_length = np.linalg.norm(line_vec)
+            line_unit = line_vec / line_length
+            
+        else:
+            # Fit line using least squares for more points
+            try:
+                # Use SVD to fit line
+                centroid = np.mean(sample_points, axis=0)
+                centered_points = sample_points - centroid
+                
+                # SVD: line direction is first principal component
+                _, _, vh = np.linalg.svd(centered_points.T)
+                line_unit = vh[0]  # First row is the principal direction
+                p1 = centroid
+                
+            except np.linalg.LinAlgError:
+                continue
+        
+        # Count inliers and create mask: points within distance_threshold of the line
+        inlier_mask = np.zeros(len(points), dtype=bool)
+        inlier_count = 0
+        
+        for idx, point in enumerate(points):
+            if min_samples == 2:
+                # Distance from point to line defined by p1, p2
+                to_point = point - p1
+                projection_length = np.dot(to_point, line_unit)
+                closest_point_on_line = p1 + projection_length * line_unit
+                distance = np.linalg.norm(point - closest_point_on_line)
+            else:
+                # Distance from point to line through centroid with direction line_unit
+                to_point = point - p1
+                projection_length = np.dot(to_point, line_unit)
+                closest_point_on_line = p1 + projection_length * line_unit
+                distance = np.linalg.norm(point - closest_point_on_line)
+            
+            if distance <= distance_threshold:
+                inlier_mask[idx] = True
+                inlier_count += 1
+        
+        # Update best line if this one has more inliers
+        if inlier_count > best_inliers:
+            best_inliers = inlier_count
+            best_inlier_mask = inlier_mask.copy()
+            
+            # Find extent of inliers along the line
+            inlier_projections = []
+            for idx, point in enumerate(points):
+                if inlier_mask[idx]:
+                    if min_samples == 2:
+                        to_point = point - p1
+                        projection_length = np.dot(to_point, line_unit)
+                    else:
+                        to_point = point - p1
+                        projection_length = np.dot(to_point, line_unit)
+                    
+                    inlier_projections.append(projection_length)
+            
+            if inlier_projections:
+                min_proj = min(inlier_projections)
+                max_proj = max(inlier_projections)
+                
+                if min_samples == 2:
+                    start_point = p1 + min_proj * line_unit
+                    end_point = p1 + max_proj * line_unit
+                else:
+                    start_point = p1 + min_proj * line_unit
+                    end_point = p1 + max_proj * line_unit
+                
+                best_line = (start_point, end_point)
+    
+    # Return best line and outliers if it has enough inliers
+    min_inliers = max(min_samples, len(points) // 4)  # At least 25% of points should be inliers
+    if best_inliers >= min_inliers and best_inlier_mask is not None:
+        outliers = points[~best_inlier_mask]  # Points that are NOT inliers
+        return best_line, outliers
+    
+    return None
+
+
+def draw_field_lines_ransac(frame: np.ndarray, 
+                           fitted_lines: List[Tuple[np.ndarray, np.ndarray]],
+                           line_color: Tuple[int, int, int] = None,
+                           line_thickness: int = None) -> np.ndarray:
+    """Draw RANSAC-fitted field lines on the frame.
+    
+    Args:
+        frame: Input frame to draw on
+        fitted_lines: List of (start_point, end_point) tuples for each line
+        line_color: BGR color for the lines
+        line_thickness: Thickness of the lines
+        
+    Returns:
+        Frame with fitted lines drawn
+    """
+    if not fitted_lines:
+        return frame
+    
+    # Import here to avoid circular imports
+    from ..config.settings import get_setting
+    
+    # Use config values if parameters not provided
+    if line_color is None:
+        color_list = get_setting("models.segmentation.contour.line_color", [0, 255, 0])
+        line_color = tuple(color_list) if isinstance(color_list, list) else (0, 255, 0)
+    if line_thickness is None:
+        line_thickness = get_setting("models.segmentation.contour.line_thickness", 3)
+    
+    result = frame.copy()
+    
+    try:
+        for i, (start_point, end_point) in enumerate(fitted_lines):
+            # Convert points to integers for drawing
+            start = tuple(start_point.astype(np.int32))
+            end = tuple(end_point.astype(np.int32))
+            
+            # Draw the line
+            cv2.line(result, start, end, line_color, line_thickness)
+            
+            # Draw endpoint markers
+            cv2.circle(result, start, line_thickness + 2, line_color, -1)
+            cv2.circle(result, end, line_thickness + 2, line_color, -1)
+        
+        print(f"[VISUALIZATION] Drew {len(fitted_lines)} RANSAC-fitted field lines")
+        
+    except Exception as e:
+        print(f"[VISUALIZATION] Error drawing RANSAC lines: {e}")
+    
+    return result
+
+
+def draw_field_lines_ransac_with_outliers(frame: np.ndarray, 
+                                         fitted_lines: List[Tuple[np.ndarray, np.ndarray]],
+                                         outlier_points: List[np.ndarray],
+                                         line_color: Tuple[int, int, int] = None,
+                                         line_thickness: int = None,
+                                         outlier_color: Tuple[int, int, int] = None,
+                                         outlier_radius: int = None,
+                                         show_outliers: bool = None) -> np.ndarray:
+    """Draw RANSAC-fitted field lines and outlier points on the frame.
+    
+    Args:
+        frame: Input frame to draw on
+        fitted_lines: List of (start_point, end_point) tuples for each line
+        outlier_points: List of outlier point arrays for each segment
+        line_color: BGR color for the lines
+        line_thickness: Thickness of the lines
+        outlier_color: BGR color for outlier points
+        outlier_radius: Radius for outlier points
+        show_outliers: Whether to draw outlier points
+        
+    Returns:
+        Frame with fitted lines and outliers drawn
+    """
+    if not fitted_lines and not outlier_points:
+        return frame
+    
+    try:
+        result = frame.copy()
+        
+        # Draw RANSAC lines first
+        if fitted_lines:
+            result = draw_field_lines_ransac(result, fitted_lines, line_color, line_thickness)
+        
+        # Draw outlier points if enabled
+        if outlier_points and (show_outliers if show_outliers is not None else get_setting("models.segmentation.contour.ransac.show_outliers", True)):
+            # Get default values from config
+            outlier_color = outlier_color or tuple(get_setting("models.segmentation.contour.ransac.outlier_color", [0, 0, 255]))
+            outlier_radius = outlier_radius if outlier_radius is not None else get_setting("models.segmentation.contour.ransac.outlier_radius", 3)
+            
+            outlier_count = 0
+            for segment_outliers in outlier_points:
+                if segment_outliers is not None and len(segment_outliers) > 0:
+                    for point in segment_outliers:
+                        center = (int(point[0]), int(point[1]))
+                        cv2.circle(result, center, outlier_radius, outlier_color, -1)
+                        outlier_count += 1
+            
+            if outlier_count > 0:
+                print(f"[VISUALIZATION] Drew {outlier_count} RANSAC outlier points")
+        
+    except Exception as e:
+        print(f"[VISUALIZATION] Error drawing RANSAC lines and outliers: {e}")
+    
+    return result
+
+
 def _apply_morphological_smoothing(mask: np.ndarray, 
                                  opening_kernel_size: int = None,
                                  closing_kernel_size: int = None,
@@ -969,6 +1482,9 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
     if unified_mask is None or not np.any(unified_mask):
         return frame
     
+    # Import here to avoid circular imports
+    from ..config.settings import get_setting
+    
     overlay = frame.copy()
     
     # Create colored overlay where mask is present
@@ -983,11 +1499,49 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
         border_color = tuple(int(c * 0.7) for c in color)
         cv2.drawContours(result, contours, -1, border_color, 2)
     
-    # Draw simplified contour if requested
+    # Draw simplified contour or RANSAC lines if requested
     if draw_contour:
-        simplified_contour = calculate_field_contour(unified_mask)
-        if simplified_contour is not None:
-            result = draw_field_contour(result, simplified_contour)
+        # Check if RANSAC line fitting is enabled
+        ransac_enabled = get_setting("models.segmentation.contour.ransac.enabled", False)
+        
+        if ransac_enabled:
+            # Use RANSAC line fitting approach
+            simplified_contour = calculate_field_contour(unified_mask)
+            if simplified_contour is not None:
+                # Fit lines using RANSAC
+                num_lines = get_setting("models.segmentation.contour.ransac.num_lines", 3)
+                distance_threshold = get_setting("models.segmentation.contour.ransac.distance_threshold", 10.0)
+                min_samples = get_setting("models.segmentation.contour.ransac.min_samples", 2)
+                max_trials = get_setting("models.segmentation.contour.ransac.max_trials", 1000)
+                
+                fitted_lines, outlier_points = fit_field_lines_ransac(
+                    simplified_contour, 
+                    num_lines=num_lines,
+                    distance_threshold=distance_threshold,
+                    min_samples=min_samples,
+                    max_trials=max_trials
+                )
+                
+                if fitted_lines:
+                    # Draw RANSAC-fitted lines and outliers
+                    line_color_list = get_setting("models.segmentation.contour.ransac.line_color", [0, 255, 0])
+                    line_color = tuple(line_color_list) if isinstance(line_color_list, list) else (0, 255, 0)
+                    result = draw_field_lines_ransac_with_outliers(
+                        result, 
+                        fitted_lines, 
+                        outlier_points,
+                        line_color=line_color
+                    )
+                else:
+                    print("[VISUALIZATION] RANSAC line fitting failed, falling back to contour")
+                    result = draw_field_contour(result, simplified_contour)
+            else:
+                print("[VISUALIZATION] No contour found for RANSAC line fitting")
+        else:
+            # Use traditional contour approach
+            simplified_contour = calculate_field_contour(unified_mask)
+            if simplified_contour is not None:
+                result = draw_field_contour(result, simplified_contour)
     
     return result
 

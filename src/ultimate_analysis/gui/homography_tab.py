@@ -30,7 +30,9 @@ from ..gui.visualization import (
     create_unified_field_mask, 
     draw_unified_field_mask,
     calculate_field_contour,
-    draw_field_contour
+    draw_field_contour,
+    fit_field_lines_ransac,
+    draw_field_lines_ransac
 )
 
 
@@ -313,6 +315,7 @@ class HomographyTab(QWidget):
         self.current_segmentation_results = None
         self.segmentation_model_combo: Optional[QComboBox] = None
         self.show_segmentation_checkbox: Optional[QCheckBox] = None
+        self.ransac_checkbox: Optional[QCheckBox] = None
         self.available_segmentation_models: List[str] = []
         
         # Initialize UI
@@ -437,6 +440,13 @@ class HomographyTab(QWidget):
         self.show_segmentation_checkbox.setChecked(self.show_segmentation)
         self.show_segmentation_checkbox.stateChanged.connect(self._on_segmentation_toggled)
         segmentation_layout.addWidget(self.show_segmentation_checkbox)
+        
+        # RANSAC line fitting checkbox
+        self.ransac_checkbox = QCheckBox("Use RANSAC Line Fitting")
+        self.ransac_checkbox.setChecked(get_setting("models.segmentation.contour.ransac.enabled", False))
+        self.ransac_checkbox.stateChanged.connect(self._on_ransac_toggled)
+        self.ransac_checkbox.setToolTip("Fit straight lines to contour segments using RANSAC algorithm")
+        segmentation_layout.addWidget(self.ransac_checkbox)
         
         # Model selection
         model_layout = QHBoxLayout()
@@ -1395,6 +1405,30 @@ class HomographyTab(QWidget):
             self.current_segmentation_results = None
             
         self._update_displays()
+    
+    def _on_ransac_toggled(self, state: int):
+        """Handle RANSAC line fitting checkbox toggle."""
+        ransac_enabled = state == 2  # Qt.Checked = 2
+        
+        print(f"[HOMOGRAPHY] RANSAC toggle: state={state}, ransac_enabled={ransac_enabled}")
+        
+        # Temporarily override the config value in memory
+        from ..config.settings import get_config
+        config = get_config()
+        if 'models' not in config:
+            config['models'] = {}
+        if 'segmentation' not in config['models']:
+            config['models']['segmentation'] = {}
+        if 'contour' not in config['models']['segmentation']:
+            config['models']['segmentation']['contour'] = {}
+        if 'ransac' not in config['models']['segmentation']['contour']:
+            config['models']['segmentation']['contour']['ransac'] = {}
+        
+        config['models']['segmentation']['contour']['ransac']['enabled'] = ransac_enabled
+        
+        # Update displays if segmentation is currently shown
+        if self.show_segmentation and self.current_segmentation_results:
+            self._update_displays()
         
     def _on_segmentation_model_changed(self, display_name: str):
         """Handle segmentation model selection change."""
