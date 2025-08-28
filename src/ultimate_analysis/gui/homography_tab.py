@@ -892,12 +892,12 @@ class HomographyTab(QWidget):
         self._display_frame(warped_frame, self.warped_display)
         
     def _apply_segmentation_to_warped_frame(self, warped_frame: np.ndarray, segmentation_results: list) -> np.ndarray:
-        """Apply segmentation overlay to warped frame by transforming the unified masks."""
+        """Apply segmentation overlay to warped frame by transforming contour points from original image."""
         if not segmentation_results:
             return warped_frame
             
         try:
-            # Create unified mask from segmentation results
+            # Create unified mask from segmentation results on original frame
             original_frame_shape = self.current_frame.shape[:2]  # (height, width)
             unified_mask = create_unified_field_mask(segmentation_results, original_frame_shape)
             
@@ -907,30 +907,37 @@ class HomographyTab(QWidget):
             
             print(f"[HOMOGRAPHY] Created unified mask with shape {unified_mask.shape}, {np.sum(unified_mask)} pixels")
             
-            # Apply homography transformation to the unified mask
-            h_matrix = self._get_homography_matrix()
-            warped_unified_mask = cv2.warpPerspective(
-                unified_mask.astype(np.float32), 
-                h_matrix, 
-                (warped_frame.shape[1], warped_frame.shape[0])
-            )
+            # Calculate contour on the original image
+            original_contour = calculate_field_contour(unified_mask)
             
-            # Convert back to binary mask
-            warped_unified_mask = (warped_unified_mask > 0.5).astype(np.uint8)
-            
-            if not np.any(warped_unified_mask):
-                print("[HOMOGRAPHY] No field area found in warped unified mask")
+            if original_contour is None or len(original_contour) == 0:
+                print("[HOMOGRAPHY] No contour found in original unified mask")
                 return warped_frame
             
-            # Apply unified mask overlay with a single color (bright green for field)
-            field_color = (0, 255, 0)  # Bright green (BGR)
-            result_frame = draw_unified_field_mask(warped_frame, warped_unified_mask, field_color, alpha=0.4)
+            # Transform contour points using homography matrix
+            h_matrix = self._get_homography_matrix()
+            transformed_contour = self._transform_contour_points(original_contour, h_matrix)
             
-            print(f"[HOMOGRAPHY] Applied unified field mask to warped frame: {np.sum(warped_unified_mask)} pixels")
+            if transformed_contour is None:
+                print("[HOMOGRAPHY] Failed to transform contour points")
+                return warped_frame
+            
+            # Create mask from transformed contour points
+            warped_mask = np.zeros((warped_frame.shape[0], warped_frame.shape[1]), dtype=np.uint8)
+            cv2.fillPoly(warped_mask, [transformed_contour], 1)
+            
+            # Apply overlay and draw contour on warped frame
+            field_color = (0, 255, 0)  # Bright green (BGR)
+            result_frame = draw_unified_field_mask(warped_frame, warped_mask, field_color, alpha=0.4, draw_contour=False)
+            
+            # Draw the transformed contour directly
+            result_frame = draw_field_contour(result_frame, transformed_contour)
+            
+            print(f"[HOMOGRAPHY] Applied transformed contour to warped frame: {len(transformed_contour)} points")
             return result_frame
             
         except Exception as e:
-            print(f"[HOMOGRAPHY] Error applying unified segmentation to warped frame: {e}")
+            print(f"[HOMOGRAPHY] Error applying transformed segmentation to warped frame: {e}")
             import traceback
             traceback.print_exc()
             return warped_frame
@@ -945,6 +952,37 @@ class HomographyTab(QWidget):
         ], dtype=np.float32)
         
         return h_matrix
+    
+    def _transform_contour_points(self, contour: np.ndarray, h_matrix: np.ndarray) -> Optional[np.ndarray]:
+        """Transform contour points using homography matrix.
+        
+        Args:
+            contour: Contour points as numpy array of shape (N, 1, 2)
+            h_matrix: 3x3 homography transformation matrix
+            
+        Returns:
+            Transformed contour points in same format, or None if transformation fails
+        """
+        if contour is None or len(contour) == 0:
+            return None
+            
+        try:
+            # Reshape contour points for perspective transformation
+            # contour is (N, 1, 2), we need (N, 2) for cv2.perspectiveTransform
+            points = contour.reshape(-1, 1, 2).astype(np.float32)
+            
+            # Apply perspective transformation
+            transformed_points = cv2.perspectiveTransform(points, h_matrix)
+            
+            # Reshape back to contour format (N, 1, 2)
+            transformed_contour = transformed_points.reshape(-1, 1, 2).astype(np.int32)
+            
+            print(f"[HOMOGRAPHY] Transformed {len(contour)} contour points")
+            return transformed_contour
+            
+        except Exception as e:
+            print(f"[HOMOGRAPHY] Error transforming contour points: {e}")
+            return None
     
     def _display_frame(self, frame: np.ndarray, label: ZoomableImageLabel):
         """Display a frame in the specified zoomable label widget."""

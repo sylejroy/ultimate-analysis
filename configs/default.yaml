@@ -35,8 +35,8 @@ models:
     
     # Morphological operations for mask smoothing
     morphological:
-      opening_kernel_size: 50     # Size for noise removal (0 to disable)
-      closing_kernel_size: 50    # Size for hole filling (0 to disable)
+      opening_kernel_size: 100     # Size for noise removal (0 to disable)
+      closing_kernel_size: 100    # Size for hole filling (0 to disable)
       fill_holes: true           # Apply flood fill for remaining holes
     
     # Contour calculation and drawings
