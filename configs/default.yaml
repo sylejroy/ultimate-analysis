@@ -35,9 +35,19 @@ models:
     
     # Morphological operations for mask smoothing
     morphological:
-      opening_kernel_size: 5     # Size for noise removal (0 to disable)
-      closing_kernel_size: 15    # Size for hole filling (0 to disable)
+      opening_kernel_size: 50     # Size for noise removal (0 to disable)
+      closing_kernel_size: 50    # Size for hole filling (0 to disable)
       fill_holes: true           # Apply flood fill for remaining holes
+    
+    # Contour calculation and drawings
+    contour:
+      simplify_epsilon: 0.0001     # Contour simplification factor (fraction of perimeter)
+      min_area: 5000             # Minimum contour area to consider
+      line_color: [255, 255, 0]  # BGR color for contour lines (yellow)
+      point_color: [0, 255, 255] # BGR color for contour points (cyan)
+      line_thickness: 3          # Thickness of contour lines
+      point_radius: 5            # Radius of contour points
+      draw_points: true          # Whether to draw individual contour points
   
   tracking:
     default_tracker: "deepsort"

@@ -677,6 +677,124 @@ def _draw_segmentation_masks(frame: np.ndarray, masks: np.ndarray) -> np.ndarray
     return overlay
 
 
+def calculate_field_contour(unified_mask: np.ndarray, 
+                           simplify_epsilon: float = None,
+                           min_contour_area: int = None) -> Optional[np.ndarray]:
+    """Calculate and simplify the contour of the field mask.
+    
+    Args:
+        unified_mask: Binary mask (H, W) where 1 indicates field area
+        simplify_epsilon: Epsilon parameter for contour simplification (as fraction of perimeter)
+        min_contour_area: Minimum area threshold for contours
+        
+    Returns:
+        Simplified contour points as numpy array of shape (N, 1, 2), or None if no contour found
+    """
+    if unified_mask is None or not np.any(unified_mask):
+        return None
+    
+    # Import here to avoid circular imports
+    from ..config.settings import get_setting
+    
+    # Use config values if parameters not provided
+    if simplify_epsilon is None:
+        simplify_epsilon = get_setting("models.segmentation.contour.simplify_epsilon", 0.01)
+    if min_contour_area is None:
+        min_contour_area = get_setting("models.segmentation.contour.min_area", 5000)
+    
+    try:
+        # Find contours
+        contours, _ = cv2.findContours(unified_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            return None
+        
+        # Find the largest contour (main field boundary)
+        largest_contour = max(contours, key=cv2.contourArea)
+        
+        # Check if contour meets minimum area requirement
+        contour_area = cv2.contourArea(largest_contour)
+        if contour_area < min_contour_area:
+            print(f"[VISUALIZATION] Contour area {contour_area} below threshold {min_contour_area}")
+            return None
+        
+        # Simplify contour using Douglas-Peucker algorithm
+        perimeter = cv2.arcLength(largest_contour, True)
+        epsilon = simplify_epsilon * perimeter
+        simplified_contour = cv2.approxPolyDP(largest_contour, epsilon, True)
+        
+        print(f"[VISUALIZATION] Original contour points: {len(largest_contour)}, simplified: {len(simplified_contour)}")
+        
+        return simplified_contour
+        
+    except Exception as e:
+        print(f"[VISUALIZATION] Error calculating field contour: {e}")
+        return None
+
+
+def draw_field_contour(frame: np.ndarray, contour: np.ndarray,
+                      contour_color: Tuple[int, int, int] = None,
+                      point_color: Tuple[int, int, int] = None,
+                      line_thickness: int = None,
+                      point_radius: int = None,
+                      draw_points: bool = None) -> np.ndarray:
+    """Draw field contour lines and points on the frame.
+    
+    Args:
+        frame: Input frame to draw on
+        contour: Contour points as numpy array of shape (N, 1, 2)
+        contour_color: BGR color for contour lines
+        point_color: BGR color for contour points
+        line_thickness: Thickness of contour lines
+        point_radius: Radius of contour points
+        draw_points: Whether to draw individual contour points
+        
+    Returns:
+        Frame with contour overlay
+    """
+    if contour is None or len(contour) == 0:
+        return frame
+    
+    # Import here to avoid circular imports
+    from ..config.settings import get_setting
+    
+    # Use config values if parameters not provided
+    if contour_color is None:
+        # Get color from config as list and convert to tuple
+        color_list = get_setting("models.segmentation.contour.line_color", [255, 255, 0])
+        contour_color = tuple(color_list) if isinstance(color_list, list) else (255, 255, 0)
+    if point_color is None:
+        color_list = get_setting("models.segmentation.contour.point_color", [0, 255, 255])
+        point_color = tuple(color_list) if isinstance(color_list, list) else (0, 255, 255)
+    if line_thickness is None:
+        line_thickness = get_setting("models.segmentation.contour.line_thickness", 3)
+    if point_radius is None:
+        point_radius = get_setting("models.segmentation.contour.point_radius", 5)
+    if draw_points is None:
+        draw_points = get_setting("models.segmentation.contour.draw_points", True)
+    
+    result = frame.copy()
+    
+    try:
+        # Draw contour lines
+        cv2.drawContours(result, [contour], -1, contour_color, line_thickness)
+        
+        # Draw contour points if enabled
+        if draw_points:
+            for point in contour:
+                center = tuple(point[0])  # point is shape (1, 2), so point[0] is (x, y)
+                cv2.circle(result, center, point_radius, point_color, -1)
+                # Add small white border for better visibility
+                cv2.circle(result, center, point_radius + 1, (255, 255, 255), 1)
+        
+        print(f"[VISUALIZATION] Drew contour with {len(contour)} points")
+        
+    except Exception as e:
+        print(f"[VISUALIZATION] Error drawing field contour: {e}")
+    
+    return result
+
+
 def _apply_morphological_smoothing(mask: np.ndarray, 
                                  opening_kernel_size: int = None,
                                  closing_kernel_size: int = None,
@@ -834,17 +952,19 @@ def create_unified_field_mask(segmentation_results: List[Any], frame_shape: Tupl
 
 def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray, 
                            color: Tuple[int, int, int] = (0, 255, 0), 
-                           alpha: float = 0.4) -> np.ndarray:
-    """Draw a unified field mask with a single color overlay.
+                           alpha: float = 0.4,
+                           draw_contour: bool = True) -> np.ndarray:
+    """Draw a unified field mask with a single color overlay and optional contour.
     
     Args:
         frame: Input frame to draw on
         unified_mask: Binary mask (H, W) where 1 indicates field area
         color: BGR color tuple for the overlay
         alpha: Transparency for overlay (0.0 = transparent, 1.0 = opaque)
+        draw_contour: Whether to calculate and draw simplified contours
         
     Returns:
-        Frame with unified mask overlay
+        Frame with unified mask overlay and optional contour
     """
     if unified_mask is None or not np.any(unified_mask):
         return frame
@@ -857,11 +977,17 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
     # Blend with original frame
     result = cv2.addWeighted(frame, 1 - alpha, overlay, alpha, 0)
     
-    # Draw contours for better visibility
+    # Draw basic border contours for mask visibility
     contours, _ = cv2.findContours(unified_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if contours:
         border_color = tuple(int(c * 0.7) for c in color)
         cv2.drawContours(result, contours, -1, border_color, 2)
+    
+    # Draw simplified contour if requested
+    if draw_contour:
+        simplified_contour = calculate_field_contour(unified_mask)
+        if simplified_contour is not None:
+            result = draw_field_contour(result, simplified_contour)
     
     return result
 

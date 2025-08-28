@@ -25,7 +25,13 @@ from .video_player import VideoPlayer
 from ..config.settings import get_setting
 from ..constants import DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS
 from ..processing.field_segmentation import run_field_segmentation, set_field_model
-from ..gui.visualization import draw_field_segmentation, create_unified_field_mask, draw_unified_field_mask
+from ..gui.visualization import (
+    draw_field_segmentation, 
+    create_unified_field_mask, 
+    draw_unified_field_mask,
+    calculate_field_contour,
+    draw_field_contour
+)
 
 
 class ZoomableImageLabel(QLabel):
