@@ -303,7 +303,7 @@ class HomographyTab(QWidget):
         self.warped_scroll_area: Optional[QScrollArea] = None
         
         # Field segmentation state
-        self.show_segmentation = False
+        self.show_segmentation = True
         self.current_segmentation_results = None
         self.segmentation_model_combo: Optional[QComboBox] = None
         self.show_segmentation_checkbox: Optional[QCheckBox] = None

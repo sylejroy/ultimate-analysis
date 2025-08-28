@@ -677,6 +677,99 @@ def _draw_segmentation_masks(frame: np.ndarray, masks: np.ndarray) -> np.ndarray
     return overlay
 
 
+def _apply_morphological_smoothing(mask: np.ndarray, 
+                                 opening_kernel_size: int = None,
+                                 closing_kernel_size: int = None,
+                                 fill_holes: bool = None) -> np.ndarray:
+    """Apply morphological operations to smooth a binary mask.
+    
+    Args:
+        mask: Binary mask (H, W) with values 0 or 1
+        opening_kernel_size: Size of kernel for opening operation (removes noise)
+        closing_kernel_size: Size of kernel for closing operation (fills gaps)
+        fill_holes: Whether to apply hole filling
+        
+    Returns:
+        Smoothed binary mask
+    """
+    if not np.any(mask):
+        return mask
+    
+    # Import here to avoid circular imports
+    from ..config.settings import get_setting
+    
+    # Use config values if parameters not provided
+    if opening_kernel_size is None:
+        opening_kernel_size = get_setting("models.segmentation.morphological.opening_kernel_size", 5)
+    if closing_kernel_size is None:
+        closing_kernel_size = get_setting("models.segmentation.morphological.closing_kernel_size", 15)
+    if fill_holes is None:
+        fill_holes = get_setting("models.segmentation.morphological.fill_holes", True)
+    
+    try:
+        # Ensure mask is binary
+        mask_binary = (mask > 0).astype(np.uint8)
+        
+        # 1. Opening operation: erosion followed by dilation
+        # This removes small noise and disconnected components
+        if opening_kernel_size > 0:
+            opening_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, 
+                                                     (opening_kernel_size, opening_kernel_size))
+            mask_binary = cv2.morphologyEx(mask_binary, cv2.MORPH_OPEN, opening_kernel)
+        
+        # 2. Closing operation: dilation followed by erosion
+        # This fills small gaps and holes within the field area
+        if closing_kernel_size > 0:
+            closing_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, 
+                                                     (closing_kernel_size, closing_kernel_size))
+            mask_binary = cv2.morphologyEx(mask_binary, cv2.MORPH_CLOSE, closing_kernel)
+        
+        # 3. Fill remaining holes using flood fill
+        if fill_holes:
+            mask_binary = _fill_holes_flood_fill(mask_binary)
+        
+        return mask_binary
+        
+    except Exception as e:
+        print(f"[VISUALIZATION] Error in morphological smoothing: {e}")
+        return mask
+
+
+def _fill_holes_flood_fill(mask: np.ndarray) -> np.ndarray:
+    """Fill holes in a binary mask using flood fill from the borders.
+    
+    Args:
+        mask: Binary mask (H, W) with values 0 or 1
+        
+    Returns:
+        Mask with holes filled
+    """
+    try:
+        # Create a copy to work with
+        filled_mask = mask.copy()
+        h, w = mask.shape
+        
+        # Create a mask that is 2 pixels larger in each dimension
+        # This allows flood fill to work from the border
+        flood_mask = np.zeros((h + 2, w + 2), dtype=np.uint8)
+        
+        # Copy the original mask to the center of the flood mask
+        flood_mask[1:-1, 1:-1] = 1 - filled_mask  # Invert: 0 becomes 1, 1 becomes 0
+        
+        # Flood fill from the top-left corner (which should be background)
+        cv2.floodFill(flood_mask, None, (0, 0), 0)
+        
+        # Extract the filled region and invert back
+        filled_region = flood_mask[1:-1, 1:-1]
+        filled_mask = 1 - filled_region
+        
+        return filled_mask.astype(np.uint8)
+        
+    except Exception as e:
+        print(f"[VISUALIZATION] Error in hole filling: {e}")
+        return mask
+
+
 def create_unified_field_mask(segmentation_results: List[Any], frame_shape: Tuple[int, int]) -> Optional[np.ndarray]:
     """Create a unified mask combining all segmentation classes into one binary mask.
     
@@ -731,6 +824,10 @@ def create_unified_field_mask(segmentation_results: List[Any], frame_shape: Tupl
                 
         except Exception as e:
             print(f"[VISUALIZATION] Error creating unified mask: {e}")
+    
+    # Apply morphological operations to smooth the mask
+    if np.any(unified_mask):
+        unified_mask = _apply_morphological_smoothing(unified_mask)
             
     return unified_mask if np.any(unified_mask) else None
 

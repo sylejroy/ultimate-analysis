@@ -32,6 +32,12 @@ models:
     default_model: "yolo11l-seg.pt"
     confidence_threshold: 0.6
     mask_alpha: 0.3
+    
+    # Morphological operations for mask smoothing
+    morphological:
+      opening_kernel_size: 5     # Size for noise removal (0 to disable)
+      closing_kernel_size: 15    # Size for hole filling (0 to disable)
+      fill_holes: true           # Apply flood fill for remaining holes
   
   tracking:
     default_tracker: "deepsort"
