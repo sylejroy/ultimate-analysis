@@ -32,7 +32,8 @@ from ..gui.visualization import (
     calculate_field_contour,
     draw_field_contour,
     fit_field_lines_ransac,
-    draw_field_lines_ransac
+    draw_field_lines_ransac,
+    draw_classified_field_lines
 )
 
 
@@ -317,6 +318,7 @@ class HomographyTab(QWidget):
         self.show_segmentation_checkbox: Optional[QCheckBox] = None
         self.ransac_checkbox: Optional[QCheckBox] = None
         self.available_segmentation_models: List[str] = []
+        self.classified_lines: Dict[str, np.ndarray] = {}  # Store classified field lines
         
         # Initialize UI
         self._init_ui()
@@ -870,10 +872,11 @@ class HomographyTab(QWidget):
             if unified_mask is not None:
                 # Use bright green for unified field mask
                 field_color = (0, 255, 0)  # Bright green (BGR)
-                original_frame = draw_unified_field_mask(original_frame, unified_mask, field_color, alpha=0.4)
+                original_frame, self.classified_lines = draw_unified_field_mask(original_frame, unified_mask, field_color, alpha=0.4)
                 print(f"[HOMOGRAPHY] Applied unified mask to original frame: {np.sum(unified_mask)} pixels")
             else:
                 print("[HOMOGRAPHY] No unified mask could be created for original frame")
+                self.classified_lines = {}
         elif self.show_segmentation:
             print("[HOMOGRAPHY] Segmentation enabled but no results available")
         
@@ -938,10 +941,16 @@ class HomographyTab(QWidget):
             
             # Apply overlay and draw contour on warped frame
             field_color = (0, 255, 0)  # Bright green (BGR)
-            result_frame = draw_unified_field_mask(warped_frame, warped_mask, field_color, alpha=0.4, draw_contour=False)
+            result_frame, _ = draw_unified_field_mask(warped_frame, warped_mask, field_color, alpha=0.4, draw_contour=False)
             
             # Draw the transformed contour directly
             result_frame = draw_field_contour(result_frame, transformed_contour)
+            
+            # Draw classified lines if available
+            if self.classified_lines:
+                homography_matrix = self._get_homography_matrix()
+                result_frame = draw_classified_field_lines(result_frame, self.classified_lines, homography_matrix)
+                print(f"[HOMOGRAPHY] Drew {len(self.classified_lines)} classified field lines on warped frame")
             
             print(f"[HOMOGRAPHY] Applied transformed contour to warped frame: {len(transformed_contour)} points")
             return result_frame

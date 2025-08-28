@@ -1012,13 +1012,117 @@ def fit_field_lines_ransac(contour: np.ndarray,
         
         print(f"[VISUALIZATION] Sequential RANSAC: Successfully fitted {len(fitted_lines)} out of {num_lines} lines")
         
+        # Classify the fitted lines
+        if fitted_lines:
+            classified_lines = _classify_field_lines(fitted_lines, frame.shape)
+        else:
+            classified_lines = {}
+        
         # Filter out None entries from fitted_lines
         valid_lines = [line for line in fitted_lines if line is not None]
-        return (valid_lines, all_outliers, all_inliers, edge_filtered_points) if valid_lines else (None, None, None, edge_filtered_points)
+        return (valid_lines, all_outliers, all_inliers, edge_filtered_points, classified_lines) if valid_lines else (None, None, None, edge_filtered_points, {})
         
     except Exception as e:
         print(f"[VISUALIZATION] Error in RANSAC line fitting: {e}")
-        return None, None, None, np.array([]).reshape(0, 2)
+        return None, None, None, np.array([]).reshape(0, 2), {}
+
+
+def _classify_field_lines(fitted_lines: List[np.ndarray], frame_shape: Tuple[int, int, int]) -> Dict[str, np.ndarray]:
+    """Classify fitted lines into field components (sidelines, endzone lines, etc.).
+    
+    Args:
+        fitted_lines: List of line segments as [start_point, end_point] arrays
+        frame_shape: Shape of the frame (height, width, channels)
+        
+    Returns:
+        Dictionary mapping line types to line coordinates
+    """
+    if not fitted_lines:
+        return {}
+    
+    frame_height, frame_width = frame_shape[:2]
+    classified = {}
+    
+    # Calculate line properties
+    line_info = []
+    for i, line in enumerate(fitted_lines):
+        if line is None or len(line) != 2:
+            continue
+            
+        start_point, end_point = line[0], line[1]
+        
+        # Calculate line angle (in degrees)
+        dx = end_point[0] - start_point[0]
+        dy = end_point[1] - start_point[1]
+        angle = np.degrees(np.arctan2(dy, dx))
+        
+        # Normalize angle to [0, 180)
+        if angle < 0:
+            angle += 180
+        
+        # Calculate average Y position (vertical position in image)
+        avg_y = (start_point[1] + end_point[1]) / 2
+        avg_x = (start_point[0] + end_point[0]) / 2
+        
+        # Determine if line is horizontal or vertical
+        # Lines within 30 degrees of horizontal are considered horizontal
+        is_horizontal = abs(angle - 0) < 30 or abs(angle - 180) < 30
+        
+        line_info.append({
+            'index': i,
+            'line': line,
+            'angle': angle,
+            'avg_y': avg_y,
+            'avg_x': avg_x,
+            'is_horizontal': is_horizontal,
+            'start': start_point,
+            'end': end_point
+        })
+        
+        print(f"[VISUALIZATION] Line {i}: angle={angle:.1f}°, avg_y={avg_y:.1f}, avg_x={avg_x:.1f}, horizontal={is_horizontal}")
+    
+    # Separate horizontal and non-horizontal lines
+    horizontal_lines = [info for info in line_info if info['is_horizontal']]
+    vertical_lines = [info for info in line_info if not info['is_horizontal']]
+    
+    # Sort horizontal lines by Y position (top to bottom)
+    horizontal_lines.sort(key=lambda x: x['avg_y'])
+    
+    # Sort vertical lines by X position (left to right)
+    vertical_lines.sort(key=lambda x: x['avg_x'])
+    
+    # Classify horizontal lines
+    top_third_y = frame_height * (2/3)  # Top 2/3 of image
+    
+    for i, line_info_item in enumerate(horizontal_lines):
+        if line_info_item['avg_y'] < top_third_y:
+            # Lines in top 2/3 are far endzone lines
+            if i == 0:
+                classified['far_endzone_back'] = line_info_item['line']
+                print(f"[VISUALIZATION] Classified line {line_info_item['index']} as far endzone back")
+            elif i == 1:
+                classified['far_endzone_front'] = line_info_item['line']
+                print(f"[VISUALIZATION] Classified line {line_info_item['index']} as far endzone front")
+        else:
+            # Lines in bottom 1/3 are near endzone lines
+            if 'near_endzone_front' not in classified:
+                classified['near_endzone_front'] = line_info_item['line']
+                print(f"[VISUALIZATION] Classified line {line_info_item['index']} as near endzone front")
+            else:
+                classified['near_endzone_back'] = line_info_item['line']
+                print(f"[VISUALIZATION] Classified line {line_info_item['index']} as near endzone back")
+    
+    # Classify vertical lines (sidelines)
+    for i, line_info_item in enumerate(vertical_lines):
+        if i == 0:
+            classified['left_sideline'] = line_info_item['line']
+            print(f"[VISUALIZATION] Classified line {line_info_item['index']} as left sideline")
+        elif i == 1:
+            classified['right_sideline'] = line_info_item['line']
+            print(f"[VISUALIZATION] Classified line {line_info_item['index']} as right sideline")
+    
+    print(f"[VISUALIZATION] Line classification complete: {list(classified.keys())}")
+    return classified
 
 
 def _segment_contour_points(points: np.ndarray, num_segments: int) -> List[np.ndarray]:
@@ -1552,7 +1656,7 @@ def create_unified_field_mask(segmentation_results: List[Any], frame_shape: Tupl
 def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray, 
                            color: Tuple[int, int, int] = (0, 255, 0), 
                            alpha: float = 0.4,
-                           draw_contour: bool = True) -> np.ndarray:
+                           draw_contour: bool = True) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     """Draw a unified field mask with a single color overlay and optional contour.
     
     Args:
@@ -1563,15 +1667,16 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
         draw_contour: Whether to calculate and draw simplified contours
         
     Returns:
-        Frame with unified mask overlay and optional contour
+        Tuple of (frame with unified mask overlay and optional contour, classified_lines dictionary)
     """
     if unified_mask is None or not np.any(unified_mask):
-        return frame
+        return frame, {}
     
     # Import here to avoid circular imports
     from ..config.settings import get_setting
     
     overlay = frame.copy()
+    classified_lines = {}  # Initialize empty classified lines dictionary
     
     # Create colored overlay where mask is present
     overlay[unified_mask == 1] = color
@@ -1600,7 +1705,7 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
                 min_samples = get_setting("models.segmentation.contour.ransac.min_samples", 2)
                 max_trials = get_setting("models.segmentation.contour.ransac.max_trials", 1000)
                 
-                fitted_lines, outlier_points, inlier_points, edge_filtered_points = fit_field_lines_ransac(
+                fitted_lines, outlier_points, inlier_points, edge_filtered_points, classified_lines = fit_field_lines_ransac(
                     simplified_contour, 
                     frame,
                     num_lines=num_lines,
@@ -1663,6 +1768,80 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
             simplified_contour = calculate_field_contour(unified_mask)
             if simplified_contour is not None:
                 result = draw_field_contour(result, simplified_contour)
+    
+    return result, classified_lines
+
+
+def draw_classified_field_lines(frame: np.ndarray, classified_lines: Dict[str, np.ndarray],
+                               transformation_matrix: Optional[np.ndarray] = None) -> np.ndarray:
+    """Draw classified field lines with different colors for each type.
+    
+    Args:
+        frame: Frame to draw on
+        classified_lines: Dictionary mapping line types to line coordinates
+        transformation_matrix: Optional homography matrix to transform lines to warped view
+        
+    Returns:
+        Frame with classified lines drawn
+    """
+    if not classified_lines:
+        return frame
+        
+    result = frame.copy()
+    
+    # Define colors for different line types
+    line_colors = {
+        'left_sideline': (255, 0, 0),      # Blue
+        'right_sideline': (255, 0, 255),   # Magenta  
+        'far_endzone_back': (0, 255, 255), # Yellow
+        'far_endzone_front': (0, 165, 255), # Orange
+        'near_endzone_front': (0, 255, 0), # Green
+        'near_endzone_back': (255, 255, 0)  # Cyan
+    }
+    
+    line_thickness = 3
+    
+    for line_type, line_coords in classified_lines.items():
+        if line_coords is None or len(line_coords) != 2:
+            continue
+            
+        color = line_colors.get(line_type, (255, 255, 255))  # Default white
+        
+        start_point = line_coords[0].copy()
+        end_point = line_coords[1].copy()
+        
+        # Transform points if transformation matrix is provided
+        if transformation_matrix is not None:
+            # Convert to homogeneous coordinates
+            start_homo = np.array([start_point[0], start_point[1], 1.0])
+            end_homo = np.array([end_point[0], end_point[1], 1.0])
+            
+            # Apply transformation
+            start_transformed = transformation_matrix @ start_homo
+            end_transformed = transformation_matrix @ end_homo
+            
+            # Convert back to 2D coordinates
+            if start_transformed[2] != 0:
+                start_point = start_transformed[:2] / start_transformed[2]
+            if end_transformed[2] != 0:
+                end_point = end_transformed[:2] / end_transformed[2]
+        
+        # Draw the line
+        start_int = (int(start_point[0]), int(start_point[1]))
+        end_int = (int(end_point[0]), int(end_point[1]))
+        
+        # Check if points are within frame bounds
+        h, w = frame.shape[:2]
+        if (0 <= start_int[0] < w and 0 <= start_int[1] < h and
+            0 <= end_int[0] < w and 0 <= end_int[1] < h):
+            cv2.line(result, start_int, end_int, color, line_thickness)
+            
+            # Add text label
+            mid_point = ((start_int[0] + end_int[0]) // 2, (start_int[1] + end_int[1]) // 2)
+            cv2.putText(result, line_type.replace('_', ' ').title(), mid_point, 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            
+            print(f"[VISUALIZATION] Drew {line_type} line from {start_int} to {end_int}")
     
     return result
 
