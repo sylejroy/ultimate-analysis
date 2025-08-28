@@ -25,7 +25,7 @@ from .video_player import VideoPlayer
 from ..config.settings import get_setting
 from ..constants import DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS
 from ..processing.field_segmentation import run_field_segmentation, set_field_model
-from ..gui.visualization import draw_field_segmentation
+from ..gui.visualization import draw_field_segmentation, create_unified_field_mask, draw_unified_field_mask
 
 
 class ZoomableImageLabel(QLabel):
@@ -847,8 +847,17 @@ class HomographyTab(QWidget):
         # Apply segmentation overlay to original frame if enabled
         original_frame = self.current_frame.copy()
         if self.show_segmentation and self.current_segmentation_results:
-            original_frame = draw_field_segmentation(original_frame, self.current_segmentation_results)
-            print(f"[HOMOGRAPHY] Applied segmentation to original frame: {len(self.current_segmentation_results)} results")
+            # Create and display unified mask on original frame
+            frame_shape = self.current_frame.shape[:2]  # (height, width)
+            unified_mask = create_unified_field_mask(self.current_segmentation_results, frame_shape)
+            
+            if unified_mask is not None:
+                # Use bright green for unified field mask
+                field_color = (0, 255, 0)  # Bright green (BGR)
+                original_frame = draw_unified_field_mask(original_frame, unified_mask, field_color, alpha=0.4)
+                print(f"[HOMOGRAPHY] Applied unified mask to original frame: {np.sum(unified_mask)} pixels")
+            else:
+                print("[HOMOGRAPHY] No unified mask could be created for original frame")
         elif self.show_segmentation:
             print("[HOMOGRAPHY] Segmentation enabled but no results available")
         
@@ -877,82 +886,45 @@ class HomographyTab(QWidget):
         self._display_frame(warped_frame, self.warped_display)
         
     def _apply_segmentation_to_warped_frame(self, warped_frame: np.ndarray, segmentation_results: list) -> np.ndarray:
-        """Apply segmentation overlay to warped frame by transforming the masks."""
+        """Apply segmentation overlay to warped frame by transforming the unified masks."""
         if not segmentation_results:
             return warped_frame
             
         try:
-            # Create a copy to apply segmentation overlay
-            result_frame = warped_frame.copy()
+            # Create unified mask from segmentation results
+            original_frame_shape = self.current_frame.shape[:2]  # (height, width)
+            unified_mask = create_unified_field_mask(segmentation_results, original_frame_shape)
             
-            # Get homography matrix for transforming masks
+            if unified_mask is None:
+                print("[HOMOGRAPHY] No unified mask could be created")
+                return warped_frame
+            
+            print(f"[HOMOGRAPHY] Created unified mask with shape {unified_mask.shape}, {np.sum(unified_mask)} pixels")
+            
+            # Apply homography transformation to the unified mask
             h_matrix = self._get_homography_matrix()
+            warped_unified_mask = cv2.warpPerspective(
+                unified_mask.astype(np.float32), 
+                h_matrix, 
+                (warped_frame.shape[1], warped_frame.shape[0])
+            )
             
-            for seg_result in segmentation_results:
-                if hasattr(seg_result, 'masks') and seg_result.masks is not None:
-                    # Get mask data
-                    if hasattr(seg_result.masks, 'data'):
-                        mask_data = seg_result.masks.data
-                    else:
-                        continue
-                        
-                    # Convert to numpy if needed
-                    if hasattr(mask_data, 'cpu'):
-                        masks = mask_data.cpu().numpy()
-                    elif hasattr(mask_data, 'numpy'):
-                        masks = mask_data.numpy()
-                    else:
-                        masks = mask_data
-                    
-                    # Process each mask
-                    for i, mask in enumerate(masks):
-                        # Ensure mask is 2D and proper size
-                        if len(mask.shape) == 3:
-                            mask = mask[0]  # Take first channel if 3D
-                        
-                        # Resize mask to match original frame dimensions if needed
-                        original_height, original_width = self.current_frame.shape[:2]
-                        if mask.shape != (original_height, original_width):
-                            mask = cv2.resize(mask.astype(np.float32), (original_width, original_height))
-                        
-                        # Apply homography transformation to the mask
-                        warped_mask = cv2.warpPerspective(
-                            mask.astype(np.float32), 
-                            h_matrix, 
-                            (warped_frame.shape[1], warped_frame.shape[0])
-                        )
-                        
-                        # Apply color overlay where mask is present
-                        mask_binary = (warped_mask > 0.5).astype(np.uint8)
-                        if np.any(mask_binary):
-                            # Use the same color scheme as the visualization
-                            # Color mapping: 0 = Central Field (cyan), 1 = Endzone (magenta)
-                            color_dict = {
-                                0: (0, 255, 255),    # Cyan for central field (BGR)
-                                1: (255, 0, 255)     # Magenta for endzone (BGR)
-                            }
-                            color = color_dict.get(i, (0, 255, 255))  # Default to cyan
-                            
-                            # Create colored overlay
-                            overlay = result_frame.copy()
-                            overlay[mask_binary == 1] = color
-                            
-                            # Blend with original frame using same alpha as visualization
-                            alpha = 0.4
-                            result_frame = cv2.addWeighted(result_frame, 1-alpha, overlay, alpha, 0)
-                            
-                            # Draw contours for better visibility
-                            contours, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                            if contours:
-                                border_color = tuple(int(c * 0.7) for c in color)
-                                cv2.drawContours(result_frame, contours, -1, border_color, 2)
-                            
-                            print(f"[HOMOGRAPHY] Applied transformed mask {i} with color {color} to warped frame")
+            # Convert back to binary mask
+            warped_unified_mask = (warped_unified_mask > 0.5).astype(np.uint8)
             
+            if not np.any(warped_unified_mask):
+                print("[HOMOGRAPHY] No field area found in warped unified mask")
+                return warped_frame
+            
+            # Apply unified mask overlay with a single color (bright green for field)
+            field_color = (0, 255, 0)  # Bright green (BGR)
+            result_frame = draw_unified_field_mask(warped_frame, warped_unified_mask, field_color, alpha=0.4)
+            
+            print(f"[HOMOGRAPHY] Applied unified field mask to warped frame: {np.sum(warped_unified_mask)} pixels")
             return result_frame
             
         except Exception as e:
-            print(f"[HOMOGRAPHY] Error transforming segmentation to warped frame: {e}")
+            print(f"[HOMOGRAPHY] Error applying unified segmentation to warped frame: {e}")
             import traceback
             traceback.print_exc()
             return warped_frame

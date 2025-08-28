@@ -677,6 +677,98 @@ def _draw_segmentation_masks(frame: np.ndarray, masks: np.ndarray) -> np.ndarray
     return overlay
 
 
+def create_unified_field_mask(segmentation_results: List[Any], frame_shape: Tuple[int, int]) -> Optional[np.ndarray]:
+    """Create a unified mask combining all segmentation classes into one binary mask.
+    
+    Args:
+        segmentation_results: List of segmentation result objects
+        frame_shape: (height, width) of the target frame
+        
+    Returns:
+        Unified binary mask (H, W) where 1 indicates field area, or None if no results
+    """
+    if not segmentation_results:
+        return None
+    
+    frame_h, frame_w = frame_shape
+    unified_mask = np.zeros((frame_h, frame_w), dtype=np.uint8)
+    
+    for result in segmentation_results:
+        if not hasattr(result, 'masks') or result.masks is None:
+            continue
+            
+        try:
+            # Get mask data
+            if hasattr(result.masks, 'data'):
+                mask_data = result.masks.data
+            else:
+                continue
+                
+            # Convert to numpy if needed
+            if hasattr(mask_data, 'cpu'):
+                masks = mask_data.cpu().numpy()
+            else:
+                masks = mask_data.numpy() if hasattr(mask_data, 'numpy') else mask_data
+            
+            # Combine all class masks into unified mask
+            for mask in masks:
+                # Ensure mask is 2D
+                if len(mask.shape) == 3:
+                    mask = mask[0]
+                
+                # Resize to target frame size if needed
+                if mask.shape != (frame_h, frame_w):
+                    mask_resized = cv2.resize(
+                        mask.astype(np.float32), 
+                        (frame_w, frame_h), 
+                        interpolation=cv2.INTER_NEAREST
+                    )
+                else:
+                    mask_resized = mask
+                
+                # Add to unified mask (any field class becomes 1)
+                unified_mask = np.logical_or(unified_mask, mask_resized > 0.5).astype(np.uint8)
+                
+        except Exception as e:
+            print(f"[VISUALIZATION] Error creating unified mask: {e}")
+            
+    return unified_mask if np.any(unified_mask) else None
+
+
+def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray, 
+                           color: Tuple[int, int, int] = (0, 255, 0), 
+                           alpha: float = 0.4) -> np.ndarray:
+    """Draw a unified field mask with a single color overlay.
+    
+    Args:
+        frame: Input frame to draw on
+        unified_mask: Binary mask (H, W) where 1 indicates field area
+        color: BGR color tuple for the overlay
+        alpha: Transparency for overlay (0.0 = transparent, 1.0 = opaque)
+        
+    Returns:
+        Frame with unified mask overlay
+    """
+    if unified_mask is None or not np.any(unified_mask):
+        return frame
+    
+    overlay = frame.copy()
+    
+    # Create colored overlay where mask is present
+    overlay[unified_mask == 1] = color
+    
+    # Blend with original frame
+    result = cv2.addWeighted(frame, 1 - alpha, overlay, alpha, 0)
+    
+    # Draw contours for better visibility
+    contours, _ = cv2.findContours(unified_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if contours:
+        border_color = tuple(int(c * 0.7) for c in color)
+        cv2.drawContours(result, contours, -1, border_color, 2)
+    
+    return result
+
+
 def _get_track_color(track_id: int) -> Tuple[int, int, int]:
     """Generate a consistent, distinct color for a track ID.
     
