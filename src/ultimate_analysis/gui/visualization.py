@@ -912,7 +912,7 @@ def draw_field_contour(frame: np.ndarray, contour: np.ndarray,
 
 def fit_field_lines_ransac(contour: np.ndarray, 
                           frame: np.ndarray,
-                          num_lines: int = 3,
+                          num_lines: int = 4,
                           distance_threshold: float = 10.0,
                           min_samples: int = 2,
                           max_trials: int = 1000) -> Optional[Tuple[List[Tuple[np.ndarray, np.ndarray]], List[np.ndarray], List[np.ndarray], List[np.ndarray]]]:
@@ -1065,8 +1065,8 @@ def _classify_field_lines(fitted_lines: List[np.ndarray], frame_shape: Tuple[int
         avg_x = (start_point[0] + end_point[0]) / 2
         
         # Determine if line is horizontal or vertical
-        # Lines within 30 degrees of horizontal are considered horizontal
-        is_horizontal = abs(angle - 0) < 30 or abs(angle - 180) < 30
+        # Lines within 15 degrees of horizontal are considered horizontal (more strict)
+        is_horizontal = abs(angle - 0) < 15 or abs(angle - 180) < 15
         
         line_info.append({
             'index': i,
@@ -1091,28 +1091,50 @@ def _classify_field_lines(fitted_lines: List[np.ndarray], frame_shape: Tuple[int
     # Sort vertical lines by X position (left to right)
     vertical_lines.sort(key=lambda x: x['avg_x'])
     
-    # Classify horizontal lines
-    top_third_y = frame_height * (2/3)  # Top 2/3 of image
+    # Classify horizontal lines based on Y position
+    # Ultimate frisbee field has up to 4 horizontal lines: far endzone back, far endzone front, near endzone front, near endzone back
+    # Use quarter-based regions but ensure each classification is only assigned once
+    
+    quarter_height = frame_height / 4
+    used_classifications = set()
     
     for i, line_info_item in enumerate(horizontal_lines):
-        if line_info_item['avg_y'] < top_third_y:
-            # Lines in top 2/3 are far endzone lines
-            if i == 0:
-                classified['far_endzone_back'] = line_info_item['line']
-                print(f"[VISUALIZATION] Classified line {line_info_item['index']} as far endzone back")
-            elif i == 1:
-                classified['far_endzone_front'] = line_info_item['line']
-                print(f"[VISUALIZATION] Classified line {line_info_item['index']} as far endzone front")
+        y_pos = line_info_item['avg_y']
+        
+        # Determine preferred classification based on position
+        if y_pos < quarter_height:
+            preferred = 'far_endzone_back'
+        elif y_pos < quarter_height * 2:
+            preferred = 'far_endzone_front'
+        elif y_pos < quarter_height * 3:
+            preferred = 'near_endzone_front'
         else:
-            # Lines in bottom 1/3 are near endzone lines
-            if 'near_endzone_front' not in classified:
-                classified['near_endzone_front'] = line_info_item['line']
-                print(f"[VISUALIZATION] Classified line {line_info_item['index']} as near endzone front")
-            else:
-                classified['near_endzone_back'] = line_info_item['line']
-                print(f"[VISUALIZATION] Classified line {line_info_item['index']} as near endzone back")
+            preferred = 'near_endzone_back'
+        
+        # If preferred classification is already used, find an alternative
+        if preferred not in used_classifications:
+            classified[preferred] = line_info_item['line']
+            used_classifications.add(preferred)
+            print(f"[VISUALIZATION] Classified line {line_info_item['index']} as {preferred}")
+        else:
+            # Find the next available horizontal line classification
+            alternatives = ['far_endzone_back', 'far_endzone_front', 'near_endzone_front', 'near_endzone_back']
+            assigned = False
+            for alt in alternatives:
+                if alt not in used_classifications:
+                    classified[alt] = line_info_item['line']
+                    used_classifications.add(alt)
+                    print(f"[VISUALIZATION] Classified line {line_info_item['index']} as {alt} (alternative)")
+                    assigned = True
+                    break
+            
+            if not assigned:
+                # If all standard classifications are used, create additional ones
+                classified[f'horizontal_line_{i}'] = line_info_item['line']
+                print(f"[VISUALIZATION] Classified line {line_info_item['index']} as horizontal_line_{i} (overflow)")
     
     # Classify vertical lines (sidelines)
+    # Ultimate frisbee field typically has 2 sidelines, but may detect more segments
     for i, line_info_item in enumerate(vertical_lines):
         if i == 0:
             classified['left_sideline'] = line_info_item['line']
@@ -1120,6 +1142,10 @@ def _classify_field_lines(fitted_lines: List[np.ndarray], frame_shape: Tuple[int
         elif i == 1:
             classified['right_sideline'] = line_info_item['line']
             print(f"[VISUALIZATION] Classified line {line_info_item['index']} as right sideline")
+        else:
+            # Additional vertical lines - classify as additional sideline segments
+            classified[f'sideline_segment_{i}'] = line_info_item['line']
+            print(f"[VISUALIZATION] Classified line {line_info_item['index']} as sideline segment {i}")
     
     print(f"[VISUALIZATION] Line classification complete: {list(classified.keys())}")
     return classified
@@ -1700,7 +1726,7 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
             simplified_contour = calculate_field_contour(unified_mask)
             if simplified_contour is not None:
                 # Fit lines using RANSAC
-                num_lines = get_setting("models.segmentation.contour.ransac.num_lines", 3)
+                num_lines = get_setting("models.segmentation.contour.ransac.num_lines", 4)
                 distance_threshold = get_setting("models.segmentation.contour.ransac.distance_threshold", 10.0)
                 min_samples = get_setting("models.segmentation.contour.ransac.min_samples", 2)
                 max_trials = get_setting("models.segmentation.contour.ransac.max_trials", 1000)
@@ -1836,10 +1862,32 @@ def draw_classified_field_lines(frame: np.ndarray, classified_lines: Dict[str, n
             0 <= end_int[0] < w and 0 <= end_int[1] < h):
             cv2.line(result, start_int, end_int, color, line_thickness)
             
-            # Add text label
+            # Add text label with offset to avoid covering the line
             mid_point = ((start_int[0] + end_int[0]) // 2, (start_int[1] + end_int[1]) // 2)
-            cv2.putText(result, line_type.replace('_', ' ').title(), mid_point, 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            
+            # Calculate offset perpendicular to the line
+            line_vec = (end_int[0] - start_int[0], end_int[1] - start_int[1])
+            line_length = max(1, (line_vec[0]**2 + line_vec[1]**2)**0.5)  # Avoid division by zero
+            
+            # Perpendicular vector (rotate 90 degrees)
+            perp_vec = (-line_vec[1], line_vec[0])
+            
+            # Normalize and scale for offset distance
+            offset_distance = 25  # pixels
+            offset_x = int((perp_vec[0] / line_length) * offset_distance)
+            offset_y = int((perp_vec[1] / line_length) * offset_distance)
+            
+            # Apply offset to text position
+            text_pos = (mid_point[0] + offset_x, mid_point[1] + offset_y)
+            
+            # Ensure text position is within frame bounds
+            text_pos = (max(10, min(w - 10, text_pos[0])), max(20, min(h - 10, text_pos[1])))
+            
+            # Draw text with larger font size and better visibility
+            font_scale = 0.8  # Increased from 0.5
+            font_thickness = 2  # Increased from 1
+            cv2.putText(result, line_type.replace('_', ' ').title(), text_pos, 
+                       cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, font_thickness)
             
             print(f"[VISUALIZATION] Drew {line_type} line from {start_int} to {end_int}")
     

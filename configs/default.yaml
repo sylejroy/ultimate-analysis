@@ -58,7 +58,7 @@ models:
       # RANSAC line fitting parameters
       ransac:
         enabled: true            # Whether to use RANSAC line fitting instead of contour
-        num_lines: 3            # Number of line segments to fit (3-4 for field boundaries)
+        num_lines: 4            # Number of line segments to fit (3-4 for field boundaries)
         distance_threshold: 5.0 # Maximum distance from point to line for inliers
         min_samples: 2          # Minimum number of points needed to fit a line
         max_trials: 100        # Maximum RANSAC iterations per line segment
