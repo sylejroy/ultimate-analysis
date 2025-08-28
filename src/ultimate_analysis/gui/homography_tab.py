@@ -7,7 +7,7 @@ with real-time perspective transformation visualization and YAML save/load funct
 import os
 import yaml
 import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 
 import cv2
@@ -33,7 +33,8 @@ from ..gui.visualization import (
     draw_field_contour,
     fit_field_lines_ransac,
     draw_field_lines_ransac,
-    draw_classified_field_lines
+    draw_classified_field_lines,
+    draw_all_field_lines
 )
 
 
@@ -319,6 +320,7 @@ class HomographyTab(QWidget):
         self.ransac_checkbox: Optional[QCheckBox] = None
         self.available_segmentation_models: List[str] = []
         self.classified_lines: Dict[str, np.ndarray] = {}  # Store classified field lines
+        self.all_lines_for_display: Dict[str, Tuple[np.ndarray, float, bool]] = {}  # Store all lines for display
         
         # Initialize UI
         self._init_ui()
@@ -872,11 +874,12 @@ class HomographyTab(QWidget):
             if unified_mask is not None:
                 # Use bright green for unified field mask
                 field_color = (0, 255, 0)  # Bright green (BGR)
-                original_frame, self.classified_lines = draw_unified_field_mask(original_frame, unified_mask, field_color, alpha=0.4)
+                original_frame, self.classified_lines, self.all_lines_for_display = draw_unified_field_mask(original_frame, unified_mask, field_color, alpha=0.4)
                 print(f"[HOMOGRAPHY] Applied unified mask to original frame: {np.sum(unified_mask)} pixels")
             else:
                 print("[HOMOGRAPHY] No unified mask could be created for original frame")
                 self.classified_lines = {}
+                self.all_lines_for_display = {}
         elif self.show_segmentation:
             print("[HOMOGRAPHY] Segmentation enabled but no results available")
         
@@ -941,13 +944,18 @@ class HomographyTab(QWidget):
             
             # Apply overlay and draw contour on warped frame
             field_color = (0, 255, 0)  # Bright green (BGR)
-            result_frame, _ = draw_unified_field_mask(warped_frame, warped_mask, field_color, alpha=0.4, draw_contour=False)
+            result_frame, _, _ = draw_unified_field_mask(warped_frame, warped_mask, field_color, alpha=0.4, draw_contour=False)
             
             # Draw the transformed contour directly
             result_frame = draw_field_contour(result_frame, transformed_contour)
             
-            # Draw classified lines if available
-            if self.classified_lines:
+            # Draw all lines (classified and unclassified) if available
+            if self.all_lines_for_display:
+                homography_matrix = self._get_homography_matrix()
+                result_frame = draw_all_field_lines(result_frame, self.all_lines_for_display, homography_matrix)
+                print(f"[HOMOGRAPHY] Drew {len(self.all_lines_for_display)} total field lines on warped frame")
+            elif self.classified_lines:
+                # Fallback to classified lines only if all_lines_for_display is not available
                 homography_matrix = self._get_homography_matrix()
                 result_frame = draw_classified_field_lines(result_frame, self.classified_lines, homography_matrix)
                 print(f"[HOMOGRAPHY] Drew {len(self.classified_lines)} classified field lines on warped frame")

@@ -62,6 +62,7 @@ models:
         distance_threshold: 5.0 # Maximum distance from point to line for inliers
         min_samples: 2          # Minimum number of points needed to fit a line
         max_trials: 100        # Maximum RANSAC iterations per line segment
+        classification_confidence_threshold: 0.5  # Minimum confidence for line classification
         line_color: [0, 255, 0] # BGR color for RANSAC lines (green)
         outlier_color: [0, 165, 255] # BGR color for RANSAC outlier points (orange)
         outlier_radius: 4       # Radius for outlier point visualization

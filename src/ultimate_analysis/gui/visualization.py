@@ -915,7 +915,7 @@ def fit_field_lines_ransac(contour: np.ndarray,
                           num_lines: int = 4,
                           distance_threshold: float = 10.0,
                           min_samples: int = 2,
-                          max_trials: int = 1000) -> Optional[Tuple[List[Tuple[np.ndarray, np.ndarray]], List[np.ndarray], List[np.ndarray], List[np.ndarray]]]:
+                          max_trials: int = 1000) -> Optional[Tuple[List[Tuple[np.ndarray, np.ndarray]], List[np.ndarray], List[np.ndarray], List[np.ndarray], Dict, Dict]]:
     """Fit straight lines to contour segments using RANSAC.
     
     This function segments the contour and fits straight lines to each segment,
@@ -930,13 +930,17 @@ def fit_field_lines_ransac(contour: np.ndarray,
         max_trials: Maximum RANSAC iterations per line segment
         
     Returns:
-        Tuple of (fitted_lines, outlier_points) where:
+        Tuple of (fitted_lines, outlier_points, inlier_points, edge_filtered_points, classified_lines, all_lines_for_display) where:
         - fitted_lines: List of (start_point, end_point) tuples for each fitted line
         - outlier_points: List of outlier point arrays for each segment
-        Returns (None, None) if fitting fails
+        - inlier_points: List of inlier point arrays for each segment
+        - edge_filtered_points: Points that were filtered out during edge filtering
+        - classified_lines: Dictionary of high-confidence classified lines
+        - all_lines_for_display: Dictionary of all lines (classified and unclassified) for visualization
+        Returns (None, None, None, None, {}, {}) if fitting fails
     """
     if contour is None or len(contour) < num_lines * min_samples:
-        return None, None, None, None
+        return None, None, None, None, {}, {}
     
     try:
         # Convert contour to 2D points array
@@ -977,6 +981,7 @@ def fit_field_lines_ransac(contour: np.ndarray,
         # Sequential RANSAC: Find lines one by one, removing inliers each time
         remaining_points = points.copy()
         fitted_lines = []
+        line_confidences = []  # Store confidence for each line
         all_outliers = []
         all_inliers = []
         
@@ -991,14 +996,15 @@ def fit_field_lines_ransac(contour: np.ndarray,
             result = _fit_line_ransac_with_outliers(remaining_points, distance_threshold, min_samples, max_trials)
             
             if result is not None:
-                line_points, outliers, inliers = result
+                line_points, outliers, inliers, confidence = result
                 fitted_lines.append(line_points)
+                line_confidences.append(confidence)
                 all_inliers.append(inliers)
                 
                 # Remove inliers from remaining points for next iteration
                 remaining_points = outliers
                 
-                print(f"[VISUALIZATION] Line {iteration}: Found line with {len(inliers)} inliers, {len(outliers)} points remaining")
+                print(f"[VISUALIZATION] Line {iteration}: Found line with {len(inliers)} inliers, {len(outliers)} points remaining, confidence={confidence:.3f}")
             else:
                 print(f"[VISUALIZATION] Iteration {iteration}: Failed to fit line, stopping sequential RANSAC")
                 break
@@ -1012,33 +1018,71 @@ def fit_field_lines_ransac(contour: np.ndarray,
         
         print(f"[VISUALIZATION] Sequential RANSAC: Successfully fitted {len(fitted_lines)} out of {num_lines} lines")
         
-        # Classify the fitted lines
-        if fitted_lines:
-            classified_lines = _classify_field_lines(fitted_lines, frame.shape)
+        # Filter lines by confidence threshold for classification
+        classification_threshold = get_setting("models.segmentation.contour.ransac.classification_confidence_threshold", 0.5)
+        
+        # Separate high-confidence lines for classification vs all lines for display
+        high_confidence_lines = []
+        high_confidence_confidences = []
+        
+        for i, (line, confidence) in enumerate(zip(fitted_lines, line_confidences)):
+            if line is not None and confidence >= classification_threshold:
+                high_confidence_lines.append(line)
+                high_confidence_confidences.append(confidence)
+        
+        print(f"[VISUALIZATION] Filtered {len(high_confidence_lines)} high-confidence lines (>= {classification_threshold}) for classification from {len(fitted_lines)} total lines")
+        
+        # Classify only the high-confidence lines
+        if high_confidence_lines:
+            classified_lines = _classify_field_lines(high_confidence_lines, frame.shape, high_confidence_confidences)
         else:
             classified_lines = {}
         
-        # Filter out None entries from fitted_lines
+        # Create a dictionary of all lines (including low-confidence ones) for display purposes
+        # Store as (line_coords, confidence, is_classified) tuples
+        all_lines_for_display = {}
+        
+        # Add all fitted lines with their original indices for display
+        for i, (line, confidence) in enumerate(zip(fitted_lines, line_confidences)):
+            if line is not None:
+                is_classified = confidence >= classification_threshold
+                line_type = f"unclassified_line_{i}" if not is_classified else None
+                
+                # If it's a high-confidence line, it will be overwritten by the classified version below
+                if not is_classified:
+                    all_lines_for_display[line_type] = (line, confidence, False)
+        
+        # Add classified lines (these will overwrite any unclassified entries for the same lines)
+        for line_type, (line_coords, confidence) in classified_lines.items():
+            all_lines_for_display[line_type] = (line_coords, confidence, True)
+        
+        # Filter out None entries from fitted_lines but keep all for display
         valid_lines = [line for line in fitted_lines if line is not None]
-        return (valid_lines, all_outliers, all_inliers, edge_filtered_points, classified_lines) if valid_lines else (None, None, None, edge_filtered_points, {})
+        return (valid_lines, all_outliers, all_inliers, edge_filtered_points, classified_lines, all_lines_for_display) if valid_lines else (None, None, None, edge_filtered_points, {}, {})
         
     except Exception as e:
         print(f"[VISUALIZATION] Error in RANSAC line fitting: {e}")
-        return None, None, None, np.array([]).reshape(0, 2), {}
+        return None, None, None, np.array([]).reshape(0, 2), {}, {}
 
 
-def _classify_field_lines(fitted_lines: List[np.ndarray], frame_shape: Tuple[int, int, int]) -> Dict[str, np.ndarray]:
+def _classify_field_lines(fitted_lines: List[np.ndarray], frame_shape: Tuple[int, int, int], 
+                         line_confidences: List[float] = None) -> Dict[str, Tuple[np.ndarray, float]]:
     """Classify fitted lines into field components (sidelines, endzone lines, etc.).
     
     Args:
         fitted_lines: List of line segments as [start_point, end_point] arrays
         frame_shape: Shape of the frame (height, width, channels)
+        line_confidences: List of confidence scores for each line
         
     Returns:
-        Dictionary mapping line types to line coordinates
+        Dictionary mapping line types to (line_coordinates, confidence) tuples
     """
     if not fitted_lines:
         return {}
+    
+    # If no confidences provided, use default values
+    if line_confidences is None:
+        line_confidences = [1.0] * len(fitted_lines)
     
     frame_height, frame_width = frame_shape[:2]
     classified = {}
@@ -1071,6 +1115,7 @@ def _classify_field_lines(fitted_lines: List[np.ndarray], frame_shape: Tuple[int
         line_info.append({
             'index': i,
             'line': line,
+            'confidence': line_confidences[i],  # Add confidence to line info
             'angle': angle,
             'avg_y': avg_y,
             'avg_x': avg_x,
@@ -1079,7 +1124,7 @@ def _classify_field_lines(fitted_lines: List[np.ndarray], frame_shape: Tuple[int
             'end': end_point
         })
         
-        print(f"[VISUALIZATION] Line {i}: angle={angle:.1f}°, avg_y={avg_y:.1f}, avg_x={avg_x:.1f}, horizontal={is_horizontal}")
+        print(f"[VISUALIZATION] Line {i}: angle={angle:.1f}°, avg_y={avg_y:.1f}, avg_x={avg_x:.1f}, horizontal={is_horizontal}, confidence={line_confidences[i]:.3f}")
     
     # Separate horizontal and non-horizontal lines
     horizontal_lines = [info for info in line_info if info['is_horizontal']]
@@ -1113,7 +1158,7 @@ def _classify_field_lines(fitted_lines: List[np.ndarray], frame_shape: Tuple[int
         
         # If preferred classification is already used, find an alternative
         if preferred not in used_classifications:
-            classified[preferred] = line_info_item['line']
+            classified[preferred] = (line_info_item['line'], line_info_item['confidence'])
             used_classifications.add(preferred)
             print(f"[VISUALIZATION] Classified line {line_info_item['index']} as {preferred}")
         else:
@@ -1122,7 +1167,7 @@ def _classify_field_lines(fitted_lines: List[np.ndarray], frame_shape: Tuple[int
             assigned = False
             for alt in alternatives:
                 if alt not in used_classifications:
-                    classified[alt] = line_info_item['line']
+                    classified[alt] = (line_info_item['line'], line_info_item['confidence'])
                     used_classifications.add(alt)
                     print(f"[VISUALIZATION] Classified line {line_info_item['index']} as {alt} (alternative)")
                     assigned = True
@@ -1130,22 +1175,83 @@ def _classify_field_lines(fitted_lines: List[np.ndarray], frame_shape: Tuple[int
             
             if not assigned:
                 # If all standard classifications are used, create additional ones
-                classified[f'horizontal_line_{i}'] = line_info_item['line']
+                classified[f'horizontal_line_{i}'] = (line_info_item['line'], line_info_item['confidence'])
                 print(f"[VISUALIZATION] Classified line {line_info_item['index']} as horizontal_line_{i} (overflow)")
     
-    # Classify vertical lines (sidelines)
+    # Classify vertical lines (sidelines) with improved logic
     # Ultimate frisbee field typically has 2 sidelines, but may detect more segments
-    for i, line_info_item in enumerate(vertical_lines):
-        if i == 0:
-            classified['left_sideline'] = line_info_item['line']
-            print(f"[VISUALIZATION] Classified line {line_info_item['index']} as left sideline")
-        elif i == 1:
-            classified['right_sideline'] = line_info_item['line']
-            print(f"[VISUALIZATION] Classified line {line_info_item['index']} as right sideline")
-        else:
-            # Additional vertical lines - classify as additional sideline segments
-            classified[f'sideline_segment_{i}'] = line_info_item['line']
-            print(f"[VISUALIZATION] Classified line {line_info_item['index']} as sideline segment {i}")
+    
+    if len(vertical_lines) >= 1:
+        frame_center_x = frame_width / 2
+        
+        # Separate lines into left and right candidates based on frame center
+        left_candidates = [line for line in vertical_lines if line['avg_x'] < frame_center_x]
+        right_candidates = [line for line in vertical_lines if line['avg_x'] >= frame_center_x]
+        
+        # Sort left candidates by X position (rightmost first - closest to center)
+        # and right candidates by X position (leftmost first - closest to center)
+        left_candidates.sort(key=lambda x: x['avg_x'], reverse=True)
+        right_candidates.sort(key=lambda x: x['avg_x'])
+        
+        # For each side, prefer the line closest to center with highest confidence
+        def select_best_sideline(candidates, side_name):
+            if not candidates:
+                return None
+            
+            # Weight by both distance to center and confidence
+            def score_line(line):
+                # Normalize distance to center (0 = at edge, 1 = at center)
+                if side_name == 'left':
+                    distance_factor = line['avg_x'] / frame_center_x  # Higher = closer to center
+                else:  # right
+                    distance_factor = (frame_width - line['avg_x']) / frame_center_x
+                
+                distance_factor = min(1.0, distance_factor)  # Clamp to 1.0
+                
+                # Combine confidence and position (60% confidence, 40% position)
+                score = 0.6 * line['confidence'] + 0.4 * distance_factor
+                return score
+            
+            # Select line with highest combined score
+            best_line = max(candidates, key=score_line)
+            return best_line
+        
+        # Assign best left and right sidelines
+        best_left = select_best_sideline(left_candidates, 'left')
+        best_right = select_best_sideline(right_candidates, 'right')
+        
+        if best_left:
+            classified['left_sideline'] = (best_left['line'], best_left['confidence'])
+            print(f"[VISUALIZATION] Classified line {best_left['index']} as left sideline (score-based)")
+            
+        if best_right:
+            classified['right_sideline'] = (best_right['line'], best_right['confidence'])
+            print(f"[VISUALIZATION] Classified line {best_right['index']} as right sideline (score-based)")
+        
+        # Handle case where there's only one vertical line detected
+        if not best_left and not best_right and len(vertical_lines) == 1:
+            line = vertical_lines[0]
+            # Assign to the side it's actually on
+            if line['avg_x'] < frame_center_x:
+                classified['left_sideline'] = (line['line'], line['confidence'])
+                print(f"[VISUALIZATION] Classified line {line['index']} as left sideline (single line)")
+            else:
+                classified['right_sideline'] = (line['line'], line['confidence'])
+                print(f"[VISUALIZATION] Classified line {line['index']} as right sideline (single line)")
+        
+        # Classify any remaining vertical lines as additional segments
+        assigned_indices = set()
+        if best_left:
+            assigned_indices.add(best_left['index'])
+        if best_right:
+            assigned_indices.add(best_right['index'])
+            
+        segment_count = 0
+        for line_info_item in vertical_lines:
+            if line_info_item['index'] not in assigned_indices:
+                classified[f'sideline_segment_{segment_count}'] = (line_info_item['line'], line_info_item['confidence'])
+                print(f"[VISUALIZATION] Classified line {line_info_item['index']} as sideline segment {segment_count}")
+                segment_count += 1
     
     print(f"[VISUALIZATION] Line classification complete: {list(classified.keys())}")
     return classified
@@ -1300,8 +1406,8 @@ def _fit_line_ransac(points: np.ndarray,
 def _fit_line_ransac_with_outliers(points: np.ndarray, 
                                   distance_threshold: float,
                                   min_samples: int,
-                                  max_trials: int) -> Optional[Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray, np.ndarray]]:
-    """Fit a line to points using RANSAC algorithm and return outliers and inliers.
+                                  max_trials: int) -> Optional[Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray, np.ndarray, float]]:
+    """Fit a line to points using RANSAC algorithm and return outliers, inliers, and goodness of fit.
     
     Args:
         points: Array of 2D points (N, 2)
@@ -1310,7 +1416,7 @@ def _fit_line_ransac_with_outliers(points: np.ndarray,
         max_trials: Maximum RANSAC iterations
         
     Returns:
-        Tuple of ((start_point, end_point), outlier_points, inlier_points) for the fitted line, outliers, and inliers,
+        Tuple of ((start_point, end_point), outlier_points, inlier_points, confidence) for the fitted line, outliers, inliers, and confidence score,
         or None if fitting fails
     """
     if len(points) < min_samples:
@@ -1412,7 +1518,73 @@ def _fit_line_ransac_with_outliers(points: np.ndarray,
     if best_inliers >= min_inliers and best_inlier_mask is not None:
         outliers = points[~best_inlier_mask]  # Points that are NOT inliers
         inliers = points[best_inlier_mask]    # Points that ARE inliers
-        return best_line, outliers, inliers
+        
+        # Calculate confidence based on the fitting error (Weighted RMSE) of inliers
+        if len(inliers) > 0 and best_line is not None:
+            start_point, end_point = best_line
+            
+            # Calculate line parameters for distance computation
+            line_vec = end_point - start_point
+            line_length = np.linalg.norm(line_vec)
+            
+            if line_length > 1e-6:  # Avoid division by zero
+                line_unit = line_vec / line_length
+                
+                # Calculate weights based on point density (nearby point count)
+                weights = []
+                neighbor_radius = 20.0  # pixels - adjust based on typical field line spacing
+                
+                for i, pt in enumerate(inliers):
+                    # Count nearby points within radius
+                    nearby_count = 0
+                    for other_pt in inliers:
+                        distance = np.linalg.norm(pt - other_pt)
+                        if distance <= neighbor_radius:
+                            nearby_count += 1
+                    
+                    # Weight is the count of nearby points (including itself)
+                    weights.append(nearby_count)
+                
+                # Calculate Weighted RMSE for inlier points
+                weighted_squared_errors = []
+                total_weight = 0
+                
+                for i, point in enumerate(inliers):
+                    # Distance from point to line
+                    to_point = point - start_point
+                    projection_length = np.dot(to_point, line_unit)
+                    closest_point_on_line = start_point + projection_length * line_unit
+                    distance = np.linalg.norm(point - closest_point_on_line)
+                    
+                    # Weight the squared error by point density
+                    weight = weights[i]
+                    weighted_squared_errors.append((distance ** 2) * weight)
+                    total_weight += weight
+                
+                # Calculate Weighted RMSE
+                if total_weight > 0:
+                    weighted_rmse = np.sqrt(sum(weighted_squared_errors) / total_weight)
+                else:
+                    weighted_rmse = float('inf')
+                
+                # Convert Weighted RMSE to confidence (0 to 1)
+                # Lower weighted RMSE = higher confidence
+                # Dense, well-fitted lines get higher confidence than sparse, noisy lines
+                # Use exponential decay to map Weighted RMSE to confidence
+                # Weighted RMSE of 0 -> confidence = 1.0
+                # Weighted RMSE of 5 pixels -> confidence ≈ 0.37
+                # Weighted RMSE of 10 pixels -> confidence ≈ 0.14
+                max_expected_rmse = 10.0  # pixels
+                confidence = np.exp(-weighted_rmse / (max_expected_rmse / 3.0))
+                confidence = min(1.0, max(0.0, confidence))  # Clamp to [0, 1]
+            else:
+                # Degenerate line case
+                confidence = 0.0
+        else:
+            # No inliers or no line
+            confidence = 0.0
+        
+        return best_line, outliers, inliers, confidence
     
     return None
 
@@ -1682,7 +1854,7 @@ def create_unified_field_mask(segmentation_results: List[Any], frame_shape: Tupl
 def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray, 
                            color: Tuple[int, int, int] = (0, 255, 0), 
                            alpha: float = 0.4,
-                           draw_contour: bool = True) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+                           draw_contour: bool = True) -> Tuple[np.ndarray, Dict[str, np.ndarray], Dict[str, Tuple[np.ndarray, float, bool]]]:
     """Draw a unified field mask with a single color overlay and optional contour.
     
     Args:
@@ -1693,16 +1865,17 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
         draw_contour: Whether to calculate and draw simplified contours
         
     Returns:
-        Tuple of (frame with unified mask overlay and optional contour, classified_lines dictionary)
+        Tuple of (frame with unified mask overlay and optional contour, classified_lines dictionary, all_lines_for_display dictionary)
     """
     if unified_mask is None or not np.any(unified_mask):
-        return frame, {}
+        return frame, {}, {}
     
     # Import here to avoid circular imports
     from ..config.settings import get_setting
     
     overlay = frame.copy()
     classified_lines = {}  # Initialize empty classified lines dictionary
+    all_lines_for_display = {}  # Initialize empty all lines dictionary
     
     # Create colored overlay where mask is present
     overlay[unified_mask == 1] = color
@@ -1731,7 +1904,7 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
                 min_samples = get_setting("models.segmentation.contour.ransac.min_samples", 2)
                 max_trials = get_setting("models.segmentation.contour.ransac.max_trials", 1000)
                 
-                fitted_lines, outlier_points, inlier_points, edge_filtered_points, classified_lines = fit_field_lines_ransac(
+                fitted_lines, outlier_points, inlier_points, edge_filtered_points, classified_lines, all_lines_for_display = fit_field_lines_ransac(
                     simplified_contour, 
                     frame,
                     num_lines=num_lines,
@@ -1795,22 +1968,22 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
             if simplified_contour is not None:
                 result = draw_field_contour(result, simplified_contour)
     
-    return result, classified_lines
+    return result, classified_lines, all_lines_for_display
 
 
-def draw_classified_field_lines(frame: np.ndarray, classified_lines: Dict[str, np.ndarray],
-                               transformation_matrix: Optional[np.ndarray] = None) -> np.ndarray:
-    """Draw classified field lines with different colors for each type.
+def draw_all_field_lines(frame: np.ndarray, all_lines_for_display: Dict[str, Tuple[np.ndarray, float, bool]],
+                        transformation_matrix: Optional[np.ndarray] = None) -> np.ndarray:
+    """Draw all field lines (both classified and unclassified) with appropriate coloring based on confidence.
     
     Args:
         frame: Frame to draw on
-        classified_lines: Dictionary mapping line types to line coordinates
+        all_lines_for_display: Dictionary mapping line types to (line_coordinates, confidence, is_classified) tuples
         transformation_matrix: Optional homography matrix to transform lines to warped view
         
     Returns:
-        Frame with classified lines drawn
+        Frame with all lines drawn
     """
-    if not classified_lines:
+    if not all_lines_for_display:
         return frame
         
     result = frame.copy()
@@ -1827,11 +2000,28 @@ def draw_classified_field_lines(frame: np.ndarray, classified_lines: Dict[str, n
     
     line_thickness = 3
     
-    for line_type, line_coords in classified_lines.items():
+    for line_type, line_data in all_lines_for_display.items():
+        line_coords, confidence, is_classified = line_data
+        
         if line_coords is None or len(line_coords) != 2:
             continue
             
-        color = line_colors.get(line_type, (255, 255, 255))  # Default white
+        # Determine color based on classification status and confidence
+        if is_classified:
+            # Use the specific color for classified lines
+            base_color = line_colors.get(line_type, (255, 255, 255))  # Default white
+        else:
+            # Use grey for unclassified lines
+            base_color = (128, 128, 128)  # Grey for unclassified
+        
+        # Further grey out lines with very low confidence (< 0.5)
+        confidence_threshold = 0.5
+        if confidence < confidence_threshold:
+            # Convert to darker grey for low confidence
+            grey_intensity = int(sum(base_color) / 3 * 0.4)  # Even darker grey for low confidence
+            color = (grey_intensity, grey_intensity, grey_intensity)
+        else:
+            color = base_color
         
         start_point = line_coords[0].copy()
         end_point = line_coords[1].copy()
@@ -1862,7 +2052,129 @@ def draw_classified_field_lines(frame: np.ndarray, classified_lines: Dict[str, n
             0 <= end_int[0] < w and 0 <= end_int[1] < h):
             cv2.line(result, start_int, end_int, color, line_thickness)
             
-            # Add text label with offset to avoid covering the line
+            # Add text label with confidence score (only for classified lines or high-confidence unclassified)
+            if is_classified or confidence >= 0.3:  # Show labels for classified or reasonably confident lines
+                mid_point = ((start_int[0] + end_int[0]) // 2, (start_int[1] + end_int[1]) // 2)
+                
+                # Calculate offset perpendicular to the line
+                line_vec = (end_int[0] - start_int[0], end_int[1] - start_int[1])
+                line_length = max(1, (line_vec[0]**2 + line_vec[1]**2)**0.5)  # Avoid division by zero
+                
+                # Perpendicular vector (rotate 90 degrees)
+                perp_vec = (-line_vec[1], line_vec[0])
+                
+                # Normalize and scale for offset distance
+                offset_distance = 25  # pixels
+                offset_x = int((perp_vec[0] / line_length) * offset_distance)
+                offset_y = int((perp_vec[1] / line_length) * offset_distance)
+                
+                # Apply offset to text position
+                text_pos = (mid_point[0] + offset_x, mid_point[1] + offset_y)
+                
+                # Ensure text position is within frame bounds
+                text_pos = (max(10, min(w - 10, text_pos[0])), max(20, min(h - 10, text_pos[1])))
+                
+                # Create label with confidence score
+                if is_classified:
+                    clean_name = line_type.replace('_', ' ').title()
+                    confidence_label = f"{clean_name} ({confidence:.2f})"
+                else:
+                    confidence_label = f"Unclassified ({confidence:.2f})"
+                
+                # Draw text with larger font size and better visibility
+                font_scale = 0.8  # Increased from 0.5
+                font_thickness = 2  # Increased from 1
+                cv2.putText(result, confidence_label, text_pos, 
+                           cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, font_thickness)
+            
+            print(f"[VISUALIZATION] Drew {line_type} line from {start_int} to {end_int}")
+    
+    return result
+
+
+def draw_classified_field_lines(frame: np.ndarray, classified_lines: Dict[str, Tuple[np.ndarray, float]],
+                               transformation_matrix: Optional[np.ndarray] = None) -> np.ndarray:
+    """Draw classified field lines with different colors for each type and confidence scores.
+    
+    Args:
+        frame: Frame to draw on
+        classified_lines: Dictionary mapping line types to (line_coordinates, confidence) tuples
+        transformation_matrix: Optional homography matrix to transform lines to warped view
+        
+    Returns:
+        Frame with classified lines drawn
+    """
+    if not classified_lines:
+        return frame
+        
+    result = frame.copy()
+    
+    # Define colors for different line types
+    line_colors = {
+        'left_sideline': (255, 0, 0),      # Blue
+        'right_sideline': (255, 0, 255),   # Magenta  
+        'far_endzone_back': (0, 255, 255), # Yellow
+        'far_endzone_front': (0, 165, 255), # Orange
+        'near_endzone_front': (0, 255, 0), # Green
+        'near_endzone_back': (255, 255, 0)  # Cyan
+    }
+    
+    line_thickness = 3
+    
+    for line_type, line_data in classified_lines.items():
+        # Handle both old format (just coordinates) and new format (coordinates, confidence)
+        if isinstance(line_data, tuple) and len(line_data) == 2:
+            line_coords, confidence = line_data
+        else:
+            # Backward compatibility - assume old format
+            line_coords = line_data
+            confidence = 1.0
+        
+        if line_coords is None or len(line_coords) != 2:
+            continue
+            
+        # Determine color based on confidence
+        base_color = line_colors.get(line_type, (255, 255, 255))  # Default white
+        
+        # Grey out lines with low confidence (< 0.5)
+        confidence_threshold = 0.5
+        if confidence < confidence_threshold:
+            # Convert to grey by averaging RGB values and reducing intensity
+            grey_intensity = int(sum(base_color) / 3 * 0.6)  # Darker grey for low confidence
+            color = (grey_intensity, grey_intensity, grey_intensity)
+        else:
+            color = base_color
+        
+        start_point = line_coords[0].copy()
+        end_point = line_coords[1].copy()
+        
+        # Transform points if transformation matrix is provided
+        if transformation_matrix is not None:
+            # Convert to homogeneous coordinates
+            start_homo = np.array([start_point[0], start_point[1], 1.0])
+            end_homo = np.array([end_point[0], end_point[1], 1.0])
+            
+            # Apply transformation
+            start_transformed = transformation_matrix @ start_homo
+            end_transformed = transformation_matrix @ end_homo
+            
+            # Convert back to 2D coordinates
+            if start_transformed[2] != 0:
+                start_point = start_transformed[:2] / start_transformed[2]
+            if end_transformed[2] != 0:
+                end_point = end_transformed[:2] / end_transformed[2]
+        
+        # Draw the line
+        start_int = (int(start_point[0]), int(start_point[1]))
+        end_int = (int(end_point[0]), int(end_point[1]))
+        
+        # Check if points are within frame bounds
+        h, w = frame.shape[:2]
+        if (0 <= start_int[0] < w and 0 <= start_int[1] < h and
+            0 <= end_int[0] < w and 0 <= end_int[1] < h):
+            cv2.line(result, start_int, end_int, color, line_thickness)
+            
+            # Add text label with confidence score
             mid_point = ((start_int[0] + end_int[0]) // 2, (start_int[1] + end_int[1]) // 2)
             
             # Calculate offset perpendicular to the line
@@ -1883,10 +2195,14 @@ def draw_classified_field_lines(frame: np.ndarray, classified_lines: Dict[str, n
             # Ensure text position is within frame bounds
             text_pos = (max(10, min(w - 10, text_pos[0])), max(20, min(h - 10, text_pos[1])))
             
+            # Create label with confidence score
+            clean_name = line_type.replace('_', ' ').title()
+            confidence_label = f"{clean_name} ({confidence:.2f})"
+            
             # Draw text with larger font size and better visibility
             font_scale = 0.8  # Increased from 0.5
             font_thickness = 2  # Increased from 1
-            cv2.putText(result, line_type.replace('_', ' ').title(), text_pos, 
+            cv2.putText(result, confidence_label, text_pos, 
                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, font_thickness)
             
             print(f"[VISUALIZATION] Drew {line_type} line from {start_int} to {end_int}")
