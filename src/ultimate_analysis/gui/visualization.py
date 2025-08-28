@@ -974,36 +974,43 @@ def fit_field_lines_ransac(contour: np.ndarray,
             else:
                 print(f"[VISUALIZATION] Warning: Edge filtering removed all points!")
         
-        # Segment the contour into approximately equal parts
-        segments = _segment_contour_points(points, num_lines)
-        
+        # Sequential RANSAC: Find lines one by one, removing inliers each time
+        remaining_points = points.copy()
         fitted_lines = []
         all_outliers = []
         all_inliers = []
         
-        for i, segment_points in enumerate(segments):
-            if len(segment_points) < min_samples:
-                print(f"[VISUALIZATION] Segment {i} has insufficient points: {len(segment_points)}")
-                all_outliers.append(segment_points)  # All points are outliers if insufficient for fitting
-                all_inliers.append(np.array([]).reshape(0, 2))  # No inliers
-                continue
+        for iteration in range(num_lines):
+            if len(remaining_points) < min_samples:
+                print(f"[VISUALIZATION] Iteration {iteration}: Not enough remaining points ({len(remaining_points)} < {min_samples})")
+                break
             
-            # Fit line to this segment using RANSAC
-            result = _fit_line_ransac_with_outliers(segment_points, distance_threshold, min_samples, max_trials)
+            print(f"[VISUALIZATION] Iteration {iteration}: Fitting line to {len(remaining_points)} remaining points")
+            
+            # Fit line to remaining points using RANSAC
+            result = _fit_line_ransac_with_outliers(remaining_points, distance_threshold, min_samples, max_trials)
             
             if result is not None:
                 line_points, outliers, inliers = result
                 fitted_lines.append(line_points)
-                all_outliers.append(outliers)
                 all_inliers.append(inliers)
-                print(f"[VISUALIZATION] Fitted line segment {i}: {len(segment_points)} points -> line")
+                
+                # Remove inliers from remaining points for next iteration
+                remaining_points = outliers
+                
+                print(f"[VISUALIZATION] Line {iteration}: Found line with {len(inliers)} inliers, {len(outliers)} points remaining")
             else:
-                fitted_lines.append(None)
-                all_outliers.append(segment_points)  # All points are outliers if fitting failed
-                all_inliers.append(np.array([]).reshape(0, 2))  # No inliers
-                print(f"[VISUALIZATION] Failed to fit line to segment {i}")
+                print(f"[VISUALIZATION] Iteration {iteration}: Failed to fit line, stopping sequential RANSAC")
+                break
         
-        print(f"[VISUALIZATION] Successfully fitted {len([l for l in fitted_lines if l is not None])} out of {num_lines} line segments")
+        # All remaining points after all iterations are final outliers
+        if len(remaining_points) > 0:
+            all_outliers.append(remaining_points)
+            print(f"[VISUALIZATION] Final outliers: {len(remaining_points)} points")
+        else:
+            all_outliers.append(np.array([]).reshape(0, 2))
+        
+        print(f"[VISUALIZATION] Sequential RANSAC: Successfully fitted {len(fitted_lines)} out of {num_lines} lines")
         
         # Filter out None entries from fitted_lines
         valid_lines = [line for line in fitted_lines if line is not None]
