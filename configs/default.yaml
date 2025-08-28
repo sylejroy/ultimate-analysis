@@ -59,13 +59,24 @@ models:
       ransac:
         enabled: true            # Whether to use RANSAC line fitting instead of contour
         num_lines: 3            # Number of line segments to fit (3-4 for field boundaries)
-        distance_threshold: 10.0 # Maximum distance from point to line for inliers
+        distance_threshold: 15.0 # Maximum distance from point to line for inliers
         min_samples: 2          # Minimum number of points needed to fit a line
-        max_trials: 1000        # Maximum RANSAC iterations per line segment
+        max_trials: 100        # Maximum RANSAC iterations per line segment
         line_color: [0, 255, 0] # BGR color for RANSAC lines (green)
-        outlier_color: [0, 0, 255] # BGR color for RANSAC outlier points (red)
-        outlier_radius: 3       # Radius for outlier point visualization
+        outlier_color: [0, 165, 255] # BGR color for RANSAC outlier points (orange)
+        outlier_radius: 4       # Radius for outlier point visualization
         show_outliers: true     # Whether to visualize RANSAC outliers
+        inlier_color: [0, 255, 0] # BGR color for RANSAC inlier points (green)
+        inlier_radius: 2        # Radius for inlier point visualization
+        show_inliers: true      # Whether to visualize RANSAC inliers
+        
+        # Edge filtering parameters
+        edge_filtering:
+          enabled: true         # Whether to filter points near image edges
+          margin: 15           # Distance from edge in pixels to consider as "near edge"
+          edge_point_color: [0, 0, 255] # BGR color for filtered edge points (red)
+          edge_point_radius: 4  # Radius for edge point visualization
+          show_edge_points: true # Whether to visualize filtered edge points
   
   tracking:
     default_tracker: "deepsort"

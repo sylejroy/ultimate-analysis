@@ -12,6 +12,59 @@ from ..constants import VISUALIZATION_COLORS
 from ..config.settings import get_setting
 
 
+def filter_edge_points(contour: np.ndarray, 
+                      frame_shape: tuple,
+                      edge_margin: int = 20) -> tuple[np.ndarray, np.ndarray]:
+    """Filter out contour points that are too close to image edges.
+    
+    Points near the edge are often artifacts from segmentation models
+    and should not be considered for field boundary fitting.
+    
+    Args:
+        contour: Contour points as numpy array of shape (N, 1, 2) or (N, 2)
+        frame_shape: Shape of the frame (height, width) or (height, width, channels)
+        edge_margin: Distance from edge in pixels to filter out
+        
+    Returns:
+        Tuple of (filtered_contour, edge_points):
+        - filtered_contour: Points away from edges
+        - edge_points: Points near edges that were filtered out
+    """
+    if contour is None or len(contour) == 0:
+        return contour, np.array([]).reshape(0, 1, 2)
+    
+    # Ensure contour is in shape (N, 2)
+    if contour.ndim == 3 and contour.shape[1] == 1:
+        points = contour.reshape(-1, 2)
+    else:
+        points = contour.reshape(-1, 2)
+    
+    # Get frame dimensions
+    height, width = frame_shape[:2]
+    
+    # Create mask for points away from edges
+    x_coords = points[:, 0]
+    y_coords = points[:, 1]
+    
+    # Points are kept if they are sufficiently far from all edges
+    valid_mask = (
+        (x_coords >= edge_margin) &           # Not too close to left edge
+        (x_coords <= width - edge_margin) &   # Not too close to right edge
+        (y_coords >= edge_margin) &           # Not too close to top edge
+        (y_coords <= height - edge_margin)    # Not too close to bottom edge
+    )
+    
+    # Split points into valid and edge points
+    valid_points = points[valid_mask]
+    edge_points = points[~valid_mask]
+    
+    # Convert back to original format (N, 1, 2)
+    valid_contour = valid_points.reshape(-1, 1, 2) if len(valid_points) > 0 else np.array([]).reshape(0, 1, 2)
+    edge_contour = edge_points.reshape(-1, 1, 2) if len(edge_points) > 0 else np.array([]).reshape(0, 1, 2)
+    
+    return valid_contour, edge_contour
+
+
 def interpolate_contour_points(contour: np.ndarray, 
                               max_distance: float = 10.0,
                               min_distance: float = 3.0) -> np.ndarray:
@@ -858,10 +911,11 @@ def draw_field_contour(frame: np.ndarray, contour: np.ndarray,
 
 
 def fit_field_lines_ransac(contour: np.ndarray, 
+                          frame: np.ndarray,
                           num_lines: int = 3,
                           distance_threshold: float = 10.0,
                           min_samples: int = 2,
-                          max_trials: int = 1000) -> Optional[Tuple[List[Tuple[np.ndarray, np.ndarray]], List[np.ndarray]]]:
+                          max_trials: int = 1000) -> Optional[Tuple[List[Tuple[np.ndarray, np.ndarray]], List[np.ndarray], List[np.ndarray], List[np.ndarray]]]:
     """Fit straight lines to contour segments using RANSAC.
     
     This function segments the contour and fits straight lines to each segment,
@@ -869,6 +923,7 @@ def fit_field_lines_ransac(contour: np.ndarray,
     
     Args:
         contour: Contour points as numpy array of shape (N, 1, 2)
+        frame: Input frame for determining shape (used for edge filtering)
         num_lines: Number of line segments to fit (typically 3-4 for field boundaries)
         distance_threshold: Maximum distance from point to line to be considered inlier
         min_samples: Minimum number of points needed to fit a line
@@ -881,13 +936,14 @@ def fit_field_lines_ransac(contour: np.ndarray,
         Returns (None, None) if fitting fails
     """
     if contour is None or len(contour) < num_lines * min_samples:
-        return None, None
+        return None, None, None, None
     
     try:
         # Convert contour to 2D points array
         points = contour.reshape(-1, 2).astype(np.float32)
+        edge_filtered_points = np.array([]).reshape(0, 2)  # Store edge-filtered points
         
-        # Apply interpolation if enabled
+        # Apply interpolation if enabled (before edge filtering)
         interpolation_enabled = get_setting("models.segmentation.contour.interpolation.enabled", False)
         if interpolation_enabled:
             max_distance = get_setting("models.segmentation.contour.interpolation.max_point_distance", 10)
@@ -898,42 +954,64 @@ def fit_field_lines_ransac(contour: np.ndarray,
             interpolated_contour = interpolate_contour_points(contour_format, max_distance, min_distance)
             points = interpolated_contour.reshape(-1, 2).astype(np.float32)
             
-            print(f"[VISUALIZATION] Interpolated contour: {len(contour.reshape(-1, 2))} -> {len(points)} points")
+            print(f"[VISUALIZATION] Interpolated contour: {len(contour_format.reshape(-1, 2))} -> {len(points)} points")
+        
+        # Apply edge filtering after interpolation if enabled
+        edge_filtering_enabled = get_setting("models.segmentation.contour.ransac.edge_filtering.enabled", False)
+        if edge_filtering_enabled:
+            edge_margin = get_setting("models.segmentation.contour.ransac.edge_filtering.margin", 20)
+            
+            # Convert to contour format for edge filtering
+            contour_format = points.reshape(-1, 1, 2)
+            filtered_contour, edge_points = filter_edge_points(contour_format, frame.shape, edge_margin)
+            
+            # Update points to use only non-edge points
+            if len(filtered_contour) > 0:
+                original_count = len(points)
+                points = filtered_contour.reshape(-1, 2).astype(np.float32)
+                edge_filtered_points = edge_points.reshape(-1, 2).astype(np.float32) if len(edge_points) > 0 else np.array([]).reshape(0, 2)
+                print(f"[VISUALIZATION] Edge filtering: {original_count} -> {len(points)} points ({len(edge_filtered_points)} filtered)")
+            else:
+                print(f"[VISUALIZATION] Warning: Edge filtering removed all points!")
         
         # Segment the contour into approximately equal parts
         segments = _segment_contour_points(points, num_lines)
         
         fitted_lines = []
         all_outliers = []
+        all_inliers = []
         
         for i, segment_points in enumerate(segments):
             if len(segment_points) < min_samples:
                 print(f"[VISUALIZATION] Segment {i} has insufficient points: {len(segment_points)}")
                 all_outliers.append(segment_points)  # All points are outliers if insufficient for fitting
+                all_inliers.append(np.array([]).reshape(0, 2))  # No inliers
                 continue
             
             # Fit line to this segment using RANSAC
             result = _fit_line_ransac_with_outliers(segment_points, distance_threshold, min_samples, max_trials)
             
             if result is not None:
-                line_points, outliers = result
+                line_points, outliers, inliers = result
                 fitted_lines.append(line_points)
                 all_outliers.append(outliers)
+                all_inliers.append(inliers)
                 print(f"[VISUALIZATION] Fitted line segment {i}: {len(segment_points)} points -> line")
             else:
                 fitted_lines.append(None)
                 all_outliers.append(segment_points)  # All points are outliers if fitting failed
+                all_inliers.append(np.array([]).reshape(0, 2))  # No inliers
                 print(f"[VISUALIZATION] Failed to fit line to segment {i}")
         
         print(f"[VISUALIZATION] Successfully fitted {len([l for l in fitted_lines if l is not None])} out of {num_lines} line segments")
         
         # Filter out None entries from fitted_lines
         valid_lines = [line for line in fitted_lines if line is not None]
-        return (valid_lines, all_outliers) if valid_lines else (None, None)
+        return (valid_lines, all_outliers, all_inliers, edge_filtered_points) if valid_lines else (None, None, None, edge_filtered_points)
         
     except Exception as e:
         print(f"[VISUALIZATION] Error in RANSAC line fitting: {e}")
-        return None, None
+        return None, None, None, np.array([]).reshape(0, 2)
 
 
 def _segment_contour_points(points: np.ndarray, num_segments: int) -> List[np.ndarray]:
@@ -1085,8 +1163,8 @@ def _fit_line_ransac(points: np.ndarray,
 def _fit_line_ransac_with_outliers(points: np.ndarray, 
                                   distance_threshold: float,
                                   min_samples: int,
-                                  max_trials: int) -> Optional[Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray]]:
-    """Fit a line to points using RANSAC algorithm and return outliers.
+                                  max_trials: int) -> Optional[Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray, np.ndarray]]:
+    """Fit a line to points using RANSAC algorithm and return outliers and inliers.
     
     Args:
         points: Array of 2D points (N, 2)
@@ -1095,7 +1173,7 @@ def _fit_line_ransac_with_outliers(points: np.ndarray,
         max_trials: Maximum RANSAC iterations
         
     Returns:
-        Tuple of ((start_point, end_point), outlier_points) for the fitted line and outliers,
+        Tuple of ((start_point, end_point), outlier_points, inlier_points) for the fitted line, outliers, and inliers,
         or None if fitting fails
     """
     if len(points) < min_samples:
@@ -1192,11 +1270,12 @@ def _fit_line_ransac_with_outliers(points: np.ndarray,
                 
                 best_line = (start_point, end_point)
     
-    # Return best line and outliers if it has enough inliers
+    # Return best line, outliers, and inliers if it has enough inliers
     min_inliers = max(min_samples, len(points) // 4)  # At least 25% of points should be inliers
     if best_inliers >= min_inliers and best_inlier_mask is not None:
         outliers = points[~best_inlier_mask]  # Points that are NOT inliers
-        return best_line, outliers
+        inliers = points[best_inlier_mask]    # Points that ARE inliers
+        return best_line, outliers, inliers
     
     return None
 
@@ -1514,8 +1593,9 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
                 min_samples = get_setting("models.segmentation.contour.ransac.min_samples", 2)
                 max_trials = get_setting("models.segmentation.contour.ransac.max_trials", 1000)
                 
-                fitted_lines, outlier_points = fit_field_lines_ransac(
+                fitted_lines, outlier_points, inlier_points, edge_filtered_points = fit_field_lines_ransac(
                     simplified_contour, 
+                    frame,
                     num_lines=num_lines,
                     distance_threshold=distance_threshold,
                     min_samples=min_samples,
@@ -1532,6 +1612,40 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
                         outlier_points,
                         line_color=line_color
                     )
+                    
+                    # Draw edge-filtered points if enabled
+                    edge_filtering_enabled = get_setting("models.segmentation.contour.ransac.edge_filtering.enabled", False)
+                    show_edge_points = get_setting("models.segmentation.contour.ransac.edge_filtering.show_edge_points", True)
+                    if edge_filtering_enabled and show_edge_points and len(edge_filtered_points) > 0:
+                        edge_color_list = get_setting("models.segmentation.contour.ransac.edge_filtering.edge_point_color", [0, 0, 255])
+                        edge_color = tuple(edge_color_list) if isinstance(edge_color_list, list) else (0, 0, 255)
+                        edge_radius = get_setting("models.segmentation.contour.ransac.edge_filtering.edge_point_radius", 2)
+                        
+                        for point in edge_filtered_points:
+                            x, y = int(point[0]), int(point[1])
+                            if 0 <= x < result.shape[1] and 0 <= y < result.shape[0]:
+                                cv2.circle(result, (x, y), edge_radius, edge_color, -1)
+                        
+                        print(f"[VISUALIZATION] Drew {len(edge_filtered_points)} edge-filtered points")
+                    
+                    # Draw inlier points if enabled
+                    show_inliers = get_setting("models.segmentation.contour.ransac.inliers.show_inliers", True)
+                    if show_inliers and inlier_points and len(inlier_points) > 0:
+                        inlier_color_list = get_setting("models.segmentation.contour.ransac.inliers.inlier_color", [0, 255, 0])
+                        inlier_color = tuple(inlier_color_list) if isinstance(inlier_color_list, list) else (0, 255, 0)
+                        inlier_radius = get_setting("models.segmentation.contour.ransac.inliers.inlier_radius", 2)
+                        
+                        # Draw inliers for each segment
+                        total_inliers = 0
+                        for inlier_segment in inlier_points:
+                            if len(inlier_segment) > 0:
+                                for point in inlier_segment:
+                                    x, y = int(point[0]), int(point[1])
+                                    if 0 <= x < result.shape[1] and 0 <= y < result.shape[0]:
+                                        cv2.circle(result, (x, y), inlier_radius, inlier_color, -1)
+                                        total_inliers += 1
+                        
+                        print(f"[VISUALIZATION] Drew {total_inliers} inlier points")
                 else:
                     print("[VISUALIZATION] RANSAC line fitting failed, falling back to contour")
                     result = draw_field_contour(result, simplified_contour)
