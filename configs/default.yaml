@@ -32,6 +32,52 @@ models:
     default_model: "yolo11l-seg.pt"
     confidence_threshold: 0.6
     mask_alpha: 0.3
+    
+    # Morphological operations for mask smoothing
+    morphological:
+      opening_kernel_size: 0     # Size for noise removal (0 to disable)
+      closing_kernel_size: 0    # Size for hole filling (0 to disable)
+      fill_holes: false           # Apply flood fill for remaining holes
+    
+    # Contour calculation and drawings
+    contour:
+      simplify_epsilon: 0.0001     # Contour simplification factor (fraction of perimeter)
+      min_area: 5000             # Minimum contour area to consider
+      line_color: [255, 255, 0]  # BGR color for contour lines (yellow)
+      point_color: [0, 255, 255] # BGR color for contour points (cyan)
+      line_thickness: 3          # Thickness of contour lines
+      point_radius: 5            # Radius of contour points
+      draw_points: true          # Whether to draw individual contour points
+      
+      # Contour interpolation parameters
+      interpolation:
+        enabled: true            # Whether to interpolate contour points for denser sampling
+        max_point_distance: 10   # Maximum distance between consecutive points in pixels
+        min_point_distance: 3    # Minimum distance to avoid over-densification
+      
+      # RANSAC line fitting parameters
+      ransac:
+        enabled: true            # Whether to use RANSAC line fitting instead of contour
+        num_lines: 4            # Number of line segments to fit (3-4 for field boundaries)
+        distance_threshold: 5.0 # Maximum distance from point to line for inliers
+        min_samples: 2          # Minimum number of points needed to fit a line
+        max_trials: 100        # Maximum RANSAC iterations per line segment
+        classification_confidence_threshold: 0.5  # Minimum confidence for line classification
+        line_color: [0, 255, 0] # BGR color for RANSAC lines (green)
+        outlier_color: [0, 165, 255] # BGR color for RANSAC outlier points (orange)
+        outlier_radius: 4       # Radius for outlier point visualization
+        show_outliers: true     # Whether to visualize RANSAC outliers
+        inlier_color: [0, 255, 0] # BGR color for RANSAC inlier points (green)
+        inlier_radius: 2        # Radius for inlier point visualization
+        show_inliers: true      # Whether to visualize RANSAC inliers
+        
+        # Edge filtering parameters
+        edge_filtering:
+          enabled: true         # Whether to filter points near image edges
+          margin: 15           # Distance from edge in pixels to consider as "near edge"
+          edge_point_color: [0, 0, 255] # BGR color for filtered edge points (red)
+          edge_point_radius: 4  # Radius for edge point visualization
+          show_edge_points: true # Whether to visualize filtered edge points
   
   tracking:
     default_tracker: "deepsort"

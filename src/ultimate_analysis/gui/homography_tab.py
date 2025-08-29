@@ -7,7 +7,7 @@ with real-time perspective transformation visualization and YAML save/load funct
 import os
 import yaml
 import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 
 import cv2
@@ -25,7 +25,17 @@ from .video_player import VideoPlayer
 from ..config.settings import get_setting
 from ..constants import DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS
 from ..processing.field_segmentation import run_field_segmentation, set_field_model
-from ..gui.visualization import draw_field_segmentation
+from ..gui.visualization import (
+    draw_field_segmentation, 
+    create_unified_field_mask, 
+    draw_unified_field_mask,
+    calculate_field_contour,
+    draw_field_contour,
+    fit_field_lines_ransac,
+    draw_field_lines_ransac,
+    draw_classified_field_lines,
+    draw_all_field_lines
+)
 
 
 class ZoomableImageLabel(QLabel):
@@ -303,11 +313,14 @@ class HomographyTab(QWidget):
         self.warped_scroll_area: Optional[QScrollArea] = None
         
         # Field segmentation state
-        self.show_segmentation = False
+        self.show_segmentation = True
         self.current_segmentation_results = None
         self.segmentation_model_combo: Optional[QComboBox] = None
         self.show_segmentation_checkbox: Optional[QCheckBox] = None
+        self.ransac_checkbox: Optional[QCheckBox] = None
         self.available_segmentation_models: List[str] = []
+        self.classified_lines: Dict[str, np.ndarray] = {}  # Store classified field lines
+        self.all_lines_for_display: Dict[str, Tuple[np.ndarray, float, bool]] = {}  # Store all lines for display
         
         # Initialize UI
         self._init_ui()
@@ -431,6 +444,13 @@ class HomographyTab(QWidget):
         self.show_segmentation_checkbox.setChecked(self.show_segmentation)
         self.show_segmentation_checkbox.stateChanged.connect(self._on_segmentation_toggled)
         segmentation_layout.addWidget(self.show_segmentation_checkbox)
+        
+        # RANSAC line fitting checkbox
+        self.ransac_checkbox = QCheckBox("Use RANSAC Line Fitting")
+        self.ransac_checkbox.setChecked(get_setting("models.segmentation.contour.ransac.enabled", False))
+        self.ransac_checkbox.stateChanged.connect(self._on_ransac_toggled)
+        self.ransac_checkbox.setToolTip("Fit straight lines to contour segments using RANSAC algorithm")
+        segmentation_layout.addWidget(self.ransac_checkbox)
         
         # Model selection
         model_layout = QHBoxLayout()
@@ -847,8 +867,19 @@ class HomographyTab(QWidget):
         # Apply segmentation overlay to original frame if enabled
         original_frame = self.current_frame.copy()
         if self.show_segmentation and self.current_segmentation_results:
-            original_frame = draw_field_segmentation(original_frame, self.current_segmentation_results)
-            print(f"[HOMOGRAPHY] Applied segmentation to original frame: {len(self.current_segmentation_results)} results")
+            # Create and display unified mask on original frame
+            frame_shape = self.current_frame.shape[:2]  # (height, width)
+            unified_mask = create_unified_field_mask(self.current_segmentation_results, frame_shape)
+            
+            if unified_mask is not None:
+                # Use bright green for unified field mask
+                field_color = (0, 255, 0)  # Bright green (BGR)
+                original_frame, self.classified_lines, self.all_lines_for_display = draw_unified_field_mask(original_frame, unified_mask, field_color, alpha=0.4)
+                print(f"[HOMOGRAPHY] Applied unified mask to original frame: {np.sum(unified_mask)} pixels")
+            else:
+                print("[HOMOGRAPHY] No unified mask could be created for original frame")
+                self.classified_lines = {}
+                self.all_lines_for_display = {}
         elif self.show_segmentation:
             print("[HOMOGRAPHY] Segmentation enabled but no results available")
         
@@ -877,82 +908,63 @@ class HomographyTab(QWidget):
         self._display_frame(warped_frame, self.warped_display)
         
     def _apply_segmentation_to_warped_frame(self, warped_frame: np.ndarray, segmentation_results: list) -> np.ndarray:
-        """Apply segmentation overlay to warped frame by transforming the masks."""
+        """Apply segmentation overlay to warped frame by transforming contour points from original image."""
         if not segmentation_results:
             return warped_frame
             
         try:
-            # Create a copy to apply segmentation overlay
-            result_frame = warped_frame.copy()
+            # Create unified mask from segmentation results on original frame
+            original_frame_shape = self.current_frame.shape[:2]  # (height, width)
+            unified_mask = create_unified_field_mask(segmentation_results, original_frame_shape)
             
-            # Get homography matrix for transforming masks
+            if unified_mask is None:
+                print("[HOMOGRAPHY] No unified mask could be created")
+                return warped_frame
+            
+            print(f"[HOMOGRAPHY] Created unified mask with shape {unified_mask.shape}, {np.sum(unified_mask)} pixels")
+            
+            # Calculate contour on the original image
+            original_contour = calculate_field_contour(unified_mask)
+            
+            if original_contour is None or len(original_contour) == 0:
+                print("[HOMOGRAPHY] No contour found in original unified mask")
+                return warped_frame
+            
+            # Transform contour points using homography matrix
             h_matrix = self._get_homography_matrix()
+            transformed_contour = self._transform_contour_points(original_contour, h_matrix)
             
-            for seg_result in segmentation_results:
-                if hasattr(seg_result, 'masks') and seg_result.masks is not None:
-                    # Get mask data
-                    if hasattr(seg_result.masks, 'data'):
-                        mask_data = seg_result.masks.data
-                    else:
-                        continue
-                        
-                    # Convert to numpy if needed
-                    if hasattr(mask_data, 'cpu'):
-                        masks = mask_data.cpu().numpy()
-                    elif hasattr(mask_data, 'numpy'):
-                        masks = mask_data.numpy()
-                    else:
-                        masks = mask_data
-                    
-                    # Process each mask
-                    for i, mask in enumerate(masks):
-                        # Ensure mask is 2D and proper size
-                        if len(mask.shape) == 3:
-                            mask = mask[0]  # Take first channel if 3D
-                        
-                        # Resize mask to match original frame dimensions if needed
-                        original_height, original_width = self.current_frame.shape[:2]
-                        if mask.shape != (original_height, original_width):
-                            mask = cv2.resize(mask.astype(np.float32), (original_width, original_height))
-                        
-                        # Apply homography transformation to the mask
-                        warped_mask = cv2.warpPerspective(
-                            mask.astype(np.float32), 
-                            h_matrix, 
-                            (warped_frame.shape[1], warped_frame.shape[0])
-                        )
-                        
-                        # Apply color overlay where mask is present
-                        mask_binary = (warped_mask > 0.5).astype(np.uint8)
-                        if np.any(mask_binary):
-                            # Use the same color scheme as the visualization
-                            # Color mapping: 0 = Central Field (cyan), 1 = Endzone (magenta)
-                            color_dict = {
-                                0: (0, 255, 255),    # Cyan for central field (BGR)
-                                1: (255, 0, 255)     # Magenta for endzone (BGR)
-                            }
-                            color = color_dict.get(i, (0, 255, 255))  # Default to cyan
-                            
-                            # Create colored overlay
-                            overlay = result_frame.copy()
-                            overlay[mask_binary == 1] = color
-                            
-                            # Blend with original frame using same alpha as visualization
-                            alpha = 0.4
-                            result_frame = cv2.addWeighted(result_frame, 1-alpha, overlay, alpha, 0)
-                            
-                            # Draw contours for better visibility
-                            contours, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                            if contours:
-                                border_color = tuple(int(c * 0.7) for c in color)
-                                cv2.drawContours(result_frame, contours, -1, border_color, 2)
-                            
-                            print(f"[HOMOGRAPHY] Applied transformed mask {i} with color {color} to warped frame")
+            if transformed_contour is None:
+                print("[HOMOGRAPHY] Failed to transform contour points")
+                return warped_frame
             
+            # Create mask from transformed contour points
+            warped_mask = np.zeros((warped_frame.shape[0], warped_frame.shape[1]), dtype=np.uint8)
+            cv2.fillPoly(warped_mask, [transformed_contour], 1)
+            
+            # Apply overlay and draw contour on warped frame
+            field_color = (0, 255, 0)  # Bright green (BGR)
+            result_frame, _, _ = draw_unified_field_mask(warped_frame, warped_mask, field_color, alpha=0.4, draw_contour=False)
+            
+            # Draw the transformed contour directly
+            result_frame = draw_field_contour(result_frame, transformed_contour)
+            
+            # Draw all lines (classified and unclassified) if available
+            if self.all_lines_for_display:
+                homography_matrix = self._get_homography_matrix()
+                result_frame = draw_all_field_lines(result_frame, self.all_lines_for_display, homography_matrix)
+                print(f"[HOMOGRAPHY] Drew {len(self.all_lines_for_display)} total field lines on warped frame")
+            elif self.classified_lines:
+                # Fallback to classified lines only if all_lines_for_display is not available
+                homography_matrix = self._get_homography_matrix()
+                result_frame = draw_classified_field_lines(result_frame, self.classified_lines, homography_matrix)
+                print(f"[HOMOGRAPHY] Drew {len(self.classified_lines)} classified field lines on warped frame")
+            
+            print(f"[HOMOGRAPHY] Applied transformed contour to warped frame: {len(transformed_contour)} points")
             return result_frame
             
         except Exception as e:
-            print(f"[HOMOGRAPHY] Error transforming segmentation to warped frame: {e}")
+            print(f"[HOMOGRAPHY] Error applying transformed segmentation to warped frame: {e}")
             import traceback
             traceback.print_exc()
             return warped_frame
@@ -967,6 +979,37 @@ class HomographyTab(QWidget):
         ], dtype=np.float32)
         
         return h_matrix
+    
+    def _transform_contour_points(self, contour: np.ndarray, h_matrix: np.ndarray) -> Optional[np.ndarray]:
+        """Transform contour points using homography matrix.
+        
+        Args:
+            contour: Contour points as numpy array of shape (N, 1, 2)
+            h_matrix: 3x3 homography transformation matrix
+            
+        Returns:
+            Transformed contour points in same format, or None if transformation fails
+        """
+        if contour is None or len(contour) == 0:
+            return None
+            
+        try:
+            # Reshape contour points for perspective transformation
+            # contour is (N, 1, 2), we need (N, 2) for cv2.perspectiveTransform
+            points = contour.reshape(-1, 1, 2).astype(np.float32)
+            
+            # Apply perspective transformation
+            transformed_points = cv2.perspectiveTransform(points, h_matrix)
+            
+            # Reshape back to contour format (N, 1, 2)
+            transformed_contour = transformed_points.reshape(-1, 1, 2).astype(np.int32)
+            
+            print(f"[HOMOGRAPHY] Transformed {len(contour)} contour points")
+            return transformed_contour
+            
+        except Exception as e:
+            print(f"[HOMOGRAPHY] Error transforming contour points: {e}")
+            return None
     
     def _display_frame(self, frame: np.ndarray, label: ZoomableImageLabel):
         """Display a frame in the specified zoomable label widget."""
@@ -1379,6 +1422,30 @@ class HomographyTab(QWidget):
             self.current_segmentation_results = None
             
         self._update_displays()
+    
+    def _on_ransac_toggled(self, state: int):
+        """Handle RANSAC line fitting checkbox toggle."""
+        ransac_enabled = state == 2  # Qt.Checked = 2
+        
+        print(f"[HOMOGRAPHY] RANSAC toggle: state={state}, ransac_enabled={ransac_enabled}")
+        
+        # Temporarily override the config value in memory
+        from ..config.settings import get_config
+        config = get_config()
+        if 'models' not in config:
+            config['models'] = {}
+        if 'segmentation' not in config['models']:
+            config['models']['segmentation'] = {}
+        if 'contour' not in config['models']['segmentation']:
+            config['models']['segmentation']['contour'] = {}
+        if 'ransac' not in config['models']['segmentation']['contour']:
+            config['models']['segmentation']['contour']['ransac'] = {}
+        
+        config['models']['segmentation']['contour']['ransac']['enabled'] = ransac_enabled
+        
+        # Update displays if segmentation is currently shown
+        if self.show_segmentation and self.current_segmentation_results:
+            self._update_displays()
         
     def _on_segmentation_model_changed(self, display_name: str):
         """Handle segmentation model selection change."""
