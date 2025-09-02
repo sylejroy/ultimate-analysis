@@ -881,10 +881,10 @@ def fit_field_lines_ransac(contour: np.ndarray,
                           distance_threshold: float = 10.0,
                           min_samples: int = 2,
                           max_trials: int = 1000) -> Optional[Tuple[List[Tuple[np.ndarray, np.ndarray]], List[np.ndarray], List[np.ndarray], List[np.ndarray], Dict, Dict]]:
-    """Fit straight lines to contour segments using RANSAC.
+    """Lightweight visualization wrapper for RANSAC line fitting.
     
-    This function segments the contour and fits straight lines to each segment,
-    which is useful for field boundary detection where we expect rectangular shapes.
+    This function delegates heavy processing to the processing module and handles
+    only the visualization-specific logic like line classification for display.
     
     Args:
         contour: Contour points as numpy array of shape (N, 1, 2)
@@ -908,80 +908,15 @@ def fit_field_lines_ransac(contour: np.ndarray,
         return None, None, None, None, {}, {}
     
     try:
-        # Convert contour to 2D points array
-        points = contour.reshape(-1, 2).astype(np.float32)
-        edge_filtered_points = np.array([]).reshape(0, 2)  # Store edge-filtered points
+        # Import here to avoid circular imports
+        from ..processing.field_analysis import extract_field_lines_ransac_processing
         
-        # Apply interpolation if enabled (before edge filtering)
-        interpolation_enabled = get_setting("models.segmentation.contour.interpolation.enabled", False)
-        if interpolation_enabled:
-            max_distance = get_setting("models.segmentation.contour.interpolation.max_point_distance", 10)
-            min_distance = get_setting("models.segmentation.contour.interpolation.min_point_distance", 3)
-            
-            # Convert to contour format for interpolation
-            contour_format = points.reshape(-1, 1, 2)
-            interpolated_contour = interpolate_contour_points(contour_format, max_distance, min_distance)
-            points = interpolated_contour.reshape(-1, 2).astype(np.float32)
-            
-            print(f"[VISUALIZATION] Interpolated contour: {len(contour_format.reshape(-1, 2))} -> {len(points)} points")
+        # Delegate heavy processing to processing module
+        fitted_lines, line_confidences, all_outliers, all_inliers, edge_filtered_points, processing_stats = \
+            extract_field_lines_ransac_processing(contour, frame, num_lines, distance_threshold, min_samples, max_trials)
         
-        # Apply edge filtering after interpolation if enabled
-        edge_filtering_enabled = get_setting("models.segmentation.contour.ransac.edge_filtering.enabled", False)
-        if edge_filtering_enabled:
-            edge_margin = get_setting("models.segmentation.contour.ransac.edge_filtering.margin", 20)
-            
-            # Convert to contour format for edge filtering
-            contour_format = points.reshape(-1, 1, 2)
-            filtered_contour, edge_points = filter_edge_points(contour_format, frame.shape, edge_margin)
-            
-            # Update points to use only non-edge points
-            if len(filtered_contour) > 0:
-                original_count = len(points)
-                points = filtered_contour.reshape(-1, 2).astype(np.float32)
-                edge_filtered_points = edge_points.reshape(-1, 2).astype(np.float32) if len(edge_points) > 0 else np.array([]).reshape(0, 2)
-                print(f"[VISUALIZATION] Edge filtering: {original_count} -> {len(points)} points ({len(edge_filtered_points)} filtered)")
-            else:
-                print(f"[VISUALIZATION] Warning: Edge filtering removed all points!")
-        
-        # Sequential RANSAC: Find lines one by one, removing inliers each time
-        remaining_points = points.copy()
-        fitted_lines = []
-        line_confidences = []  # Store confidence for each line
-        all_outliers = []
-        all_inliers = []
-        
-        for iteration in range(num_lines):
-            if len(remaining_points) < min_samples:
-                print(f"[VISUALIZATION] Iteration {iteration}: Not enough remaining points ({len(remaining_points)} < {min_samples})")
-                break
-            
-            print(f"[VISUALIZATION] Iteration {iteration}: Fitting line to {len(remaining_points)} remaining points")
-            
-            # Fit line to remaining points using RANSAC
-            result = _fit_line_ransac_with_outliers(remaining_points, distance_threshold, min_samples, max_trials)
-            
-            if result is not None:
-                line_points, outliers, inliers, confidence = result
-                fitted_lines.append(line_points)
-                line_confidences.append(confidence)
-                all_inliers.append(inliers)
-                
-                # Remove inliers from remaining points for next iteration
-                remaining_points = outliers
-                
-                print(f"[VISUALIZATION] Line {iteration}: Found line with {len(inliers)} inliers, {len(outliers)} points remaining, confidence={confidence:.3f}")
-            else:
-                print(f"[VISUALIZATION] Iteration {iteration}: Failed to fit line, stopping sequential RANSAC")
-                break
-        
-        # All remaining points after all iterations are final outliers
-        if len(remaining_points) > 0:
-            all_outliers.append(remaining_points)
-            print(f"[VISUALIZATION] Final outliers: {len(remaining_points)} points")
-        else:
-            all_outliers.append(np.array([]).reshape(0, 2))
-        
-        print(f"[VISUALIZATION] Sequential RANSAC: Successfully fitted {len(fitted_lines)} out of {num_lines} lines")
+        if not fitted_lines:
+            return None, None, None, None, {}, {}
         
         # Filter lines by confidence threshold for classification
         classification_threshold = get_setting("models.segmentation.contour.ransac.classification_confidence_threshold", 0.5)
@@ -995,13 +930,21 @@ def fit_field_lines_ransac(contour: np.ndarray,
                 high_confidence_lines.append(line)
                 high_confidence_confidences.append(confidence)
         
-        print(f"[VISUALIZATION] Filtered {len(high_confidence_lines)} high-confidence lines (>= {classification_threshold}) for classification from {len(fitted_lines)} total lines")
+        # Only log significant events to avoid spam
+        if len(fitted_lines) > 0 and processing_stats.get('lines_fitted', 0) > 0:
+            # Only log every 20th successful extraction to reduce spam
+            frame_count = getattr(fit_field_lines_ransac, '_frame_count', 0)
+            fit_field_lines_ransac._frame_count = frame_count + 1
+            if frame_count % 20 == 0:  
+                print(f"[VISUALIZATION] Processed {len(high_confidence_lines)} high-confidence lines (>= {classification_threshold}) for classification from {len(fitted_lines)} total lines")
         
-        # Classify only the high-confidence lines
+        # Classify only the high-confidence lines using simplified classification
+        classified_lines = {}
         if high_confidence_lines:
-            classified_lines = _classify_field_lines(high_confidence_lines, frame.shape, high_confidence_confidences)
-        else:
-            classified_lines = {}
+            try:
+                classified_lines = _classify_field_lines(high_confidence_lines, frame.shape, high_confidence_confidences)
+            except Exception as e:
+                print(f"[VISUALIZATION] Error classifying lines: {e}")
         
         # Create a dictionary of all lines (including low-confidence ones) for display purposes
         # Store as (line_coords, confidence, is_classified) tuples

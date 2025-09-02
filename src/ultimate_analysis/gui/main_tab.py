@@ -982,6 +982,12 @@ class MainTab(QWidget):
                     frame = draw_all_field_lines(frame, self.all_lines_for_display, 
                                                scale_factor=1.0, draw_raw_lines_only=True)
                     print(f"[MAIN_TAB] Added raw RANSAC lines for {len(self.all_lines_for_display)} field lines")
+                
+                # Overlay Kalman-tracked field lines on main view for better stability visualization
+                if self.tracked_lines:
+                    frame = draw_tracked_field_lines(frame, self.tracked_lines, 
+                                                   transformation_matrix=None, scale_factor=1.0)
+                    print(f"[MAIN_TAB] Added {len(self.tracked_lines)} Kalman-tracked lines to main view")
             else:
                 print("[MAIN_TAB] No unified mask could be created")
                 self.tracked_lines = []
@@ -991,7 +997,7 @@ class MainTab(QWidget):
         
         # Show detections only if tracking is NOT enabled (to avoid visual clutter)
         if self.current_detections and not self.tracking_checkbox.isChecked():
-            frame = draw_detections(frame, self.current_detections, inplace=True)
+            frame = draw_detections(frame, self.current_detections)
         
         # Show tracking visualization if tracking is enabled
         elif self.current_tracks and self.tracking_checkbox.isChecked():
