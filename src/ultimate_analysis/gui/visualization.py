@@ -1972,13 +1972,14 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
 
 
 def draw_all_field_lines(frame: np.ndarray, all_lines_for_display: Dict[str, Tuple[np.ndarray, float, bool]],
-                        transformation_matrix: Optional[np.ndarray] = None) -> np.ndarray:
+                        transformation_matrix: Optional[np.ndarray] = None, scale_factor: float = 1.0) -> np.ndarray:
     """Draw all field lines (both classified and unclassified) with appropriate coloring based on confidence.
     
     Args:
         frame: Frame to draw on
         all_lines_for_display: Dictionary mapping line types to (line_coordinates, confidence, is_classified) tuples
         transformation_matrix: Optional homography matrix to transform lines to warped view
+        scale_factor: Scale factor for text and line thickness (useful for top-down view)
         
     Returns:
         Frame with all lines drawn
@@ -1998,7 +1999,7 @@ def draw_all_field_lines(frame: np.ndarray, all_lines_for_display: Dict[str, Tup
         'near_endzone_back': (255, 255, 0)  # Cyan
     }
     
-    line_thickness = 3
+    line_thickness = max(1, int(3 * scale_factor))  # Scale line thickness
     
     for line_type, line_data in all_lines_for_display.items():
         line_coords, confidence, is_classified = line_data
@@ -2064,7 +2065,7 @@ def draw_all_field_lines(frame: np.ndarray, all_lines_for_display: Dict[str, Tup
                 perp_vec = (-line_vec[1], line_vec[0])
                 
                 # Normalize and scale for offset distance
-                offset_distance = 25  # pixels
+                offset_distance = max(15, int(25 * scale_factor))  # Scale offset distance
                 offset_x = int((perp_vec[0] / line_length) * offset_distance)
                 offset_y = int((perp_vec[1] / line_length) * offset_distance)
                 
@@ -2081,9 +2082,9 @@ def draw_all_field_lines(frame: np.ndarray, all_lines_for_display: Dict[str, Tup
                 else:
                     confidence_label = f"Unclassified ({confidence:.2f})"
                 
-                # Draw text with larger font size and better visibility
-                font_scale = 0.8  # Increased from 0.5
-                font_thickness = 2  # Increased from 1
+                # Draw text with larger font size and better visibility (scaled for top-down view)
+                font_scale = max(0.5, 0.8 * scale_factor)  # Scaled font size
+                font_thickness = max(1, int(2 * scale_factor))  # Scaled font thickness
                 cv2.putText(result, confidence_label, text_pos, 
                            cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, font_thickness)
             

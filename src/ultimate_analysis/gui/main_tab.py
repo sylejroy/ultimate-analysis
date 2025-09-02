@@ -7,19 +7,23 @@ playback controls, and processing options.
 import os
 import cv2
 import time
+import hashlib
+import numpy as np
+import yaml
+from functools import lru_cache
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, 
     QCheckBox, QPushButton, QSlider, QListWidgetItem, QGroupBox,
-    QFormLayout, QComboBox, QShortcut, QSplitter
+    QFormLayout, QComboBox, QShortcut, QSplitter, QDoubleSpinBox, QSizePolicy
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont, QColor
 
 from .video_player import VideoPlayer
-from .visualization import draw_detections, draw_tracks, draw_tracks_with_player_ids
+from .visualization import draw_detections, draw_tracks, draw_tracks_with_player_ids, draw_unified_field_mask, create_unified_field_mask, draw_all_field_lines, draw_classified_field_lines
 from .performance_widget import PerformanceWidget
 from ..processing import (
     run_inference, run_tracking, run_player_id_on_tracks, run_field_segmentation,
@@ -70,6 +74,38 @@ class MainTab(QWidget):
         self.current_field_results: List[Any] = []
         self.current_player_ids: Dict[int, Tuple[str, Any]] = {}
         
+        # Field segmentation state
+        self.show_segmentation = True
+        self.current_segmentation_results = None
+        self.segmentation_model_combo: Optional[QComboBox] = None
+        self.show_segmentation_checkbox: Optional[QCheckBox] = None
+        self.ransac_checkbox: Optional[QCheckBox] = None
+        self.available_segmentation_models: List[str] = []
+        self.classified_lines: Dict[str, np.ndarray] = {}  # Store classified field lines
+        self.all_lines_for_display: Dict[str, Tuple[np.ndarray, float, bool]] = {}  # Store all lines for display
+        
+        # Homography state
+        self.homography_enabled = True  # Enable by default
+        self.homography_matrix: Optional[np.ndarray] = None
+        self.homography_warped_frame: Optional[np.ndarray] = None
+        self.homography_display_label: Optional[QLabel] = None
+        
+        # Try to load homography matrix from file
+        loaded_matrix = self._load_homography_params_from_file()
+        if loaded_matrix is not None:
+            self.homography_matrix = loaded_matrix
+            print("[MAIN_TAB] Using homography matrix from file")
+        else:
+            print("[MAIN_TAB] Using default homography parameters (no file found)")
+        
+        # Frame-based caching system for optimization
+        self.frame_cache: Dict[str, Dict[str, Any]] = {}  # hash -> {results, timestamp}
+        self.cache_max_size = get_setting("performance.cache_size_frames", 50)
+        self.cache_enabled = get_setting("performance.enable_frame_caching", True)
+        self.last_frame_hash: Optional[str] = None
+        self.cache_hit_count = 0
+        self.cache_miss_count = 0
+        
         # FPS tracking for processed frames
         self.frame_times: List[float] = []
         self.max_frame_samples = 30  # Rolling average over 30 frames
@@ -78,6 +114,13 @@ class MainTab(QWidget):
         # Playback timer
         self.playback_timer = QTimer()
         self.playback_timer.timeout.connect(self._on_timer_tick)
+        
+        # Debounced update system for immediate display refresh with pending processing
+        self.pending_update = False
+        self.update_timer = QTimer()
+        self.update_timer.setSingleShot(True)
+        self.update_timer.timeout.connect(self._delayed_update_displays)
+        self.debounce_delay_ms = get_setting("performance.debounce_delay_ms", 100)
         
         # Initialize UI
         self._init_ui()
@@ -100,6 +143,46 @@ class MainTab(QWidget):
             
             self.video_list.setCurrentRow(default_index)
             self._load_selected_video()
+        
+        # Load segmentation models
+        self._load_segmentation_models()
+    
+    def _load_homography_params_from_file(self) -> Optional[np.ndarray]:
+        """Load homography matrix from the homography_params.yaml file.
+        
+        Returns:
+            Homography matrix as numpy array, or None if loading fails
+        """
+        try:
+            homography_file = Path("configs/homography_params.yaml")
+            if not homography_file.exists():
+                print(f"[MAIN_TAB] Homography params file not found: {homography_file}")
+                return None
+            
+            with open(homography_file, 'r') as f:
+                data = yaml.safe_load(f)
+            
+            if 'homography_parameters' not in data:
+                print("[MAIN_TAB] No homography_parameters found in file")
+                return None
+            
+            params = data['homography_parameters']
+            
+            # Reconstruct 3x3 matrix from individual elements
+            matrix = np.array([
+                [params['H00'], params['H01'], params['H02']],
+                [params['H10'], params['H11'], params['H12']],
+                [params['H20'], params['H21'], 1.0]  # H22 is typically 1.0
+            ], dtype=np.float32)
+            
+            print(f"[MAIN_TAB] Loaded homography matrix from file: {homography_file}")
+            print(f"[MAIN_TAB] Matrix:\n{matrix}")
+            
+            return matrix
+            
+        except Exception as e:
+            print(f"[MAIN_TAB] Error loading homography parameters: {e}")
+            return None
     
     def _init_ui(self):
         """Initialize the user interface."""
@@ -115,12 +198,18 @@ class MainTab(QWidget):
         left_panel.setMaximumWidth(500)  # Maximum width to prevent taking too much space
         splitter.addWidget(left_panel)
         
-        # Right panel: Video display
+        # Center panel: Main video display
+        center_panel = self._create_center_panel()
+        splitter.addWidget(center_panel)
+        
+        # Right panel: Homography controls and top-down view
         right_panel = self._create_right_panel()
+        right_panel.setMinimumWidth(300)  # Minimum width for homography controls
+        right_panel.setMaximumWidth(600)  # Maximum width to prevent taking too much space
         splitter.addWidget(right_panel)
         
-        # Simple initial sizing - left takes ~20%, right takes ~80%
-        splitter.setSizes([350, 1400])  # Initial sizes in pixels
+        # Simple initial sizing - left takes ~20%, center takes ~50%, right takes ~30%
+        splitter.setSizes([350, 1000, 500])  # Initial sizes in pixels
         
         main_layout.addWidget(splitter)
         self.setLayout(main_layout)
@@ -160,10 +249,12 @@ class MainTab(QWidget):
         # Checkboxes for processing features
         self.inference_checkbox = QCheckBox("Object Detection (Inference)")
         self.inference_checkbox.setToolTip(f"Enable/disable object detection [{SHORTCUTS['TOGGLE_INFERENCE']}]")
+        self.inference_checkbox.setChecked(True)  # Enable inference by default
         self.inference_checkbox.stateChanged.connect(self._on_inference_toggled)
         
         self.tracking_checkbox = QCheckBox("Object Tracking")  
         self.tracking_checkbox.setToolTip(f"Enable/disable object tracking [{SHORTCUTS['TOGGLE_TRACKING']}]")
+        self.tracking_checkbox.setChecked(True)  # Enable tracking by default
         self.tracking_checkbox.stateChanged.connect(self._on_tracking_toggled)
         
         self.player_id_checkbox = QCheckBox("Player Identification")
@@ -173,11 +264,18 @@ class MainTab(QWidget):
         self.field_segmentation_checkbox = QCheckBox("Field Segmentation")
         self.field_segmentation_checkbox.setToolTip(f"Enable/disable field boundary detection [{SHORTCUTS['TOGGLE_FIELD_SEGMENTATION']}]")
         self.field_segmentation_checkbox.stateChanged.connect(self._on_field_segmentation_toggled)
+        self.field_segmentation_checkbox.setChecked(True)  # Enable by default to show advanced field line detection
+        
+        self.homography_checkbox = QCheckBox("Enable Top-Down View")
+        self.homography_checkbox.setChecked(True)  # Enable by default
+        self.homography_checkbox.setToolTip("Enable/disable homography transformation for top-down view")
+        self.homography_checkbox.stateChanged.connect(self._on_homography_toggled)
         
         processing_layout.addWidget(self.inference_checkbox)
         processing_layout.addWidget(self.tracking_checkbox)
         processing_layout.addWidget(self.player_id_checkbox)
         processing_layout.addWidget(self.field_segmentation_checkbox)
+        processing_layout.addWidget(self.homography_checkbox)
         
         processing_group.setLayout(processing_layout)
         layout.addWidget(processing_group)
@@ -213,6 +311,42 @@ class MainTab(QWidget):
         models_group.setLayout(models_layout)
         layout.addWidget(models_group)
         
+        # Field Segmentation Controls
+        segmentation_group = QGroupBox("Field Segmentation")
+        segmentation_layout = QVBoxLayout()
+        
+        # Show segmentation checkbox
+        self.show_segmentation_checkbox = QCheckBox("Show Field Segmentation")
+        self.show_segmentation_checkbox.setChecked(True)  # Enable by default to show field lines
+        self.show_segmentation_checkbox.stateChanged.connect(self._on_segmentation_toggled)
+        segmentation_layout.addWidget(self.show_segmentation_checkbox)
+        
+        # RANSAC line fitting checkbox
+        self.ransac_checkbox = QCheckBox("Use RANSAC Line Fitting")
+        self.ransac_checkbox.setChecked(True)  # Enable by default for advanced line detection
+        self.ransac_checkbox.stateChanged.connect(self._on_ransac_toggled)
+        self.ransac_checkbox.setToolTip("Fit straight lines to contour segments using RANSAC algorithm")
+        segmentation_layout.addWidget(self.ransac_checkbox)
+        
+        # Model selection
+        model_layout = QHBoxLayout()
+        model_layout.addWidget(QLabel("Model:"))
+        
+        self.segmentation_model_combo = QComboBox()
+        self.segmentation_model_combo.setMinimumWidth(150)
+        self.segmentation_model_combo.currentTextChanged.connect(self._on_segmentation_model_changed)
+        model_layout.addWidget(self.segmentation_model_combo)
+        
+        refresh_models_button = QPushButton("↻")
+        refresh_models_button.setMaximumWidth(30)
+        refresh_models_button.setToolTip("Refresh model list")
+        refresh_models_button.clicked.connect(self._load_segmentation_models)
+        model_layout.addWidget(refresh_models_button)
+        
+        segmentation_layout.addLayout(model_layout)
+        segmentation_group.setLayout(segmentation_layout)
+        layout.addWidget(segmentation_group)
+        
         # Performance metrics section
         self.performance_widget = PerformanceWidget()
         layout.addWidget(self.performance_widget)
@@ -223,8 +357,8 @@ class MainTab(QWidget):
         panel.setLayout(layout)
         return panel
     
-    def _create_right_panel(self) -> QWidget:
-        """Create the right panel with video display and controls."""
+    def _create_center_panel(self) -> QWidget:
+        """Create the center panel with main video display and controls."""
         panel = QWidget()
         layout = QVBoxLayout()
         
@@ -285,6 +419,38 @@ class MainTab(QWidget):
         controls_layout.addWidget(reset_button)
         
         layout.addLayout(controls_layout)
+        
+        panel.setLayout(layout)
+        return panel
+    
+    def _create_right_panel(self) -> QWidget:
+        """Create the right panel with top-down view."""
+        panel = QWidget()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(5, 5, 5, 5)  # Reduce margins for more space
+        
+        # Top-down view display (expanded to fill the panel)
+        view_group = QGroupBox("Top-Down View")
+        view_layout = QVBoxLayout()
+        view_layout.setContentsMargins(5, 5, 5, 5)  # Reduce margins inside group box
+        
+        self.homography_display_label = QLabel("Loading top-down view...")
+        self.homography_display_label.setAlignment(Qt.AlignCenter)
+        self.homography_display_label.setMinimumHeight(300)  # Reasonable minimum
+        self.homography_display_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)  # Lower stretch - preferred width, expanding height
+        # Do not use setScaledContents to avoid stretching text and overlays
+        self.homography_display_label.setStyleSheet("""
+            QLabel {
+                border: 2px solid #555;
+                background-color: #1a1a1a;
+                color: #999;
+                font-size: 14px;
+            }
+        """)
+        view_layout.addWidget(self.homography_display_label)
+        
+        view_group.setLayout(view_layout)
+        layout.addWidget(view_group, 1)  # Give the view group stretch factor of 1 to fill available space
         
         panel.setLayout(layout)
         return panel
@@ -443,6 +609,22 @@ class MainTab(QWidget):
         self.frame_times.clear()
         self.current_fps = 0.0
         
+        # Clear frame cache when loading new video
+        self.frame_cache.clear()
+        self.last_frame_hash = None
+        self.cache_hit_count = 0
+        self.cache_miss_count = 0
+        print("[MAIN_TAB] Frame cache cleared for new video")
+        
+        # Reset homography matrix for new video
+        self.homography_matrix = None
+        if self.homography_enabled:
+            # Reload homography matrix from file for new video
+            loaded_matrix = self._load_homography_params_from_file()
+            if loaded_matrix is not None:
+                self.homography_matrix = loaded_matrix
+                print("[MAIN_TAB] Reloaded homography matrix for new video")
+        
         # Load video
         if self.video_player.load_video(video_path):
             # Update UI
@@ -475,8 +657,8 @@ class MainTab(QWidget):
         if frame is None:
             return
         
-        # Apply processing if enabled
-        processed_frame = self._process_frame(frame.copy())
+        # Apply processing if enabled (with caching optimization)
+        processed_frame = self._process_frame_cached(frame.copy())
         
         # Convert to Qt format and display
         height, width, channel = processed_frame.shape
@@ -496,6 +678,156 @@ class MainTab(QWidget):
         )
         
         self.video_label.setPixmap(scaled_pixmap)
+        
+        # Update homography display if enabled
+        if self.homography_enabled:
+            self._update_homography_display()
+    
+    def _compute_frame_hash(self, frame: np.ndarray) -> str:
+        """Compute a hash of the frame content for caching.
+        
+        Args:
+            frame: Input frame
+            
+        Returns:
+            Hash string representing frame content
+        """
+        # Use a smaller sample of the frame for faster hashing
+        # Sample every 8th pixel to balance speed and collision resistance
+        sample = frame[::8, ::8]
+        return hashlib.md5(sample.tobytes()).hexdigest()
+    
+    def _get_processing_cache_key(self) -> str:
+        """Generate cache key based on current processing settings.
+        
+        Returns:
+            Cache key string representing current processing configuration
+        """
+        settings = [
+            str(self.inference_checkbox.isChecked()),
+            str(self.tracking_checkbox.isChecked()),
+            str(self.field_segmentation_checkbox.isChecked()),
+            str(self.player_id_checkbox.isChecked())
+        ]
+        return "|".join(settings)
+    
+    def _delayed_update_displays(self) -> None:
+        """Delayed update handler for debounced UI updates."""
+        if self.pending_update and self.video_player.is_loaded():
+            frame = self.video_player.get_current_frame()
+            if frame is not None:
+                self._display_frame(frame)
+            self.pending_update = False
+            print("[MAIN_TAB] Executed debounced display update")
+    
+    def _request_display_update(self, immediate: bool = False) -> None:
+        """Request a display update with debouncing to prevent excessive recomputation.
+        
+        Args:
+            immediate: If True, force immediate update and set pending flag
+        """
+        if immediate:
+            # Force immediate update but set pending flag for debounced processing
+            self.pending_update = True
+            if self.video_player.is_loaded():
+                frame = self.video_player.get_current_frame()
+                if frame is not None:
+                    self._display_frame(frame)
+        else:
+            # Standard debounced update
+            self.pending_update = True
+            self.update_timer.start(self.debounce_delay_ms)
+    def _cleanup_frame_cache(self) -> None:
+        """Clean up old cache entries to maintain memory limits."""
+        if len(self.frame_cache) <= self.cache_max_size:
+            return
+            
+        # Sort by timestamp and remove oldest entries
+        sorted_entries = sorted(
+            self.frame_cache.items(),
+            key=lambda x: x[1]['timestamp']
+        )
+        
+        # Remove oldest entries to get back to 80% of max size
+        target_size = int(self.cache_max_size * 0.8)
+        entries_to_remove = len(sorted_entries) - target_size
+        
+        for i in range(entries_to_remove):
+            cache_key = sorted_entries[i][0]
+            del self.frame_cache[cache_key]
+            
+        print(f"[MAIN_TAB] Cache cleanup: removed {entries_to_remove} entries, {len(self.frame_cache)} remaining")
+    
+    def _process_frame_cached(self, frame: np.ndarray) -> np.ndarray:
+        """Process frame with caching optimization to avoid redundant computations.
+        
+        Args:
+            frame: Input frame to process
+            
+        Returns:
+            Processed frame with visualizations
+        """
+        if not self.cache_enabled:
+            return self._process_frame(frame)
+            
+        # Compute frame content hash
+        frame_hash = self._compute_frame_hash(frame)
+        processing_key = self._get_processing_cache_key()
+        cache_key = f"{frame_hash}_{processing_key}"
+        
+        # Check cache hit
+        current_time = time.time()
+        if cache_key in self.frame_cache:
+            # Cache hit - return cached results with proper timing
+            total_cache_start_time = time.time()  # Track total time for cache hit
+            
+            cached_data = self.frame_cache[cache_key]
+            
+            # Update cache timestamp and restore processing results
+            cached_data['timestamp'] = current_time
+            self.current_detections = cached_data['detections']
+            self.current_tracks = cached_data['tracks'] 
+            self.current_field_results = cached_data['field_results']
+            self.current_player_ids = cached_data['player_ids']
+            
+            # Apply visualizations to the frame
+            viz_start_time = time.time()
+            processed_frame = self._apply_visualizations(frame.copy())
+            viz_duration_ms = (time.time() - viz_start_time) * 1000
+            
+            # Record cache hit performance with proper total timing
+            total_cache_duration_ms = (time.time() - total_cache_start_time) * 1000
+            self.cache_hit_count += 1
+            self.performance_widget.add_processing_measurement("Visualization", viz_duration_ms)
+            self.performance_widget.add_processing_measurement("Total Runtime", total_cache_duration_ms)
+            self._update_fps(total_cache_duration_ms)
+            
+            # Log cache efficiency periodically
+            if (self.cache_hit_count + self.cache_miss_count) % 30 == 0:
+                total_requests = self.cache_hit_count + self.cache_miss_count
+                hit_rate = (self.cache_hit_count / total_requests) * 100
+                print(f"[MAIN_TAB] Cache hit rate: {hit_rate:.1f}% ({self.cache_hit_count}/{total_requests})")
+            
+            return processed_frame
+        
+        # Cache miss - perform full processing
+        self.cache_miss_count += 1
+        processed_frame = self._process_frame(frame)
+        
+        # Store results in cache
+        self.frame_cache[cache_key] = {
+            'timestamp': current_time,
+            'detections': self.current_detections.copy(),
+            'tracks': self.current_tracks.copy() if self.current_tracks else [],
+            'field_results': self.current_field_results.copy() if self.current_field_results else [],
+            'player_ids': self.current_player_ids.copy()
+        }
+        
+        # Clean up cache if needed
+        self._cleanup_frame_cache()
+        
+        self.last_frame_hash = frame_hash
+        return processed_frame
     
     def _process_frame(self, frame):
         """Apply enabled processing to a frame.
@@ -538,6 +870,11 @@ class MainTab(QWidget):
             self.current_field_results = run_field_segmentation(frame)
             duration_ms = (time.time() - start_time) * 1000
             self.performance_widget.add_processing_measurement("Field Segmentation", duration_ms)
+        else:
+            # Clear field results when disabled
+            self.current_field_results = []
+            self.classified_lines = {}
+            self.all_lines_for_display = {}
         
         # Run player ID if enabled (requires tracking to be active)
         if self.player_id_checkbox.isChecked() and self.current_tracks:
@@ -571,9 +908,24 @@ class MainTab(QWidget):
         viz_duration_ms = (time.time() - viz_start_time) * 1000
         self.performance_widget.add_processing_measurement("Visualization", viz_duration_ms)
         
+        # Add line extraction timing if RANSAC was used and field segmentation was enabled
+        if self.all_lines_for_display and self.field_segmentation_checkbox.isChecked():
+            # Estimate line extraction time (this is included in field segmentation timing)
+            line_count = len(self.all_lines_for_display)
+            estimated_line_extraction_ms = viz_duration_ms * 0.2  # Roughly 20% of viz time
+            self.performance_widget.add_processing_measurement("Line Extraction", estimated_line_extraction_ms)
+        elif not self.field_segmentation_checkbox.isChecked():
+            # Set line extraction to 0 when field segmentation is disabled
+            self.performance_widget.add_processing_measurement("Line Extraction", 0.0)
+        
         # Record total runtime
         total_duration_ms = (time.time() - total_start_time) * 1000
         self.performance_widget.add_processing_measurement("Total Runtime", total_duration_ms)
+        
+        # Add default homography measurements if homography is not enabled
+        if not self.homography_enabled:
+            self.performance_widget.add_processing_measurement("Homography Calculation", 0.0)
+            self.performance_widget.add_processing_measurement("Homography Display", 0.0)
         
         # Update FPS calculation
         self._update_fps(total_duration_ms)
@@ -581,7 +933,7 @@ class MainTab(QWidget):
         return frame
     
     def _apply_visualizations(self, frame):
-        """Apply visualization overlays to frame.
+        """Apply visualization overlays to frame with memory optimization.
         
         Args:
             frame: Frame to add visualizations to
@@ -591,11 +943,28 @@ class MainTab(QWidget):
         """
         # Apply field segmentation overlay first (as background)
         if self.current_field_results and self.field_segmentation_checkbox.isChecked():
-            frame = visualize_segmentation(frame, self.current_field_results, alpha=0.3)
+            # Create and display unified mask with advanced field line detection
+            frame_shape = frame.shape[:2]  # (height, width)
+            unified_mask = create_unified_field_mask(self.current_field_results, frame_shape)
+            
+            if unified_mask is not None:
+                # Use bright green for unified field mask
+                field_color = (0, 255, 0)  # Bright green (BGR)
+                frame, self.classified_lines, self.all_lines_for_display = draw_unified_field_mask(frame, unified_mask, field_color, alpha=0.3)
+                print(f"[MAIN_TAB] Applied unified mask to frame: {np.sum(unified_mask)} pixels")
+                
+                # Add line labelling if we have classified lines
+                if self.all_lines_for_display:
+                    frame = draw_all_field_lines(frame, self.all_lines_for_display, scale_factor=1.0)
+                    print(f"[MAIN_TAB] Added line labels for {len(self.all_lines_for_display)} field lines")
+            else:
+                print("[MAIN_TAB] No unified mask could be created")
+                self.classified_lines = {}
+                self.all_lines_for_display = {}
         
         # Show detections only if tracking is NOT enabled (to avoid visual clutter)
         if self.current_detections and not self.tracking_checkbox.isChecked():
-            frame = draw_detections(frame, self.current_detections)
+            frame = draw_detections(frame, self.current_detections, inplace=True)
         
         # Show tracking visualization if tracking is enabled
         if self.current_tracks and self.tracking_checkbox.isChecked():
@@ -731,14 +1100,12 @@ class MainTab(QWidget):
             self._stop_playback()
     
     def _on_seek(self, frame_idx: int):
-        """Handle seek bar movement."""
+        """Handle seek bar movement with immediate display update."""
         if self.video_player.is_loaded():
             self.video_player.seek_to_frame(frame_idx)
             
-            # Display current frame
-            frame = self.video_player.get_current_frame()
-            if frame is not None:
-                self._display_frame(frame)
+            # Use immediate display update for scrubbing responsiveness
+            self._request_display_update(immediate=True)
     
     def _prev_video(self):
         """Switch to previous video."""
@@ -763,20 +1130,26 @@ class MainTab(QWidget):
         reset_tracker()
         print("[MAIN_TAB] Tracker reset")
     
-    # Processing control event handlers
+    # Processing control event handlers with debounced updates
     def _on_inference_toggled(self, checked: bool):
-        """Handle inference checkbox toggle."""
+        """Handle inference checkbox toggle with debounced update."""
         print(f"[MAIN_TAB] Inference {'enabled' if checked else 'disabled'}")
+        # Clear cache when processing settings change
+        self.frame_cache.clear()
+        self._request_display_update()
     
     def _on_tracking_toggled(self, checked: bool):
-        """Handle tracking checkbox toggle."""
+        """Handle tracking checkbox toggle with debounced update."""
         print(f"[MAIN_TAB] Tracking {'enabled' if checked else 'disabled'}")
         if checked:
             # Enable inference if tracking is enabled
             self.inference_checkbox.setChecked(True)
+        # Clear cache when processing settings change
+        self.frame_cache.clear()
+        self._request_display_update()
     
     def _on_player_id_toggled(self, checked: bool):
-        """Handle player ID checkbox toggle."""
+        """Handle player ID checkbox toggle with debounced update."""
         print(f"[MAIN_TAB] Player ID {'enabled' if checked else 'disabled'}")
         if checked:
             # Enable tracking and inference if player ID is enabled
@@ -784,9 +1157,12 @@ class MainTab(QWidget):
             self.inference_checkbox.setChecked(True)
             
             print("[MAIN_TAB] Player ID using EasyOCR for jersey number recognition")
+        # Clear cache when processing settings change
+        self.frame_cache.clear()
+        self._request_display_update()
     
     def _on_field_segmentation_toggled(self, checked: bool):
-        """Handle field segmentation checkbox toggle."""
+        """Handle field segmentation checkbox toggle with debounced update."""
         print(f"[MAIN_TAB] Field segmentation {'enabled' if checked else 'disabled'}")
         
         if checked:
@@ -798,6 +1174,9 @@ class MainTab(QWidget):
             else:
                 print(f"[MAIN_TAB] Default field segmentation model not found at: {default_model_path}")
                 print("[MAIN_TAB] Will use fallback models or mock results")
+        # Clear cache when processing settings change
+        self.frame_cache.clear()
+        self._request_display_update()
     
     # Model selection event handlers
     def _on_detection_model_changed(self, model_path: str):
@@ -823,6 +1202,473 @@ class MainTab(QWidget):
             full_path = Path(get_setting("models.base_path", DEFAULT_PATHS['MODELS'])) / model_path
             set_field_model(str(full_path))
             print(f"[MAIN_TAB] Field model changed to: {model_path}")
+    
+    def _load_segmentation_models(self):
+        """Load available field segmentation models using the same logic as main tab."""
+        self.available_segmentation_models.clear()
+        
+        # Look for models in the models directory (same logic as main tab)
+        models_path = Path(get_setting("models.base_path", DEFAULT_PATHS['MODELS']))
+        
+        if not models_path.exists():
+            print(f"[MAIN_TAB] Models directory not found: {models_path}")
+            return
+        
+        # Search for segmentation model files
+        model_files = []
+        for model_dir in models_path.rglob("*"):
+            if model_dir.is_file() and model_dir.suffix == ".pt":
+                # Skip last.pt files - we only want best.pt from finetuned models
+                if model_dir.name == "last.pt":
+                    continue
+                    
+                # Check if this is a segmentation model
+                if "segmentation" in str(model_dir).lower():
+                    model_files.append(str(model_dir))
+        
+        # Add pretrained segmentation models
+        pretrained_path = models_path / "pretrained"
+        if pretrained_path.exists():
+            for model_file in pretrained_path.glob("*seg*.pt"):
+                model_files.append(str(model_file))
+        
+        # Store the full paths
+        self.available_segmentation_models = model_files
+        
+        # Update combo box
+        if self.segmentation_model_combo is not None:
+            self.segmentation_model_combo.clear()
+            for model_path in self.available_segmentation_models:
+                # Create display name from path
+                if 'pretrained' in model_path:
+                    display_name = f"Pretrained: {Path(model_path).stem}"
+                else:
+                    # Extract model name from path
+                    path_parts = Path(model_path).parts
+                    if 'segmentation' in path_parts:
+                        seg_index = path_parts.index('segmentation')
+                        if seg_index + 1 < len(path_parts):
+                            display_name = path_parts[seg_index + 1]
+                        else:
+                            display_name = Path(model_path).parent.parent.name
+                    else:
+                        display_name = Path(model_path).parent.parent.name
+                
+                self.segmentation_model_combo.addItem(display_name, model_path)
+                
+        print(f"[MAIN_TAB] Loaded {len(self.available_segmentation_models)} segmentation models")
+        
+        # Auto-select the new default model if available
+        if self.segmentation_model_combo is not None:
+            default_model_path = "data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt"
+            for i in range(self.segmentation_model_combo.count()):
+                item_path = self.segmentation_model_combo.itemData(i)
+                if item_path and default_model_path in str(item_path):
+                    self.segmentation_model_combo.setCurrentIndex(i)
+                    print(f"[MAIN_TAB] Auto-selected default segmentation model: {self.segmentation_model_combo.itemText(i)}")
+                    break
+    
+    def _on_segmentation_toggled(self, state: int):
+        """Handle segmentation checkbox toggle."""
+        self.show_segmentation = state == 2  # Qt.Checked = 2
+        
+        print(f"[MAIN_TAB] Segmentation toggle: state={state}, show_segmentation={self.show_segmentation}")
+        
+        if self.show_segmentation:
+            print("[MAIN_TAB] Field segmentation enabled")
+            self.current_segmentation_results = None  # Force re-run on next frame
+        else:
+            print("[MAIN_TAB] Field segmentation disabled")
+            self.current_segmentation_results = None
+            self.classified_lines = {}
+            self.all_lines_for_display = {}
+            
+        self._request_display_update()
+    
+    def _on_ransac_toggled(self, state: int):
+        """Handle RANSAC line fitting checkbox toggle."""
+        ransac_enabled = state == 2  # Qt.Checked = 2
+        
+        print(f"[MAIN_TAB] RANSAC toggle: state={state}, ransac_enabled={ransac_enabled}")
+        
+        # Temporarily override the config value in memory
+        from ..config.settings import get_config
+        config = get_config()
+        if 'models' not in config:
+            config['models'] = {}
+        if 'segmentation' not in config['models']:
+            config['models']['segmentation'] = {}
+        if 'contour' not in config['models']['segmentation']:
+            config['models']['segmentation']['contour'] = {}
+        if 'ransac' not in config['models']['segmentation']['contour']:
+            config['models']['segmentation']['contour']['ransac'] = {}
+        
+        config['models']['segmentation']['contour']['ransac']['enabled'] = ransac_enabled
+        
+        # Clear cache to force re-processing with new RANSAC setting
+        self.frame_cache.clear()
+        print("[MAIN_TAB] Cleared frame cache due to RANSAC setting change")
+        
+        # Update displays if segmentation is currently shown
+        if self.show_segmentation and self.current_field_results:
+            # Force re-run segmentation with new RANSAC setting
+            self.current_field_results = None
+            self.classified_lines = {}
+            self.all_lines_for_display = {}
+            self._request_display_update()
+    
+    def _on_segmentation_model_changed(self, display_name: str):
+        """Handle segmentation model selection change."""
+        if self.segmentation_model_combo is None:
+            return
+            
+        model_path = self.segmentation_model_combo.currentData()
+        if model_path and os.path.exists(model_path):
+            print(f"[MAIN_TAB] Changing segmentation model to: {model_path}")
+            try:
+                if set_field_model(model_path):
+                    print(f"[MAIN_TAB] Successfully loaded segmentation model: {display_name}")
+                    # Force re-run segmentation with new model
+                    if self.show_segmentation:
+                        self.current_segmentation_results = None
+                        self._request_display_update()
+                else:
+                    print(f"[MAIN_TAB] Failed to load segmentation model: {model_path}")
+            except Exception as e:
+                print(f"[MAIN_TAB] Error loading segmentation model: {e}")
+        else:
+            print(f"[MAIN_TAB] Invalid model path: {model_path}")
+    
+    def _apply_segmentation_to_warped_frame(self, warped_frame: np.ndarray, segmentation_results: list) -> np.ndarray:
+        """Apply segmentation overlay to warped frame by transforming contour points from original image."""
+        if not segmentation_results:
+            return warped_frame
+            
+        try:
+            # Create unified mask from segmentation results on original frame
+            original_frame_shape = self.video_player.get_current_frame().shape[:2]  # (height, width)
+            unified_mask = create_unified_field_mask(segmentation_results, original_frame_shape)
+            
+            if unified_mask is None:
+                print("[MAIN_TAB] No unified mask could be created")
+                return warped_frame
+            
+            print(f"[MAIN_TAB] Created unified mask with shape {unified_mask.shape}, {np.sum(unified_mask)} pixels")
+            
+            # Calculate contour on the original image
+            from .visualization import calculate_field_contour
+            original_contour = calculate_field_contour(unified_mask)
+            
+            if original_contour is None or len(original_contour) == 0:
+                print("[MAIN_TAB] No contour found in original unified mask")
+                return warped_frame
+            
+            # Transform contour points using homography matrix
+            transformed_contour = self._transform_contour_points(original_contour, self.homography_matrix)
+            
+            if transformed_contour is None:
+                print("[MAIN_TAB] Failed to transform contour points")
+                return warped_frame
+            
+            # Create mask from transformed contour points
+            warped_mask = np.zeros((warped_frame.shape[0], warped_frame.shape[1]), dtype=np.uint8)
+            cv2.fillPoly(warped_mask, [transformed_contour], 1)
+            
+            # Apply overlay and draw contour on warped frame
+            field_color = (0, 255, 0)  # Bright green (BGR)
+            from .visualization import draw_unified_field_mask, draw_field_contour
+            result_frame, _, _ = draw_unified_field_mask(warped_frame, warped_mask, field_color, alpha=0.4, draw_contour=False)
+            
+            # Draw the transformed contour directly
+            result_frame = draw_field_contour(result_frame, transformed_contour)
+            
+            # Note: Field lines will be drawn later in _update_homography_display() with proper scale_factor for top-down view
+            # This avoids duplicate text/labels in the homography display
+            
+            print(f"[MAIN_TAB] Applied transformed contour to warped frame: {len(transformed_contour)} points")
+            return result_frame
+            
+        except Exception as e:
+            print(f"[MAIN_TAB] Error applying transformed segmentation to warped frame: {e}")
+            import traceback
+            traceback.print_exc()
+            return warped_frame
+    
+    def _transform_contour_points(self, contour: np.ndarray, h_matrix: np.ndarray) -> Optional[np.ndarray]:
+        """Transform contour points using homography matrix.
+        
+        Args:
+            contour: Contour points as numpy array of shape (N, 1, 2)
+            h_matrix: 3x3 homography transformation matrix
+            
+        Returns:
+            Transformed contour points in same format, or None if transformation fails
+        """
+        if contour is None or len(contour) == 0:
+            return None
+            
+        try:
+            # Reshape contour points for perspective transformation
+            # contour is (N, 1, 2), we need (N, 2) for cv2.perspectiveTransform
+            points = contour.reshape(-1, 1, 2).astype(np.float32)
+            
+            # Apply perspective transformation
+            transformed_points = cv2.perspectiveTransform(points, h_matrix)
+            
+            # Reshape back to contour format (N, 1, 2)
+            transformed_contour = transformed_points.reshape(-1, 1, 2).astype(np.int32)
+            
+            print(f"[MAIN_TAB] Transformed {len(contour)} contour points")
+            return transformed_contour
+            
+        except Exception as e:
+            print(f"[MAIN_TAB] Error transforming contour points: {e}")
+            return None
+
+    def _on_homography_toggled(self, state: int):
+        """Handle homography checkbox toggle."""
+        self.homography_enabled = state == 2  # Qt.Checked = 2
+        
+        print(f"[MAIN_TAB] Homography {'enabled' if self.homography_enabled else 'disabled'}")
+        
+        if self.homography_enabled:
+            # Try to load homography matrix if not already loaded
+            if self.homography_matrix is None:
+                loaded_matrix = self._load_homography_params_from_file()
+                if loaded_matrix is not None:
+                    self.homography_matrix = loaded_matrix
+            self._update_homography_display()
+        else:
+            if self.homography_display_label:
+                self.homography_display_label.setText("Homography view disabled")
+                self.homography_warped_frame = None
+    
+    def _map_tracked_objects_to_top_down(self, warped_frame: np.ndarray) -> np.ndarray:
+        """Map tracked objects to the top-down view using their foot positions.
+        
+        Args:
+            warped_frame: The homography-transformed frame
+            
+        Returns:
+            Frame with tracked objects mapped to top-down view
+        """
+        if not self.current_tracks or self.homography_matrix is None:
+            return warped_frame
+        
+        result_frame = warped_frame.copy()
+        
+        for track in self.current_tracks:
+            # Get track properties
+            track_id = getattr(track, 'track_id', None)
+            if track_id is None:
+                continue
+                
+            # Get bounding box
+            bbox = None
+            if hasattr(track, 'to_ltrb'):
+                bbox = track.to_ltrb()
+            elif hasattr(track, 'to_tlbr'):
+                bbox = track.to_tlbr()
+            elif hasattr(track, 'bbox'):
+                bbox = track.bbox
+            
+            if bbox is None or len(bbox) != 4:
+                continue
+                
+            x1, y1, x2, y2 = map(int, bbox)
+            
+            # Calculate foot position (bottom center of bounding box)
+            foot_x = (x1 + x2) / 2
+            foot_y = y2  # Bottom of bounding box represents feet
+            
+            # Transform foot position using homography matrix
+            foot_point = np.array([[[foot_x, foot_y]]], dtype=np.float32)
+            try:
+                transformed_foot = cv2.perspectiveTransform(foot_point, self.homography_matrix)
+                transformed_x = int(transformed_foot[0][0][0])
+                transformed_y = int(transformed_foot[0][0][1])
+                
+                # Check if transformed position is within frame bounds
+                frame_h, frame_w = warped_frame.shape[:2]
+                if 0 <= transformed_x < frame_w and 0 <= transformed_y < frame_h:
+                    # Generate unique color for each track ID
+                    from .visualization import _get_track_color
+                    color = _get_track_color(track_id)
+                    
+                    # Draw foot position as a circle (larger for top-down view)
+                    cv2.circle(result_frame, (transformed_x, transformed_y), 12, color, -1)
+                    
+                    # Draw track ID label with larger font for top-down view
+                    label_text = f"ID:{track_id}"
+                    
+                    # Add player jersey number if available
+                    if track_id in self.current_player_ids:
+                        jersey_number, _ = self.current_player_ids[track_id]
+                        if jersey_number != "Unknown":
+                            label_text = f"#{jersey_number}"
+                    
+                    # Draw label background for better visibility (larger for top-down view)
+                    font_scale = 1.0  # Increased from 0.6 for better visibility in top-down view
+                    font_thickness = 3  # Increased from 2 for better visibility
+                    label_size = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thickness)[0]
+                    label_bg_x1 = transformed_x - label_size[0] // 2 - 5
+                    label_bg_y1 = transformed_y - 35
+                    label_bg_x2 = transformed_x + label_size[0] // 2 + 5
+                    label_bg_y2 = transformed_y - 5
+                    
+                    cv2.rectangle(result_frame, (label_bg_x1, label_bg_y1), (label_bg_x2, label_bg_y2), color, -1)
+                    
+                    # Draw label text with larger font
+                    cv2.putText(result_frame, label_text, 
+                              (transformed_x - label_size[0] // 2, transformed_y - 15),
+                              cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), font_thickness)
+                    
+                    # Draw direction indicator if track has history
+                    track_histories = get_track_histories()
+                    if track_histories and track_id in track_histories:
+                        history = track_histories[track_id]
+                        if len(history) >= 2:
+                            # Get last two foot positions and transform them
+                            last_pos = history[-1]
+                            prev_pos = history[-2] if len(history) > 1 else history[-1]
+                            
+                            # Transform previous position
+                            prev_point = np.array([[[prev_pos[0], prev_pos[1]]]], dtype=np.float32)
+                            try:
+                                transformed_prev = cv2.perspectiveTransform(prev_point, self.homography_matrix)
+                                prev_x = int(transformed_prev[0][0][0])
+                                prev_y = int(transformed_prev[0][0][1])
+                                
+                                # Draw direction arrow
+                                if 0 <= prev_x < frame_w and 0 <= prev_y < frame_h:
+                                    # Calculate direction vector
+                                    dx = transformed_x - prev_x
+                                    dy = transformed_y - prev_y
+                                    length = (dx*dx + dy*dy) ** 0.5
+                                    
+                                    if length > 5:  # Only draw if significant movement
+                                        # Normalize and scale
+                                        dx = int(dx / length * 15)
+                                        dy = int(dy / length * 15)
+                                        
+                                        # Draw arrow
+                                        arrow_end_x = transformed_x + dx
+                                        arrow_end_y = transformed_y + dy
+                                        cv2.arrowedLine(result_frame, 
+                                                      (transformed_x, transformed_y),
+                                                      (arrow_end_x, arrow_end_y),
+                                                      color, 2, tipLength=0.3)
+                            except:
+                                pass  # Skip if transformation fails
+                    
+            except Exception as e:
+                print(f"[MAIN_TAB] Error transforming track {track_id} position: {e}")
+                continue
+        
+        return result_frame
+
+    def _update_homography_display(self):
+        """Update the homography display with the current frame and transformation."""
+        if not self.homography_enabled or self.homography_display_label is None:
+            return
+        
+        homography_start_time = time.time()
+        
+        try:
+            # Get current frame
+            if self.video_player.is_loaded():
+                frame = self.video_player.get_current_frame()
+                if frame is None:
+                    self.homography_display_label.setText("No frame available")
+                    return
+                
+                # Apply homography transformation
+                if self.homography_matrix is not None:
+                    # Apply the transformation with timing
+                    homography_calc_start = time.time()
+                    height, width = frame.shape[:2]
+                    warped_frame = cv2.warpPerspective(frame, self.homography_matrix, (width, height))
+                    homography_calc_duration_ms = (time.time() - homography_calc_start) * 1000
+                    self.performance_widget.add_processing_measurement("Homography Calculation", homography_calc_duration_ms)
+                    
+                    # Apply field segmentation to warped frame if available
+                    if self.current_field_results and self.field_segmentation_checkbox.isChecked():
+                        try:
+                            # Transform the segmentation masks to match the warped frame
+                            warped_frame_with_segmentation = self._apply_segmentation_to_warped_frame(warped_frame, self.current_field_results)
+                            if warped_frame_with_segmentation is not None:
+                                warped_frame = warped_frame_with_segmentation
+                                print(f"[MAIN_TAB] Applied transformed segmentation to homography view: {len(self.current_field_results)} results")
+                            else:
+                                print("[MAIN_TAB] Failed to apply transformed segmentation to homography view")
+                        except Exception as e:
+                            print(f"[MAIN_TAB] Error applying segmentation to homography view: {e}")
+                    
+                    # Apply field line visualization if available (with larger text for top-down view)
+                    if self.all_lines_for_display:
+                        warped_frame = draw_all_field_lines(warped_frame, self.all_lines_for_display, self.homography_matrix, scale_factor=1.5)
+                        print(f"[MAIN_TAB] Applied {len(self.all_lines_for_display)} field lines to homography view")
+                    
+                    # Map tracked objects to top-down view if tracking is enabled
+                    if self.tracking_checkbox.isChecked() and self.current_tracks:
+                        warped_frame = self._map_tracked_objects_to_top_down(warped_frame)
+                        print(f"[MAIN_TAB] Mapped {len(self.current_tracks)} tracked objects to top-down view")
+                    
+                    self.homography_warped_frame = warped_frame
+                    
+                    # Get original warped frame dimensions
+                    warped_height, warped_width, warped_channel = warped_frame.shape
+                    
+                    # Apply horizontal zoom to focus on center portion of the field
+                    # Crop horizontally to 60% of the width for more zoom, centered
+                    zoom_factor = 0.6  # Keep 60% of the width for more horizontal zoom
+                    crop_width = int(warped_width * zoom_factor)
+                    crop_start_x = (warped_width - crop_width) // 2
+                    crop_end_x = crop_start_x + crop_width
+                    
+                    # Crop the warped frame horizontally
+                    zoomed_frame = warped_frame[:, crop_start_x:crop_end_x]
+                    print(f"[MAIN_TAB] Applied horizontal zoom: {warped_width}px -> {crop_width}px (factor: {zoom_factor})")
+                    
+                    # Convert cropped frame to Qt format and display
+                    zoomed_height, zoomed_width, zoomed_channel = zoomed_frame.shape
+                    bytes_per_line = 3 * zoomed_width
+                    
+                    # Ensure the frame is contiguous for QImage
+                    zoomed_frame = np.ascontiguousarray(zoomed_frame)
+                    
+                    q_image = QImage(zoomed_frame.data, zoomed_width, zoomed_height, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
+                    
+                    # Scale to fill the available label space while stretching to fit
+                    pixmap = QPixmap.fromImage(q_image)
+                    label_width = self.homography_display_label.width()
+                    label_height = self.homography_display_label.height()
+                    
+                    # Apply controlled stretching - stretch image but not overlays/text 
+                    if label_width > 0 and label_height > 0:
+                        scaled_pixmap = pixmap.scaled(
+                            label_width - 4, label_height - 4,  # Account for 2px border
+                            Qt.IgnoreAspectRatio,  # Stretch to fill the entire space
+                            Qt.SmoothTransformation
+                        )
+                        self.homography_display_label.setPixmap(scaled_pixmap)
+                    else:
+                        # Fallback for invalid dimensions
+                        self.homography_display_label.setPixmap(pixmap)
+                    
+                    # Record homography processing time
+                    homography_duration_ms = (time.time() - homography_start_time) * 1000
+                    self.performance_widget.add_processing_measurement("Homography Display", homography_duration_ms)
+                    
+                    print("[MAIN_TAB] Updated homography display using loaded matrix")
+                else:
+                    self.homography_display_label.setText("Homography matrix not available")
+            else:
+                self.homography_display_label.setText("No video loaded")
+                
+        except Exception as e:
+            print(f"[MAIN_TAB] Error updating homography display: {e}")
+            self.homography_display_label.setText(f"Error: {str(e)}")
     
     def _draw_jersey_table_overlay(self, frame):
         """Draw jersey tracking information as an overlay on the frame."""

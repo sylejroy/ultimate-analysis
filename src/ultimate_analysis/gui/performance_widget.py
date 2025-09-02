@@ -233,7 +233,10 @@ class PerformanceWidget(QWidget):
             "Tracking", 
             "Player ID - Preprocessing",
             "Player ID - EasyOCR", 
-            "Field Segmentation", 
+            "Field Segmentation",
+            "Line Extraction",
+            "Homography Calculation",
+            "Homography Display", 
             "Visualization", 
             "Total Runtime"
         ]
@@ -258,6 +261,13 @@ class PerformanceWidget(QWidget):
                     item = self.table.item(i, col)
                     if item:
                         item.setBackground(QColor(50, 70, 50))  # Subtle green tint
+                        
+            # Style the Homography rows with a subtle background
+            elif "Homography" in process or "Line Extraction" in process:
+                for col in range(4):
+                    item = self.table.item(i, col)
+                    if item:
+                        item.setBackground(QColor(70, 50, 70))  # Subtle purple tint
         
         # Auto-resize table height to fit all rows
         self._resize_table_to_content()
@@ -333,7 +343,10 @@ class PerformanceWidget(QWidget):
             "Tracking", 
             "Player ID - Preprocessing",
             "Player ID - EasyOCR", 
-            "Field Segmentation", 
+            "Field Segmentation",
+            "Line Extraction",
+            "Homography Calculation",
+            "Homography Display", 
             "Visualization", 
             "Total Runtime"
         ]
