@@ -797,6 +797,8 @@ def calculate_field_contour(unified_mask: np.ndarray,
                            min_contour_area: int = None) -> Optional[np.ndarray]:
     """Calculate and simplify the contour of the field mask.
     
+    This function now delegates to the processing module for consistent algorithm.
+    
     Args:
         unified_mask: Binary mask (H, W) where 1 indicates field area
         simplify_epsilon: Epsilon parameter for contour simplification (as fraction of perimeter)
@@ -805,46 +807,9 @@ def calculate_field_contour(unified_mask: np.ndarray,
     Returns:
         Simplified contour points as numpy array of shape (N, 1, 2), or None if no contour found
     """
-    if unified_mask is None or not np.any(unified_mask):
-        return None
-    
     # Import here to avoid circular imports
-    from ..config.settings import get_setting
-    
-    # Use config values if parameters not provided
-    if simplify_epsilon is None:
-        simplify_epsilon = get_setting("models.segmentation.contour.simplify_epsilon", 0.01)
-    if min_contour_area is None:
-        min_contour_area = get_setting("models.segmentation.contour.min_area", 5000)
-    
-    try:
-        # Find contours
-        contours, _ = cv2.findContours(unified_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        if not contours:
-            return None
-        
-        # Find the largest contour (main field boundary)
-        largest_contour = max(contours, key=cv2.contourArea)
-        
-        # Check if contour meets minimum area requirement
-        contour_area = cv2.contourArea(largest_contour)
-        if contour_area < min_contour_area:
-            print(f"[VISUALIZATION] Contour area {contour_area} below threshold {min_contour_area}")
-            return None
-        
-        # Simplify contour using Douglas-Peucker algorithm
-        perimeter = cv2.arcLength(largest_contour, True)
-        epsilon = simplify_epsilon * perimeter
-        simplified_contour = cv2.approxPolyDP(largest_contour, epsilon, True)
-        
-        print(f"[VISUALIZATION] Original contour points: {len(largest_contour)}, simplified: {len(simplified_contour)}")
-        
-        return simplified_contour
-        
-    except Exception as e:
-        print(f"[VISUALIZATION] Error calculating field contour: {e}")
-        return None
+    from ..processing.field_analysis import calculate_field_contour_processing
+    return calculate_field_contour_processing(unified_mask, simplify_epsilon, min_contour_area)
 
 
 def draw_field_contour(frame: np.ndarray, contour: np.ndarray,
@@ -1702,95 +1667,27 @@ def _apply_morphological_smoothing(mask: np.ndarray,
                                  fill_holes: bool = None) -> np.ndarray:
     """Apply morphological operations to smooth a binary mask.
     
-    Args:
-        mask: Binary mask (H, W) with values 0 or 1
-        opening_kernel_size: Size of kernel for opening operation (removes noise)
-        closing_kernel_size: Size of kernel for closing operation (fills gaps)
-        fill_holes: Whether to apply hole filling
-        
-    Returns:
-        Smoothed binary mask
+    This function now delegates to the processing module for consistent algorithm.
     """
-    if not np.any(mask):
-        return mask
-    
     # Import here to avoid circular imports
-    from ..config.settings import get_setting
-    
-    # Use config values if parameters not provided
-    if opening_kernel_size is None:
-        opening_kernel_size = get_setting("models.segmentation.morphological.opening_kernel_size", 5)
-    if closing_kernel_size is None:
-        closing_kernel_size = get_setting("models.segmentation.morphological.closing_kernel_size", 15)
-    if fill_holes is None:
-        fill_holes = get_setting("models.segmentation.morphological.fill_holes", True)
-    
-    try:
-        # Ensure mask is binary
-        mask_binary = (mask > 0).astype(np.uint8)
-        
-        # 1. Opening operation: erosion followed by dilation
-        # This removes small noise and disconnected components
-        if opening_kernel_size > 0:
-            opening_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, 
-                                                     (opening_kernel_size, opening_kernel_size))
-            mask_binary = cv2.morphologyEx(mask_binary, cv2.MORPH_OPEN, opening_kernel)
-        
-        # 2. Closing operation: dilation followed by erosion
-        # This fills small gaps and holes within the field area
-        if closing_kernel_size > 0:
-            closing_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, 
-                                                     (closing_kernel_size, closing_kernel_size))
-            mask_binary = cv2.morphologyEx(mask_binary, cv2.MORPH_CLOSE, closing_kernel)
-        
-        # 3. Fill remaining holes using flood fill
-        if fill_holes:
-            mask_binary = _fill_holes_flood_fill(mask_binary)
-        
-        return mask_binary
-        
-    except Exception as e:
-        print(f"[VISUALIZATION] Error in morphological smoothing: {e}")
-        return mask
+    from ..processing.field_analysis import apply_morphological_smoothing
+    return apply_morphological_smoothing(mask, opening_kernel_size, closing_kernel_size, fill_holes)
 
 
 def _fill_holes_flood_fill(mask: np.ndarray) -> np.ndarray:
     """Fill holes in a binary mask using flood fill from the borders.
     
-    Args:
-        mask: Binary mask (H, W) with values 0 or 1
-        
-    Returns:
-        Mask with holes filled
+    This function now delegates to the processing module for consistent algorithm.
     """
-    try:
-        # Create a copy to work with
-        filled_mask = mask.copy()
-        h, w = mask.shape
-        
-        # Create a mask that is 2 pixels larger in each dimension
-        # This allows flood fill to work from the border
-        flood_mask = np.zeros((h + 2, w + 2), dtype=np.uint8)
-        
-        # Copy the original mask to the center of the flood mask
-        flood_mask[1:-1, 1:-1] = 1 - filled_mask  # Invert: 0 becomes 1, 1 becomes 0
-        
-        # Flood fill from the top-left corner (which should be background)
-        cv2.floodFill(flood_mask, None, (0, 0), 0)
-        
-        # Extract the filled region and invert back
-        filled_region = flood_mask[1:-1, 1:-1]
-        filled_mask = 1 - filled_region
-        
-        return filled_mask.astype(np.uint8)
-        
-    except Exception as e:
-        print(f"[VISUALIZATION] Error in hole filling: {e}")
-        return mask
+    # Import here to avoid circular imports
+    from ..processing.field_analysis import _fill_holes_flood_fill as processing_fill_holes
+    return processing_fill_holes(mask)
 
 
 def create_unified_field_mask(segmentation_results: List[Any], frame_shape: Tuple[int, int]) -> Optional[np.ndarray]:
     """Create a unified mask combining all segmentation classes into one binary mask.
+    
+    This function now delegates to the processing module for consistent algorithm.
     
     Args:
         segmentation_results: List of segmentation result objects
@@ -1799,63 +1696,17 @@ def create_unified_field_mask(segmentation_results: List[Any], frame_shape: Tupl
     Returns:
         Unified binary mask (H, W) where 1 indicates field area, or None if no results
     """
-    if not segmentation_results:
-        return None
-    
-    frame_h, frame_w = frame_shape
-    unified_mask = np.zeros((frame_h, frame_w), dtype=np.uint8)
-    
-    for result in segmentation_results:
-        if not hasattr(result, 'masks') or result.masks is None:
-            continue
-            
-        try:
-            # Get mask data
-            if hasattr(result.masks, 'data'):
-                mask_data = result.masks.data
-            else:
-                continue
-                
-            # Convert to numpy if needed
-            if hasattr(mask_data, 'cpu'):
-                masks = mask_data.cpu().numpy()
-            else:
-                masks = mask_data.numpy() if hasattr(mask_data, 'numpy') else mask_data
-            
-            # Combine all class masks into unified mask
-            for mask in masks:
-                # Ensure mask is 2D
-                if len(mask.shape) == 3:
-                    mask = mask[0]
-                
-                # Resize to target frame size if needed
-                if mask.shape != (frame_h, frame_w):
-                    mask_resized = cv2.resize(
-                        mask.astype(np.float32), 
-                        (frame_w, frame_h), 
-                        interpolation=cv2.INTER_NEAREST
-                    )
-                else:
-                    mask_resized = mask
-                
-                # Add to unified mask (any field class becomes 1)
-                unified_mask = np.logical_or(unified_mask, mask_resized > 0.5).astype(np.uint8)
-                
-        except Exception as e:
-            print(f"[VISUALIZATION] Error creating unified mask: {e}")
-    
-    # Apply morphological operations to smooth the mask
-    if np.any(unified_mask):
-        unified_mask = _apply_morphological_smoothing(unified_mask)
-            
-    return unified_mask if np.any(unified_mask) else None
+    # Import here to avoid circular imports
+    from ..processing.field_analysis import create_unified_field_mask_processing
+    return create_unified_field_mask_processing(segmentation_results, frame_shape)
 
 
 def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray, 
                            color: Tuple[int, int, int] = (0, 255, 0), 
                            alpha: float = 0.4,
-                           draw_contour: bool = True) -> Tuple[np.ndarray, Dict[str, np.ndarray], Dict[str, Tuple[np.ndarray, float, bool]]]:
-    """Draw a unified field mask with a single color overlay and optional contour.
+                           draw_contour: bool = True,
+                           fill_mask: bool = False) -> Tuple[np.ndarray, Dict[str, np.ndarray], Dict[str, Tuple[np.ndarray, float, bool]]]:
+    """Draw a unified field mask with optional fill and contour.
     
     Args:
         frame: Input frame to draw on
@@ -1863,6 +1714,7 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
         color: BGR color tuple for the overlay
         alpha: Transparency for overlay (0.0 = transparent, 1.0 = opaque)
         draw_contour: Whether to calculate and draw simplified contours
+        fill_mask: Whether to fill the mask area (False = contour only)
         
     Returns:
         Tuple of (frame with unified mask overlay and optional contour, classified_lines dictionary, all_lines_for_display dictionary)
@@ -1873,17 +1725,17 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
     # Import here to avoid circular imports
     from ..config.settings import get_setting
     
-    overlay = frame.copy()
+    result = frame.copy()
     classified_lines = {}  # Initialize empty classified lines dictionary
     all_lines_for_display = {}  # Initialize empty all lines dictionary
     
-    # Create colored overlay where mask is present
-    overlay[unified_mask == 1] = color
+    # Only fill mask if explicitly requested (disabled by default for better runtime)
+    if fill_mask:
+        overlay = frame.copy()
+        overlay[unified_mask == 1] = color
+        result = cv2.addWeighted(frame, 1 - alpha, overlay, alpha, 0)
     
-    # Blend with original frame
-    result = cv2.addWeighted(frame, 1 - alpha, overlay, alpha, 0)
-    
-    # Draw basic border contours for mask visibility
+    # Always draw contour for field boundary visibility 
     contours, _ = cv2.findContours(unified_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if contours:
         border_color = tuple(int(c * 0.7) for c in color)
@@ -1972,7 +1824,8 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
 
 
 def draw_all_field_lines(frame: np.ndarray, all_lines_for_display: Dict[str, Tuple[np.ndarray, float, bool]],
-                        transformation_matrix: Optional[np.ndarray] = None, scale_factor: float = 1.0) -> np.ndarray:
+                        transformation_matrix: Optional[np.ndarray] = None, scale_factor: float = 1.0,
+                        draw_raw_lines_only: bool = False) -> np.ndarray:
     """Draw all field lines (both classified and unclassified) with appropriate coloring based on confidence.
     
     Args:
@@ -1980,6 +1833,7 @@ def draw_all_field_lines(frame: np.ndarray, all_lines_for_display: Dict[str, Tup
         all_lines_for_display: Dictionary mapping line types to (line_coordinates, confidence, is_classified) tuples
         transformation_matrix: Optional homography matrix to transform lines to warped view
         scale_factor: Scale factor for text and line thickness (useful for top-down view)
+        draw_raw_lines_only: If True, only draw raw RANSAC lines without classification colors/labels
         
     Returns:
         Frame with all lines drawn
@@ -2007,22 +1861,24 @@ def draw_all_field_lines(frame: np.ndarray, all_lines_for_display: Dict[str, Tup
         if line_coords is None or len(line_coords) != 2:
             continue
             
-        # Determine color based on classification status and confidence
-        if is_classified:
-            # Use the specific color for classified lines
-            base_color = line_colors.get(line_type, (255, 255, 255))  # Default white
+        # Determine color based on mode
+        if draw_raw_lines_only:
+            # Use a single color for all raw RANSAC lines
+            color = (0, 255, 0)  # Green for all raw lines
         else:
-            # Use grey for unclassified lines
-            base_color = (128, 128, 128)  # Grey for unclassified
-        
-        # Further grey out lines with very low confidence (< 0.5)
-        confidence_threshold = 0.5
-        if confidence < confidence_threshold:
-            # Convert to darker grey for low confidence
-            grey_intensity = int(sum(base_color) / 3 * 0.4)  # Even darker grey for low confidence
-            color = (grey_intensity, grey_intensity, grey_intensity)
-        else:
-            color = base_color
+            # Use classification-based coloring for top-down view
+            if is_classified:
+                base_color = line_colors.get(line_type, (255, 255, 255))  # Default white
+            else:
+                base_color = (128, 128, 128)  # Grey for unclassified
+            
+            # Further grey out lines with very low confidence (< 0.5)
+            confidence_threshold = 0.5
+            if confidence < confidence_threshold:
+                grey_intensity = int(sum(base_color) / 3 * 0.4)  # Even darker grey
+                color = (grey_intensity, grey_intensity, grey_intensity)
+            else:
+                color = base_color
         
         start_point = line_coords[0].copy()
         end_point = line_coords[1].copy()
@@ -2053,8 +1909,8 @@ def draw_all_field_lines(frame: np.ndarray, all_lines_for_display: Dict[str, Tup
             0 <= end_int[0] < w and 0 <= end_int[1] < h):
             cv2.line(result, start_int, end_int, color, line_thickness)
             
-            # Add text label with confidence score (only for classified lines or high-confidence unclassified)
-            if is_classified or confidence >= 0.3:  # Show labels for classified or reasonably confident lines
+            # Add text labels only for classified lines in top-down view (not raw mode)
+            if not draw_raw_lines_only and is_classified and scale_factor > 1.0:  # Only in top-down view
                 mid_point = ((start_int[0] + end_int[0]) // 2, (start_int[1] + end_int[1]) // 2)
                 
                 # Calculate offset perpendicular to the line
@@ -2064,8 +1920,8 @@ def draw_all_field_lines(frame: np.ndarray, all_lines_for_display: Dict[str, Tup
                 # Perpendicular vector (rotate 90 degrees)
                 perp_vec = (-line_vec[1], line_vec[0])
                 
-                # Normalize and scale for offset distance
-                offset_distance = max(15, int(25 * scale_factor))  # Scale offset distance
+                # Normalize and scale for offset distance  
+                offset_distance = max(10, int(15 * scale_factor))  # Smaller offset for simpler text
                 offset_x = int((perp_vec[0] / line_length) * offset_distance)
                 offset_y = int((perp_vec[1] / line_length) * offset_distance)
                 
@@ -2075,17 +1931,14 @@ def draw_all_field_lines(frame: np.ndarray, all_lines_for_display: Dict[str, Tup
                 # Ensure text position is within frame bounds
                 text_pos = (max(10, min(w - 10, text_pos[0])), max(20, min(h - 10, text_pos[1])))
                 
-                # Create label with confidence score
-                if is_classified:
-                    clean_name = line_type.replace('_', ' ').title()
-                    confidence_label = f"{clean_name} ({confidence:.2f})"
-                else:
-                    confidence_label = f"Unclassified ({confidence:.2f})"
+                # Create simple label - just the line type name
+                clean_name = line_type.replace('_', ' ').title()
+                simple_label = clean_name.replace(' ', '')  # Remove spaces for compactness
                 
-                # Draw text with larger font size and better visibility (scaled for top-down view)
-                font_scale = max(0.5, 0.8 * scale_factor)  # Scaled font size
-                font_thickness = max(1, int(2 * scale_factor))  # Scaled font thickness
-                cv2.putText(result, confidence_label, text_pos, 
+                # Draw simple text with smaller font for better readability in top-down view
+                font_scale = max(0.4, 0.6 * scale_factor)  # Smaller, simpler font
+                font_thickness = max(1, int(1 * scale_factor))  # Thinner text
+                cv2.putText(result, simple_label, text_pos, 
                            cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, font_thickness)
             
             print(f"[VISUALIZATION] Drew {line_type} line from {start_int} to {end_int}")

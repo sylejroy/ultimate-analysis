@@ -174,8 +174,9 @@ def run_field_segmentation(frame: np.ndarray) -> List[Any]:
         print("[FIELD_SEG] YOLO not available, returning mock results")
         return _create_mock_results(frame)
     
-    # Load default model if none is loaded
+    # Load default model if none is loaded (lazy loading optimization)
     if _field_model is None:
+        print("[FIELD_SEG] Loading default model on first use (lazy loading)")
         _load_default_model()
     
     if _field_model is None:
@@ -359,8 +360,9 @@ def _load_default_model() -> None:
         print("[FIELD_SEG] No field segmentation models found, will use mock results")
 
 
-# Initialize with default model when module is imported
-_load_default_model()
+# Initialize with default model when first needed (lazy loading)
+# This optimization prevents slow startup by deferring model loading until actually used
+# _load_default_model()  # Commented out for performance optimization
 
 
 def visualize_segmentation(frame: np.ndarray, results: List[Any], alpha: float = 0.5) -> np.ndarray:

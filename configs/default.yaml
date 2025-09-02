@@ -61,15 +61,15 @@ models:
         num_lines: 4            # Number of line segments to fit (3-4 for field boundaries)
         distance_threshold: 5.0 # Maximum distance from point to line for inliers
         min_samples: 2          # Minimum number of points needed to fit a line
-        max_trials: 100        # Maximum RANSAC iterations per line segment
+        max_trials: 20        # Maximum RANSAC iterations per line segment
         classification_confidence_threshold: 0.5  # Minimum confidence for line classification
         line_color: [0, 255, 0] # BGR color for RANSAC lines (green)
         outlier_color: [0, 165, 255] # BGR color for RANSAC outlier points (orange)
         outlier_radius: 4       # Radius for outlier point visualization
-        show_outliers: true     # Whether to visualize RANSAC outliers
+        show_outliers: false     # Whether to visualize RANSAC outliers
         inlier_color: [0, 255, 0] # BGR color for RANSAC inlier points (green)
         inlier_radius: 2        # Radius for inlier point visualization
-        show_inliers: true      # Whether to visualize RANSAC inliers
+        show_inliers: false      # Whether to visualize RANSAC inliers
         
         # Edge filtering parameters
         edge_filtering:
@@ -95,6 +95,14 @@ models:
     # Histogram tracking specific settings
     histogram_match_threshold: 0.3  # Minimum similarity for track matching
     histogram_bins: 32              # Number of histogram bins per channel
+    
+    # Kalman filter settings for line tracking
+    kalman:
+      max_tracks: 8                   # Maximum number of tracked lines
+      association_threshold: 50.0     # Maximum distance for line association
+      min_confidence: 0.3             # Minimum confidence to create new track
+      process_noise: 0.001            # Process noise covariance
+      measurement_noise: 0.1          # Measurement noise covariance
   
   player_id:
     ocr_enabled: true

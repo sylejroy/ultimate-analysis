@@ -24,12 +24,15 @@ from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont, QColor
 
 from .video_player import VideoPlayer
 from .visualization import draw_detections, draw_tracks, draw_tracks_with_player_ids, draw_unified_field_mask, create_unified_field_mask, draw_all_field_lines, draw_classified_field_lines
+from .tracked_line_visualization import draw_tracked_field_lines
 from .performance_widget import PerformanceWidget
 from ..processing import (
     run_inference, run_tracking, run_player_id_on_tracks, run_field_segmentation,
     set_detection_model, set_field_model, set_tracker_type, 
     reset_tracker, get_track_histories
 )
+from ..processing.kalman_line_tracker import track_lines, reset_line_tracker
+from ..processing.line_extraction import extract_raw_lines_from_segmentation
 from ..processing.jersey_tracker import get_jersey_tracker
 from ..processing.field_segmentation import visualize_segmentation
 from ..config.settings import get_setting
@@ -81,7 +84,7 @@ class MainTab(QWidget):
         self.show_segmentation_checkbox: Optional[QCheckBox] = None
         self.ransac_checkbox: Optional[QCheckBox] = None
         self.available_segmentation_models: List[str] = []
-        self.classified_lines: Dict[str, np.ndarray] = {}  # Store classified field lines
+        self.tracked_lines: List[Dict[str, Any]] = []  # Store Kalman-filtered field lines
         self.all_lines_for_display: Dict[str, Tuple[np.ndarray, float, bool]] = {}  # Store all lines for display
         
         # Homography state
@@ -873,7 +876,7 @@ class MainTab(QWidget):
         else:
             # Clear field results when disabled
             self.current_field_results = []
-            self.classified_lines = {}
+            self.tracked_lines = []
             self.all_lines_for_display = {}
         
         # Run player ID if enabled (requires tracking to be active)
@@ -933,7 +936,7 @@ class MainTab(QWidget):
         return frame
     
     def _apply_visualizations(self, frame):
-        """Apply visualization overlays to frame with memory optimization.
+        """Apply visualization overlays to frame with memory and performance optimization.
         
         Args:
             frame: Frame to add visualizations to
@@ -941,34 +944,58 @@ class MainTab(QWidget):
         Returns:
             Frame with visualizations applied
         """
-        # Apply field segmentation overlay first (as background)
+        # Early return for minimal processing if no overlays are enabled
+        viz_enabled = (self.field_segmentation_checkbox.isChecked() or 
+                      self.current_detections or self.current_tracks)
+        
+        if not viz_enabled:
+            # Add only FPS overlay for minimal processing
+            self._draw_fps_overlay(frame)
+            return frame
+        
+        # Apply field segmentation overlay first (as background) - contour only for better performance
         if self.current_field_results and self.field_segmentation_checkbox.isChecked():
-            # Create and display unified mask with advanced field line detection
+            # Create and display unified mask with RANSAC line detection (no classification)
             frame_shape = frame.shape[:2]  # (height, width)
             unified_mask = create_unified_field_mask(self.current_field_results, frame_shape)
             
             if unified_mask is not None:
-                # Use bright green for unified field mask
-                field_color = (0, 255, 0)  # Bright green (BGR)
-                frame, self.classified_lines, self.all_lines_for_display = draw_unified_field_mask(frame, unified_mask, field_color, alpha=0.3)
-                print(f"[MAIN_TAB] Applied unified mask to frame: {np.sum(unified_mask)} pixels")
+                # Extract raw RANSAC lines directly for Kalman tracking (bypass classification)
+                detected_lines, confidences = extract_raw_lines_from_segmentation(
+                    self.current_field_results, frame_shape)
                 
-                # Add line labelling if we have classified lines
+                # Apply Kalman filtering to track lines over time
+                if detected_lines:
+                    self.tracked_lines = track_lines(detected_lines, confidences)
+                    print(f"[MAIN_TAB] Tracking {len(self.tracked_lines)} lines with Kalman filter")
+                else:
+                    self.tracked_lines = []
+                
+                # Use bright green for unified field mask - contour only, no fill for better runtime
+                field_color = (0, 255, 0)  # Bright green (BGR)
+                frame, raw_lines_dict, self.all_lines_for_display = draw_unified_field_mask(
+                    frame, unified_mask, field_color, alpha=0.3, fill_mask=False)
+                print(f"[MAIN_TAB] Applied field contour (no fill) to frame: {np.sum(unified_mask)} pixels")
+                
+                # Draw raw RANSAC lines only in main view (tracking data for top-down view)
                 if self.all_lines_for_display:
-                    frame = draw_all_field_lines(frame, self.all_lines_for_display, scale_factor=1.0)
-                    print(f"[MAIN_TAB] Added line labels for {len(self.all_lines_for_display)} field lines")
+                    frame = draw_all_field_lines(frame, self.all_lines_for_display, 
+                                               scale_factor=1.0, draw_raw_lines_only=True)
+                    print(f"[MAIN_TAB] Added raw RANSAC lines for {len(self.all_lines_for_display)} field lines")
             else:
                 print("[MAIN_TAB] No unified mask could be created")
-                self.classified_lines = {}
+                self.tracked_lines = []
                 self.all_lines_for_display = {}
+        
+        # Conditional visualization based on enabled options (avoid unnecessary processing)
         
         # Show detections only if tracking is NOT enabled (to avoid visual clutter)
         if self.current_detections and not self.tracking_checkbox.isChecked():
             frame = draw_detections(frame, self.current_detections, inplace=True)
         
         # Show tracking visualization if tracking is enabled
-        if self.current_tracks and self.tracking_checkbox.isChecked():
-            # Get track histories for trajectory visualization
+        elif self.current_tracks and self.tracking_checkbox.isChecked():
+            # Get track histories for trajectory visualization (cached in processing module)
             track_histories = get_track_histories()
             
             # Use player ID visualization if player ID is enabled (even if no IDs detected yet)
@@ -977,11 +1004,11 @@ class MainTab(QWidget):
             else:
                 frame = draw_tracks(frame, self.current_tracks, track_histories)
         
-        # Add FPS overlay to top right
+        # Add FPS overlay to top right (lightweight)
         self._draw_fps_overlay(frame)
         
-        # Add jersey tracking table overlay if player ID is enabled
-        if self.player_id_checkbox.isChecked():
+        # Add jersey tracking table overlay if player ID is enabled (conditional rendering)
+        if self.player_id_checkbox.isChecked() and self.current_player_ids:
             self._draw_jersey_table_overlay(frame)
         
         return frame
@@ -1280,8 +1307,10 @@ class MainTab(QWidget):
         else:
             print("[MAIN_TAB] Field segmentation disabled")
             self.current_segmentation_results = None
-            self.classified_lines = {}
+            self.tracked_lines = []
             self.all_lines_for_display = {}
+            # Reset line tracker when segmentation is disabled
+            reset_line_tracker()
             
         self._request_display_update()
     
@@ -1313,8 +1342,10 @@ class MainTab(QWidget):
         if self.show_segmentation and self.current_field_results:
             # Force re-run segmentation with new RANSAC setting
             self.current_field_results = None
-            self.classified_lines = {}
+            self.tracked_lines = []
             self.all_lines_for_display = {}
+            # Reset line tracker when RANSAC settings change
+            reset_line_tracker()
             self._request_display_update()
     
     def _on_segmentation_model_changed(self, display_name: str):
@@ -1374,16 +1405,18 @@ class MainTab(QWidget):
             warped_mask = np.zeros((warped_frame.shape[0], warped_frame.shape[1]), dtype=np.uint8)
             cv2.fillPoly(warped_mask, [transformed_contour], 1)
             
-            # Apply overlay and draw contour on warped frame
+            # Apply overlay and draw contour on warped frame - contour only for consistency
             field_color = (0, 255, 0)  # Bright green (BGR)
             from .visualization import draw_unified_field_mask, draw_field_contour
-            result_frame, _, _ = draw_unified_field_mask(warped_frame, warped_mask, field_color, alpha=0.4, draw_contour=False)
+            result_frame, _, _ = draw_unified_field_mask(warped_frame, warped_mask, field_color, 
+                                                       alpha=0.4, draw_contour=False, fill_mask=False)
             
             # Draw the transformed contour directly
             result_frame = draw_field_contour(result_frame, transformed_contour)
             
-            # Note: Field lines will be drawn later in _update_homography_display() with proper scale_factor for top-down view
-            # This avoids duplicate text/labels in the homography display
+            # Note: Field lines will be drawn later in _update_homography_display() 
+            # with proper scale_factor and classification for top-down view
+            # This avoids duplicate text/labels and ensures consistent processing
             
             print(f"[MAIN_TAB] Applied transformed contour to warped frame: {len(transformed_contour)} points")
             return result_frame
@@ -1604,15 +1637,23 @@ class MainTab(QWidget):
                         except Exception as e:
                             print(f"[MAIN_TAB] Error applying segmentation to homography view: {e}")
                     
-                    # Apply field line visualization if available (with larger text for top-down view)
-                    if self.all_lines_for_display:
-                        warped_frame = draw_all_field_lines(warped_frame, self.all_lines_for_display, self.homography_matrix, scale_factor=1.5)
-                        print(f"[MAIN_TAB] Applied {len(self.all_lines_for_display)} field lines to homography view")
-                    
                     # Map tracked objects to top-down view if tracking is enabled
                     if self.tracking_checkbox.isChecked() and self.current_tracks:
                         warped_frame = self._map_tracked_objects_to_top_down(warped_frame)
                         print(f"[MAIN_TAB] Mapped {len(self.current_tracks)} tracked objects to top-down view")
+                    
+                    # Add Kalman-tracked field lines to top-down view
+                    if self.tracked_lines:
+                        # Use tracked lines with confidence display for top-down view
+                        warped_frame = draw_tracked_field_lines(warped_frame, self.tracked_lines, 
+                                                              self.homography_matrix, scale_factor=2.0)
+                        print(f"[MAIN_TAB] Added Kalman-tracked field lines to top-down view: {len(self.tracked_lines)} lines")
+                    elif self.all_lines_for_display:
+                        # Fallback to classified lines if no tracked lines available
+                        warped_frame = draw_all_field_lines(warped_frame, self.all_lines_for_display, 
+                                                          self.homography_matrix, scale_factor=2.0, 
+                                                          draw_raw_lines_only=False)
+                        print(f"[MAIN_TAB] Added classified field lines to top-down view (fallback): {len(self.all_lines_for_display)} lines")
                     
                     self.homography_warped_frame = warped_frame
                     

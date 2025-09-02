@@ -7,7 +7,8 @@ with real-time perspective transformation visualization and YAML save/load funct
 import os
 import yaml
 import datetime
-from typing import List, Dict, Optional, Tuple
+import time
+from typing import List, Dict, Optional, Tuple, Any
 from pathlib import Path
 
 import cv2
@@ -16,7 +17,8 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, 
     QPushButton, QSlider, QListWidgetItem, QGroupBox,
     QFormLayout, QSplitter, QFileDialog, QMessageBox,
-    QScrollArea, QSizePolicy, QCheckBox, QSpinBox, QComboBox
+    QScrollArea, QSizePolicy, QCheckBox, QSpinBox, QComboBox,
+    QTableWidget, QTableWidgetItem, QHeaderView, QDialog
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QPoint
 from PyQt5.QtGui import QPixmap, QImage, QWheelEvent, QPainter, QPen, QColor, QMouseEvent
@@ -36,6 +38,9 @@ from ..gui.visualization import (
     draw_classified_field_lines,
     draw_all_field_lines
 )
+from ..processing.line_extraction import extract_raw_lines_from_segmentation
+from .tracked_line_visualization import draw_tracked_field_lines, classify_tracked_lines
+from ..processing.kalman_line_tracker import track_lines, reset_line_tracker
 
 
 class ZoomableImageLabel(QLabel):
@@ -319,8 +324,21 @@ class HomographyTab(QWidget):
         self.show_segmentation_checkbox: Optional[QCheckBox] = None
         self.ransac_checkbox: Optional[QCheckBox] = None
         self.available_segmentation_models: List[str] = []
-        self.classified_lines: Dict[str, np.ndarray] = {}  # Store classified field lines
+        self.tracked_lines: List[Dict[str, Any]] = []  # Store Kalman-filtered field lines
         self.all_lines_for_display: Dict[str, Tuple[np.ndarray, float, bool]] = {}  # Store all lines for display
+        
+        # Runtime performance tracking
+        self.runtime_popup: Optional[QDialog] = None
+        self.runtime_table: Optional[QTableWidget] = None
+        self.runtime_button: Optional[QPushButton] = None
+        self.processing_times: Dict[str, List[float]] = {
+            'Field Segmentation': [],
+            'Morphological Ops': [],
+            'RANSAC Fitting': [],
+            'Line Tracking': [],
+            'Homography Calc': [],
+            'Display Update': []
+        }
         
         # Initialize UI
         self._init_ui()
@@ -447,7 +465,7 @@ class HomographyTab(QWidget):
         
         # RANSAC line fitting checkbox
         self.ransac_checkbox = QCheckBox("Use RANSAC Line Fitting")
-        self.ransac_checkbox.setChecked(get_setting("models.segmentation.contour.ransac.enabled", False))
+        self.ransac_checkbox.setChecked(get_setting("models.segmentation.contour.ransac.enabled", True))
         self.ransac_checkbox.stateChanged.connect(self._on_ransac_toggled)
         self.ransac_checkbox.setToolTip("Fit straight lines to contour segments using RANSAC algorithm")
         segmentation_layout.addWidget(self.ransac_checkbox)
@@ -470,6 +488,38 @@ class HomographyTab(QWidget):
         segmentation_layout.addLayout(model_layout)
         segmentation_group.setLayout(segmentation_layout)
         layout.addWidget(segmentation_group)
+        
+        # Runtime performance button
+        runtime_group = QGroupBox("Performance Monitoring")
+        runtime_layout = QVBoxLayout()
+        
+        self.runtime_button = QPushButton("Show Runtime Performance")
+        self.runtime_button.setMinimumHeight(40)
+        self.runtime_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2c5aa0;
+                color: white;
+                font-weight: bold;
+                border: 2px solid #1e3f73;
+                border-radius: 5px;
+                padding: 8px;
+            }
+            QPushButton:hover {
+                background-color: #3a6bb5;
+            }
+            QPushButton:pressed {
+                background-color: #1e3f73;
+            }
+        """)
+        self.runtime_button.clicked.connect(self._show_runtime_popup)
+        runtime_layout.addWidget(self.runtime_button)
+        
+        runtime_group.setLayout(runtime_layout)
+        layout.addWidget(runtime_group)
+        
+        # Initialize popup window (hidden)
+        self.runtime_popup = None
+        self.runtime_table = None
         
         # Add stretch to push everything to top
         layout.addStretch()
@@ -863,22 +913,55 @@ class HomographyTab(QWidget):
         """Update both original and warped frame displays."""
         if self.current_frame is None:
             return
-            
+        
+        update_start = time.time()
+        
         # Apply segmentation overlay to original frame if enabled
         original_frame = self.current_frame.copy()
         if self.show_segmentation and self.current_segmentation_results:
             # Create and display unified mask on original frame
+            morphological_start = time.time()
             frame_shape = self.current_frame.shape[:2]  # (height, width)
             unified_mask = create_unified_field_mask(self.current_segmentation_results, frame_shape)
+            morphological_duration = (time.time() - morphological_start) * 1000
+            self._add_runtime_measurement('Morphological Ops', morphological_duration)
             
             if unified_mask is not None:
-                # Use bright green for unified field mask
+                # Use bright green for unified field mask - contour only for consistency with main tab
                 field_color = (0, 255, 0)  # Bright green (BGR)
-                original_frame, self.classified_lines, self.all_lines_for_display = draw_unified_field_mask(original_frame, unified_mask, field_color, alpha=0.4)
-                print(f"[HOMOGRAPHY] Applied unified mask to original frame: {np.sum(unified_mask)} pixels")
+                
+                # Time the line extraction and tracking steps
+                extraction_start = time.time()
+                
+                # Extract raw RANSAC lines directly for Kalman tracking (bypass classification)
+                detected_lines, confidences = extract_raw_lines_from_segmentation(
+                    self.current_segmentation_results, frame_shape)
+                
+                extraction_duration = (time.time() - extraction_start) * 1000
+                self._add_runtime_measurement('Line Extraction', extraction_duration)
+                
+                # Apply Kalman filtering to track lines over time
+                tracking_start = time.time()
+                if detected_lines:
+                    self.tracked_lines = track_lines(detected_lines, confidences)
+                    print(f"[HOMOGRAPHY] Tracking {len(self.tracked_lines)} lines with Kalman filter")
+                else:
+                    self.tracked_lines = []
+                
+                tracking_duration = (time.time() - tracking_start) * 1000
+                self._add_runtime_measurement('Kalman Tracking', tracking_duration)
+                
+                # Draw unified mask for visualization (lightweight version without RANSAC re-computation)
+                original_frame, raw_lines_dict, self.all_lines_for_display = draw_unified_field_mask(
+                    original_frame, unified_mask, field_color, alpha=0.4, fill_mask=False)
+                
+                tracking_duration = (time.time() - tracking_start) * 1000
+                self._add_runtime_measurement('Line Tracking', tracking_duration)
+                
+                print(f"[HOMOGRAPHY] Applied field contour (no fill) to original frame: {np.sum(unified_mask)} pixels")
             else:
                 print("[HOMOGRAPHY] No unified mask could be created for original frame")
-                self.classified_lines = {}
+                self.tracked_lines = []
                 self.all_lines_for_display = {}
         elif self.show_segmentation:
             print("[HOMOGRAPHY] Segmentation enabled but no results available")
@@ -887,7 +970,11 @@ class HomographyTab(QWidget):
         self._display_frame(original_frame, self.original_display)
         
         # Create warped frame
+        homography_start = time.time()
         warped_frame = self._apply_homography(self.current_frame)
+        homography_duration = (time.time() - homography_start) * 1000
+        self._add_runtime_measurement('Homography Calc', homography_duration)
+        
         print(f"[HOMOGRAPHY] Warped frame shape: {warped_frame.shape}, dtype: {warped_frame.dtype}")
         
         # For warped view, apply segmentation overlay if enabled
@@ -906,6 +993,10 @@ class HomographyTab(QWidget):
             print("[HOMOGRAPHY] Segmentation enabled but no results available for warped frame")
         
         self._display_frame(warped_frame, self.warped_display)
+        
+        # Record total display update time
+        update_duration = (time.time() - update_start) * 1000
+        self._add_runtime_measurement('Display Update', update_duration)
         
     def _apply_segmentation_to_warped_frame(self, warped_frame: np.ndarray, segmentation_results: list) -> np.ndarray:
         """Apply segmentation overlay to warped frame by transforming contour points from original image."""
@@ -942,9 +1033,10 @@ class HomographyTab(QWidget):
             warped_mask = np.zeros((warped_frame.shape[0], warped_frame.shape[1]), dtype=np.uint8)
             cv2.fillPoly(warped_mask, [transformed_contour], 1)
             
-            # Apply overlay and draw contour on warped frame
+            # Apply overlay and draw contour on warped frame - contour only for consistency
             field_color = (0, 255, 0)  # Bright green (BGR)
-            result_frame, _, _ = draw_unified_field_mask(warped_frame, warped_mask, field_color, alpha=0.4, draw_contour=False)
+            result_frame, _, _ = draw_unified_field_mask(warped_frame, warped_mask, field_color, 
+                                                       alpha=0.4, draw_contour=False, fill_mask=False)
             
             # Draw the transformed contour directly
             result_frame = draw_field_contour(result_frame, transformed_contour)
@@ -952,13 +1044,16 @@ class HomographyTab(QWidget):
             # Draw all lines (classified and unclassified) if available
             if self.all_lines_for_display:
                 homography_matrix = self._get_homography_matrix()
-                result_frame = draw_all_field_lines(result_frame, self.all_lines_for_display, homography_matrix)
+                result_frame = draw_all_field_lines(result_frame, self.all_lines_for_display, 
+                                                  homography_matrix, scale_factor=2.0, 
+                                                  draw_raw_lines_only=False)  # Show classified lines with simple labels
                 print(f"[HOMOGRAPHY] Drew {len(self.all_lines_for_display)} total field lines on warped frame")
-            elif self.classified_lines:
-                # Fallback to classified lines only if all_lines_for_display is not available
+            elif self.tracked_lines:
+                # Draw Kalman-tracked lines in top-down view with classification colors
                 homography_matrix = self._get_homography_matrix()
-                result_frame = draw_classified_field_lines(result_frame, self.classified_lines, homography_matrix)
-                print(f"[HOMOGRAPHY] Drew {len(self.classified_lines)} classified field lines on warped frame")
+                result_frame = draw_tracked_field_lines(result_frame, self.tracked_lines, 
+                                                      homography_matrix, scale_factor=2.0)
+                print(f"[HOMOGRAPHY] Drew {len(self.tracked_lines)} tracked field lines on warped frame")
             
             print(f"[HOMOGRAPHY] Applied transformed contour to warped frame: {len(transformed_contour)} points")
             return result_frame
@@ -1328,9 +1423,13 @@ class HomographyTab(QWidget):
             
         try:
             print("[HOMOGRAPHY] Running field segmentation on current frame")
+            segmentation_start = time.time()
             self.current_segmentation_results = run_field_segmentation(self.current_frame)
+            segmentation_duration = (time.time() - segmentation_start) * 1000
+            self._add_runtime_measurement('Field Segmentation', segmentation_duration)
+            
             if self.current_segmentation_results:
-                print(f"[HOMOGRAPHY] Segmentation complete: {len(self.current_segmentation_results)} results")
+                print(f"[HOMOGRAPHY] Segmentation complete: {len(self.current_segmentation_results)} results ({segmentation_duration:.1f}ms)")
                 # Debug: Check if results have masks
                 for i, result in enumerate(self.current_segmentation_results):
                     if hasattr(result, 'masks') and result.masks is not None:
@@ -1468,3 +1567,160 @@ class HomographyTab(QWidget):
                 print(f"[HOMOGRAPHY] Error loading segmentation model: {e}")
         else:
             print(f"[HOMOGRAPHY] Invalid model path: {model_path}")
+    
+    def _show_runtime_popup(self) -> None:
+        """Show the runtime performance popup window."""
+        if self.runtime_popup is None:
+            # Create the popup window
+            self.runtime_popup = QDialog(self)
+            self.runtime_popup.setWindowTitle("Processing Runtime Performance")
+            self.runtime_popup.setModal(False)  # Allow interaction with main window
+            self.runtime_popup.resize(500, 350)
+            
+            # Set dark background
+            self.runtime_popup.setStyleSheet("""
+                QDialog {
+                    background-color: #1a1a1a;
+                    color: #ffffff;
+                }
+                QLabel {
+                    color: #ffffff;
+                    font-size: 12px;
+                }
+                QTableWidget {
+                    background-color: #000000;
+                    color: #ffffff;
+                    gridline-color: #333333;
+                    border: 1px solid #555555;
+                    selection-background-color: #2c5aa0;
+                }
+                QTableWidget::item {
+                    padding: 4px;
+                    border-bottom: 1px solid #333333;
+                }
+                QTableWidget QHeaderView::section {
+                    background-color: #2a2a2a;
+                    color: #ffffff;
+                    padding: 4px;
+                    border: 1px solid #555555;
+                    font-weight: bold;
+                }
+            """)
+            
+            # Create layout
+            popup_layout = QVBoxLayout()
+            
+            # Add title
+            title_label = QLabel("Processing Runtime Performance (ms)")
+            title_label.setStyleSheet("font-size: 14px; font-weight: bold; margin: 10px;")
+            popup_layout.addWidget(title_label)
+            
+            # Create table
+            self.runtime_table = QTableWidget()
+            self.runtime_table.setColumnCount(4)
+            self.runtime_table.setHorizontalHeaderLabels(["Process", "Current", "Average", "Max"])
+            
+            # Set table properties
+            self.runtime_table.horizontalHeader().setStretchLastSection(True)
+            self.runtime_table.verticalHeader().setVisible(False)
+            self.runtime_table.setAlternatingRowColors(True)
+            
+            # Initialize table with processing steps
+            processes = ['Field Segmentation', 'Morphological Ops', 'RANSAC Fitting', 
+                        'Line Classification', 'Homography Calc', 'Display Update']
+            self.runtime_table.setRowCount(len(processes))
+            
+            for i, process in enumerate(processes):
+                self.runtime_table.setItem(i, 0, QTableWidgetItem(process))
+                self.runtime_table.setItem(i, 1, QTableWidgetItem("0.0"))
+                self.runtime_table.setItem(i, 2, QTableWidgetItem("0.0"))
+                self.runtime_table.setItem(i, 3, QTableWidgetItem("0.0"))
+            
+            # Set column widths
+            header = self.runtime_table.horizontalHeader()
+            header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+            header.setSectionResizeMode(1, QHeaderView.Fixed)
+            header.setSectionResizeMode(2, QHeaderView.Fixed)
+            header.setSectionResizeMode(3, QHeaderView.Stretch)
+            self.runtime_table.setColumnWidth(1, 80)
+            self.runtime_table.setColumnWidth(2, 80)
+            
+            popup_layout.addWidget(self.runtime_table)
+            
+            # Add info label
+            info_label = QLabel("Real-time performance monitoring. Window can be kept open while using the application.")
+            info_label.setStyleSheet("font-size: 10px; color: #cccccc; margin: 5px;")
+            popup_layout.addWidget(info_label)
+            
+            # Add close button
+            close_button = QPushButton("Close")
+            close_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #555555;
+                    color: white;
+                    border: 1px solid #777777;
+                    border-radius: 3px;
+                    padding: 6px;
+                    min-width: 80px;
+                }
+                QPushButton:hover {
+                    background-color: #666666;
+                }
+                QPushButton:pressed {
+                    background-color: #444444;
+                }
+            """)
+            close_button.clicked.connect(self.runtime_popup.close)
+            
+            button_layout = QHBoxLayout()
+            button_layout.addStretch()
+            button_layout.addWidget(close_button)
+            popup_layout.addLayout(button_layout)
+            
+            self.runtime_popup.setLayout(popup_layout)
+        
+        # Show the popup
+        self.runtime_popup.show()
+        self.runtime_popup.raise_()
+        self.runtime_popup.activateWindow()
+    
+    def _add_runtime_measurement(self, process_name: str, duration_ms: float) -> None:
+        """Add a runtime measurement for a specific process.
+        
+        Args:
+            process_name: Name of the process (e.g., 'Field Segmentation')
+            duration_ms: Duration in milliseconds
+        """
+        if process_name in self.processing_times:
+            # Add to history (keep last 10 measurements for rolling average)
+            self.processing_times[process_name].append(duration_ms)
+            if len(self.processing_times[process_name]) > 10:
+                self.processing_times[process_name].pop(0)
+            
+            # Update table
+            self._update_runtime_table()
+    
+    def _update_runtime_table(self) -> None:
+        """Update the runtime performance table with current measurements."""
+        if not self.runtime_table:
+            return
+        
+        processes = ['Field Segmentation', 'Morphological Ops', 'RANSAC Fitting', 
+                    'Line Classification', 'Homography Calc', 'Display Update']
+        
+        for i, process in enumerate(processes):
+            if process in self.processing_times and self.processing_times[process]:
+                times = self.processing_times[process]
+                current = times[-1]  # Most recent measurement
+                average = sum(times) / len(times)  # Rolling average
+                maximum = max(times)  # Maximum in current history
+                
+                # Update table cells
+                self.runtime_table.setItem(i, 1, QTableWidgetItem(f"{current:.1f}"))
+                self.runtime_table.setItem(i, 2, QTableWidgetItem(f"{average:.1f}"))
+                self.runtime_table.setItem(i, 3, QTableWidgetItem(f"{maximum:.1f}"))
+            else:
+                # No measurements yet
+                self.runtime_table.setItem(i, 1, QTableWidgetItem("0.0"))
+                self.runtime_table.setItem(i, 2, QTableWidgetItem("0.0"))
+                self.runtime_table.setItem(i, 3, QTableWidgetItem("0.0"))

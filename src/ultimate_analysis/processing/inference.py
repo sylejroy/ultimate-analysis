@@ -89,8 +89,9 @@ def run_inference(frame: np.ndarray, model_name: Optional[str] = None) -> List[D
         if not set_detection_model(model_name):
             print(f"[INFERENCE] Failed to load model {model_name}, using current model")
     
-    # Ensure we have a model
+    # Ensure we have a model (lazy loading optimization)
     if _detection_model is None:
+        print("[INFERENCE] Loading default model on first use (lazy loading)")
         _load_default_model()
     
     if _detection_model is None:
@@ -318,5 +319,6 @@ def _load_default_model() -> None:
                     print(f"  - {pretrained_path}")
 
 
-# Initialize with default model when module is imported
-_load_default_model()
+# Initialize with default model when first needed (lazy loading)
+# This optimization prevents slow startup by deferring model loading until actually used
+# _load_default_model()  # Commented out for performance optimization
