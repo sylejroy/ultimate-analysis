@@ -110,3 +110,10 @@ Models are cached for performance and organized by training runs in `data/models
 ## License
 
 GNU General Public License v3.0 - see LICENSE file for details.
+
+## Upcoming Features & Improvements
+
+- Enhance disc detection by implementing separate models for player and disc identification.
+- Introduce a “Realtime Mode” that launches the app with only the main tab, streamlining the interface and removing exploratory tabs.
+- Utilize detected field lines to refine the homography matrix—consider integrating a particle filter for improved accuracy.
+- Implement asynchronous processing to boost realtime performance.
