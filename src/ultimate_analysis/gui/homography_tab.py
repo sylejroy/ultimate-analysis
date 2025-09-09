@@ -33,7 +33,6 @@ from ..gui.visualization import (
     draw_field_contour,
     fit_field_lines_ransac,
     draw_field_lines_ransac,
-    draw_classified_field_lines,
     draw_all_field_lines
 )
 
@@ -280,13 +279,13 @@ class HomographyTab(QWidget):
     
     def __init__(self):
         super().__init__()
-        
+
         # Video player and state
         self.video_player = VideoPlayer()
         self.video_files: List[str] = []
         self.current_video_index: int = 0
         self.current_frame: Optional[np.ndarray] = None
-        
+
         # Homography parameters (H[2,2] = 1.0 fixed)
         # Default is identity matrix except for the bottom row scaling
         self.homography_params = {
@@ -294,7 +293,7 @@ class HomographyTab(QWidget):
             'H10': 0.0, 'H11': 1.0, 'H12': 0.0,
             'H20': 0.0, 'H21': 0.0
         }
-        
+
         # UI components
         self.video_list: Optional[QListWidget] = None
         self.frame_label: Optional[QLabel] = None
@@ -302,16 +301,16 @@ class HomographyTab(QWidget):
         self.warped_display: Optional[ZoomableImageLabel] = None
         self.param_sliders: Dict[str, QSlider] = {}
         self.param_labels: Dict[str, QLabel] = {}
-        
+
         # Scrubbing controls
         self.scrubbing_slider: Optional[QSlider] = None
         self.scrubbing_frame_label: Optional[QLabel] = None
         self.current_video_label: Optional[QLabel] = None
-        
+
         # Zoom functionality
         self.original_scroll_area: Optional[QScrollArea] = None
         self.warped_scroll_area: Optional[QScrollArea] = None
-        
+
         # Field segmentation state
         self.show_segmentation = True
         self.current_segmentation_results = None
@@ -319,14 +318,14 @@ class HomographyTab(QWidget):
         self.show_segmentation_checkbox: Optional[QCheckBox] = None
         self.ransac_checkbox: Optional[QCheckBox] = None
         self.available_segmentation_models: List[str] = []
-        self.classified_lines: Dict[str, np.ndarray] = {}  # Store classified field lines
-        self.all_lines_for_display: Dict[str, Tuple[np.ndarray, float, bool]] = {}  # Store all lines for display
-        
+        # Field lines prepared for display: mapping id -> (line_points, confidence, is_classified)
+        self.all_lines_for_display: Dict[str, Tuple[np.ndarray, float, bool]] = {}
+
         # Initialize UI
         self._init_ui()
         self._load_videos()
         self._load_segmentation_models()
-        
+
         # Load default homography parameters from config
         self._load_default_parameters()
         
@@ -356,124 +355,126 @@ class HomographyTab(QWidget):
         """Create the left panel with video list and parameter controls."""
         panel = QWidget()
         layout = QVBoxLayout()
-        
+
         # Video selection section
         video_group = QGroupBox("Video Selection")
         video_layout = QVBoxLayout()
-        
+
         # Video list header
         list_header = QHBoxLayout()
         list_header.addWidget(QLabel("Videos"))
-        
+
         refresh_button = QPushButton("Refresh")
         refresh_button.clicked.connect(self._load_videos)
         refresh_button.setToolTip("Refresh video list")
         list_header.addWidget(refresh_button)
-        
+
         video_layout.addLayout(list_header)
-        
+
         # Video list widget
         self.video_list = QListWidget()
         self.video_list.setMinimumHeight(150)
         self.video_list.currentRowChanged.connect(self._on_video_selection_changed)
         video_layout.addWidget(self.video_list)
-        
+
         # Frame navigation
         frame_nav_layout = QHBoxLayout()
         frame_nav_layout.addWidget(QLabel("Frame:"))
-        
+
         self.frame_label = QLabel("0 / 0")
         frame_nav_layout.addWidget(self.frame_label)
         frame_nav_layout.addStretch()
-        
+
         video_layout.addLayout(frame_nav_layout)
-        
+
         video_group.setLayout(video_layout)
         layout.addWidget(video_group)
-        
+
         # Homography parameters section
         params_group = QGroupBox("Homography Parameters")
         params_layout = QVBoxLayout()
-        
+
         # Create parameter sliders
         self._create_parameter_controls(params_layout)
-        
+
         # Control buttons
         button_layout = QHBoxLayout()
-        
+
         reset_button = QPushButton("Reset")
         reset_button.clicked.connect(self._reset_homography)
         reset_button.setToolTip("Reset to identity matrix")
         button_layout.addWidget(reset_button)
-        
+
         save_button = QPushButton("Save Params")
         save_button.clicked.connect(self._save_parameters)
         save_button.setToolTip("Save parameters to YAML file")
         button_layout.addWidget(save_button)
-        
+
         load_button = QPushButton("Load Params")
         load_button.clicked.connect(self._load_parameters)
         load_button.setToolTip("Load parameters from YAML file")
         button_layout.addWidget(load_button)
-        
+
         # Second row of buttons
         button_layout2 = QHBoxLayout()
-        
+
         save_default_button = QPushButton("Save as Default")
         save_default_button.clicked.connect(self._save_as_default_parameters)
         save_default_button.setToolTip("Save current parameters as default startup values")
         save_default_button.setStyleSheet("background-color: #2c5aa0; color: white; font-weight: bold;")
         button_layout2.addWidget(save_default_button)
-        
+
         load_default_button = QPushButton("Load Default")
         load_default_button.clicked.connect(self._load_default_parameters)
         load_default_button.setToolTip("Load default parameters from config")
         button_layout2.addWidget(load_default_button)
-        
+
         params_layout.addLayout(button_layout)
         params_layout.addLayout(button_layout2)
         params_group.setLayout(params_layout)
         layout.addWidget(params_group)
-        
+
         # Field Segmentation Controls
         segmentation_group = QGroupBox("Field Segmentation")
         segmentation_layout = QVBoxLayout()
-        
+
         # Show segmentation checkbox
         self.show_segmentation_checkbox = QCheckBox("Show Field Segmentation")
         self.show_segmentation_checkbox.setChecked(self.show_segmentation)
         self.show_segmentation_checkbox.stateChanged.connect(self._on_segmentation_toggled)
         segmentation_layout.addWidget(self.show_segmentation_checkbox)
-        
+
         # RANSAC line fitting checkbox
         self.ransac_checkbox = QCheckBox("Use RANSAC Line Fitting")
         self.ransac_checkbox.setChecked(get_setting("models.segmentation.contour.ransac.enabled", False))
         self.ransac_checkbox.stateChanged.connect(self._on_ransac_toggled)
         self.ransac_checkbox.setToolTip("Fit straight lines to contour segments using RANSAC algorithm")
         segmentation_layout.addWidget(self.ransac_checkbox)
-        
+
+    # (Removed) Line classification toggle was removed — classification is disabled globally
+
         # Model selection
         model_layout = QHBoxLayout()
         model_layout.addWidget(QLabel("Model:"))
-        
+
         self.segmentation_model_combo = QComboBox()
         self.segmentation_model_combo.setMinimumWidth(150)
         self.segmentation_model_combo.currentTextChanged.connect(self._on_segmentation_model_changed)
         model_layout.addWidget(self.segmentation_model_combo)
-        
+
         refresh_models_button = QPushButton("↻")
         refresh_models_button.setMaximumWidth(30)
         refresh_models_button.setToolTip("Refresh model list")
         refresh_models_button.clicked.connect(self._load_segmentation_models)
         model_layout.addWidget(refresh_models_button)
-        
+
         segmentation_layout.addLayout(model_layout)
         segmentation_group.setLayout(segmentation_layout)
         layout.addWidget(segmentation_group)
-        
+
         # Add stretch to push everything to top
         layout.addStretch()
-        
+
         panel.setLayout(layout)
         return panel
         
@@ -874,11 +875,11 @@ class HomographyTab(QWidget):
             if unified_mask is not None:
                 # Use bright green for unified field mask
                 field_color = (0, 255, 0)  # Bright green (BGR)
-                original_frame, self.classified_lines, self.all_lines_for_display = draw_unified_field_mask(original_frame, unified_mask, field_color, alpha=0.4)
+                # draw_unified_field_mask returns (frame, classified_lines, all_lines_for_display)
+                original_frame, _, self.all_lines_for_display = draw_unified_field_mask(original_frame, unified_mask, field_color, alpha=0.4)
                 print(f"[HOMOGRAPHY] Applied unified mask to original frame: {np.sum(unified_mask)} pixels")
             else:
                 print("[HOMOGRAPHY] No unified mask could be created for original frame")
-                self.classified_lines = {}
                 self.all_lines_for_display = {}
         elif self.show_segmentation:
             print("[HOMOGRAPHY] Segmentation enabled but no results available")
@@ -949,16 +950,14 @@ class HomographyTab(QWidget):
             # Draw the transformed contour directly
             result_frame = draw_field_contour(result_frame, transformed_contour)
             
-            # Draw all lines (classified and unclassified) if available
+            # Draw prepared field lines for display (if available)
             if self.all_lines_for_display:
                 homography_matrix = self._get_homography_matrix()
-                result_frame = draw_all_field_lines(result_frame, self.all_lines_for_display, homography_matrix)
-                print(f"[HOMOGRAPHY] Drew {len(self.all_lines_for_display)} total field lines on warped frame")
-            elif self.classified_lines:
-                # Fallback to classified lines only if all_lines_for_display is not available
-                homography_matrix = self._get_homography_matrix()
-                result_frame = draw_classified_field_lines(result_frame, self.classified_lines, homography_matrix)
-                print(f"[HOMOGRAPHY] Drew {len(self.classified_lines)} classified field lines on warped frame")
+                try:
+                    result_frame = draw_all_field_lines(result_frame, self.all_lines_for_display, homography_matrix)
+                    print(f"[HOMOGRAPHY] Drew {len(self.all_lines_for_display)} total field lines on warped frame")
+                except Exception as e:
+                    print(f"[HOMOGRAPHY] Error drawing field lines: {e}")
             
             print(f"[HOMOGRAPHY] Applied transformed contour to warped frame: {len(transformed_contour)} points")
             return result_frame
@@ -1446,6 +1445,7 @@ class HomographyTab(QWidget):
         # Update displays if segmentation is currently shown
         if self.show_segmentation and self.current_segmentation_results:
             self._update_displays()
+    
         
     def _on_segmentation_model_changed(self, display_name: str):
         """Handle segmentation model selection change."""
