@@ -312,7 +312,7 @@ class HomographyTab(QWidget):
         self.warped_scroll_area: Optional[QScrollArea] = None
 
         # Field segmentation state
-        self.show_segmentation = True
+        self.show_segmentation = False  # Start with segmentation DISABLED for fast loading
         self.current_segmentation_results = None
         self.segmentation_model_combo: Optional[QComboBox] = None
         self.show_segmentation_checkbox: Optional[QCheckBox] = None
@@ -321,13 +321,23 @@ class HomographyTab(QWidget):
         # Field lines prepared for display: mapping id -> (line_points, confidence, is_classified)
         self.all_lines_for_display: Dict[str, Tuple[np.ndarray, float, bool]] = {}
 
-        # Initialize UI
+        print("[HOMOGRAPHY] Initializing UI...")
+        # Initialize UI first
         self._init_ui()
+        
+        print("[HOMOGRAPHY] Loading video files...")
+        # Load videos (lightweight operation)
         self._load_videos()
+        
+        print("[HOMOGRAPHY] Loading segmentation models...")
+        # Load segmentation models list (just file discovery, no model loading)
         self._load_segmentation_models()
 
+        print("[HOMOGRAPHY] Loading default parameters...")
         # Load default homography parameters from config
         self._load_default_parameters()
+        
+        print("[HOMOGRAPHY] Tab initialization complete")
         
     def _init_ui(self):
         """Initialize the user interface."""
@@ -440,7 +450,10 @@ class HomographyTab(QWidget):
 
         # Show segmentation checkbox
         self.show_segmentation_checkbox = QCheckBox("Show Field Segmentation")
+        # Set checkbox state without triggering signal during initialization
+        self.show_segmentation_checkbox.blockSignals(True)
         self.show_segmentation_checkbox.setChecked(self.show_segmentation)
+        self.show_segmentation_checkbox.blockSignals(False)
         self.show_segmentation_checkbox.stateChanged.connect(self._on_segmentation_toggled)
         segmentation_layout.addWidget(self.show_segmentation_checkbox)
 
@@ -791,7 +804,20 @@ class HomographyTab(QWidget):
             first_frame = self.video_player.get_current_frame()
             if first_frame is not None:
                 self.current_frame = first_frame.copy()
-                self._update_displays()
+                # Update displays WITHOUT running segmentation initially (for fast loading)
+                self._update_displays_without_segmentation()
+                
+    def _update_displays_without_segmentation(self):
+        """Update displays without running segmentation - for fast initial loading."""
+        if self.current_frame is None:
+            return
+            
+        # Display original frame without segmentation overlay
+        self._display_frame(self.current_frame, self.original_display)
+        
+        # Create and display warped frame without segmentation overlay  
+        warped_frame = self._apply_homography(self.current_frame)
+        self._display_frame(warped_frame, self.warped_display)
                 
     def _on_frame_changed(self, frame_idx: int):
         """Handle frame slider change."""
@@ -863,6 +889,11 @@ class HomographyTab(QWidget):
     def _update_displays(self):
         """Update both original and warped frame displays."""
         if self.current_frame is None:
+            return
+        
+        # If segmentation is disabled, use fast update
+        if not self.show_segmentation:
+            self._update_displays_without_segmentation()
             return
             
         # Apply segmentation overlay to original frame if enabled
