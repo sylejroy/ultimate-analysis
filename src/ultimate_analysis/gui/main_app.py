@@ -12,9 +12,10 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPalette, QColor
 
 from .main_tab import MainTab
-from .easyocr_tuning_tab import EasyOCRTuningTab
-from .model_tuning_tab import ModelTuningTab
-from .homography_tab import HomographyTab
+# Import other tabs only when needed to avoid dependency issues during testing
+# from .easyocr_tuning_tab import EasyOCRTuningTab
+# from .model_tuning_tab import ModelTuningTab
+# from .homography_tab import HomographyTab
 from ..config.settings import get_setting
 from ..constants import DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT, MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT
 
@@ -22,22 +23,34 @@ from ..constants import DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT, MIN_WINDOW_
 class UltimateAnalysisApp(QMainWindow):
     """Main application window with tabbed interface."""
     
-    def __init__(self):
+    def __init__(self, realtime_mode: bool = False):
+        """Initialize the main application window.
+        
+        Args:
+            realtime_mode: If True, show only the main tab for streamlined interface
+        """
         super().__init__()
         
         # Application state
         self._current_video_path: Optional[str] = None
+        self._realtime_mode = realtime_mode
         
         # Initialize UI
         self._init_ui()
         self._setup_dark_theme()
         
-        print("[APP] Ultimate Analysis application initialized")
+        mode_text = "realtime mode" if realtime_mode else "full mode"
+        print(f"[APP] Ultimate Analysis application initialized in {mode_text}")
     
     def _init_ui(self):
         """Initialize the user interface."""
         # Window properties
-        self.setWindowTitle(get_setting("app.name", "Ultimate Analysis"))
+        app_name = get_setting("app.name", "Ultimate Analysis")
+        if self._realtime_mode:
+            window_title = f"{app_name} - Realtime Mode"
+        else:
+            window_title = app_name
+        self.setWindowTitle(window_title)
         self.setMinimumSize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
         self.resize(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
         
@@ -55,33 +68,48 @@ class UltimateAnalysisApp(QMainWindow):
         self.tab_widget.setTabPosition(QTabWidget.North)
         layout.addWidget(self.tab_widget)
         
-        # Create main tab
+        # Create main tab (always present)
         self.main_tab = MainTab()
         self.main_tab.video_changed.connect(self._on_video_changed)
         self.tab_widget.addTab(self.main_tab, "Main Analysis")
         
-        # Create EasyOCR tuning tab
-        self.easyocr_tab = EasyOCRTuningTab()
-        self.tab_widget.addTab(self.easyocr_tab, "EasyOCR Tuning")
-        
-        # Create Model Tuning tab
-        self.model_tuning_tab = ModelTuningTab()
-        self.tab_widget.addTab(self.model_tuning_tab, "Model Training")
-        
-        # Create Homography Estimation tab
-        self.homography_tab = HomographyTab()
-        self.tab_widget.addTab(self.homography_tab, "Homography Estimation")
-        
-        # TODO: Add more tabs as needed
-        # Example placeholder tabs:
-        # self.tab_widget.addTab(QWidget(), "Data Preprocessing") 
-        # self.tab_widget.addTab(QWidget(), "Performance Analysis")
+        # Add additional tabs only if not in realtime mode
+        if not self._realtime_mode:
+            try:
+                # Import tabs dynamically to avoid dependency issues
+                from .easyocr_tuning_tab import EasyOCRTuningTab
+                from .model_tuning_tab import ModelTuningTab  
+                from .homography_tab import HomographyTab
+                
+                # Create EasyOCR tuning tab
+                self.easyocr_tab = EasyOCRTuningTab()
+                self.tab_widget.addTab(self.easyocr_tab, "EasyOCR Tuning")
+                
+                # Create Model Tuning tab
+                self.model_tuning_tab = ModelTuningTab()
+                self.tab_widget.addTab(self.model_tuning_tab, "Model Training")
+                
+                # Create Homography Estimation tab
+                self.homography_tab = HomographyTab()
+                self.tab_widget.addTab(self.homography_tab, "Homography Estimation")
+                
+                # TODO: Add more tabs as needed
+                # Example placeholder tabs:
+                # self.tab_widget.addTab(QWidget(), "Data Preprocessing") 
+                # self.tab_widget.addTab(QWidget(), "Performance Analysis")
+            except ImportError as e:
+                print(f"[APP] Warning: Could not load some tabs due to missing dependencies: {e}")
+                print("[APP] Some features may not be available. Install missing dependencies to access all tabs.")
         
         # Status bar
         self.status_bar = self.statusBar()
-        self.status_bar.showMessage("Ready")
+        if self._realtime_mode:
+            self.status_bar.showMessage("Ready - Realtime Mode")
+        else:
+            self.status_bar.showMessage("Ready")
         
-        print("[APP] UI initialized with main tab")
+        mode_info = "realtime mode (main tab only)" if self._realtime_mode else "full mode (all tabs)"
+        print(f"[APP] UI initialized in {mode_info}")
     
     def _setup_dark_theme(self):
         """Setup dark theme for the application."""
@@ -408,18 +436,23 @@ def create_application() -> QApplication:
     return app
 
 
-def main():
-    """Main entry point for the Ultimate Analysis application."""
-    print("[APP] Starting Ultimate Analysis...")
+def main(realtime_mode: bool = False):
+    """Main entry point for the Ultimate Analysis application.
+    
+    Args:
+        realtime_mode: If True, launch in realtime mode with only the main tab
+    """
+    mode_text = "realtime mode" if realtime_mode else "full mode"
+    print(f"[APP] Starting Ultimate Analysis in {mode_text}...")
     
     # Create application
     app = create_application()
     
     # Create main window
-    main_window = UltimateAnalysisApp()
+    main_window = UltimateAnalysisApp(realtime_mode=realtime_mode)
     main_window.show()
     
-    print("[APP] Application started, entering event loop")
+    print(f"[APP] Application started in {mode_text}, entering event loop")
     
     # Run event loop
     try:
