@@ -974,8 +974,9 @@ class MainTab(QWidget):
                     self.ransac_lines = []
                     self.ransac_confidences = []
                 
-                # Use bright green for unified field mask - contour only, no fill for better runtime
-                field_color = (0, 255, 0)  # Bright green (BGR)
+                # Use the same color as segmentation for consistency
+                from .visualization import get_primary_field_color
+                field_color = get_primary_field_color()  # Bright cyan (BGR) - same as segmentation
                 frame, raw_lines_dict, self.all_lines_for_display = draw_unified_field_mask(
                     frame, unified_mask, field_color, alpha=0.3, fill_mask=False)
                 print(f"[MAIN_TAB] Applied field contour (no fill) to frame: {np.sum(unified_mask)} pixels")
@@ -1415,8 +1416,8 @@ class MainTab(QWidget):
             cv2.fillPoly(warped_mask, [transformed_contour], 1)
             
             # Apply overlay and draw contour on warped frame - contour only for consistency
-            field_color = (0, 255, 0)  # Bright green (BGR)
-            from .visualization import draw_unified_field_mask, draw_field_contour
+            from .visualization import draw_unified_field_mask, draw_field_contour, get_primary_field_color
+            field_color = get_primary_field_color()  # Bright cyan (BGR) - same as segmentation
             result_frame, _, _ = draw_unified_field_mask(warped_frame, warped_mask, field_color, 
                                                        alpha=0.4, draw_contour=False, fill_mask=False)
             

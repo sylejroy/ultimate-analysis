@@ -34,7 +34,8 @@ from ..gui.visualization import (
     calculate_field_contour,
     draw_field_contour,
     draw_field_lines_ransac,
-    draw_all_field_lines
+    draw_all_field_lines,
+    get_primary_field_color
 )
 from ..processing.line_extraction import extract_raw_lines_from_segmentation
 from .ransac_line_visualization import draw_ransac_field_lines
@@ -956,8 +957,8 @@ class HomographyTab(QWidget):
             self._add_runtime_measurement('Morphological Ops', morphological_duration)
             
             if unified_mask is not None:
-                # Use bright green for unified field mask - contour only for consistency with main tab
-                field_color = (0, 255, 0)  # Bright green (BGR)
+                # Use same color as segmentation visualization for consistency
+                field_color = get_primary_field_color()  # Cyan (BGR)
                 
                 # Time the line extraction and tracking steps
                 extraction_start = time.time()
@@ -1059,7 +1060,7 @@ class HomographyTab(QWidget):
             cv2.fillPoly(warped_mask, [transformed_contour], 1)
             
             # Apply overlay and draw contour on warped frame - contour only for consistency
-            field_color = (0, 255, 0)  # Bright green (BGR)
+            field_color = get_primary_field_color()  # Cyan (BGR)
             result_frame, _, _ = draw_unified_field_mask(warped_frame, warped_mask, field_color, 
                                                        alpha=0.4, draw_contour=False, fill_mask=False)
             

@@ -12,6 +12,28 @@ from ..constants import VISUALIZATION_COLORS
 from ..config.settings import get_setting
 
 
+def get_segmentation_colors() -> Dict[int, Tuple[int, int, int]]:
+    """Get the standard segmentation colors used throughout the application.
+    
+    Returns:
+        Dictionary mapping class indices to BGR color tuples
+    """
+    return {
+        0: (0, 255, 255),    # Central Field: bright cyan (BGR)
+        1: (255, 0, 255)     # Endzone: bright magenta (BGR)
+    }
+
+
+def get_primary_field_color() -> Tuple[int, int, int]:
+    """Get the primary field color (central field) for consistent visualization.
+    
+    Returns:
+        BGR color tuple for the primary field area
+    """
+    colors = get_segmentation_colors()
+    return colors[0]  # Return central field color (cyan)
+
+
 def filter_edge_points(contour: np.ndarray, 
                       frame_shape: tuple,
                       edge_margin: int = 20) -> tuple[np.ndarray, np.ndarray]:
@@ -728,11 +750,8 @@ def _draw_segmentation_masks(frame: np.ndarray, masks: np.ndarray) -> np.ndarray
     overlay = frame.copy()
     color_mask = np.zeros_like(frame)
     
-    # Define colors for different field regions - made much brighter for better visibility
-    color_dict = {
-        0: (0, 255, 255),    # Central Field: bright cyan (BGR)
-        1: (255, 0, 255)     # Endzone: bright magenta (BGR)
-    }
+    # Use centralized segmentation colors for consistency
+    color_dict = get_segmentation_colors()
     
     name_dict = {
         0: "Central Field", 
@@ -997,6 +1016,9 @@ def draw_field_lines_ransac_with_outliers(frame: np.ndarray,
                 if segment_outliers is not None and len(segment_outliers) > 0:
                     for point in segment_outliers:
                         center = (int(point[0]), int(point[1]))
+                        # Draw white border for better visibility
+                        cv2.circle(result, center, outlier_radius + 1, (255, 255, 255), -1)
+                        # Draw colored point on top
                         cv2.circle(result, center, outlier_radius, outlier_color, -1)
                         outlier_count += 1
             
@@ -1138,6 +1160,9 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
                         for point in edge_filtered_points:
                             x, y = int(point[0]), int(point[1])
                             if 0 <= x < result.shape[1] and 0 <= y < result.shape[0]:
+                                # Draw white border for better visibility
+                                cv2.circle(result, (x, y), edge_radius + 1, (255, 255, 255), -1)
+                                # Draw colored point on top
                                 cv2.circle(result, (x, y), edge_radius, edge_color, -1)
                         
                         print(f"[VISUALIZATION] Drew {len(edge_filtered_points)} edge-filtered points")
@@ -1156,6 +1181,9 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
                                 for point in inlier_segment:
                                     x, y = int(point[0]), int(point[1])
                                     if 0 <= x < result.shape[1] and 0 <= y < result.shape[0]:
+                                        # Draw white border for better visibility
+                                        cv2.circle(result, (x, y), inlier_radius + 1, (255, 255, 255), -1)
+                                        # Draw colored point on top
                                         cv2.circle(result, (x, y), inlier_radius, inlier_color, -1)
                                         total_inliers += 1
                         

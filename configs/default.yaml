@@ -52,7 +52,7 @@ models:
       # Contour interpolation parameters
       interpolation:
         enabled: true            # Whether to interpolate contour points for denser sampling
-        max_point_distance: 10   # Maximum distance between consecutive points in pixels
+        max_point_distance: 20   # Maximum distance between consecutive points in pixels
         min_point_distance: 3    # Minimum distance to avoid over-densification
       
       # RANSAC line fitting parameters
@@ -64,18 +64,18 @@ models:
         max_trials: 20        # Maximum RANSAC iterations per line segment
         line_color: [0, 255, 0] # BGR color for RANSAC lines (green)
         outlier_color: [0, 165, 255] # BGR color for RANSAC outlier points (orange)
-        outlier_radius: 4       # Radius for outlier point visualization
-        show_outliers: false     # Whether to visualize RANSAC outliers
+        outlier_radius: 6       # Radius for outlier point visualization (increased for visibility)
+        show_outliers: true     # Whether to visualize RANSAC outliers (enabled)
         inlier_color: [0, 255, 0] # BGR color for RANSAC inlier points (green)
-        inlier_radius: 2        # Radius for inlier point visualization
-        show_inliers: false      # Whether to visualize RANSAC inliers
+        inlier_radius: 5        # Radius for inlier point visualization (increased for visibility)
+        show_inliers: true      # Whether to visualize RANSAC inliers (enabled)
         
         # Edge filtering parameters
         edge_filtering:
           enabled: true         # Whether to filter points near image edges
           margin: 15           # Distance from edge in pixels to consider as "near edge"
           edge_point_color: [0, 0, 255] # BGR color for filtered edge points (red)
-          edge_point_radius: 4  # Radius for edge point visualization
+          edge_point_radius: 6  # Radius for edge point visualization (increased for visibility)
           show_edge_points: true # Whether to visualize filtered edge points
   
   tracking:
