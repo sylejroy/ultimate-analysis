@@ -545,7 +545,7 @@ class HomographyTab(QWidget):
         return panel
         
     def _create_right_panel(self) -> QWidget:
-        """Create the right panel with vertically stacked zoomable displays."""
+        """Create the right panel with side-by-side zoomable displays."""
         panel = QWidget()
         layout = QVBoxLayout()
         
@@ -554,6 +554,9 @@ class HomographyTab(QWidget):
         header.setAlignment(Qt.AlignCenter)
         header.setStyleSheet("font-size: 14px; font-weight: bold; margin: 10px;")
         layout.addWidget(header)
+        
+        # Create horizontal layout for side-by-side image displays
+        images_layout = QHBoxLayout()
         
         # Original frame display with scroll area and scrubbing controls
         original_group = QGroupBox("Original Frame")
@@ -584,7 +587,7 @@ class HomographyTab(QWidget):
         original_layout.addWidget(scrubbing_panel)
         
         original_group.setLayout(original_layout)
-        layout.addWidget(original_group)
+        images_layout.addWidget(original_group)
         
         # Warped frame display with scroll area
         warped_group = QGroupBox("Warped Frame (3:1 aspect ratio)")
@@ -610,7 +613,10 @@ class HomographyTab(QWidget):
         self.warped_scroll_area.setWidget(self.warped_display)
         warped_layout.addWidget(self.warped_scroll_area)
         warped_group.setLayout(warped_layout)
-        layout.addWidget(warped_group)
+        images_layout.addWidget(warped_group)
+        
+        # Add the side-by-side images layout to main layout
+        layout.addLayout(images_layout)
         
         # Reset zoom buttons
         zoom_layout = QHBoxLayout()
