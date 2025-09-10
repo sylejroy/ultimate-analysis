@@ -33,7 +33,6 @@ from ..gui.visualization import (
     draw_unified_field_mask,
     calculate_field_contour,
     draw_field_contour,
-    fit_field_lines_ransac,
     draw_field_lines_ransac,
     draw_classified_field_lines,
     draw_all_field_lines
