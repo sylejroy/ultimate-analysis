@@ -1,3 +1,7 @@
+# Ultimate Analysis - Training Configuration
+# This file contains all settings related to model training
+
+# Detection Model Training Settings
 detection:
   augment: false
   batch_size: 0.8
@@ -16,11 +20,8 @@ detection:
   patience: 10
   weight_decay: 0.0005
   workers: 8
-output:
-  save_models: true
-  save_plots: true
-  save_results: true
-  verbose: true
+
+# Segmentation Model Training Settings
 segmentation:
   augment: true
   batch_size: 4.0
@@ -39,3 +40,43 @@ segmentation:
   patience: 20
   weight_decay: 0.0005
   workers: 0
+
+# Player ID Model Training Settings
+player_id:
+  augment: true
+  batch_size: 16
+  epochs: 100
+  learning_rate: 0.01
+  momentum: 0.9
+  weight_decay: 0.0001
+  dropout: 0.5
+  
+# Data Management
+data:
+  train_split: 0.8
+  val_split: 0.15
+  test_split: 0.05
+  random_seed: 42
+  augmentation_factor: 3
+  
+# Output Settings
+output:
+  save_models: true
+  save_plots: true
+  save_results: true
+  verbose: true
+  model_format: "pt"  # pt, onnx, torchscript
+  
+# Hardware Settings
+hardware:
+  device: "auto"  # auto, cpu, cuda, mps
+  multi_gpu: false
+  fp16: false
+  amp: true  # Automatic mixed precision
+
+# Validation Settings
+validation:
+  interval: 10  # Validate every N epochs
+  save_best: true
+  early_stopping: true
+  min_delta: 0.001

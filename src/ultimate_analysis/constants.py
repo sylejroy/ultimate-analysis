@@ -90,7 +90,25 @@ FALLBACK_DEFAULTS = {
     'nms_threshold': 0.45,
     'tracker_type': 'deepsort',
     'model_detection': 'data/models/detection/object_detection_yolo11l/finetune3/weights/best.pt',
-    'model_segmentation': 'yolo11l-seg.pt',
+    'model_segmentation': 'data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt',
+}
+
+# Configuration file paths
+CONFIG_FILES = {
+    'PROCESSING': 'configs/processing.yaml',
+    'TRAINING': 'configs/training.yaml',
+    'DEFAULT': 'configs/processing.yaml',  # DEFAULT now points to processing.yaml
+}
+
+# Homography optimization parameters (used when config unavailable)
+HOMOGRAPHY_OPTIMIZATION = {
+    'learning_rate': 0.001,
+    'max_adjustment': 0.1,
+    'vertical_threshold_degrees': 15.0,
+    'horizontal_threshold_degrees': 15.0,
+    'bottom_alignment_weight': 1.0,
+    'vertical_alignment_weight': 1.0,
+    'horizontal_alignment_weight': 1.0,
 }
 
 # Video file extensions (system constraint)

@@ -16,7 +16,8 @@ from pathlib import Path
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, 
     QCheckBox, QPushButton, QSlider, QListWidgetItem, QGroupBox,
-    QFormLayout, QComboBox, QShortcut, QSplitter, QSizePolicy, QScrollArea
+    QFormLayout, QComboBox, QShortcut, QSplitter, QSizePolicy, QScrollArea,
+    QTableWidget, QTableWidgetItem, QHeaderView
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QPixmap, QImage, QKeySequence
@@ -25,7 +26,6 @@ from .video_player import VideoPlayer
 from .homography_tab import ZoomableImageLabel
 from .visualization import draw_detections, draw_tracks, draw_tracks_with_player_ids, draw_unified_field_mask, create_unified_field_mask, draw_all_field_lines, draw_field_segmentation
 from .ransac_line_visualization import draw_ransac_field_lines
-from .performance_widget import PerformanceWidget
 from ..processing import (
     run_inference, run_tracking, run_player_id_on_tracks, run_field_segmentation,
     set_detection_model, set_field_model, set_tracker_type, 
@@ -118,6 +118,16 @@ class MainTab(QWidget):
         self.max_frame_samples = 30  # Rolling average over 30 frames
         self.current_fps = 0.0
         
+        # Runtime tracking for performance table
+        self.runtime_data: Dict[str, List[float]] = {
+            'inference': [],
+            'tracking': [],
+            'field_segmentation': [],
+            'player_id': [],
+            'total': []
+        }
+        self.max_runtime_samples = 30  # Keep last 30 samples for averaging
+        
         # Playback timer
         self.playback_timer = QTimer()
         self.playback_timer.timeout.connect(self._on_timer_tick)
@@ -155,38 +165,39 @@ class MainTab(QWidget):
         self._load_segmentation_models()
     
     def _load_homography_params_from_file(self) -> Optional[np.ndarray]:
-        """Load homography matrix from the homography_params.yaml file.
-        
+        """Load homography matrix from the processing.yaml file (homography.current_parameters section).
         Returns:
             Homography matrix as numpy array, or None if loading fails
         """
         try:
-            homography_file = Path("configs/homography_params.yaml")
+            homography_file = Path("configs/processing.yaml")
             if not homography_file.exists():
-                print(f"[MAIN_TAB] Homography params file not found: {homography_file}")
+                print(f"[MAIN_TAB] processing.yaml not found: {homography_file}")
                 return None
-            
-            with open(homography_file, 'r') as f:
+
+            with open(homography_file, 'r', encoding='utf-8') as f:
                 data = yaml.safe_load(f)
-            
-            if 'homography_parameters' not in data:
-                print("[MAIN_TAB] No homography_parameters found in file")
+
+            # Navigate to homography.current_parameters
+            params = None
+            if 'homography' in data and 'current_parameters' in data['homography']:
+                params = data['homography']['current_parameters']
+            else:
+                print("[MAIN_TAB] homography.current_parameters not found in processing.yaml")
                 return None
-            
-            params = data['homography_parameters']
-            
+
             # Reconstruct 3x3 matrix from individual elements
             matrix = np.array([
                 [params['H00'], params['H01'], params['H02']],
                 [params['H10'], params['H11'], params['H12']],
                 [params['H20'], params['H21'], 1.0]  # H22 is typically 1.0
             ], dtype=np.float32)
-            
-            print(f"[MAIN_TAB] Loaded homography matrix from file: {homography_file}")
+
+            print(f"[MAIN_TAB] Loaded homography matrix from processing.yaml")
             print(f"[MAIN_TAB] Matrix:\n{matrix}")
-            
+
             return matrix
-            
+
         except Exception as e:
             print(f"[MAIN_TAB] Error loading homography parameters: {e}")
             return None
@@ -354,9 +365,40 @@ class MainTab(QWidget):
         segmentation_group.setLayout(segmentation_layout)
         layout.addWidget(segmentation_group)
         
-        # Performance metrics section
-        self.performance_widget = PerformanceWidget()
-        layout.addWidget(self.performance_widget)
+        # Runtime performance table
+        runtime_group = QGroupBox("Performance Metrics")
+        runtime_layout = QVBoxLayout()
+        
+        self.runtime_table = QTableWidget(5, 2)  # 5 rows (inference, tracking, field_seg, player_id, total), 2 cols (metric, time)
+        self.runtime_table.setHorizontalHeaderLabels(["Metric", "Avg Time (ms)"])
+        self.runtime_table.setVerticalHeaderLabels(["Inference", "Tracking", "Field Seg", "Player ID", "Total"])
+
+        # Styling & sizing: full visibility (no scrolling needed) and consistent dark theme
+        self.runtime_table.horizontalHeader().setStretchLastSection(True)
+        self.runtime_table.verticalHeader().setVisible(False)
+        self.runtime_table.setAlternatingRowColors(False)
+        self.runtime_table.setStyleSheet("""
+            QTableWidget { background-color: #111111; color: #ffffff; gridline-color: #333333; }
+            QHeaderView::section { background-color: #222222; color: #ffffff; border: 1px solid #444444; font-weight: bold; }
+            QTableWidget::item { padding: 4px; }
+        """)
+        self.runtime_table.setFixedHeight( (5 * 28) + self.runtime_table.horizontalHeader().height() + 6 )  # Row height estimate
+        self.runtime_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.runtime_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.runtime_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        
+        # Initialize table data
+        metrics = ["Inference", "Tracking", "Field Segmentation", "Player ID", "Total"]
+        for i, metric in enumerate(metrics):
+            self.runtime_table.setItem(i, 0, QTableWidgetItem(metric))
+            self.runtime_table.setItem(i, 1, QTableWidgetItem("0.0"))
+        
+        # Make table read-only
+        self.runtime_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        
+        runtime_layout.addWidget(self.runtime_table)
+        runtime_group.setLayout(runtime_layout)
+        layout.addWidget(runtime_group)
         
         # Add stretch to push everything to top
         layout.addStretch()
@@ -764,7 +806,6 @@ class MainTab(QWidget):
             processed_frame = self._process_frame(frame)
             # Record total runtime for non-cached processing
             total_runtime_ms = (time.time() - total_runtime_start) * 1000
-            self.performance_widget.add_processing_measurement("Total Runtime", total_runtime_ms)
             self._update_fps(total_runtime_ms)
             return processed_frame
             
@@ -794,8 +835,6 @@ class MainTab(QWidget):
             # Record cache hit performance with total runtime from start of method
             total_runtime_ms = (time.time() - total_runtime_start) * 1000
             self.cache_hit_count += 1
-            self.performance_widget.add_processing_measurement("Visualization", viz_duration_ms)
-            self.performance_widget.add_processing_measurement("Total Runtime", total_runtime_ms)
             self._update_fps(total_runtime_ms)
             
             # Log cache efficiency periodically
@@ -823,8 +862,8 @@ class MainTab(QWidget):
         self._cleanup_frame_cache()
         
         # Record total runtime from start of method
+        
         total_runtime_ms = (time.time() - total_runtime_start) * 1000
-        self.performance_widget.add_processing_measurement("Total Runtime", total_runtime_ms)
         self._update_fps(total_runtime_ms)
         
         self.last_frame_hash = frame_hash
@@ -849,28 +888,31 @@ class MainTab(QWidget):
         self.current_player_ids = {}
         
         # Run inference if enabled
+        inference_time = 0.0
         if self.inference_checkbox.isChecked():
             print("[MAIN_TAB] Running inference...")
             start_time = time.time()
             self.current_detections = run_inference(frame)
-            duration_ms = (time.time() - start_time) * 1000
-            self.performance_widget.add_processing_measurement("Inference", duration_ms)
+            inference_time = (time.time() - start_time) * 1000
+            self._add_runtime_measurement('inference', inference_time)
         
         # Run tracking if enabled
+        tracking_time = 0.0
         if self.tracking_checkbox.isChecked() and self.current_detections:
             print("[MAIN_TAB] Running tracking...")
             start_time = time.time()
             self.current_tracks = run_tracking(frame, self.current_detections)
-            duration_ms = (time.time() - start_time) * 1000
-            self.performance_widget.add_processing_measurement("Tracking", duration_ms)
+            tracking_time = (time.time() - start_time) * 1000
+            self._add_runtime_measurement('tracking', tracking_time)
         
         # Run field segmentation if enabled
+        field_seg_time = 0.0
         if self.field_segmentation_checkbox.isChecked():
             print("[MAIN_TAB] Running field segmentation...")
             start_time = time.time()
             self.current_field_results = run_field_segmentation(frame)
-            duration_ms = (time.time() - start_time) * 1000
-            self.performance_widget.add_processing_measurement("Field Segmentation", duration_ms)
+            field_seg_time = (time.time() - start_time) * 1000
+            self._add_runtime_measurement('field_segmentation', field_seg_time)
         else:
             # Clear field results when disabled
             self.current_field_results = []
@@ -879,11 +921,13 @@ class MainTab(QWidget):
             self.all_lines_for_display = {}
         
         # Run player ID if enabled (requires tracking to be active)
+        player_id_time = 0.0
         if self.player_id_checkbox.isChecked() and self.current_tracks:
             print(f"[MAIN_TAB] Running player identification on {len(self.current_tracks)} tracks...")
             start_time = time.time()
             self.current_player_ids, player_id_timing = run_player_id_on_tracks(frame, self.current_tracks)
-            duration_ms = (time.time() - start_time) * 1000
+            player_id_time = (time.time() - start_time) * 1000
+            self._add_runtime_measurement('player_id', player_id_time)
             
             # Debug timing values and results
             print(f"[MAIN_TAB] Player ID results: {len(self.current_player_ids)} tracks processed")
@@ -891,12 +935,7 @@ class MainTab(QWidget):
                 confidence = details.get('confidence', 0.0) if details else 0.0
                 print(f"[MAIN_TAB]   Track {track_id}: #{jersey_number} (conf: {confidence:.3f})")
             print(f"[MAIN_TAB] Raw timing: {player_id_timing}")
-            print(f"[MAIN_TAB] Total duration: {duration_ms:.1f}ms")
-            
-            # Add detailed timing measurements (only if there are actual measurements)
-            if player_id_timing['preprocessing_ms'] > 0 or player_id_timing['ocr_ms'] > 0:
-                self.performance_widget.add_processing_measurement("Player ID - Preprocessing", player_id_timing['preprocessing_ms'])
-                self.performance_widget.add_processing_measurement("Player ID - EasyOCR", player_id_timing['ocr_ms'])
+            print(f"[MAIN_TAB] Total duration: {player_id_time:.1f}ms")
             
             print(f"[MAIN_TAB] Identified {len(self.current_player_ids)} players")
             print(f"[MAIN_TAB] Player ID timing - Preprocessing: {player_id_timing['preprocessing_ms']:.1f}ms, OCR: {player_id_timing['ocr_ms']:.1f}ms")
@@ -908,22 +947,17 @@ class MainTab(QWidget):
         viz_start_time = time.time()
         frame = self._apply_visualizations(frame)
         viz_duration_ms = (time.time() - viz_start_time) * 1000
-        self.performance_widget.add_processing_measurement("Visualization", viz_duration_ms)
         
-        # Add line extraction timing if RANSAC was used and field segmentation was enabled
+        # Visualization completed
         if self.all_lines_for_display and self.field_segmentation_checkbox.isChecked():
-            # Estimate line extraction time (this is included in field segmentation timing)
+            # Line extraction is included in field segmentation timing
             line_count = len(self.all_lines_for_display)
             estimated_line_extraction_ms = viz_duration_ms * 0.2  # Roughly 20% of viz time
-            self.performance_widget.add_processing_measurement("Line Extraction", estimated_line_extraction_ms)
-        elif not self.field_segmentation_checkbox.isChecked():
-            # Set line extraction to 0 when field segmentation is disabled
-            self.performance_widget.add_processing_measurement("Line Extraction", 0.0)
         
-        # Add default homography measurements if homography is not enabled
-        if not self.homography_enabled:
-            self.performance_widget.add_processing_measurement("Homography Calculation", 0.0)
-            self.performance_widget.add_processing_measurement("Homography Display", 0.0)
+        # Calculate and track total processing time
+        total_time = (time.time() - total_start_time) * 1000
+        self._add_runtime_measurement('total', total_time)
+        self._update_runtime_table()
         
         return frame
     
@@ -1043,6 +1077,38 @@ class MainTab(QWidget):
                 self.current_fps = 1000.0 / avg_frame_time_ms
             else:
                 self.current_fps = 0.0
+    
+    def _add_runtime_measurement(self, metric: str, time_ms: float) -> None:
+        """Add a runtime measurement for the specified metric.
+        
+        Args:
+            metric: The metric name ('inference', 'tracking', 'field_segmentation', 'player_id', 'total')
+            time_ms: The time measurement in milliseconds
+        """
+        if metric not in self.runtime_data:
+            return
+        
+        # Add current measurement
+        self.runtime_data[metric].append(time_ms)
+        
+        # Keep only recent samples for rolling average
+        if len(self.runtime_data[metric]) > self.max_runtime_samples:
+            self.runtime_data[metric].pop(0)
+    
+    def _update_runtime_table(self) -> None:
+        """Update the runtime performance table with current averages."""
+        if not hasattr(self, 'runtime_table'):
+            return
+        
+        metrics = ['inference', 'tracking', 'field_segmentation', 'player_id', 'total']
+        metric_names = ["Inference", "Tracking", "Field Segmentation", "Player ID", "Total"]
+        
+        for i, (metric, display_name) in enumerate(zip(metrics, metric_names)):
+            if metric in self.runtime_data and len(self.runtime_data[metric]) > 0:
+                avg_time = sum(self.runtime_data[metric]) / len(self.runtime_data[metric])
+                self.runtime_table.setItem(i, 1, QTableWidgetItem(f"{avg_time:.1f}"))
+            else:
+                self.runtime_table.setItem(i, 1, QTableWidgetItem("0.0"))
     
     def _draw_fps_overlay(self, frame) -> None:
         """Draw FPS overlay on the top right of the frame.
@@ -1204,7 +1270,7 @@ class MainTab(QWidget):
         
         if checked:
             # Ensure field segmentation model is loaded with the default path
-            default_model_path = Path(get_setting("models.base_path", DEFAULT_PATHS['MODELS'])) / "segmentation/field_finder_yolo11m-seg/segmentation_finetune/weights/best.pt"
+            default_model_path = Path(get_setting("models.base_path", DEFAULT_PATHS['MODELS'])) / "segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt"
             if default_model_path.exists():
                 set_field_model(str(default_model_path))
                 print(f"[MAIN_TAB] Field segmentation model set to: {default_model_path}")
@@ -1531,7 +1597,6 @@ class MainTab(QWidget):
                     
                     warped_frame = cv2.warpPerspective(frame, self.homography_matrix, (output_width, output_height))
                     homography_calc_duration_ms = (time.time() - homography_calc_start) * 1000
-                    self.performance_widget.add_processing_measurement("Homography Calculation", homography_calc_duration_ms)
                     
                     # Apply field segmentation to warped frame if available
                     if self.current_field_results and self.field_segmentation_checkbox.isChecked():
@@ -1586,7 +1651,6 @@ class MainTab(QWidget):
                     
                     # Record homography processing time
                     homography_duration_ms = (time.time() - homography_start_time) * 1000
-                    self.performance_widget.add_processing_measurement("Homography Display", homography_duration_ms)
                     
                     print("[MAIN_TAB] Updated homography display using loaded matrix")
                 else:

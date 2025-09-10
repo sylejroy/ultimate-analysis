@@ -75,7 +75,7 @@ def _load_config() -> Dict[str, Any]:
     if project_root is None:
         raise FileNotFoundError("Could not find configs/ directory in project structure")
     
-    config_file = project_root / "configs" / "default.yaml"
+    config_file = project_root / "configs" / "processing.yaml"
     
     if not config_file.exists():
         raise FileNotFoundError(f"Configuration file not found: {config_file}")

@@ -1279,35 +1279,45 @@ class HomographyTab(QWidget):
                 print(f"[HOMOGRAPHY] Error saving parameters: {e}")
     
     def _save_as_default_parameters(self):
-        """Save current parameters as the default parameters file."""
+        """Save current parameters as default to processing.yaml."""
         try:
-            # Get the default parameters file path from config
-            default_params_file = get_setting("homography.default_params_file", "configs/homography_params.yaml")
+            # Save to processing.yaml instead of homography_params.yaml
+            processing_config_file = "configs/processing.yaml"
             
             # Ensure the directory exists
-            Path(default_params_file).parent.mkdir(parents=True, exist_ok=True)
+            Path(processing_config_file).parent.mkdir(parents=True, exist_ok=True)
             
-            # Prepare data for saving
-            save_data = {
-                'homography_parameters': self.homography_params.copy(),
-                'metadata': {
-                    'created_at': datetime.datetime.now().isoformat(),
-                    'description': "Default homography parameters (updated by user)",
-                    'video_file': Path(self.video_files[self.current_video_index]).name if self.video_files else None,
-                    'frame_index': self.scrubbing_slider.value() if hasattr(self, 'scrubbing_slider') else 0,
-                    'application': 'Ultimate Analysis',
-                    'version': '1.0'
-                }
-            }
+            # Load existing processing config
+            processing_config = {}
+            if Path(processing_config_file).exists():
+                try:
+                    with open(processing_config_file, 'r', encoding='utf-8') as f:
+                        processing_config = yaml.safe_load(f) or {}
+                except Exception as e:
+                    print(f"[HOMOGRAPHY] Warning: Could not load existing processing.yaml: {e}")
             
-            # Save to YAML
-            with open(default_params_file, 'w', encoding='utf-8') as f:
-                yaml.dump(save_data, f, default_flow_style=False, sort_keys=False)
+            # Update homography section in processing config
+            if 'homography' not in processing_config:
+                processing_config['homography'] = {}
             
+            processing_config['homography'].update({
+                'save_directory': "configs",
+                'default_params_file': processing_config_file,
+                'slider_range_main': [-100.0, 100.0],
+                'slider_range_perspective': [-0.2, 0.2],
+                'buffer_factor': 1.8,
+                'output_aspect_ratio': 3.0,
+                'current_parameters': self.homography_params.copy()
+            })
+            
+            # Save updated processing config
+            with open(processing_config_file, 'w', encoding='utf-8') as f:
+                yaml.dump(processing_config, f, default_flow_style=False, sort_keys=False)
+                        
             QMessageBox.information(self, "Success", 
-                                  f"Parameters saved as default to:\n{default_params_file}\n\n"
+                                  f"Parameters saved to:\n{processing_config_file}\n\n"
                                   "These parameters will be loaded automatically on startup.")
-            print(f"[HOMOGRAPHY] Saved default parameters to: {default_params_file}")
+            print(f"[HOMOGRAPHY] Saved default parameters to: {processing_config_file}")
             
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to save default parameters:\n{str(e)}")
@@ -1384,33 +1394,41 @@ class HomographyTab(QWidget):
     def _load_default_parameters(self):
         """Load default homography parameters from config file on startup."""
         try:
-            # Get the default parameters file path from config
-            default_params_file = get_setting("homography.default_params_file", "configs/homography_params.yaml")
+            # First attempt: read directly from unified config (processing.yaml) via get_setting
+            unified_params = get_setting("homography.current_parameters", None)
+            loaded_from = "config:get_setting(homography.current_parameters)"
             
-            if not Path(default_params_file).exists():
-                print(f"[HOMOGRAPHY] Default parameters file not found: {default_params_file}")
-                return
-                
-            print(f"[HOMOGRAPHY] Loading default parameters from: {default_params_file}")
-            
-            # Load from YAML
-            with open(default_params_file, 'r', encoding='utf-8') as f:
-                data = yaml.safe_load(f)
-            
-            # Extract parameters
-            if 'homography_parameters' in data:
-                loaded_params = data['homography_parameters']
+            if not unified_params or not isinstance(unified_params, dict):
+                # Fallback: legacy file-based loading using default_params_file
+                default_params_file = get_setting("homography.default_params_file", "configs/homography_params.yaml")
+                if Path(default_params_file).exists():
+                    print(f"[HOMOGRAPHY] current_parameters not found in config; falling back to file: {default_params_file}")
+                    with open(default_params_file, 'r', encoding='utf-8') as f:
+                        data = yaml.safe_load(f) or {}
+                    if 'homography_parameters' in data:
+                        unified_params = data['homography_parameters']
+                        loaded_from = f"file:{default_params_file} (homography_parameters)"
+                    else:
+                        unified_params = data
+                        loaded_from = f"file:{default_params_file} (root keys)"
+                else:
+                    print(f"[HOMOGRAPHY] Neither homography.current_parameters nor default file present; keeping identity.")
+                    return
             else:
-                # Try loading direct parameter format
-                loaded_params = data
+                print("[HOMOGRAPHY] Loading homography parameters from processing.yaml homography.current_parameters")
             
-            # Validate and update parameters
+            # Apply parameters
+            updated_any = False
             for param_name in self.homography_params.keys():
-                if param_name in loaded_params:
-                    value = float(loaded_params[param_name])
+                if param_name in unified_params:
+                    try:
+                        value = float(unified_params[param_name])
+                    except Exception:
+                        continue
                     self.homography_params[param_name] = value
+                    updated_any = True
                     
-                    # Update slider position with proper type conversion
+                    # Determine appropriate slider range
                     if param_name in ['H00', 'H01', 'H10', 'H11']:
                         param_range = get_setting("homography.slider_range_main", [-50.0, 50.0])
                         if isinstance(param_range, list) and len(param_range) == 2:
@@ -1425,26 +1443,27 @@ class HomographyTab(QWidget):
                             param_range = [-0.2, 0.2]
                     else:
                         param_range = [-10000.0, 10000.0]
-                        
-                    slider_val = int(((value - param_range[0]) / (param_range[1] - param_range[0])) * 1000)
-                    slider_val = max(0, min(1000, slider_val))  # Clamp to valid range
-                    self.param_sliders[param_name].setValue(slider_val)
                     
-                    # Update text input
+                    # Update slider position
+                    slider_val = int(((value - param_range[0]) / (param_range[1] - param_range[0])) * 1000)
+                    slider_val = max(0, min(1000, slider_val))
+                    if param_name in self.param_sliders:
+                        self.param_sliders[param_name].setValue(slider_val)
+                    
+                    # Update text input & label
                     if param_name in self.param_inputs:
                         self.param_inputs[param_name].setText(f"{value:.6f}")
-                    
-                    # Update label
-                    self.param_labels[param_name].setText(f"{value:.6f}")
+                    if param_name in self.param_labels:
+                        self.param_labels[param_name].setText(f"{value:.6f}")
             
-            # Update displays
-            self._update_displays()
-            
-            print(f"[HOMOGRAPHY] Default parameters loaded successfully from: {default_params_file}")
-            
+            if updated_any:
+                self._update_displays()
+                print(f"[HOMOGRAPHY] Default parameters loaded successfully from {loaded_from}")
+            else:
+                print("[HOMOGRAPHY] No matching homography parameters found; using existing values")
         except Exception as e:
             print(f"[HOMOGRAPHY] Error loading default parameters: {e}")
-            # Don't show error dialog on startup - just log it
+            # Silent failure acceptable on startup
     
     def _reset_all_zoom(self):
         """Reset zoom for both image displays."""
@@ -1586,7 +1605,7 @@ class HomographyTab(QWidget):
             self.runtime_popup = QDialog(self)
             self.runtime_popup.setWindowTitle("Processing Runtime Performance")
             self.runtime_popup.setModal(False)  # Allow interaction with main window
-            self.runtime_popup.resize(500, 350)
+            self.runtime_popup.resize(520, 320)
             
             # Set dark background
             self.runtime_popup.setStyleSheet("""
@@ -1630,11 +1649,17 @@ class HomographyTab(QWidget):
             self.runtime_table = QTableWidget()
             self.runtime_table.setColumnCount(4)
             self.runtime_table.setHorizontalHeaderLabels(["Process", "Current", "Average", "Max"])
-            
-            # Set table properties
-            self.runtime_table.horizontalHeader().setStretchLastSection(True)
+            # Consistent styling with main tab
             self.runtime_table.verticalHeader().setVisible(False)
-            self.runtime_table.setAlternatingRowColors(True)
+            self.runtime_table.setAlternatingRowColors(False)
+            self.runtime_table.setStyleSheet("""
+                QTableWidget { background-color: #000000; color: #ffffff; gridline-color: #333333; }
+                QHeaderView::section { background-color: #222222; color: #ffffff; border: 1px solid #444444; font-weight: bold; }
+                QTableWidget::item { padding: 4px; }
+            """)
+            self.runtime_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.runtime_table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.runtime_table.setEditTriggers(QTableWidget.NoEditTriggers)
             
             # Initialize table with processing steps
             processes = ['Field Segmentation', 'Morphological Ops', 'Line Extraction', 
@@ -1646,6 +1671,9 @@ class HomographyTab(QWidget):
                 self.runtime_table.setItem(i, 1, QTableWidgetItem("0.0"))
                 self.runtime_table.setItem(i, 2, QTableWidgetItem("0.0"))
                 self.runtime_table.setItem(i, 3, QTableWidgetItem("0.0"))
+            # Autosize height to fit rows (approx 28px per row + header)
+            total_rows_height = (len(processes) * 28) + self.runtime_table.horizontalHeader().height() + 8
+            self.runtime_table.setFixedHeight(total_rows_height)
             
             # Set column widths
             header = self.runtime_table.horizontalHeader()

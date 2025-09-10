@@ -56,65 +56,65 @@ class EasyOCRTuningTab(QWidget):
         self.use_parallel_processing: bool = True  # Enable parallel processing by default
         self.max_workers: int = 4  # Number of parallel workers
         
-        # EasyOCR parameters (with optimized defaults)
+        # EasyOCR parameters (defaults aligned with unified processing.yaml)
+        # NOTE: All config access now uses 'models.player_id...' paths (user.yaml deprecated)
         self.ocr_params = {
             'languages': ['en'],
             'gpu': True,
-            'width_ths': 0.4,  # Updated from provided config
+            'width_ths': 0.3,
             'height_ths': 0.7,
             'paragraph': False,
-            'adjust_contrast': 0.5,  # From provided config
+            'adjust_contrast': 0.5,
             'filter_ths': 0.003,
-            'text_threshold': 0.7,  # From provided config
-            'low_text': 0.6,  # Updated from provided config
-            'link_threshold': 0.4,
+            'text_threshold': 0.4,
+            'low_text': 0.3,
+            'link_threshold': 0.2,
             'canvas_size': 2560,
-            'mag_ratio': 2.0,  # Updated from provided config
-            'slope_ths': 0.1,  # From provided config
+            'mag_ratio': 3.0,
+            'slope_ths': 0.1,
             'ycenter_ths': 0.5,
             'y_ths': 0.5,
             'x_ths': 1.0,
             'detector': True,
             'recognizer': True,
-            'allowlist': '0123456789',  # From provided config - digits only
-            'detail': 1,  # From provided config
-            'rotation_info': [0],  # From provided config
-            'decoder': 'greedy',  # From provided config
+            'allowlist': '0123456789',
+            'detail': 1,
+            'rotation_info': [0],
+            'decoder': 'greedy',
             'beamWidth': 5,
-            'workers': 0,  # Number of parallel workers (0 = auto)
-            'batch_size': 1,
+            'workers': 0,
+            'batch_size': 16,
         }
-        
-        # Preprocessing parameters (with optimized defaults)
+
+        # Preprocessing parameters (defaults aligned with unified processing.yaml)
         self.preprocess_params = {
-            'crop_top_fraction': 0.33,  # Use top third of detection
-            'contrast_alpha': 1.0,     # Contrast adjustment
-            'brightness_beta': 0,      # Brightness adjustment
-            'gaussian_blur': 13,       # Updated from provided config (blur_ksize)
-            'resize_factor': 1.0,      # Resize factor (multiplier)
-            'resize_absolute_width': 0,  # Absolute width in pixels (0 = use factor)
-            'resize_absolute_height': 0, # Absolute height in pixels (0 = use factor)
-            'enhance_contrast': False,  # CLAHE enhancement (disabled per config)
-            'clahe_clip_limit': 3.0,   # From provided config
-            'clahe_grid_size': 8,      # From provided config
-            'denoise': False,          # Apply denoising
-            'sharpen': True,           # From provided config (enabled)
-            'sharpen_strength': 0.05,  # From provided config
-            'upscale': True,           # From provided config (enabled)
-            'upscale_factor': 3.0,     # From provided config
-            'upscale_to_size': True,   # From provided config
-            'upscale_target_size': 256, # From provided config
-            'colour_mode': True,       # From provided config
-            'bw_mode': True,           # From provided config
-            # Minimum crop size filtering (skip OCR on crops too small to be readable)
-            'min_crop_width': 20,      # Minimum crop width in pixels for OCR processing
-            'min_crop_height': 30,     # Minimum crop height in pixels for OCR processing
+            'crop_top_fraction': 0.45,
+            'contrast_alpha': 1.5,
+            'brightness_beta': -10,
+            'gaussian_blur': 0,
+            'resize_factor': 2.0,
+            'resize_absolute_width': 0,
+            'resize_absolute_height': 0,
+            'enhance_contrast': False,
+            'clahe_clip_limit': 3.0,
+            'clahe_grid_size': 8,
+            'denoise': False,
+            'sharpen': False,
+            'sharpen_strength': 0.15,
+            'upscale': False,
+            'upscale_factor': 1.0,
+            'upscale_to_size': False,
+            'upscale_target_size': 256,
+            'colour_mode': True,
+            'bw_mode': False,
+            'min_crop_width': 25,
+            'min_crop_height': 25,
         }
         
         # Initialize UI
         self._init_ui()
         self._load_videos()
-        # Load parameters from config (including user.yaml) automatically on startup
+    # Load parameters from unified processing.yaml automatically on startup
         self._load_parameters_from_config()
         
         print("[EASYOCR_TUNING] EasyOCR Tuning Tab initialized with user configuration loaded")
@@ -242,12 +242,12 @@ class EasyOCRTuningTab(QWidget):
         
         load_button = QPushButton("Load from Config")
         load_button.clicked.connect(self._load_parameters_from_config)
-        load_button.setToolTip("Load parameters from default.yaml")
+        load_button.setToolTip("Load parameters from processing.yaml")
         button_layout.addWidget(load_button)
         
         save_button = QPushButton("Save to Config")
         save_button.clicked.connect(self._save_parameters_to_config)
-        save_button.setToolTip("Save current parameters to user.yaml")
+        save_button.setToolTip("Save current parameters to processing.yaml")
         button_layout.addWidget(save_button)
         
         layout.addLayout(button_layout)
@@ -1533,146 +1533,71 @@ class EasyOCRTuningTab(QWidget):
     
     # ========== CONFIGURATION METHODS ==========
     def _load_parameters_from_config(self):
-        """Load parameters from configuration."""
+        """Load parameters from unified processing.yaml (no user.yaml fallback)."""
         try:
-            # Load user.yaml overrides if they exist
-            user_config = self._load_user_config()
-            
-            print(f"[EASYOCR_TUNING] Loading parameters from config...")
-            print(f"[EASYOCR_TUNING] User config found: {bool(user_config)}")
-            if user_config:
-                print(f"[EASYOCR_TUNING] User config keys: {list(user_config.keys())}")
-                if 'player_id' in user_config:
-                    print(f"[EASYOCR_TUNING] Player ID config keys: {list(user_config['player_id'].keys())}")
-            
-            # Load preprocessing parameters (using user overrides if available)
-            user_preprocess = user_config.get('player_id', {}).get('preprocessing', {})
-            print(f"[EASYOCR_TUNING] User preprocessing config: {user_preprocess}")
-            
-            self.preprocess_params['crop_top_fraction'] = user_preprocess.get('crop_top_fraction', 
-                get_setting('player_id.preprocessing.crop_top_fraction', 0.33))
-            self.preprocess_params['contrast_alpha'] = user_preprocess.get('contrast_alpha',
-                get_setting('player_id.preprocessing.contrast_alpha', 1.0))
-            self.preprocess_params['brightness_beta'] = user_preprocess.get('brightness_beta',
-                get_setting('player_id.preprocessing.brightness_beta', 0))
-            self.preprocess_params['gaussian_blur'] = user_preprocess.get('gaussian_blur',
-                get_setting('player_id.preprocessing.gaussian_blur', 13))
-            self.preprocess_params['enhance_contrast'] = user_preprocess.get('enhance_contrast',
-                get_setting('player_id.preprocessing.enhance_contrast', True))
-            self.preprocess_params['clahe_clip_limit'] = user_preprocess.get('clahe_clip_limit',
-                get_setting('player_id.preprocessing.clahe_clip_limit', 2.0))
-            self.preprocess_params['clahe_grid_size'] = user_config.get('player_id', {}).get('preprocessing', {}).get('clahe_grid_size',
-                get_setting('player_id.preprocessing.clahe_grid_size', 8))
-            self.preprocess_params['sharpen'] = user_config.get('player_id', {}).get('preprocessing', {}).get('sharpen',
-                get_setting('player_id.preprocessing.sharpen', True))
-            self.preprocess_params['sharpen_strength'] = user_config.get('player_id', {}).get('preprocessing', {}).get('sharpen_strength',
-                get_setting('player_id.preprocessing.sharpen_strength', 0.05))
-            self.preprocess_params['upscale'] = user_config.get('player_id', {}).get('preprocessing', {}).get('upscale',
-                get_setting('player_id.preprocessing.upscale', True))
-            self.preprocess_params['upscale_factor'] = user_config.get('player_id', {}).get('preprocessing', {}).get('upscale_factor',
-                get_setting('player_id.preprocessing.upscale_factor', 3.0))
-            self.preprocess_params['upscale_to_size'] = user_config.get('player_id', {}).get('preprocessing', {}).get('upscale_to_size',
-                get_setting('player_id.preprocessing.upscale_to_size', True))
-            self.preprocess_params['upscale_target_size'] = user_config.get('player_id', {}).get('preprocessing', {}).get('upscale_target_size',
-                get_setting('player_id.preprocessing.upscale_target_size', 256))
-            self.preprocess_params['colour_mode'] = user_config.get('player_id', {}).get('preprocessing', {}).get('colour_mode',
-                get_setting('player_id.preprocessing.colour_mode', False))
-            self.preprocess_params['bw_mode'] = user_config.get('player_id', {}).get('preprocessing', {}).get('bw_mode',
-                get_setting('player_id.preprocessing.bw_mode', True))
-            self.preprocess_params['resize_factor'] = user_config.get('player_id', {}).get('preprocessing', {}).get('resize_factor',
-                get_setting('player_id.preprocessing.resize_factor', 1.0))
-            self.preprocess_params['resize_absolute_width'] = user_config.get('player_id', {}).get('preprocessing', {}).get('resize_absolute_width',
-                get_setting('player_id.preprocessing.resize_absolute_width', 0))
-            self.preprocess_params['resize_absolute_height'] = user_config.get('player_id', {}).get('preprocessing', {}).get('resize_absolute_height',
-                get_setting('player_id.preprocessing.resize_absolute_height', 0))
-            self.preprocess_params['denoise'] = user_config.get('player_id', {}).get('preprocessing', {}).get('denoise',
-                get_setting('player_id.preprocessing.denoise', False))
-            # Load minimum crop size parameters
-            self.preprocess_params['min_crop_width'] = user_config.get('player_id', {}).get('preprocessing', {}).get('min_crop_width',
-                get_setting('player_id.preprocessing.min_crop_width', 20))
-            self.preprocess_params['min_crop_height'] = user_config.get('player_id', {}).get('preprocessing', {}).get('min_crop_height',
-                get_setting('player_id.preprocessing.min_crop_height', 30))
-            
-            # Load OCR parameters (using user overrides if available)
+            print("[EASYOCR_TUNING] Loading parameters from processing.yaml via get_setting() ...")
+
+            # Helper: load a config value with path + fallback to existing in-memory value
+            def cfg(path: str, fallback: Any) -> Any:
+                return get_setting(path, fallback)
+
+            # Preprocessing
+            pp_prefix = 'models.player_id.preprocessing'
+            self.preprocess_params['crop_top_fraction'] = cfg(f'{pp_prefix}.crop_top_fraction', self.preprocess_params['crop_top_fraction'])
+            self.preprocess_params['contrast_alpha'] = cfg(f'{pp_prefix}.contrast_alpha', self.preprocess_params['contrast_alpha'])
+            self.preprocess_params['brightness_beta'] = cfg(f'{pp_prefix}.brightness_beta', self.preprocess_params['brightness_beta'])
+            self.preprocess_params['gaussian_blur'] = cfg(f'{pp_prefix}.gaussian_blur', self.preprocess_params['gaussian_blur'])
+            self.preprocess_params['enhance_contrast'] = cfg(f'{pp_prefix}.enhance_contrast', self.preprocess_params['enhance_contrast'])
+            self.preprocess_params['clahe_clip_limit'] = cfg(f'{pp_prefix}.clahe_clip_limit', self.preprocess_params['clahe_clip_limit'])
+            self.preprocess_params['clahe_grid_size'] = cfg(f'{pp_prefix}.clahe_grid_size', self.preprocess_params['clahe_grid_size'])
+            self.preprocess_params['sharpen'] = cfg(f'{pp_prefix}.sharpen', self.preprocess_params['sharpen'])
+            self.preprocess_params['sharpen_strength'] = cfg(f'{pp_prefix}.sharpen_strength', self.preprocess_params['sharpen_strength'])
+            self.preprocess_params['upscale'] = cfg(f'{pp_prefix}.upscale', self.preprocess_params['upscale'])
+            self.preprocess_params['upscale_factor'] = cfg(f'{pp_prefix}.upscale_factor', self.preprocess_params['upscale_factor'])
+            self.preprocess_params['upscale_to_size'] = cfg(f'{pp_prefix}.upscale_to_size', self.preprocess_params['upscale_to_size'])
+            self.preprocess_params['upscale_target_size'] = cfg(f'{pp_prefix}.upscale_target_size', self.preprocess_params['upscale_target_size'])
+            self.preprocess_params['colour_mode'] = cfg(f'{pp_prefix}.colour_mode', self.preprocess_params['colour_mode'])
+            self.preprocess_params['bw_mode'] = cfg(f'{pp_prefix}.bw_mode', self.preprocess_params['bw_mode'])
+            self.preprocess_params['resize_factor'] = cfg(f'{pp_prefix}.resize_factor', self.preprocess_params['resize_factor'])
+            self.preprocess_params['resize_absolute_width'] = cfg(f'{pp_prefix}.resize_absolute_width', self.preprocess_params['resize_absolute_width'])
+            self.preprocess_params['resize_absolute_height'] = cfg(f'{pp_prefix}.resize_absolute_height', self.preprocess_params['resize_absolute_height'])
+            self.preprocess_params['denoise'] = cfg(f'{pp_prefix}.denoise', self.preprocess_params['denoise'])
+            self.preprocess_params['min_crop_width'] = cfg(f'{pp_prefix}.min_crop_width', self.preprocess_params['min_crop_width'])
+            self.preprocess_params['min_crop_height'] = cfg(f'{pp_prefix}.min_crop_height', self.preprocess_params['min_crop_height'])
+
+            # OCR
             if EASYOCR_AVAILABLE:
-                ocr_config = user_config.get('player_id', {}).get('easyocr', {})
-                print(f"[EASYOCR_TUNING] User OCR config: {ocr_config}")
-                
-                self.ocr_params['text_threshold'] = ocr_config.get('text_threshold', get_setting('player_id.easyocr.text_threshold', 0.7))
-                self.ocr_params['low_text'] = ocr_config.get('low_text', get_setting('player_id.easyocr.low_text', 0.6))
-                self.ocr_params['link_threshold'] = ocr_config.get('link_threshold', get_setting('player_id.easyocr.link_threshold', 0.4))
-                self.ocr_params['width_ths'] = ocr_config.get('width_ths', get_setting('player_id.easyocr.width_ths', 0.4))
-                self.ocr_params['height_ths'] = ocr_config.get('height_ths', get_setting('player_id.easyocr.height_ths', 0.7))
-                self.ocr_params['x_ths'] = ocr_config.get('x_ths', get_setting('player_id.easyocr.x_ths', 1.0))
-                self.ocr_params['y_ths'] = ocr_config.get('y_ths', get_setting('player_id.easyocr.y_ths', 0.5))
-                self.ocr_params['ycenter_ths'] = ocr_config.get('ycenter_ths', get_setting('player_id.easyocr.ycenter_ths', 0.5))
-                self.ocr_params['slope_ths'] = ocr_config.get('slope_ths', get_setting('player_id.easyocr.slope_ths', 0.1))
-                self.ocr_params['canvas_size'] = ocr_config.get('canvas_size', get_setting('player_id.easyocr.canvas_size', 2560))
-                self.ocr_params['mag_ratio'] = ocr_config.get('mag_ratio', get_setting('player_id.easyocr.mag_ratio', 2.0))
-                self.ocr_params['adjust_contrast'] = ocr_config.get('adjust_contrast', get_setting('player_id.easyocr.adjust_contrast', 0.5))
-                self.ocr_params['filter_ths'] = ocr_config.get('filter_ths', get_setting('player_id.easyocr.filter_ths', 0.003))
-                self.ocr_params['workers'] = ocr_config.get('workers', get_setting('player_id.easyocr.workers', 0))
-                self.ocr_params['batch_size'] = ocr_config.get('batch_size', get_setting('player_id.easyocr.batch_size', 1))
-                self.ocr_params['beamWidth'] = ocr_config.get('beamWidth', get_setting('player_id.easyocr.beamWidth', 5))
-                self.ocr_params['gpu'] = ocr_config.get('gpu', get_setting('player_id.easyocr.gpu', True))
-                self.ocr_params['paragraph'] = ocr_config.get('paragraph', get_setting('player_id.easyocr.paragraph', False))
-                self.ocr_params['detail'] = ocr_config.get('detail', get_setting('player_id.easyocr.detail', 1))
-                self.ocr_params['allowlist'] = ocr_config.get('allowlist', get_setting('player_id.easyocr.allowlist', '0123456789'))
-            
-            # Update UI controls with loaded values
+                ocr_prefix = 'models.player_id.easyocr'
+                self.ocr_params['text_threshold'] = cfg(f'{ocr_prefix}.text_threshold', self.ocr_params['text_threshold'])
+                self.ocr_params['low_text'] = cfg(f'{ocr_prefix}.low_text', self.ocr_params['low_text'])
+                self.ocr_params['link_threshold'] = cfg(f'{ocr_prefix}.link_threshold', self.ocr_params['link_threshold'])
+                self.ocr_params['width_ths'] = cfg(f'{ocr_prefix}.width_ths', self.ocr_params['width_ths'])
+                self.ocr_params['height_ths'] = cfg(f'{ocr_prefix}.height_ths', self.ocr_params['height_ths'])
+                self.ocr_params['x_ths'] = cfg(f'{ocr_prefix}.x_ths', self.ocr_params['x_ths'])
+                self.ocr_params['y_ths'] = cfg(f'{ocr_prefix}.y_ths', self.ocr_params['y_ths'])
+                self.ocr_params['ycenter_ths'] = cfg(f'{ocr_prefix}.ycenter_ths', self.ocr_params['ycenter_ths'])
+                self.ocr_params['slope_ths'] = cfg(f'{ocr_prefix}.slope_ths', self.ocr_params['slope_ths'])
+                self.ocr_params['canvas_size'] = cfg(f'{ocr_prefix}.canvas_size', self.ocr_params['canvas_size'])
+                self.ocr_params['mag_ratio'] = cfg(f'{ocr_prefix}.mag_ratio', self.ocr_params['mag_ratio'])
+                self.ocr_params['adjust_contrast'] = cfg(f'{ocr_prefix}.adjust_contrast', self.ocr_params['adjust_contrast'])
+                self.ocr_params['filter_ths'] = cfg(f'{ocr_prefix}.filter_ths', self.ocr_params['filter_ths'])
+                self.ocr_params['workers'] = cfg(f'{ocr_prefix}.workers', self.ocr_params['workers'])
+                self.ocr_params['batch_size'] = cfg(f'{ocr_prefix}.batch_size', self.ocr_params['batch_size'])
+                self.ocr_params['beamWidth'] = cfg(f'{ocr_prefix}.beamWidth', self.ocr_params['beamWidth'])
+                self.ocr_params['gpu'] = cfg(f'{ocr_prefix}.gpu', self.ocr_params['gpu'])
+                self.ocr_params['paragraph'] = cfg(f'{ocr_prefix}.paragraph', self.ocr_params['paragraph'])
+                self.ocr_params['detail'] = cfg(f'{ocr_prefix}.detail', self.ocr_params['detail'])
+                self.ocr_params['allowlist'] = cfg(f'{ocr_prefix}.allowlist', self.ocr_params['allowlist'])
+
+            # Push into UI
             self._update_controls_from_params()
-            
-            # Debug output to verify parameter loading
-            print(f"[EASYOCR_TUNING] Final parameter values:")
-            print(f"  crop_top_fraction: {self.preprocess_params['crop_top_fraction']}")
-            print(f"  contrast_alpha: {self.preprocess_params['contrast_alpha']}")
-            print(f"  gaussian_blur: {self.preprocess_params['gaussian_blur']}")
-            if EASYOCR_AVAILABLE:
-                print(f"  text_threshold: {self.ocr_params['text_threshold']}")
-                print(f"  low_text: {self.ocr_params['low_text']}")
-            
-            print("[EASYOCR_TUNING] Parameters loaded from configuration")
+
+            # Debug
+            print("[EASYOCR_TUNING] Parameters loaded from unified config")
         except Exception as e:
-            print(f"[EASYOCR_TUNING] Error loading parameters from config: {e}")
+            print(f"[EASYOCR_TUNING] Error loading parameters: {e}")
             traceback.print_exc()
-            # Continue with default values if config loading fails
-    
-    def _load_user_config(self) -> Dict[str, Any]:
-        """Load user.yaml configuration if it exists.
-        
-        Returns:
-            User configuration dictionary or empty dict if not found
-        """
-        try:
-            # Find project root
-            current_dir = Path(__file__).parent
-            project_root = None
-            
-            for parent in current_dir.parents:
-                if (parent / "configs").exists():
-                    project_root = parent
-                    break
-            
-            if project_root is None:
-                return {}
-            
-            user_config_file = project_root / "configs" / "user.yaml"
-            
-            if not user_config_file.exists():
-                return {}
-            
-            with open(user_config_file, 'r', encoding='utf-8') as f:
-                user_config = yaml.safe_load(f)
-                
-            if user_config:
-                print(f"[EASYOCR_TUNING] User configuration loaded from: {user_config_file}")
-                return user_config
-            else:
-                return {}
-                
-        except Exception as e:
-            print(f"[EASYOCR_TUNING] Error loading user config: {e}")
-            return {}
+            # Leave defaults intact on failure
     
     def _update_controls_from_params(self):
         """Update UI controls with current parameter values."""
@@ -1921,9 +1846,9 @@ class EasyOCRTuningTab(QWidget):
                 self.allowlist_edit.textChanged.connect(self._on_ocr_param_changed)
     
     def _save_parameters_to_config(self):
-        """Save current parameters to configuration file."""
+        """Save current parameters to processing.yaml configuration file (unified config)."""
         try:
-            # Find project root and construct absolute path to user.yaml
+            # Find project root and construct absolute path to processing.yaml
             current_dir = Path(__file__).parent
             project_root = None
             
@@ -1936,40 +1861,48 @@ class EasyOCRTuningTab(QWidget):
                 print("[EASYOCR_TUNING] Error: Could not find project root with configs directory")
                 return
             
-            config_path = project_root / "configs" / "user.yaml"
+            config_path = project_root / "configs" / "processing.yaml"
             
-            # Create config updates with all parameters
-            config_updates = {
-                'player_id': {
-                    'preprocessing': {
-                        'crop_top_fraction': self.preprocess_params['crop_top_fraction'],
-                        'contrast_alpha': self.preprocess_params['contrast_alpha'],
-                        'brightness_beta': self.preprocess_params['brightness_beta'],
-                        'gaussian_blur': self.preprocess_params['gaussian_blur'],
-                        'resize_factor': self.preprocess_params['resize_factor'],
-                        'resize_absolute_width': self.preprocess_params['resize_absolute_width'],
-                        'resize_absolute_height': self.preprocess_params['resize_absolute_height'],
-                        'enhance_contrast': self.preprocess_params['enhance_contrast'],
-                        'clahe_clip_limit': self.preprocess_params['clahe_clip_limit'],
-                        'clahe_grid_size': self.preprocess_params['clahe_grid_size'],
-                        'denoise': self.preprocess_params['denoise'],
-                        'sharpen': self.preprocess_params['sharpen'],
-                        'sharpen_strength': self.preprocess_params['sharpen_strength'],
-                        'upscale': self.preprocess_params['upscale'],
-                        'upscale_factor': self.preprocess_params['upscale_factor'],
-                        'upscale_to_size': self.preprocess_params['upscale_to_size'],
-                        'upscale_target_size': self.preprocess_params['upscale_target_size'],
-                        'colour_mode': self.preprocess_params['colour_mode'],
-                        'bw_mode': self.preprocess_params['bw_mode'],
-                        # Minimum crop size filtering parameters
-                        'min_crop_width': self.preprocess_params['min_crop_width'],
-                        'min_crop_height': self.preprocess_params['min_crop_height']
-                    }
-                }
+            # Load existing processing config
+            processing_config = {}
+            if config_path.exists():
+                try:
+                    with open(config_path, 'r', encoding='utf-8') as f:
+                        processing_config = yaml.safe_load(f) or {}
+                except Exception as e:
+                    print(f"[EASYOCR_TUNING] Warning: Could not load existing processing.yaml: {e}")
+            
+            # Ensure nested keys exist
+            processing_config.setdefault('models', {}).setdefault('player_id', {})
+            
+            # Update preprocessing parameters
+            processing_config['models']['player_id']['preprocessing'] = {
+                'crop_top_fraction': self.preprocess_params['crop_top_fraction'],
+                'contrast_alpha': self.preprocess_params['contrast_alpha'],
+                'brightness_beta': self.preprocess_params['brightness_beta'],
+                'gaussian_blur': self.preprocess_params['gaussian_blur'],
+                'resize_factor': self.preprocess_params['resize_factor'],
+                'resize_absolute_width': self.preprocess_params['resize_absolute_width'],
+                'resize_absolute_height': self.preprocess_params['resize_absolute_height'],
+                'enhance_contrast': self.preprocess_params['enhance_contrast'],
+                'clahe_clip_limit': self.preprocess_params['clahe_clip_limit'],
+                'clahe_grid_size': self.preprocess_params['clahe_grid_size'],
+                'denoise': self.preprocess_params['denoise'],
+                'sharpen': self.preprocess_params['sharpen'],
+                'sharpen_strength': self.preprocess_params['sharpen_strength'],
+                'upscale': self.preprocess_params['upscale'],
+                'upscale_factor': self.preprocess_params['upscale_factor'],
+                'upscale_to_size': self.preprocess_params['upscale_to_size'],
+                'upscale_target_size': self.preprocess_params['upscale_target_size'],
+                'colour_mode': self.preprocess_params['colour_mode'],
+                'bw_mode': self.preprocess_params['bw_mode'],
+                # Minimum crop size filtering parameters
+                'min_crop_width': self.preprocess_params['min_crop_width'],
+                'min_crop_height': self.preprocess_params['min_crop_height']
             }
             
             if EASYOCR_AVAILABLE:
-                config_updates['player_id']['easyocr'] = {
+                processing_config['models']['player_id']['easyocr'] = {
                     'text_threshold': self.ocr_params['text_threshold'],
                     'low_text': self.ocr_params['low_text'],
                     'link_threshold': self.ocr_params['link_threshold'],
@@ -1992,33 +1925,14 @@ class EasyOCRTuningTab(QWidget):
                     'allowlist': self.ocr_params['allowlist']
                 }
             
-            # Ensure configs directory exists
-            config_path.parent.mkdir(exist_ok=True)
-            
-            # Load existing config or create new
-            existing_config = {}
-            if config_path.exists():
-                try:
-                    with open(config_path, 'r', encoding='utf-8') as f:
-                        existing_config = yaml.safe_load(f) or {}
-                except Exception as e:
-                    print(f"[EASYOCR_TUNING] Warning: Could not read existing config: {e}")
-                    existing_config = {}
-            
-            # Merge updates
-            self._deep_update(existing_config, config_updates)
-            
             # Save updated config
             with open(config_path, 'w', encoding='utf-8') as f:
-                yaml.dump(existing_config, f, default_flow_style=False, indent=2)
+                yaml.dump(processing_config, f, default_flow_style=False, indent=2)
             
             print(f"[EASYOCR_TUNING] Parameters saved successfully to {config_path}")
-            print(f"[EASYOCR_TUNING]   - Preprocessing parameters: {len(config_updates['player_id']['preprocessing'])} saved")
-            if EASYOCR_AVAILABLE and 'easyocr' in config_updates['player_id']:
-                print(f"[EASYOCR_TUNING]   - EasyOCR parameters: {len(config_updates['player_id']['easyocr'])} saved")
-            
-            # Optional: Add visual feedback to user (you could replace this with a status bar message)
-            # For now, console output should be sufficient for debugging
+            print(f"[EASYOCR_TUNING]   - Preprocessing parameters: {len(processing_config['models']['player_id']['preprocessing'])} saved")
+            if EASYOCR_AVAILABLE and 'easyocr' in processing_config['models']['player_id']:
+                print(f"[EASYOCR_TUNING]   - EasyOCR parameters: {len(processing_config['models']['player_id']['easyocr'])} saved")
             
         except Exception as e:
             print(f"[EASYOCR_TUNING] Error saving parameters to config: {e}")
