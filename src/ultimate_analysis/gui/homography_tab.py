@@ -39,8 +39,7 @@ from ..gui.visualization import (
     draw_all_field_lines
 )
 from ..processing.line_extraction import extract_raw_lines_from_segmentation
-from .tracked_line_visualization import draw_tracked_field_lines, classify_tracked_lines
-from ..processing.kalman_line_tracker import track_lines, reset_line_tracker
+from .ransac_line_visualization import draw_ransac_field_lines
 
 
 class ZoomableImageLabel(QLabel):
@@ -324,7 +323,8 @@ class HomographyTab(QWidget):
         self.show_segmentation_checkbox: Optional[QCheckBox] = None
         self.ransac_checkbox: Optional[QCheckBox] = None
         self.available_segmentation_models: List[str] = []
-        self.tracked_lines: List[Dict[str, Any]] = []  # Store Kalman-filtered field lines
+        self.ransac_lines: List[Tuple[np.ndarray, np.ndarray]] = []  # Store RANSAC-calculated field lines
+        self.ransac_confidences: List[float] = []  # Store RANSAC line confidences
         self.all_lines_for_display: Dict[str, Tuple[np.ndarray, float, bool]] = {}  # Store all lines for display
         
         # Runtime performance tracking
@@ -933,35 +933,31 @@ class HomographyTab(QWidget):
                 # Time the line extraction and tracking steps
                 extraction_start = time.time()
                 
-                # Extract raw RANSAC lines directly for Kalman tracking (bypass classification)
+                # Extract raw RANSAC lines for direct use
                 detected_lines, confidences = extract_raw_lines_from_segmentation(
                     self.current_segmentation_results, frame_shape)
                 
                 extraction_duration = (time.time() - extraction_start) * 1000
                 self._add_runtime_measurement('Line Extraction', extraction_duration)
                 
-                # Apply Kalman filtering to track lines over time
-                tracking_start = time.time()
+                # Store RANSAC lines directly
                 if detected_lines:
-                    self.tracked_lines = track_lines(detected_lines, confidences)
-                    print(f"[HOMOGRAPHY] Tracking {len(self.tracked_lines)} lines with Kalman filter")
+                    self.ransac_lines = detected_lines
+                    self.ransac_confidences = confidences
+                    print(f"[HOMOGRAPHY] Using {len(self.ransac_lines)} RANSAC lines directly")
                 else:
-                    self.tracked_lines = []
-                
-                tracking_duration = (time.time() - tracking_start) * 1000
-                self._add_runtime_measurement('Kalman Tracking', tracking_duration)
+                    self.ransac_lines = []
+                    self.ransac_confidences = []
                 
                 # Draw unified mask for visualization (lightweight version without RANSAC re-computation)
                 original_frame, raw_lines_dict, self.all_lines_for_display = draw_unified_field_mask(
                     original_frame, unified_mask, field_color, alpha=0.4, fill_mask=False)
                 
-                tracking_duration = (time.time() - tracking_start) * 1000
-                self._add_runtime_measurement('Line Tracking', tracking_duration)
-                
                 print(f"[HOMOGRAPHY] Applied field contour (no fill) to original frame: {np.sum(unified_mask)} pixels")
             else:
                 print("[HOMOGRAPHY] No unified mask could be created for original frame")
-                self.tracked_lines = []
+                self.ransac_lines = []
+                self.ransac_confidences = []
                 self.all_lines_for_display = {}
         elif self.show_segmentation:
             print("[HOMOGRAPHY] Segmentation enabled but no results available")
@@ -1048,12 +1044,13 @@ class HomographyTab(QWidget):
                                                   homography_matrix, scale_factor=2.0, 
                                                   draw_raw_lines_only=False)  # Show classified lines with simple labels
                 print(f"[HOMOGRAPHY] Drew {len(self.all_lines_for_display)} total field lines on warped frame")
-            elif self.tracked_lines:
-                # Draw Kalman-tracked lines in top-down view with classification colors
+            elif self.ransac_lines:
+                # Draw RANSAC lines in top-down view
                 homography_matrix = self._get_homography_matrix()
-                result_frame = draw_tracked_field_lines(result_frame, self.tracked_lines, 
-                                                      homography_matrix, scale_factor=2.0)
-                print(f"[HOMOGRAPHY] Drew {len(self.tracked_lines)} tracked field lines on warped frame")
+                result_frame = draw_ransac_field_lines(result_frame, self.ransac_lines, 
+                                                      self.ransac_confidences, homography_matrix, 
+                                                      scale_factor=2.0)
+                print(f"[HOMOGRAPHY] Drew {len(self.ransac_lines)} RANSAC field lines on warped frame")
             
             print(f"[HOMOGRAPHY] Applied transformed contour to warped frame: {len(transformed_contour)} points")
             return result_frame

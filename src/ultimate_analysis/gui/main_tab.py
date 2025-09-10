@@ -24,14 +24,13 @@ from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont, QColor
 
 from .video_player import VideoPlayer
 from .visualization import draw_detections, draw_tracks, draw_tracks_with_player_ids, draw_unified_field_mask, create_unified_field_mask, draw_all_field_lines, draw_classified_field_lines
-from .tracked_line_visualization import draw_tracked_field_lines
+from .ransac_line_visualization import draw_ransac_field_lines
 from .performance_widget import PerformanceWidget
 from ..processing import (
     run_inference, run_tracking, run_player_id_on_tracks, run_field_segmentation,
     set_detection_model, set_field_model, set_tracker_type, 
     reset_tracker, get_track_histories
 )
-from ..processing.kalman_line_tracker import track_lines, reset_line_tracker
 from ..processing.line_extraction import extract_raw_lines_from_segmentation
 from ..processing.jersey_tracker import get_jersey_tracker
 from ..processing.field_segmentation import visualize_segmentation
@@ -84,7 +83,8 @@ class MainTab(QWidget):
         self.show_segmentation_checkbox: Optional[QCheckBox] = None
         self.ransac_checkbox: Optional[QCheckBox] = None
         self.available_segmentation_models: List[str] = []
-        self.tracked_lines: List[Dict[str, Any]] = []  # Store Kalman-filtered field lines
+        self.ransac_lines: List[Tuple[np.ndarray, np.ndarray]] = []  # Store RANSAC-calculated field lines
+        self.ransac_confidences: List[float] = []  # Store RANSAC line confidences
         self.all_lines_for_display: Dict[str, Tuple[np.ndarray, float, bool]] = {}  # Store all lines for display
         
         # Homography state
@@ -876,7 +876,8 @@ class MainTab(QWidget):
         else:
             # Clear field results when disabled
             self.current_field_results = []
-            self.tracked_lines = []
+            self.ransac_lines = []
+            self.ransac_confidences = []
             self.all_lines_for_display = {}
         
         # Run player ID if enabled (requires tracking to be active)
@@ -960,16 +961,18 @@ class MainTab(QWidget):
             unified_mask = create_unified_field_mask(self.current_field_results, frame_shape)
             
             if unified_mask is not None:
-                # Extract raw RANSAC lines directly for Kalman tracking (bypass classification)
+                # Extract raw RANSAC lines for direct use
                 detected_lines, confidences = extract_raw_lines_from_segmentation(
                     self.current_field_results, frame_shape)
                 
-                # Apply Kalman filtering to track lines over time
+                # Store RANSAC lines directly
                 if detected_lines:
-                    self.tracked_lines = track_lines(detected_lines, confidences)
-                    print(f"[MAIN_TAB] Tracking {len(self.tracked_lines)} lines with Kalman filter")
+                    self.ransac_lines = detected_lines
+                    self.ransac_confidences = confidences
+                    print(f"[MAIN_TAB] Using {len(self.ransac_lines)} RANSAC lines directly")
                 else:
-                    self.tracked_lines = []
+                    self.ransac_lines = []
+                    self.ransac_confidences = []
                 
                 # Use bright green for unified field mask - contour only, no fill for better runtime
                 field_color = (0, 255, 0)  # Bright green (BGR)
@@ -983,14 +986,16 @@ class MainTab(QWidget):
                                                scale_factor=1.0, draw_raw_lines_only=True)
                     print(f"[MAIN_TAB] Added raw RANSAC lines for {len(self.all_lines_for_display)} field lines")
                 
-                # Overlay Kalman-tracked field lines on main view for better stability visualization
-                if self.tracked_lines:
-                    frame = draw_tracked_field_lines(frame, self.tracked_lines, 
-                                                   transformation_matrix=None, scale_factor=1.0)
-                    print(f"[MAIN_TAB] Added {len(self.tracked_lines)} Kalman-tracked lines to main view")
+                # Overlay RANSAC field lines on main view
+                if self.ransac_lines:
+                    frame = draw_ransac_field_lines(frame, self.ransac_lines, 
+                                                   self.ransac_confidences, transformation_matrix=None, 
+                                                   scale_factor=1.0)
+                    print(f"[MAIN_TAB] Added {len(self.ransac_lines)} RANSAC lines to main view")
             else:
                 print("[MAIN_TAB] No unified mask could be created")
-                self.tracked_lines = []
+                self.ransac_lines = []
+                self.ransac_confidences = []
                 self.all_lines_for_display = {}
         
         # Conditional visualization based on enabled options (avoid unnecessary processing)
@@ -1313,10 +1318,9 @@ class MainTab(QWidget):
         else:
             print("[MAIN_TAB] Field segmentation disabled")
             self.current_segmentation_results = None
-            self.tracked_lines = []
+            self.ransac_lines = []
+            self.ransac_confidences = []
             self.all_lines_for_display = {}
-            # Reset line tracker when segmentation is disabled
-            reset_line_tracker()
             
         self._request_display_update()
     
@@ -1348,10 +1352,9 @@ class MainTab(QWidget):
         if self.show_segmentation and self.current_field_results:
             # Force re-run segmentation with new RANSAC setting
             self.current_field_results = None
-            self.tracked_lines = []
+            self.ransac_lines = []
+            self.ransac_confidences = []
             self.all_lines_for_display = {}
-            # Reset line tracker when RANSAC settings change
-            reset_line_tracker()
             self._request_display_update()
     
     def _on_segmentation_model_changed(self, display_name: str):
@@ -1648,14 +1651,15 @@ class MainTab(QWidget):
                         warped_frame = self._map_tracked_objects_to_top_down(warped_frame)
                         print(f"[MAIN_TAB] Mapped {len(self.current_tracks)} tracked objects to top-down view")
                     
-                    # Add Kalman-tracked field lines to top-down view
-                    if self.tracked_lines:
-                        # Use tracked lines with confidence display for top-down view
-                        warped_frame = draw_tracked_field_lines(warped_frame, self.tracked_lines, 
-                                                              self.homography_matrix, scale_factor=2.0)
-                        print(f"[MAIN_TAB] Added Kalman-tracked field lines to top-down view: {len(self.tracked_lines)} lines")
+                    # Add RANSAC field lines to top-down view
+                    if self.ransac_lines:
+                        # Use RANSAC lines with confidence display for top-down view
+                        warped_frame = draw_ransac_field_lines(warped_frame, self.ransac_lines, 
+                                                              self.ransac_confidences, self.homography_matrix, 
+                                                              scale_factor=2.0)
+                        print(f"[MAIN_TAB] Added RANSAC field lines to top-down view: {len(self.ransac_lines)} lines")
                     elif self.all_lines_for_display:
-                        # Fallback to classified lines if no tracked lines available
+                        # Fallback to classified lines if no RANSAC lines available
                         warped_frame = draw_all_field_lines(warped_frame, self.all_lines_for_display, 
                                                           self.homography_matrix, scale_factor=2.0, 
                                                           draw_raw_lines_only=False)

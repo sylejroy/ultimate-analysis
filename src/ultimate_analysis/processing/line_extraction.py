@@ -1,7 +1,7 @@
 """Line extraction utilities for direct RANSAC line access.
 
 This module provides functions to extract raw lines from field segmentation
-for Kalman tracking, bypassing the classification system.
+for direct use, bypassing the classification system.
 """
 
 import numpy as np
