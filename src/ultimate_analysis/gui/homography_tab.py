@@ -34,7 +34,6 @@ from ..gui.visualization import (
     calculate_field_contour,
     draw_field_contour,
     draw_field_lines_ransac,
-    draw_classified_field_lines,
     draw_all_field_lines
 )
 from ..processing.line_extraction import extract_raw_lines_from_segmentation
@@ -1692,7 +1691,7 @@ class HomographyTab(QWidget):
             
             # Initialize table with processing steps
             processes = ['Field Segmentation', 'Morphological Ops', 'RANSAC Fitting', 
-                        'Line Classification', 'Homography Calc', 'Display Update']
+                        'Homography Calc', 'Display Update']
             self.runtime_table.setRowCount(len(processes))
             
             for i, process in enumerate(processes):
@@ -1771,7 +1770,7 @@ class HomographyTab(QWidget):
             return
         
         processes = ['Field Segmentation', 'Morphological Ops', 'RANSAC Fitting', 
-                    'Line Classification', 'Homography Calc', 'Display Update']
+                    'Homography Calc', 'Display Update']
         
         for i, process in enumerate(processes):
             if process in self.processing_times and self.processing_times[process]:

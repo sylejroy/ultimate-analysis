@@ -363,13 +363,13 @@ def fit_field_lines_ransac(contour: np.ndarray,
         max_trials: Maximum RANSAC iterations per line segment
         
     Returns:
-        Tuple of (fitted_lines, outlier_points, inlier_points, edge_filtered_points, classified_lines, all_lines_for_display) where:
+        Tuple of (fitted_lines, outlier_points, inlier_points, edge_filtered_points, empty_dict, all_lines_for_display) where:
         - fitted_lines: List of (start_point, end_point) tuples for each fitted line
         - outlier_points: List of outlier point arrays for each segment
         - inlier_points: List of inlier point arrays for each segment
         - edge_filtered_points: Points that were filtered out during edge filtering
-        - classified_lines: Dictionary of high-confidence classified lines
-        - all_lines_for_display: Dictionary of all lines (classified and unclassified) for visualization
+        - empty_dict: Empty dictionary (classification removed)
+        - all_lines_for_display: Dictionary of all lines for visualization
         Returns (None, None, None, None, {}, {}) if fitting fails
     """
     if contour is None or len(contour) < num_lines * min_samples:
@@ -438,44 +438,18 @@ def fit_field_lines_ransac(contour: np.ndarray,
         else:
             all_outliers.append(np.array([]).reshape(0, 2))
         
-        # Filter lines by confidence threshold for classification
-        classification_threshold = get_setting("models.segmentation.contour.ransac.classification_confidence_threshold", 0.5)
-        
-        # Separate high-confidence lines for classification vs all lines for display
-        high_confidence_lines = []
-        high_confidence_confidences = []
-        
-        for i, (line, confidence) in enumerate(zip(fitted_lines, line_confidences)):
-            if line is not None and confidence >= classification_threshold:
-                high_confidence_lines.append(line)
-                high_confidence_confidences.append(confidence)
-        
-        # Classify only the high-confidence lines
-        if high_confidence_lines:
-            classified_lines = _classify_field_lines(high_confidence_lines, frame.shape, high_confidence_confidences)
-        else:
-            classified_lines = {}
-        
-        # Create a dictionary of all lines (including low-confidence ones) for display purposes
+        # Create a dictionary of all lines for display purposes (no classification)
         all_lines_for_display = {}
         
-        # Add all fitted lines with their original indices for display
+        # Add all fitted lines for display with simple numbering
         for i, (line, confidence) in enumerate(zip(fitted_lines, line_confidences)):
             if line is not None:
-                is_classified = confidence >= classification_threshold
-                line_type = f"unclassified_line_{i}" if not is_classified else None
-                
-                # If it's a high-confidence line, it will be overwritten by the classified version below
-                if not is_classified:
-                    all_lines_for_display[line_type] = (line, confidence, False)
-        
-        # Add classified lines (these will overwrite any unclassified entries for the same lines)
-        for line_type, (line_coords, confidence) in classified_lines.items():
-            all_lines_for_display[line_type] = (line_coords, confidence, True)
+                line_type = f"line_{i}"
+                all_lines_for_display[line_type] = (line, confidence, False)
         
         # Filter out None entries from fitted_lines but keep all for display
         valid_lines = [line for line in fitted_lines if line is not None]
-        return (valid_lines, all_outliers, all_inliers, edge_filtered_points, classified_lines, all_lines_for_display) if valid_lines else (None, None, None, edge_filtered_points, {}, {})
+        return (valid_lines, all_outliers, all_inliers, edge_filtered_points, {}, all_lines_for_display) if valid_lines else (None, None, None, edge_filtered_points, {}, {})
         
     except Exception as e:
         print(f"[FIELD_ANALYSIS] Error in RANSAC line fitting: {e}")
@@ -656,90 +630,6 @@ def _fit_line_ransac_fallback(points: np.ndarray, distance_threshold: float,
     except Exception as e:
         print(f"[FIELD_ANALYSIS] Error in fallback RANSAC fitting: {e}")
         return None
-
-
-def _classify_field_lines(fitted_lines: List[np.ndarray], frame_shape: Tuple[int, int, int], 
-                         line_confidences: List[float] = None) -> Dict[str, Tuple[np.ndarray, float]]:
-    """Classify fitted lines into field components (sidelines, endzone lines, etc.).
-    
-    Args:
-        fitted_lines: List of line segments as [start_point, end_point] arrays
-        frame_shape: Shape of the frame (height, width, channels)
-        line_confidences: List of confidence scores for each line
-        
-    Returns:
-        Dictionary mapping line types to (line_coordinates, confidence) tuples
-    """
-    if not fitted_lines:
-        return {}
-    
-    # If no confidences provided, use default values
-    if line_confidences is None:
-        line_confidences = [1.0] * len(fitted_lines)
-    
-    frame_height, frame_width = frame_shape[:2]
-    classified = {}
-    
-    # Calculate line properties
-    line_info = []
-    for i, line in enumerate(fitted_lines):
-        if line is None or len(line) != 2:
-            continue
-            
-        start_point, end_point = line[0], line[1]
-        
-        # Calculate line angle (in degrees)
-        dx = end_point[0] - start_point[0]
-        dy = end_point[1] - start_point[1]
-        angle = np.degrees(np.arctan2(dy, dx))
-        
-        # Normalize angle to [0, 180)
-        if angle < 0:
-            angle += 180
-        
-        # Calculate average Y position (vertical position in image)
-        avg_y = (start_point[1] + end_point[1]) / 2
-        avg_x = (start_point[0] + end_point[0]) / 2
-        
-        # Determine if line is horizontal or vertical
-        # Lines within 20 degrees of horizontal are considered horizontal
-        is_horizontal = abs(angle) <= 20 or abs(angle - 180) <= 20
-        
-        line_info.append({
-            'index': i,
-            'line': line,
-            'angle': angle,
-            'avg_y': avg_y,
-            'avg_x': avg_x,
-            'horizontal': is_horizontal,
-            'confidence': line_confidences[i]
-        })
-    
-    # Sort lines by position and angle for classification
-    horizontal_lines = [l for l in line_info if l['horizontal']]
-    vertical_lines = [l for l in line_info if not l['horizontal']]
-    
-    # Classify horizontal lines (endzone lines) - sort by Y position
-    horizontal_lines.sort(key=lambda x: x['avg_y'])
-    for i, line_data in enumerate(horizontal_lines):
-        if i == 0 and line_data['avg_y'] < frame_height * 0.6:
-            # Top line is far endzone back
-            classified['far_endzone_back'] = (line_data['line'], line_data['confidence'])
-        elif i == 1 and line_data['avg_y'] < frame_height * 0.8:
-            # Second line might be far endzone front
-            classified['far_endzone_front'] = (line_data['line'], line_data['confidence'])
-    
-    # Classify vertical lines (sidelines) - sort by X position  
-    vertical_lines.sort(key=lambda x: x['avg_x'])
-    for i, line_data in enumerate(vertical_lines):
-        if i == 0 and line_data['avg_x'] < frame_width * 0.6:
-            # Leftmost line is left sideline
-            classified['left_sideline'] = (line_data['line'], line_data['confidence'])
-        elif i == len(vertical_lines) - 1 and line_data['avg_x'] > frame_width * 0.4:
-            # Rightmost line is right sideline  
-            classified['right_sideline'] = (line_data['line'], line_data['confidence'])
-    
-    return classified
 
 
 def extract_field_lines_ransac_processing(contour: np.ndarray, frame: np.ndarray, 

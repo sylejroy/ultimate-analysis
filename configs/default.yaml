@@ -35,8 +35,8 @@ models:
     
     # Morphological operations for mask smoothing
     morphological:
-      opening_kernel_size: 0     # Size for noise removal (0 to disable)
-      closing_kernel_size: 0    # Size for hole filling (0 to disable)
+      opening_kernel_size: 5     # Size for noise removal (0 to disable)
+      closing_kernel_size: 5    # Size for hole filling (0 to disable)
       fill_holes: false           # Apply flood fill for remaining holes
     
     # Contour calculation and drawings
@@ -62,7 +62,6 @@ models:
         distance_threshold: 5.0 # Maximum distance from point to line for inliers
         min_samples: 2          # Minimum number of points needed to fit a line
         max_trials: 20        # Maximum RANSAC iterations per line segment
-        classification_confidence_threshold: 0.5  # Minimum confidence for line classification
         line_color: [0, 255, 0] # BGR color for RANSAC lines (green)
         outlier_color: [0, 165, 255] # BGR color for RANSAC outlier points (orange)
         outlier_radius: 4       # Radius for outlier point visualization

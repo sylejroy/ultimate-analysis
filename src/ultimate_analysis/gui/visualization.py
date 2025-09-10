@@ -875,198 +875,6 @@ def draw_field_contour(frame: np.ndarray, contour: np.ndarray,
     return result
 
 
-def _classify_field_lines(fitted_lines: List[np.ndarray], frame_shape: Tuple[int, int, int], 
-                         line_confidences: List[float] = None) -> Dict[str, Tuple[np.ndarray, float]]:
-    """Classify fitted lines into field components (sidelines, endzone lines, etc.).
-    
-    Args:
-        fitted_lines: List of line segments as [start_point, end_point] arrays
-        frame_shape: Shape of the frame (height, width, channels)
-        line_confidences: List of confidence scores for each line
-        
-    Returns:
-        Dictionary mapping line types to (line_coordinates, confidence) tuples
-    """
-    if not fitted_lines:
-        return {}
-    
-    # If no confidences provided, use default values
-    if line_confidences is None:
-        line_confidences = [1.0] * len(fitted_lines)
-    
-    frame_height, frame_width = frame_shape[:2]
-    classified = {}
-    
-    # Calculate line properties
-    line_info = []
-    for i, line in enumerate(fitted_lines):
-        if line is None or len(line) != 2:
-            continue
-            
-        start_point, end_point = line[0], line[1]
-        
-        # Calculate line angle (in degrees)
-        dx = end_point[0] - start_point[0]
-        dy = end_point[1] - start_point[1]
-        angle = np.degrees(np.arctan2(dy, dx))
-        
-        # Normalize angle to [0, 180)
-        if angle < 0:
-            angle += 180
-        
-        # Calculate average Y position (vertical position in image)
-        avg_y = (start_point[1] + end_point[1]) / 2
-        avg_x = (start_point[0] + end_point[0]) / 2
-        
-        # Determine if line is horizontal or vertical
-        # Lines within 15 degrees of horizontal are considered horizontal (more strict)
-        is_horizontal = abs(angle - 0) < 15 or abs(angle - 180) < 15
-        
-        line_info.append({
-            'index': i,
-            'line': line,
-            'confidence': line_confidences[i],  # Add confidence to line info
-            'angle': angle,
-            'avg_y': avg_y,
-            'avg_x': avg_x,
-            'is_horizontal': is_horizontal,
-            'start': start_point,
-            'end': end_point
-        })
-        
-        print(f"[VISUALIZATION] Line {i}: angle={angle:.1f}°, avg_y={avg_y:.1f}, avg_x={avg_x:.1f}, horizontal={is_horizontal}, confidence={line_confidences[i]:.3f}")
-    
-    # Separate horizontal and non-horizontal lines
-    horizontal_lines = [info for info in line_info if info['is_horizontal']]
-    vertical_lines = [info for info in line_info if not info['is_horizontal']]
-    
-    # Sort horizontal lines by Y position (top to bottom)
-    horizontal_lines.sort(key=lambda x: x['avg_y'])
-    
-    # Sort vertical lines by X position (left to right)
-    vertical_lines.sort(key=lambda x: x['avg_x'])
-    
-    # Classify horizontal lines based on Y position
-    # Ultimate frisbee field has up to 4 horizontal lines: far endzone back, far endzone front, near endzone front, near endzone back
-    # Use quarter-based regions but ensure each classification is only assigned once
-    
-    quarter_height = frame_height / 4
-    used_classifications = set()
-    
-    for i, line_info_item in enumerate(horizontal_lines):
-        y_pos = line_info_item['avg_y']
-        
-        # Determine preferred classification based on position
-        if y_pos < quarter_height:
-            preferred = 'far_endzone_back'
-        elif y_pos < quarter_height * 2:
-            preferred = 'far_endzone_front'
-        elif y_pos < quarter_height * 3:
-            preferred = 'near_endzone_front'
-        else:
-            preferred = 'near_endzone_back'
-        
-        # If preferred classification is already used, find an alternative
-        if preferred not in used_classifications:
-            classified[preferred] = (line_info_item['line'], line_info_item['confidence'])
-            used_classifications.add(preferred)
-            print(f"[VISUALIZATION] Classified line {line_info_item['index']} as {preferred}")
-        else:
-            # Find the next available horizontal line classification
-            alternatives = ['far_endzone_back', 'far_endzone_front', 'near_endzone_front', 'near_endzone_back']
-            assigned = False
-            for alt in alternatives:
-                if alt not in used_classifications:
-                    classified[alt] = (line_info_item['line'], line_info_item['confidence'])
-                    used_classifications.add(alt)
-                    print(f"[VISUALIZATION] Classified line {line_info_item['index']} as {alt} (alternative)")
-                    assigned = True
-                    break
-            
-            if not assigned:
-                # If all standard classifications are used, create additional ones
-                classified[f'horizontal_line_{i}'] = (line_info_item['line'], line_info_item['confidence'])
-                print(f"[VISUALIZATION] Classified line {line_info_item['index']} as horizontal_line_{i} (overflow)")
-    
-    # Classify vertical lines (sidelines) with improved logic
-    # Ultimate frisbee field typically has 2 sidelines, but may detect more segments
-    
-    if len(vertical_lines) >= 1:
-        frame_center_x = frame_width / 2
-        
-        # Separate lines into left and right candidates based on frame center
-        left_candidates = [line for line in vertical_lines if line['avg_x'] < frame_center_x]
-        right_candidates = [line for line in vertical_lines if line['avg_x'] >= frame_center_x]
-        
-        # Sort left candidates by X position (rightmost first - closest to center)
-        # and right candidates by X position (leftmost first - closest to center)
-        left_candidates.sort(key=lambda x: x['avg_x'], reverse=True)
-        right_candidates.sort(key=lambda x: x['avg_x'])
-        
-        # For each side, prefer the line closest to center with highest confidence
-        def select_best_sideline(candidates, side_name):
-            if not candidates:
-                return None
-            
-            # Weight by both distance to center and confidence
-            def score_line(line):
-                # Normalize distance to center (0 = at edge, 1 = at center)
-                if side_name == 'left':
-                    distance_factor = line['avg_x'] / frame_center_x  # Higher = closer to center
-                else:  # right
-                    distance_factor = (frame_width - line['avg_x']) / frame_center_x
-                
-                distance_factor = min(1.0, distance_factor)  # Clamp to 1.0
-                
-                # Combine confidence and position (60% confidence, 40% position)
-                score = 0.6 * line['confidence'] + 0.4 * distance_factor
-                return score
-            
-            # Select line with highest combined score
-            best_line = max(candidates, key=score_line)
-            return best_line
-        
-        # Assign best left and right sidelines
-        best_left = select_best_sideline(left_candidates, 'left')
-        best_right = select_best_sideline(right_candidates, 'right')
-        
-        if best_left:
-            classified['left_sideline'] = (best_left['line'], best_left['confidence'])
-            print(f"[VISUALIZATION] Classified line {best_left['index']} as left sideline (score-based)")
-            
-        if best_right:
-            classified['right_sideline'] = (best_right['line'], best_right['confidence'])
-            print(f"[VISUALIZATION] Classified line {best_right['index']} as right sideline (score-based)")
-        
-        # Handle case where there's only one vertical line detected
-        if not best_left and not best_right and len(vertical_lines) == 1:
-            line = vertical_lines[0]
-            # Assign to the side it's actually on
-            if line['avg_x'] < frame_center_x:
-                classified['left_sideline'] = (line['line'], line['confidence'])
-                print(f"[VISUALIZATION] Classified line {line['index']} as left sideline (single line)")
-            else:
-                classified['right_sideline'] = (line['line'], line['confidence'])
-                print(f"[VISUALIZATION] Classified line {line['index']} as right sideline (single line)")
-        
-        # Classify any remaining vertical lines as additional segments
-        assigned_indices = set()
-        if best_left:
-            assigned_indices.add(best_left['index'])
-        if best_right:
-            assigned_indices.add(best_right['index'])
-            
-        segment_count = 0
-        for line_info_item in vertical_lines:
-            if line_info_item['index'] not in assigned_indices:
-                classified[f'sideline_segment_{segment_count}'] = (line_info_item['line'], line_info_item['confidence'])
-                print(f"[VISUALIZATION] Classified line {line_info_item['index']} as sideline segment {segment_count}")
-                segment_count += 1
-    
-    print(f"[VISUALIZATION] Line classification complete: {list(classified.keys())}")
-    return classified
-
-
 def _segment_contour_points(points: np.ndarray, num_segments: int) -> List[np.ndarray]:
     """Divide contour points into segments for line fitting.
     
@@ -1257,7 +1065,7 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
         fill_mask: Whether to fill the mask area (False = contour only)
         
     Returns:
-        Tuple of (frame with unified mask overlay and optional contour, classified_lines dictionary, all_lines_for_display dictionary)
+        Tuple of (frame with unified mask overlay and optional contour, empty dictionary, all_lines_for_display dictionary)
     """
     if unified_mask is None or not np.any(unified_mask):
         return frame, {}, {}
@@ -1266,7 +1074,7 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
     from ..config.settings import get_setting
     
     result = frame.copy()
-    classified_lines = {}  # Initialize empty classified lines dictionary
+    classified_lines = {}  # Always empty since classification removed
     all_lines_for_display = {}  # Initialize empty all lines dictionary
     
     # Only fill mask if explicitly requested (disabled by default for better runtime)
@@ -1376,7 +1184,7 @@ def draw_all_field_lines(frame: np.ndarray, all_lines_for_display: Dict[str, Tup
         all_lines_for_display: Dictionary mapping line types to (line_coordinates, confidence, is_classified) tuples
         transformation_matrix: Optional homography matrix to transform lines to warped view
         scale_factor: Scale factor for text and line thickness (useful for top-down view)
-        draw_raw_lines_only: If True, only draw raw RANSAC lines without classification colors/labels
+        draw_raw_lines_only: If True, only draw simple white lines without any special colors/labels
         
     Returns:
         Frame with all lines drawn
@@ -1386,7 +1194,7 @@ def draw_all_field_lines(frame: np.ndarray, all_lines_for_display: Dict[str, Tup
         
     result = frame.copy()
     
-    # Define colors for different line types
+    # Define fallback colors for different line types (kept for compatibility)
     line_colors = {
         'left_sideline': (255, 0, 0),      # Blue
         'right_sideline': (255, 0, 255),   # Magenta  
@@ -1409,7 +1217,7 @@ def draw_all_field_lines(frame: np.ndarray, all_lines_for_display: Dict[str, Tup
             # Use a single color for all raw RANSAC lines
             color = (0, 255, 0)  # Green for all raw lines
         else:
-            # Use classification-based coloring for top-down view
+            # Use simple coloring (no classification)
             if is_classified:
                 base_color = line_colors.get(line_type, (255, 255, 255))  # Default white
             else:
@@ -1483,124 +1291,6 @@ def draw_all_field_lines(frame: np.ndarray, all_lines_for_display: Dict[str, Tup
                 font_thickness = max(1, int(1 * scale_factor))  # Thinner text
                 cv2.putText(result, simple_label, text_pos, 
                            cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, font_thickness)
-            
-            print(f"[VISUALIZATION] Drew {line_type} line from {start_int} to {end_int}")
-    
-    return result
-
-
-def draw_classified_field_lines(frame: np.ndarray, classified_lines: Dict[str, Tuple[np.ndarray, float]],
-                               transformation_matrix: Optional[np.ndarray] = None) -> np.ndarray:
-    """Draw classified field lines with different colors for each type and confidence scores.
-    
-    Args:
-        frame: Frame to draw on
-        classified_lines: Dictionary mapping line types to (line_coordinates, confidence) tuples
-        transformation_matrix: Optional homography matrix to transform lines to warped view
-        
-    Returns:
-        Frame with classified lines drawn
-    """
-    if not classified_lines:
-        return frame
-        
-    result = frame.copy()
-    
-    # Define colors for different line types
-    line_colors = {
-        'left_sideline': (255, 0, 0),      # Blue
-        'right_sideline': (255, 0, 255),   # Magenta  
-        'far_endzone_back': (0, 255, 255), # Yellow
-        'far_endzone_front': (0, 165, 255), # Orange
-        'near_endzone_front': (0, 255, 0), # Green
-        'near_endzone_back': (255, 255, 0)  # Cyan
-    }
-    
-    line_thickness = 3
-    
-    for line_type, line_data in classified_lines.items():
-        # Handle both old format (just coordinates) and new format (coordinates, confidence)
-        if isinstance(line_data, tuple) and len(line_data) == 2:
-            line_coords, confidence = line_data
-        else:
-            # Backward compatibility - assume old format
-            line_coords = line_data
-            confidence = 1.0
-        
-        if line_coords is None or len(line_coords) != 2:
-            continue
-            
-        # Determine color based on confidence
-        base_color = line_colors.get(line_type, (255, 255, 255))  # Default white
-        
-        # Grey out lines with low confidence (< 0.5)
-        confidence_threshold = 0.5
-        if confidence < confidence_threshold:
-            # Convert to grey by averaging RGB values and reducing intensity
-            grey_intensity = int(sum(base_color) / 3 * 0.6)  # Darker grey for low confidence
-            color = (grey_intensity, grey_intensity, grey_intensity)
-        else:
-            color = base_color
-        
-        start_point = line_coords[0].copy()
-        end_point = line_coords[1].copy()
-        
-        # Transform points if transformation matrix is provided
-        if transformation_matrix is not None:
-            # Convert to homogeneous coordinates
-            start_homo = np.array([start_point[0], start_point[1], 1.0])
-            end_homo = np.array([end_point[0], end_point[1], 1.0])
-            
-            # Apply transformation
-            start_transformed = transformation_matrix @ start_homo
-            end_transformed = transformation_matrix @ end_homo
-            
-            # Convert back to 2D coordinates
-            if start_transformed[2] != 0:
-                start_point = start_transformed[:2] / start_transformed[2]
-            if end_transformed[2] != 0:
-                end_point = end_transformed[:2] / end_transformed[2]
-        
-        # Draw the line
-        start_int = (int(start_point[0]), int(start_point[1]))
-        end_int = (int(end_point[0]), int(end_point[1]))
-        
-        # Check if points are within frame bounds
-        h, w = frame.shape[:2]
-        if (0 <= start_int[0] < w and 0 <= start_int[1] < h and
-            0 <= end_int[0] < w and 0 <= end_int[1] < h):
-            cv2.line(result, start_int, end_int, color, line_thickness)
-            
-            # Add text label with confidence score
-            mid_point = ((start_int[0] + end_int[0]) // 2, (start_int[1] + end_int[1]) // 2)
-            
-            # Calculate offset perpendicular to the line
-            line_vec = (end_int[0] - start_int[0], end_int[1] - start_int[1])
-            line_length = max(1, (line_vec[0]**2 + line_vec[1]**2)**0.5)  # Avoid division by zero
-            
-            # Perpendicular vector (rotate 90 degrees)
-            perp_vec = (-line_vec[1], line_vec[0])
-            
-            # Normalize and scale for offset distance
-            offset_distance = 25  # pixels
-            offset_x = int((perp_vec[0] / line_length) * offset_distance)
-            offset_y = int((perp_vec[1] / line_length) * offset_distance)
-            
-            # Apply offset to text position
-            text_pos = (mid_point[0] + offset_x, mid_point[1] + offset_y)
-            
-            # Ensure text position is within frame bounds
-            text_pos = (max(10, min(w - 10, text_pos[0])), max(20, min(h - 10, text_pos[1])))
-            
-            # Create label with confidence score
-            clean_name = line_type.replace('_', ' ').title()
-            confidence_label = f"{clean_name} ({confidence:.2f})"
-            
-            # Draw text with larger font size and better visibility
-            font_scale = 0.8  # Increased from 0.5
-            font_thickness = 2  # Increased from 1
-            cv2.putText(result, confidence_label, text_pos, 
-                       cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, font_thickness)
             
             print(f"[VISUALIZATION] Drew {line_type} line from {start_int} to {end_int}")
     

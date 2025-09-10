@@ -23,7 +23,7 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont, QColor
 
 from .video_player import VideoPlayer
-from .visualization import draw_detections, draw_tracks, draw_tracks_with_player_ids, draw_unified_field_mask, create_unified_field_mask, draw_all_field_lines, draw_classified_field_lines
+from .visualization import draw_detections, draw_tracks, draw_tracks_with_player_ids, draw_unified_field_mask, create_unified_field_mask, draw_all_field_lines
 from .ransac_line_visualization import draw_ransac_field_lines
 from .performance_widget import PerformanceWidget
 from ..processing import (
@@ -956,7 +956,7 @@ class MainTab(QWidget):
         
         # Apply field segmentation overlay first (as background) - contour only for better performance
         if self.current_field_results and self.field_segmentation_checkbox.isChecked():
-            # Create and display unified mask with RANSAC line detection (no classification)
+            # Create and display unified mask with RANSAC line detection
             frame_shape = frame.shape[:2]  # (height, width)
             unified_mask = create_unified_field_mask(self.current_field_results, frame_shape)
             
@@ -1424,7 +1424,7 @@ class MainTab(QWidget):
             result_frame = draw_field_contour(result_frame, transformed_contour)
             
             # Note: Field lines will be drawn later in _update_homography_display() 
-            # with proper scale_factor and classification for top-down view
+            # with proper scale_factor for top-down view
             # This avoids duplicate text/labels and ensures consistent processing
             
             print(f"[MAIN_TAB] Applied transformed contour to warped frame: {len(transformed_contour)} points")
