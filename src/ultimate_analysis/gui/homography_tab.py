@@ -8,7 +8,7 @@ import os
 import yaml
 import datetime
 import time
-from typing import List, Dict, Optional, Tuple, Any
+from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 
 import cv2
@@ -18,27 +18,25 @@ from PyQt5.QtWidgets import (
     QPushButton, QSlider, QListWidgetItem, QGroupBox,
     QFormLayout, QSplitter, QFileDialog, QMessageBox,
     QScrollArea, QSizePolicy, QCheckBox, QSpinBox, QComboBox,
-    QTableWidget, QTableWidgetItem, QHeaderView, QDialog
+    QTableWidget, QTableWidgetItem, QHeaderView, QDialog, QLineEdit
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QPoint
-from PyQt5.QtGui import QPixmap, QImage, QWheelEvent, QPainter, QPen, QColor, QMouseEvent
+from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QPixmap, QImage, QWheelEvent, QPainter, QPen, QColor
 
 from .video_player import VideoPlayer
 from ..config.settings import get_setting
 from ..constants import DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS
 from ..processing.field_segmentation import run_field_segmentation, set_field_model
 from ..gui.visualization import (
-    draw_field_segmentation, 
     create_unified_field_mask, 
     draw_unified_field_mask,
-    calculate_field_contour,
-    draw_field_contour,
-    draw_field_lines_ransac,
-    draw_all_field_lines,
     get_primary_field_color
 )
 from ..processing.line_extraction import extract_raw_lines_from_segmentation
-from .ransac_line_visualization import draw_ransac_field_lines
+from ..utils.segmentation_utils import (
+    apply_segmentation_to_warped_frame, load_segmentation_models, 
+    populate_segmentation_model_combo
+)
 
 
 class ZoomableImageLabel(QLabel):
@@ -305,6 +303,7 @@ class HomographyTab(QWidget):
         self.warped_display: Optional[ZoomableImageLabel] = None
         self.param_sliders: Dict[str, QSlider] = {}
         self.param_labels: Dict[str, QLabel] = {}
+        self.param_inputs: Dict[str, QLineEdit] = {}  # For direct text input
         
         # Scrubbing controls
         self.scrubbing_slider: Optional[QSlider] = None
@@ -756,8 +755,14 @@ class HomographyTab(QWidget):
         form_layout = QFormLayout()
         
         for param_name, param_range, default_val, label_text in param_config:
-            # Parameter label and value display
+            # Parameter container with horizontal layout for slider and text input
+            param_container = QWidget()
             param_layout = QVBoxLayout()
+            param_layout.setContentsMargins(0, 0, 0, 0)
+            
+            # Horizontal layout for slider and text input
+            control_layout = QHBoxLayout()
+            control_layout.setContentsMargins(0, 0, 0, 0)
             
             # Slider for parameter
             slider = QSlider(Qt.Horizontal)
@@ -772,20 +777,32 @@ class HomographyTab(QWidget):
             slider.valueChanged.connect(lambda val, name=param_name: self._on_parameter_changed(name, val))
             self.param_sliders[param_name] = slider
             
-            # Value label
+            # Text input for exact value entry
+            text_input = QLineEdit()
+            text_input.setText(f"{default_val:.6f}")
+            text_input.setMaximumWidth(80)  # Compact width
+            text_input.setStyleSheet("font-family: monospace; font-size: 10px;")
+            text_input.editingFinished.connect(lambda name=param_name, widget=text_input: self._on_text_input_changed(name, widget.text()))
+            self.param_inputs[param_name] = text_input
+            
+            # Add slider and text input to horizontal layout
+            control_layout.addWidget(slider, 1)  # Slider takes most space
+            control_layout.addWidget(text_input, 0)  # Text input is compact
+            
+            # Value label (display only)
             value_label = QLabel(f"{default_val:.6f}")
             value_label.setAlignment(Qt.AlignCenter)
-            value_label.setStyleSheet("font-family: monospace; font-size: 10px;")
+            value_label.setStyleSheet("font-family: monospace; font-size: 9px; color: #888;")
             self.param_labels[param_name] = value_label
             
-            # Combine slider and label
-            param_layout.addWidget(slider)
+            # Combine in vertical layout
+            param_layout.addLayout(control_layout)
             param_layout.addWidget(value_label)
             
+            param_container.setLayout(param_layout)
+            
             # Add to form
-            combined_widget = QWidget()
-            combined_widget.setLayout(param_layout)
-            form_layout.addRow(f"{label_text} ({param_name}):", combined_widget)
+            form_layout.addRow(f"{label_text} ({param_name}):", param_container)
             
         layout.addLayout(form_layout)
         
@@ -939,6 +956,70 @@ class HomographyTab(QWidget):
         # Update displays
         self._update_displays()
         
+        # Update text input without triggering its change handler
+        if param_name in self.param_inputs:
+            text_input = self.param_inputs[param_name]
+            text_input.blockSignals(True)
+            text_input.setText(f"{param_value:.6f}")
+            text_input.blockSignals(False)
+    
+    def _on_text_input_changed(self, param_name: str, text_value: str):
+        """Handle homography parameter change from text input."""
+        try:
+            param_value = float(text_value)
+            
+            # Get parameter range for validation
+            if param_name in ['H00', 'H01', 'H10', 'H11']:
+                param_range = get_setting("homography.slider_range_main", [-50.0, 50.0])
+                if isinstance(param_range, list) and len(param_range) == 2:
+                    param_range = [float(param_range[0]), float(param_range[1])]
+                else:
+                    param_range = [-50.0, 50.0]
+            elif param_name in ['H20', 'H21']:
+                param_range = get_setting("homography.slider_range_perspective", [-0.2, 0.2])
+                if isinstance(param_range, list) and len(param_range) == 2:
+                    param_range = [float(param_range[0]), float(param_range[1])]
+                else:
+                    param_range = [-0.2, 0.2]
+            else:  # Translation parameters
+                param_range = [-10000.0, 10000.0]
+            
+            # Clamp value to range
+            param_value = max(param_range[0], min(param_range[1], param_value))
+            
+            # Update parameter
+            self.homography_params[param_name] = param_value
+            
+            # Update value label
+            self.param_labels[param_name].setText(f"{param_value:.6f}")
+            
+            # Update slider without triggering its change handler
+            if param_name in self.param_sliders:
+                slider = self.param_sliders[param_name]
+                normalized_val = (param_value - param_range[0]) / (param_range[1] - param_range[0])
+                slider_value = int(normalized_val * 1000)
+                slider.blockSignals(True)
+                slider.setValue(slider_value)
+                slider.blockSignals(False)
+            
+            # Update text input to show clamped value if it was changed
+            text_input = self.param_inputs[param_name]
+            if abs(float(text_input.text()) - param_value) > 1e-6:
+                text_input.blockSignals(True)
+                text_input.setText(f"{param_value:.6f}")
+                text_input.blockSignals(False)
+            
+            # Update displays
+            self._update_displays()
+            
+        except ValueError:
+            # Invalid input, revert to current parameter value
+            if param_name in self.homography_params:
+                text_input = self.param_inputs[param_name]
+                text_input.blockSignals(True)
+                text_input.setText(f"{self.homography_params[param_name]:.6f}")
+                text_input.blockSignals(False)
+        
     def _update_displays(self):
         """Update both original and warped frame displays."""
         if self.current_frame is None:
@@ -1007,7 +1088,12 @@ class HomographyTab(QWidget):
         if self.show_segmentation and self.current_segmentation_results:
             try:
                 # Transform the segmentation masks to match the warped frame
-                warped_frame_with_segmentation = self._apply_segmentation_to_warped_frame(warped_frame, self.current_segmentation_results)
+                original_frame_shape = self.current_frame.shape[:2]  # (height, width)
+                h_matrix = self._get_homography_matrix()
+                warped_frame_with_segmentation = apply_segmentation_to_warped_frame(
+                    warped_frame, self.current_segmentation_results, h_matrix,
+                    original_frame_shape, "HOMOGRAPHY"
+                )
                 if warped_frame_with_segmentation is not None:
                     warped_frame = warped_frame_with_segmentation
                     print(f"[HOMOGRAPHY] Applied transformed segmentation to warped frame: {len(self.current_segmentation_results)} results")
@@ -1024,73 +1110,6 @@ class HomographyTab(QWidget):
         update_duration = (time.time() - update_start) * 1000
         self._add_runtime_measurement('Homography Display', update_duration)
         
-    def _apply_segmentation_to_warped_frame(self, warped_frame: np.ndarray, segmentation_results: list) -> np.ndarray:
-        """Apply segmentation overlay to warped frame by transforming contour points from original image."""
-        if not segmentation_results:
-            return warped_frame
-            
-        try:
-            # Create unified mask from segmentation results on original frame
-            original_frame_shape = self.current_frame.shape[:2]  # (height, width)
-            unified_mask = create_unified_field_mask(segmentation_results, original_frame_shape)
-            
-            if unified_mask is None:
-                print("[HOMOGRAPHY] No unified mask could be created")
-                return warped_frame
-            
-            print(f"[HOMOGRAPHY] Created unified mask with shape {unified_mask.shape}, {np.sum(unified_mask)} pixels")
-            
-            # Calculate contour on the original image
-            original_contour = calculate_field_contour(unified_mask)
-            
-            if original_contour is None or len(original_contour) == 0:
-                print("[HOMOGRAPHY] No contour found in original unified mask")
-                return warped_frame
-            
-            # Transform contour points using homography matrix
-            h_matrix = self._get_homography_matrix()
-            transformed_contour = self._transform_contour_points(original_contour, h_matrix)
-            
-            if transformed_contour is None:
-                print("[HOMOGRAPHY] Failed to transform contour points")
-                return warped_frame
-            
-            # Create mask from transformed contour points
-            warped_mask = np.zeros((warped_frame.shape[0], warped_frame.shape[1]), dtype=np.uint8)
-            cv2.fillPoly(warped_mask, [transformed_contour], 1)
-            
-            # Apply overlay and draw contour on warped frame - contour only for consistency
-            field_color = get_primary_field_color()  # Cyan (BGR)
-            result_frame, _, _ = draw_unified_field_mask(warped_frame, warped_mask, field_color, 
-                                                       alpha=0.4, draw_contour=False, fill_mask=False)
-            
-            # Draw the transformed contour directly
-            result_frame = draw_field_contour(result_frame, transformed_contour)
-            
-            # Draw all lines (classified and unclassified) if available
-            if self.all_lines_for_display:
-                homography_matrix = self._get_homography_matrix()
-                result_frame = draw_all_field_lines(result_frame, self.all_lines_for_display, 
-                                                  homography_matrix, scale_factor=2.0, 
-                                                  draw_raw_lines_only=False)  # Show classified lines with simple labels
-                print(f"[HOMOGRAPHY] Drew {len(self.all_lines_for_display)} total field lines on warped frame")
-            elif self.ransac_lines:
-                # Draw RANSAC lines in top-down view
-                homography_matrix = self._get_homography_matrix()
-                result_frame = draw_ransac_field_lines(result_frame, self.ransac_lines, 
-                                                      self.ransac_confidences, homography_matrix, 
-                                                      scale_factor=2.0)
-                print(f"[HOMOGRAPHY] Drew {len(self.ransac_lines)} RANSAC field lines on warped frame")
-            
-            print(f"[HOMOGRAPHY] Applied transformed contour to warped frame: {len(transformed_contour)} points")
-            return result_frame
-            
-        except Exception as e:
-            print(f"[HOMOGRAPHY] Error applying transformed segmentation to warped frame: {e}")
-            import traceback
-            traceback.print_exc()
-            return warped_frame
-    
     def _get_homography_matrix(self) -> np.ndarray:
         """Get the homography transformation matrix from current parameters."""
         # Construct homography matrix from H parameters
@@ -1136,37 +1155,6 @@ class HomographyTab(QWidget):
         
         print(f"[HOMOGRAPHY] Canvas size: {input_width}x{input_height} -> {output_width}x{output_height} (aspect {aspect_ratio:.1f}:1, area: {input_width*input_height} -> {output_width*output_height})")
         return output_width, output_height
-    
-    def _transform_contour_points(self, contour: np.ndarray, h_matrix: np.ndarray) -> Optional[np.ndarray]:
-        """Transform contour points using homography matrix.
-        
-        Args:
-            contour: Contour points as numpy array of shape (N, 1, 2)
-            h_matrix: 3x3 homography transformation matrix
-            
-        Returns:
-            Transformed contour points in same format, or None if transformation fails
-        """
-        if contour is None or len(contour) == 0:
-            return None
-            
-        try:
-            # Reshape contour points for perspective transformation
-            # contour is (N, 1, 2), we need (N, 2) for cv2.perspectiveTransform
-            points = contour.reshape(-1, 1, 2).astype(np.float32)
-            
-            # Apply perspective transformation
-            transformed_points = cv2.perspectiveTransform(points, h_matrix)
-            
-            # Reshape back to contour format (N, 1, 2)
-            transformed_contour = transformed_points.reshape(-1, 1, 2).astype(np.int32)
-            
-            print(f"[HOMOGRAPHY] Transformed {len(contour)} contour points")
-            return transformed_contour
-            
-        except Exception as e:
-            print(f"[HOMOGRAPHY] Error transforming contour points: {e}")
-            return None
     
     def _display_frame(self, frame: np.ndarray, label: ZoomableImageLabel):
         """Display a frame in the specified zoomable label widget."""
@@ -1376,6 +1364,10 @@ class HomographyTab(QWidget):
                         slider_val = max(0, min(1000, slider_val))  # Clamp to valid range
                         self.param_sliders[param_name].setValue(slider_val)
                         
+                        # Update text input
+                        if param_name in self.param_inputs:
+                            self.param_inputs[param_name].setText(f"{value:.6f}")
+                        
                         # Update label
                         self.param_labels[param_name].setText(f"{value:.6f}")
                 
@@ -1437,6 +1429,10 @@ class HomographyTab(QWidget):
                     slider_val = int(((value - param_range[0]) / (param_range[1] - param_range[0])) * 1000)
                     slider_val = max(0, min(1000, slider_val))  # Clamp to valid range
                     self.param_sliders[param_name].setValue(slider_val)
+                    
+                    # Update text input
+                    if param_name in self.param_inputs:
+                        self.param_inputs[param_name].setText(f"{value:.6f}")
                     
                     # Update label
                     self.param_labels[param_name].setText(f"{value:.6f}")
@@ -1508,69 +1504,19 @@ class HomographyTab(QWidget):
             self.current_segmentation_results = None
             
     def _load_segmentation_models(self):
-        """Load available field segmentation models using the same logic as main tab."""
-        self.available_segmentation_models.clear()
-        
-        # Look for models in the models directory (same logic as main tab)
-        models_path = Path(get_setting("models.base_path", DEFAULT_PATHS['MODELS']))
-        
-        if not models_path.exists():
-            print(f"[HOMOGRAPHY] Models directory not found: {models_path}")
-            return
-        
-        # Search for segmentation model files
-        model_files = []
-        for model_dir in models_path.rglob("*"):
-            if model_dir.is_file() and model_dir.suffix == ".pt":
-                # Skip last.pt files - we only want best.pt from finetuned models
-                if model_dir.name == "last.pt":
-                    continue
-                    
-                # Check if this is a segmentation model
-                if "segmentation" in str(model_dir).lower():
-                    model_files.append(str(model_dir))
-        
-        # Add pretrained segmentation models
-        pretrained_path = models_path / "pretrained"
-        if pretrained_path.exists():
-            for model_file in pretrained_path.glob("*seg*.pt"):
-                model_files.append(str(model_file))
-        
-        # Store the full paths
-        self.available_segmentation_models = model_files
+        """Load available field segmentation models using utility function."""
+        self.available_segmentation_models = load_segmentation_models()
         
         # Update combo box
         if self.segmentation_model_combo is not None:
-            self.segmentation_model_combo.clear()
-            for model_path in self.available_segmentation_models:
-                # Create display name from path
-                if 'pretrained' in model_path:
-                    display_name = f"Pretrained: {Path(model_path).stem}"
-                else:
-                    # Extract model name from path
-                    path_parts = Path(model_path).parts
-                    if 'segmentation' in path_parts:
-                        seg_index = path_parts.index('segmentation')
-                        if seg_index + 1 < len(path_parts):
-                            display_name = path_parts[seg_index + 1]
-                        else:
-                            display_name = Path(model_path).parent.parent.name
-                    else:
-                        display_name = Path(model_path).parent.parent.name
-                
-                self.segmentation_model_combo.addItem(display_name, model_path)
-                
-        print(f"[HOMOGRAPHY] Loaded {len(self.available_segmentation_models)} segmentation models")
-        
-        # Auto-select the new default model if available
-        if self.segmentation_model_combo is not None:
             default_model_path = "data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt"
-            for i in range(self.segmentation_model_combo.count()):
-                item_path = self.segmentation_model_combo.itemData(i)
-                if item_path and default_model_path in str(item_path):
-                    self.segmentation_model_combo.setCurrentIndex(i)
-                    print(f"[HOMOGRAPHY] Auto-selected default segmentation model: {self.segmentation_model_combo.itemText(i)}")
-                    break
+            populate_segmentation_model_combo(
+                self.segmentation_model_combo, 
+                self.available_segmentation_models,
+                default_model_path
+            )
+        
+        print(f"[HOMOGRAPHY] Loaded {len(self.available_segmentation_models)} segmentation models")
         
     def _on_segmentation_toggled(self, state: int):
         """Handle segmentation checkbox toggle."""

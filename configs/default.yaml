@@ -162,7 +162,7 @@ data:
 homography:
   save_directory: "configs"
   default_params_file: "configs/homography_params.yaml"
-  slider_range_main: [-50.0, 50.0]           # Range for H00, H01, H10, H11 (scale/skew/extreme)
+  slider_range_main: [-100.0, 100.0]          # Range for H00, H01, H10, H11 (scale/skew/extreme) - expanded from [-50.0, 50.0]
   slider_range_perspective: [-0.2, 0.2]      # Range for H20, H21 (perspective/extreme)
   buffer_factor: 1.8                         # Output canvas size multiplier (1.8 = 80% larger)
   output_aspect_ratio: 3.0                   # Height:width ratio for homography output canvas (3.0 = 3:1)

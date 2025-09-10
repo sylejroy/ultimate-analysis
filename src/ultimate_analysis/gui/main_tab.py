@@ -10,19 +10,19 @@ import time
 import hashlib
 import numpy as np
 import yaml
-from functools import lru_cache
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, 
     QCheckBox, QPushButton, QSlider, QListWidgetItem, QGroupBox,
-    QFormLayout, QComboBox, QShortcut, QSplitter, QDoubleSpinBox, QSizePolicy
+    QFormLayout, QComboBox, QShortcut, QSplitter, QSizePolicy, QScrollArea
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont, QColor
+from PyQt5.QtGui import QPixmap, QImage, QKeySequence
 
 from .video_player import VideoPlayer
+from .homography_tab import ZoomableImageLabel
 from .visualization import draw_detections, draw_tracks, draw_tracks_with_player_ids, draw_unified_field_mask, create_unified_field_mask, draw_all_field_lines, draw_field_segmentation
 from .ransac_line_visualization import draw_ransac_field_lines
 from .performance_widget import PerformanceWidget
@@ -33,9 +33,13 @@ from ..processing import (
 )
 from ..processing.line_extraction import extract_raw_lines_from_segmentation
 from ..processing.jersey_tracker import get_jersey_tracker
-from ..processing.field_segmentation import visualize_segmentation
 from ..config.settings import get_setting
 from ..constants import SHORTCUTS, DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS
+from ..utils.video_utils import get_video_duration
+from ..utils.segmentation_utils import (
+    apply_segmentation_to_warped_frame,
+    load_segmentation_models, populate_segmentation_model_combo
+)
 
 
 class VideoListWidget(QListWidget):
@@ -365,19 +369,29 @@ class MainTab(QWidget):
         panel = QWidget()
         layout = QVBoxLayout()
         
-        # Video display area
-        self.video_label = QLabel("No video selected")
+        # Video display area with zoom capability
+        self.video_scroll_area = QScrollArea()
+        self.video_scroll_area.setWidgetResizable(True)
+        self.video_scroll_area.setMinimumHeight(1080)  # Much bigger for main tab
+        self.video_scroll_area.setStyleSheet("""
+            QScrollArea {
+                border: 2px solid #555;
+                background-color: #1a1a1a;
+            }
+        """)
+        
+        self.video_label = ZoomableImageLabel()
+        self.video_label.setText("No video selected")
         self.video_label.setAlignment(Qt.AlignCenter)
-        self.video_label.setFixedHeight(1080)  # Much bigger for main tab - increased from 400 to 1080
         self.video_label.setStyleSheet("""
             QLabel {
-                border: 2px solid #555;
                 background-color: #1a1a1a;
                 color: #999;
                 font-size: 14px;
             }
         """)
-        layout.addWidget(self.video_label, 1)  # Takes most space
+        self.video_scroll_area.setWidget(self.video_label)
+        layout.addWidget(self.video_scroll_area, 1)  # Takes most space
         
         # Progress bar
         self.progress_bar = QSlider(Qt.Horizontal)
@@ -432,25 +446,34 @@ class MainTab(QWidget):
         layout = QVBoxLayout()
         layout.setContentsMargins(5, 5, 5, 5)  # Reduce margins for more space
         
-        # Top-down view display (expanded to fill the panel)
+        # Top-down view display (expanded to fill the panel with zoom capability)
         view_group = QGroupBox("Top-Down View")
         view_layout = QVBoxLayout()
         view_layout.setContentsMargins(5, 5, 5, 5)  # Reduce margins inside group box
         
-        self.homography_display_label = QLabel("Loading top-down view...")
+        self.homography_scroll_area = QScrollArea()
+        self.homography_scroll_area.setWidgetResizable(True)
+        self.homography_scroll_area.setMinimumHeight(300)  # Reasonable minimum
+        self.homography_scroll_area.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        self.homography_scroll_area.setStyleSheet("""
+            QScrollArea {
+                border: 2px solid #555;
+                background-color: #1a1a1a;
+            }
+        """)
+        
+        self.homography_display_label = ZoomableImageLabel()
+        self.homography_display_label.setText("Loading top-down view...")
         self.homography_display_label.setAlignment(Qt.AlignCenter)
-        self.homography_display_label.setMinimumHeight(300)  # Reasonable minimum
-        self.homography_display_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)  # Lower stretch - preferred width, expanding height
-        # Do not use setScaledContents to avoid stretching text and overlays
         self.homography_display_label.setStyleSheet("""
             QLabel {
-                border: 2px solid #555;
                 background-color: #1a1a1a;
                 color: #999;
                 font-size: 14px;
             }
         """)
-        view_layout.addWidget(self.homography_display_label)
+        self.homography_scroll_area.setWidget(self.homography_display_label)
+        view_layout.addWidget(self.homography_scroll_area)
         
         view_group.setLayout(view_layout)
         layout.addWidget(view_group, 1)  # Give the view group stretch factor of 1 to fill available space
@@ -510,7 +533,7 @@ class MainTab(QWidget):
         
         # Populate list with video info
         for video_path in self.video_files:
-            duration = self._get_video_duration(video_path)
+            duration = get_video_duration(video_path)
             filename = Path(video_path).name
             
             # Create list item with filename and duration
@@ -520,33 +543,6 @@ class MainTab(QWidget):
             self.video_list.addItem(item)
         
         print(f"[MAIN_TAB] Found {len(self.video_files)} video files")
-    
-    def _get_video_duration(self, video_path: str) -> str:
-        """Get video duration as formatted string.
-        
-        Args:
-            video_path: Path to video file
-            
-        Returns:
-            Duration string in format "MM:SS" or "Unknown"
-        """
-        try:
-            cap = cv2.VideoCapture(video_path)
-            if cap.isOpened():
-                fps = cap.get(cv2.CAP_PROP_FPS)
-                frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-                cap.release()
-                
-                if fps > 0:
-                    duration_seconds = frame_count / fps
-                    minutes = int(duration_seconds // 60)
-                    seconds = int(duration_seconds % 60)
-                    return f"{minutes:02d}:{seconds:02d}"
-            
-        except Exception as e:
-            print(f"[MAIN_TAB] Error getting duration for {video_path}: {e}")
-        
-        return "Unknown"
     
     def _populate_model_combo(self, combo: QComboBox, model_type: str):
         """Populate a combo box with available models.
@@ -668,19 +664,10 @@ class MainTab(QWidget):
         bytes_per_line = 3 * width
         
         q_image = QImage(processed_frame.data, width, height, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
-        
-        # Scale to fit label
         pixmap = QPixmap.fromImage(q_image)
-        # Use fixed dimensions instead of current label size to prevent growth
-        label_width = self.video_label.width()
-        label_height = 1200  # Use the fixed height we set
-        scaled_pixmap = pixmap.scaled(
-            label_width - 4, label_height - 4,  # Account for 2px border on each side
-            Qt.KeepAspectRatio, 
-            Qt.SmoothTransformation
-        )
         
-        self.video_label.setPixmap(scaled_pixmap)
+        # Use ZoomableImageLabel's set_image method for zoom support
+        self.video_label.set_image(pixmap)
         
         # Update homography display if enabled
         if self.homography_enabled:
@@ -1254,69 +1241,19 @@ class MainTab(QWidget):
             print(f"[MAIN_TAB] Field model changed to: {model_path}")
     
     def _load_segmentation_models(self):
-        """Load available field segmentation models using the same logic as main tab."""
-        self.available_segmentation_models.clear()
-        
-        # Look for models in the models directory (same logic as main tab)
-        models_path = Path(get_setting("models.base_path", DEFAULT_PATHS['MODELS']))
-        
-        if not models_path.exists():
-            print(f"[MAIN_TAB] Models directory not found: {models_path}")
-            return
-        
-        # Search for segmentation model files
-        model_files = []
-        for model_dir in models_path.rglob("*"):
-            if model_dir.is_file() and model_dir.suffix == ".pt":
-                # Skip last.pt files - we only want best.pt from finetuned models
-                if model_dir.name == "last.pt":
-                    continue
-                    
-                # Check if this is a segmentation model
-                if "segmentation" in str(model_dir).lower():
-                    model_files.append(str(model_dir))
-        
-        # Add pretrained segmentation models
-        pretrained_path = models_path / "pretrained"
-        if pretrained_path.exists():
-            for model_file in pretrained_path.glob("*seg*.pt"):
-                model_files.append(str(model_file))
-        
-        # Store the full paths
-        self.available_segmentation_models = model_files
+        """Load available field segmentation models using utility function."""
+        self.available_segmentation_models = load_segmentation_models()
         
         # Update combo box
         if self.segmentation_model_combo is not None:
-            self.segmentation_model_combo.clear()
-            for model_path in self.available_segmentation_models:
-                # Create display name from path
-                if 'pretrained' in model_path:
-                    display_name = f"Pretrained: {Path(model_path).stem}"
-                else:
-                    # Extract model name from path
-                    path_parts = Path(model_path).parts
-                    if 'segmentation' in path_parts:
-                        seg_index = path_parts.index('segmentation')
-                        if seg_index + 1 < len(path_parts):
-                            display_name = path_parts[seg_index + 1]
-                        else:
-                            display_name = Path(model_path).parent.parent.name
-                    else:
-                        display_name = Path(model_path).parent.parent.name
-                
-                self.segmentation_model_combo.addItem(display_name, model_path)
-                
-        print(f"[MAIN_TAB] Loaded {len(self.available_segmentation_models)} segmentation models")
-        
-        # Auto-select the new default model if available
-        if self.segmentation_model_combo is not None:
             default_model_path = "data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt"
-            for i in range(self.segmentation_model_combo.count()):
-                item_path = self.segmentation_model_combo.itemData(i)
-                if item_path and default_model_path in str(item_path):
-                    self.segmentation_model_combo.setCurrentIndex(i)
-                    print(f"[MAIN_TAB] Auto-selected default segmentation model: {self.segmentation_model_combo.itemText(i)}")
-                    break
+            populate_segmentation_model_combo(
+                self.segmentation_model_combo, 
+                self.available_segmentation_models,
+                default_model_path
+            )
+        
+        print(f"[MAIN_TAB] Loaded {len(self.available_segmentation_models)} segmentation models")
     
     def _on_segmentation_toggled(self, state: int):
         """Handle segmentation checkbox toggle."""
@@ -1390,94 +1327,6 @@ class MainTab(QWidget):
                 print(f"[MAIN_TAB] Error loading segmentation model: {e}")
         else:
             print(f"[MAIN_TAB] Invalid model path: {model_path}")
-    
-    def _apply_segmentation_to_warped_frame(self, warped_frame: np.ndarray, segmentation_results: list) -> np.ndarray:
-        """Apply segmentation overlay to warped frame by transforming contour points from original image."""
-        if not segmentation_results:
-            return warped_frame
-            
-        try:
-            # Create unified mask from segmentation results on original frame
-            original_frame_shape = self.video_player.get_current_frame().shape[:2]  # (height, width)
-            unified_mask = create_unified_field_mask(segmentation_results, original_frame_shape)
-            
-            if unified_mask is None:
-                print("[MAIN_TAB] No unified mask could be created")
-                return warped_frame
-            
-            print(f"[MAIN_TAB] Created unified mask with shape {unified_mask.shape}, {np.sum(unified_mask)} pixels")
-            
-            # Calculate contour on the original image
-            from .visualization import calculate_field_contour
-            original_contour = calculate_field_contour(unified_mask)
-            
-            if original_contour is None or len(original_contour) == 0:
-                print("[MAIN_TAB] No contour found in original unified mask")
-                return warped_frame
-            
-            # Transform contour points using homography matrix
-            transformed_contour = self._transform_contour_points(original_contour, self.homography_matrix)
-            
-            if transformed_contour is None:
-                print("[MAIN_TAB] Failed to transform contour points")
-                return warped_frame
-            
-            # Create mask from transformed contour points
-            warped_mask = np.zeros((warped_frame.shape[0], warped_frame.shape[1]), dtype=np.uint8)
-            cv2.fillPoly(warped_mask, [transformed_contour], 1)
-            
-            # Apply overlay and draw contour on warped frame - contour only for consistency
-            from .visualization import draw_unified_field_mask, draw_field_contour, get_primary_field_color
-            field_color = get_primary_field_color()  # Bright cyan (BGR) - same as segmentation
-            result_frame, _, _ = draw_unified_field_mask(warped_frame, warped_mask, field_color, 
-                                                       alpha=0.4, draw_contour=False, fill_mask=False)
-            
-            # Draw the transformed contour directly
-            result_frame = draw_field_contour(result_frame, transformed_contour)
-            
-            # Note: Field lines will be drawn later in _update_homography_display() 
-            # with proper scale_factor for top-down view
-            # This avoids duplicate text/labels and ensures consistent processing
-            
-            print(f"[MAIN_TAB] Applied transformed contour to warped frame: {len(transformed_contour)} points")
-            return result_frame
-            
-        except Exception as e:
-            print(f"[MAIN_TAB] Error applying transformed segmentation to warped frame: {e}")
-            import traceback
-            traceback.print_exc()
-            return warped_frame
-    
-    def _transform_contour_points(self, contour: np.ndarray, h_matrix: np.ndarray) -> Optional[np.ndarray]:
-        """Transform contour points using homography matrix.
-        
-        Args:
-            contour: Contour points as numpy array of shape (N, 1, 2)
-            h_matrix: 3x3 homography transformation matrix
-            
-        Returns:
-            Transformed contour points in same format, or None if transformation fails
-        """
-        if contour is None or len(contour) == 0:
-            return None
-            
-        try:
-            # Reshape contour points for perspective transformation
-            # contour is (N, 1, 2), we need (N, 2) for cv2.perspectiveTransform
-            points = contour.reshape(-1, 1, 2).astype(np.float32)
-            
-            # Apply perspective transformation
-            transformed_points = cv2.perspectiveTransform(points, h_matrix)
-            
-            # Reshape back to contour format (N, 1, 2)
-            transformed_contour = transformed_points.reshape(-1, 1, 2).astype(np.int32)
-            
-            print(f"[MAIN_TAB] Transformed {len(contour)} contour points")
-            return transformed_contour
-            
-        except Exception as e:
-            print(f"[MAIN_TAB] Error transforming contour points: {e}")
-            return None
 
     def _on_homography_toggled(self, state: int):
         """Handle homography checkbox toggle."""
@@ -1688,7 +1537,11 @@ class MainTab(QWidget):
                     if self.current_field_results and self.field_segmentation_checkbox.isChecked():
                         try:
                             # Transform the segmentation masks to match the warped frame
-                            warped_frame_with_segmentation = self._apply_segmentation_to_warped_frame(warped_frame, self.current_field_results)
+                            original_frame_shape = frame.shape[:2]  # (height, width)
+                            warped_frame_with_segmentation = apply_segmentation_to_warped_frame(
+                                warped_frame, self.current_field_results, self.homography_matrix, 
+                                original_frame_shape, "MAIN_TAB"
+                            )
                             if warped_frame_with_segmentation is not None:
                                 warped_frame = warped_frame_with_segmentation
                                 print(f"[MAIN_TAB] Applied transformed segmentation to homography view: {len(self.current_field_results)} results")
@@ -1727,22 +1580,9 @@ class MainTab(QWidget):
                     
                     q_image = QImage(warped_frame.data, warped_width, warped_height, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
                     
-                    # Display with preserved aspect ratio (no stretching or cropping)
+                    # Display with preserved aspect ratio using ZoomableImageLabel
                     pixmap = QPixmap.fromImage(q_image)
-                    label_width = self.homography_display_label.width()
-                    label_height = self.homography_display_label.height()
-                    
-                    # Scale while preserving the 3:1 aspect ratio
-                    if label_width > 0 and label_height > 0:
-                        scaled_pixmap = pixmap.scaled(
-                            label_width - 4, label_height - 4,  # Account for 2px border
-                            Qt.KeepAspectRatio,  # Preserve 3:1 aspect ratio
-                            Qt.SmoothTransformation
-                        )
-                        self.homography_display_label.setPixmap(scaled_pixmap)
-                    else:
-                        # Fallback for invalid dimensions
-                        self.homography_display_label.setPixmap(pixmap)
+                    self.homography_display_label.set_image(pixmap)
                     
                     # Record homography processing time
                     homography_duration_ms = (time.time() - homography_start_time) * 1000

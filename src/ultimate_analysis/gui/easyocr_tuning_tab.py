@@ -4,13 +4,11 @@ This module provides a specialized interface for tuning EasyOCR parameters
 on detected player bounding boxes for optimal jersey number recognition.
 """
 
-import os
 import cv2
 import numpy as np
 import yaml
 import random
 import traceback
-import time
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 
@@ -18,16 +16,17 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, 
     QPushButton, QSlider, QListWidgetItem, QGroupBox,
     QFormLayout, QComboBox, QSpinBox, QDoubleSpinBox,
-    QCheckBox, QTextEdit, QSplitter, QScrollArea, QGridLayout,
-    QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView
+    QCheckBox, QSplitter, QScrollArea, QGridLayout,
+    QLineEdit
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QThread, pyqtSlot
-from PyQt5.QtGui import QPixmap, QImage, QFont
+from PyQt5.QtCore import Qt, pyqtSlot
+from PyQt5.QtGui import QPixmap, QImage
 
 from .video_player import VideoPlayer
 from ..processing import run_inference, set_detection_model
-from ..config.settings import get_setting, get_config
-from ..constants import DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS, JERSEY_NUMBER_MIN, JERSEY_NUMBER_MAX
+from ..config.settings import get_setting
+from ..constants import DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS
+from ..utils.video_utils import get_video_duration
 
 # Try to import EasyOCR for parameter checking
 try:
@@ -741,7 +740,7 @@ class EasyOCRTuningTab(QWidget):
         
         # Populate list with video info
         for video_path in self.video_files:
-            duration = self._get_video_duration(video_path)
+            duration = get_video_duration(video_path)
             filename = Path(video_path).name
             
             # Create list item with filename and duration
@@ -762,26 +761,6 @@ class EasyOCRTuningTab(QWidget):
             
             # Load the selected video
             self._load_selected_video()
-    
-    def _get_video_duration(self, video_path: str) -> str:
-        """Get video duration as formatted string."""
-        try:
-            cap = cv2.VideoCapture(video_path)
-            if cap.isOpened():
-                fps = cap.get(cv2.CAP_PROP_FPS)
-                frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-                cap.release()
-                
-                if fps > 0:
-                    duration_seconds = frame_count / fps
-                    minutes = int(duration_seconds // 60)
-                    seconds = int(duration_seconds % 60)
-                    return f"{minutes:02d}:{seconds:02d}"
-            
-        except Exception as e:
-            print(f"[EASYOCR_TUNING] Error getting duration for {video_path}: {e}")
-        
-        return "Unknown"
     
     def _populate_model_combo(self):
         """Populate detection model combo box."""
