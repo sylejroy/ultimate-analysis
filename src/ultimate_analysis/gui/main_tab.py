@@ -23,7 +23,7 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QPixmap, QImage, QKeySequence, QFont, QColor
 
 from .video_player import VideoPlayer
-from .visualization import draw_detections, draw_tracks, draw_tracks_with_player_ids, draw_unified_field_mask, create_unified_field_mask, draw_all_field_lines
+from .visualization import draw_detections, draw_tracks, draw_tracks_with_player_ids, draw_unified_field_mask, create_unified_field_mask, draw_all_field_lines, draw_field_segmentation
 from .ransac_line_visualization import draw_ransac_field_lines
 from .performance_widget import PerformanceWidget
 from ..processing import (
@@ -770,8 +770,16 @@ class MainTab(QWidget):
         Returns:
             Processed frame with visualizations
         """
+        # Start total runtime timer at the very beginning
+        total_runtime_start = time.time()
+        
         if not self.cache_enabled:
-            return self._process_frame(frame)
+            processed_frame = self._process_frame(frame)
+            # Record total runtime for non-cached processing
+            total_runtime_ms = (time.time() - total_runtime_start) * 1000
+            self.performance_widget.add_processing_measurement("Total Runtime", total_runtime_ms)
+            self._update_fps(total_runtime_ms)
+            return processed_frame
             
         # Compute frame content hash
         frame_hash = self._compute_frame_hash(frame)
@@ -781,9 +789,7 @@ class MainTab(QWidget):
         # Check cache hit
         current_time = time.time()
         if cache_key in self.frame_cache:
-            # Cache hit - return cached results with proper timing
-            total_cache_start_time = time.time()  # Track total time for cache hit
-            
+            # Cache hit - return cached results
             cached_data = self.frame_cache[cache_key]
             
             # Update cache timestamp and restore processing results
@@ -798,12 +804,12 @@ class MainTab(QWidget):
             processed_frame = self._apply_visualizations(frame.copy())
             viz_duration_ms = (time.time() - viz_start_time) * 1000
             
-            # Record cache hit performance with proper total timing
-            total_cache_duration_ms = (time.time() - total_cache_start_time) * 1000
+            # Record cache hit performance with total runtime from start of method
+            total_runtime_ms = (time.time() - total_runtime_start) * 1000
             self.cache_hit_count += 1
             self.performance_widget.add_processing_measurement("Visualization", viz_duration_ms)
-            self.performance_widget.add_processing_measurement("Total Runtime", total_cache_duration_ms)
-            self._update_fps(total_cache_duration_ms)
+            self.performance_widget.add_processing_measurement("Total Runtime", total_runtime_ms)
+            self._update_fps(total_runtime_ms)
             
             # Log cache efficiency periodically
             if (self.cache_hit_count + self.cache_miss_count) % 30 == 0:
@@ -828,6 +834,11 @@ class MainTab(QWidget):
         
         # Clean up cache if needed
         self._cleanup_frame_cache()
+        
+        # Record total runtime from start of method
+        total_runtime_ms = (time.time() - total_runtime_start) * 1000
+        self.performance_widget.add_processing_measurement("Total Runtime", total_runtime_ms)
+        self._update_fps(total_runtime_ms)
         
         self.last_frame_hash = frame_hash
         return processed_frame
@@ -922,17 +933,10 @@ class MainTab(QWidget):
             # Set line extraction to 0 when field segmentation is disabled
             self.performance_widget.add_processing_measurement("Line Extraction", 0.0)
         
-        # Record total runtime
-        total_duration_ms = (time.time() - total_start_time) * 1000
-        self.performance_widget.add_processing_measurement("Total Runtime", total_duration_ms)
-        
         # Add default homography measurements if homography is not enabled
         if not self.homography_enabled:
             self.performance_widget.add_processing_measurement("Homography Calculation", 0.0)
             self.performance_widget.add_processing_measurement("Homography Display", 0.0)
-        
-        # Update FPS calculation
-        self._update_fps(total_duration_ms)
         
         return frame
     
@@ -956,6 +960,13 @@ class MainTab(QWidget):
         
         # Apply field segmentation overlay first (as background) - contour only for better performance
         if self.current_field_results and self.field_segmentation_checkbox.isChecked():
+            # Show raw segmentation model output if enabled
+            from ..config.settings import get_setting
+            show_raw_masks = get_setting("models.segmentation.show_raw_masks", True)
+            if show_raw_masks:
+                frame = draw_field_segmentation(frame, self.current_field_results)
+                print(f"[MAIN_TAB] Applied raw segmentation masks to frame")
+            
             # Create and display unified mask with RANSAC line detection
             frame_shape = frame.shape[:2]  # (height, width)
             unified_mask = create_unified_field_mask(self.current_field_results, frame_shape)

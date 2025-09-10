@@ -32,6 +32,7 @@ models:
     default_model: "yolo11l-seg.pt"
     confidence_threshold: 0.6
     mask_alpha: 0.3
+    show_raw_masks: false       # Whether to show raw segmentation model output masks
     
     # Morphological operations for mask smoothing
     morphological:

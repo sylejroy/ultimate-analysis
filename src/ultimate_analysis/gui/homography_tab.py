@@ -999,7 +999,7 @@ class HomographyTab(QWidget):
         homography_start = time.time()
         warped_frame = self._apply_homography(self.current_frame)
         homography_duration = (time.time() - homography_start) * 1000
-        self._add_runtime_measurement('Homography Calc', homography_duration)
+        self._add_runtime_measurement('Homography Calculation', homography_duration)
         
         print(f"[HOMOGRAPHY] Warped frame shape: {warped_frame.shape}, dtype: {warped_frame.dtype}")
         
@@ -1022,7 +1022,7 @@ class HomographyTab(QWidget):
         
         # Record total display update time
         update_duration = (time.time() - update_start) * 1000
-        self._add_runtime_measurement('Display Update', update_duration)
+        self._add_runtime_measurement('Homography Display', update_duration)
         
     def _apply_segmentation_to_warped_frame(self, warped_frame: np.ndarray, segmentation_results: list) -> np.ndarray:
         """Apply segmentation overlay to warped frame by transforming contour points from original image."""
@@ -1691,8 +1691,8 @@ class HomographyTab(QWidget):
             self.runtime_table.setAlternatingRowColors(True)
             
             # Initialize table with processing steps
-            processes = ['Field Segmentation', 'Morphological Ops', 'RANSAC Fitting', 
-                        'Homography Calc', 'Display Update']
+            processes = ['Field Segmentation', 'Morphological Ops', 'Line Extraction', 
+                        'Homography Calculation', 'Homography Display']
             self.runtime_table.setRowCount(len(processes))
             
             for i, process in enumerate(processes):
@@ -1770,8 +1770,8 @@ class HomographyTab(QWidget):
         if not self.runtime_table:
             return
         
-        processes = ['Field Segmentation', 'Morphological Ops', 'RANSAC Fitting', 
-                    'Homography Calc', 'Display Update']
+        processes = ['Field Segmentation', 'Morphological Ops', 'Line Extraction', 
+                    'Homography Calculation', 'Homography Display']
         
         for i, process in enumerate(processes):
             if process in self.processing_times and self.processing_times[process]:
