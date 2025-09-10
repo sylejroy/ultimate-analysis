@@ -340,10 +340,13 @@ class HomographyTab(QWidget):
             'Display Update': []
         }
         
-        # Initialize UI
+        # Lazy loading flags
+        self._videos_loaded = False
+        self._segmentation_models_loaded = False
+        self._ui_initialized = False
+        
+        # Initialize UI only
         self._init_ui()
-        self._load_videos()
-        self._load_segmentation_models()
         
         # Load default homography parameters from config
         self._load_default_parameters()
@@ -369,6 +372,21 @@ class HomographyTab(QWidget):
         main_layout.addWidget(content_splitter)
         
         self.setLayout(main_layout)
+    
+    def showEvent(self, event):
+        """Override showEvent to implement lazy loading when tab becomes visible."""
+        super().showEvent(event)
+        
+        # Lazy load content when tab is first shown
+        if not self._videos_loaded:
+            print("[HOMOGRAPHY] Lazy loading videos...")
+            self._load_videos()
+            self._videos_loaded = True
+            
+        if not self._segmentation_models_loaded:
+            print("[HOMOGRAPHY] Lazy loading segmentation models...")
+            self._load_segmentation_models()
+            self._segmentation_models_loaded = True
         
     def _create_left_panel(self) -> QWidget:
         """Create the left panel with video list and parameter controls."""
@@ -384,7 +402,7 @@ class HomographyTab(QWidget):
         list_header.addWidget(QLabel("Videos"))
         
         refresh_button = QPushButton("Refresh")
-        refresh_button.clicked.connect(self._load_videos)
+        refresh_button.clicked.connect(self._force_reload_videos)
         refresh_button.setToolTip("Refresh video list")
         list_header.addWidget(refresh_button)
         
@@ -570,7 +588,7 @@ class HomographyTab(QWidget):
         layout.addWidget(original_group)
         
         # Warped frame display with scroll area
-        warped_group = QGroupBox("Warped Frame (with buffer)")
+        warped_group = QGroupBox("Warped Frame (3:1 aspect ratio)")
         warped_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         warped_layout = QVBoxLayout()
         
@@ -804,6 +822,13 @@ class HomographyTab(QWidget):
         if self.video_files:
             self.video_list.setCurrentRow(0)
             self._load_selected_video()
+    
+    def _force_reload_videos(self):
+        """Force reload videos even if already loaded (for refresh button)."""
+        print("[HOMOGRAPHY] Force reloading videos...")
+        self._videos_loaded = False  # Reset flag to allow reloading
+        self._load_videos()
+        self._videos_loaded = True
             
     def _on_video_selection_changed(self, row: int):
         """Handle video selection change."""
@@ -1072,6 +1097,41 @@ class HomographyTab(QWidget):
         
         return h_matrix
     
+    def _calculate_output_canvas_size(self, input_width: int, input_height: int) -> Tuple[int, int]:
+        """Calculate output canvas size with specified aspect ratio.
+        
+        Args:
+            input_width: Original frame width
+            input_height: Original frame height
+            
+        Returns:
+            Tuple of (output_width, output_height) with 3:1 aspect ratio
+        """
+        # Get configuration settings
+        buffer_factor = get_setting("homography.buffer_factor", 2.5)
+        aspect_ratio = get_setting("homography.output_aspect_ratio", 3.0)  # height:width
+        
+        # Calculate total area we want to maintain (similar to original but with buffer)
+        original_area = input_width * input_height
+        target_area = int(original_area * buffer_factor)
+        
+        # Calculate output dimensions with specified aspect ratio
+        # For aspect_ratio = height/width, we have: height = aspect_ratio * width
+        # Area = width * height = width * (aspect_ratio * width) = aspect_ratio * width^2
+        # Therefore: width = sqrt(area / aspect_ratio), height = aspect_ratio * width
+        
+        if aspect_ratio >= 1.0:
+            # Height >= Width (e.g., 3:1 ratio means height = 3 * width)
+            output_width = int(np.sqrt(target_area / aspect_ratio))
+            output_height = int(output_width * aspect_ratio)
+        else:
+            # Width > Height (e.g., 1:3 ratio means width = 3 * height)
+            output_height = int(np.sqrt(target_area * aspect_ratio))
+            output_width = int(output_height / aspect_ratio)
+        
+        print(f"[HOMOGRAPHY] Canvas size: {input_width}x{input_height} -> {output_width}x{output_height} (aspect {aspect_ratio:.1f}:1, area: {input_width*input_height} -> {output_width*output_height})")
+        return output_width, output_height
+    
     def _transform_contour_points(self, contour: np.ndarray, h_matrix: np.ndarray) -> Optional[np.ndarray]:
         """Transform contour points using homography matrix.
         
@@ -1125,7 +1185,7 @@ class HomographyTab(QWidget):
             frame: Input frame to transform
             
         Returns:
-            Warped frame using original frame dimensions
+            Warped frame using 3:1 aspect ratio canvas
         """
         # Use the same homography matrix calculation as for segmentation
         h_matrix = self._get_homography_matrix()
@@ -1133,8 +1193,11 @@ class HomographyTab(QWidget):
         # Get original dimensions
         original_height, original_width = frame.shape[:2]
         
-        # Apply perspective transform using original frame size
-        warped = cv2.warpPerspective(frame, h_matrix, (original_width, original_height))
+        # Calculate output canvas size with 3:1 aspect ratio
+        output_width, output_height = self._calculate_output_canvas_size(original_width, original_height)
+        
+        # Apply perspective transform using calculated canvas size
+        warped = cv2.warpPerspective(frame, h_matrix, (output_width, output_height))
         
         return warped
         

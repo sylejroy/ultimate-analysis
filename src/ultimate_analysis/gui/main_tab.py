@@ -1609,6 +1609,41 @@ class MainTab(QWidget):
         
         return result_frame
 
+    def _calculate_output_canvas_size(self, input_width: int, input_height: int) -> Tuple[int, int]:
+        """Calculate output canvas size with specified aspect ratio.
+        
+        Args:
+            input_width: Original frame width
+            input_height: Original frame height
+            
+        Returns:
+            Tuple of (output_width, output_height) with 3:1 aspect ratio
+        """
+        # Get configuration settings
+        buffer_factor = get_setting("homography.buffer_factor", 2.5)
+        aspect_ratio = get_setting("homography.output_aspect_ratio", 3.0)  # height:width
+        
+        # Calculate total area we want to maintain (similar to original but with buffer)
+        original_area = input_width * input_height
+        target_area = int(original_area * buffer_factor)
+        
+        # Calculate output dimensions with specified aspect ratio
+        # For aspect_ratio = height/width, we have: height = aspect_ratio * width
+        # Area = width * height = width * (aspect_ratio * width) = aspect_ratio * width^2
+        # Therefore: width = sqrt(area / aspect_ratio), height = aspect_ratio * width
+        
+        if aspect_ratio >= 1.0:
+            # Height >= Width (e.g., 3:1 ratio means height = 3 * width)
+            output_width = int(np.sqrt(target_area / aspect_ratio))
+            output_height = int(output_width * aspect_ratio)
+        else:
+            # Width > Height (e.g., 1:3 ratio means width = 3 * height)
+            output_height = int(np.sqrt(target_area * aspect_ratio))
+            output_width = int(output_height / aspect_ratio)
+        
+        print(f"[MAIN_TAB] Canvas size: {input_width}x{input_height} -> {output_width}x{output_height} (aspect {aspect_ratio:.1f}:1, area: {input_width*input_height} -> {output_width*output_height})")
+        return output_width, output_height
+
     def _update_homography_display(self):
         """Update the homography display with the current frame and transformation."""
         if not self.homography_enabled or self.homography_display_label is None:
@@ -1629,7 +1664,11 @@ class MainTab(QWidget):
                     # Apply the transformation with timing
                     homography_calc_start = time.time()
                     height, width = frame.shape[:2]
-                    warped_frame = cv2.warpPerspective(frame, self.homography_matrix, (width, height))
+                    
+                    # Calculate output canvas size with 3:1 aspect ratio
+                    output_width, output_height = self._calculate_output_canvas_size(width, height)
+                    
+                    warped_frame = cv2.warpPerspective(frame, self.homography_matrix, (output_width, output_height))
                     homography_calc_duration_ms = (time.time() - homography_calc_start) * 1000
                     self.performance_widget.add_processing_measurement("Homography Calculation", homography_calc_duration_ms)
                     
@@ -1667,39 +1706,25 @@ class MainTab(QWidget):
                     
                     self.homography_warped_frame = warped_frame
                     
-                    # Get original warped frame dimensions
+                    # Convert warped frame to Qt format and display (preserve aspect ratio)
                     warped_height, warped_width, warped_channel = warped_frame.shape
-                    
-                    # Apply horizontal zoom to focus on center portion of the field
-                    # Crop horizontally to 60% of the width for more zoom, centered
-                    zoom_factor = 0.6  # Keep 60% of the width for more horizontal zoom
-                    crop_width = int(warped_width * zoom_factor)
-                    crop_start_x = (warped_width - crop_width) // 2
-                    crop_end_x = crop_start_x + crop_width
-                    
-                    # Crop the warped frame horizontally
-                    zoomed_frame = warped_frame[:, crop_start_x:crop_end_x]
-                    print(f"[MAIN_TAB] Applied horizontal zoom: {warped_width}px -> {crop_width}px (factor: {zoom_factor})")
-                    
-                    # Convert cropped frame to Qt format and display
-                    zoomed_height, zoomed_width, zoomed_channel = zoomed_frame.shape
-                    bytes_per_line = 3 * zoomed_width
+                    bytes_per_line = 3 * warped_width
                     
                     # Ensure the frame is contiguous for QImage
-                    zoomed_frame = np.ascontiguousarray(zoomed_frame)
+                    warped_frame = np.ascontiguousarray(warped_frame)
                     
-                    q_image = QImage(zoomed_frame.data, zoomed_width, zoomed_height, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
+                    q_image = QImage(warped_frame.data, warped_width, warped_height, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
                     
-                    # Scale to fill the available label space while stretching to fit
+                    # Display with preserved aspect ratio (no stretching or cropping)
                     pixmap = QPixmap.fromImage(q_image)
                     label_width = self.homography_display_label.width()
                     label_height = self.homography_display_label.height()
                     
-                    # Apply controlled stretching - stretch image but not overlays/text 
+                    # Scale while preserving the 3:1 aspect ratio
                     if label_width > 0 and label_height > 0:
                         scaled_pixmap = pixmap.scaled(
                             label_width - 4, label_height - 4,  # Account for 2px border
-                            Qt.IgnoreAspectRatio,  # Stretch to fill the entire space
+                            Qt.KeepAspectRatio,  # Preserve 3:1 aspect ratio
                             Qt.SmoothTransformation
                         )
                         self.homography_display_label.setPixmap(scaled_pixmap)
