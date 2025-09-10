@@ -114,7 +114,7 @@ class EasyOCRTuningTab(QWidget):
         # Initialize UI
         self._init_ui()
         self._load_videos()
-        # Load parameters from config (including user.yaml) automatically on startup
+        # Load parameters from config (including easyocr_params.yaml) automatically on startup
         self._load_parameters_from_config()
         
         print("[EASYOCR_TUNING] EasyOCR Tuning Tab initialized with user configuration loaded")
@@ -247,7 +247,7 @@ class EasyOCRTuningTab(QWidget):
         
         save_button = QPushButton("Save to Config")
         save_button.clicked.connect(self._save_parameters_to_config)
-        save_button.setToolTip("Save current parameters to user.yaml")
+        save_button.setToolTip("Save current parameters to easyocr_params.yaml")
         button_layout.addWidget(save_button)
         
         layout.addLayout(button_layout)
@@ -1535,7 +1535,7 @@ class EasyOCRTuningTab(QWidget):
     def _load_parameters_from_config(self):
         """Load parameters from configuration."""
         try:
-            # Load user.yaml overrides if they exist
+            # Load easyocr_params.yaml overrides if they exist
             user_config = self._load_user_config()
             
             print(f"[EASYOCR_TUNING] Loading parameters from config...")
@@ -1638,7 +1638,7 @@ class EasyOCRTuningTab(QWidget):
             # Continue with default values if config loading fails
     
     def _load_user_config(self) -> Dict[str, Any]:
-        """Load user.yaml configuration if it exists.
+        """Load easyocr_params.yaml configuration if it exists.
         
         Returns:
             User configuration dictionary or empty dict if not found
@@ -1656,7 +1656,7 @@ class EasyOCRTuningTab(QWidget):
             if project_root is None:
                 return {}
             
-            user_config_file = project_root / "configs" / "user.yaml"
+            user_config_file = project_root / "configs" / "easyocr_params.yaml"
             
             if not user_config_file.exists():
                 return {}
@@ -1923,7 +1923,7 @@ class EasyOCRTuningTab(QWidget):
     def _save_parameters_to_config(self):
         """Save current parameters to configuration file."""
         try:
-            # Find project root and construct absolute path to user.yaml
+            # Find project root and construct absolute path to easyocr_params.yaml
             current_dir = Path(__file__).parent
             project_root = None
             
@@ -1936,7 +1936,7 @@ class EasyOCRTuningTab(QWidget):
                 print("[EASYOCR_TUNING] Error: Could not find project root with configs directory")
                 return
             
-            config_path = project_root / "configs" / "user.yaml"
+            config_path = project_root / "configs" / "easyocr_params.yaml"
             
             # Create config updates with all parameters
             config_updates = {

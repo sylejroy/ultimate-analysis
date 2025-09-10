@@ -369,7 +369,7 @@ def _run_batch_easyocr_detection(crop_images: List[np.ndarray]) -> Tuple[List[Tu
         - Graceful fallback to sequential processing for single crops or errors
         
     Configuration:
-        Set 'parallel_workers' in user.yaml OCR config to control worker count (0 = auto, max 4)
+        Set 'parallel_workers' in easyocr_params.yaml OCR config to control worker count (0 = auto, max 4)
     """
     batch_timing = {'preprocessing_ms': 0.0, 'ocr_ms': 0.0}
     batch_results = []
@@ -610,7 +610,7 @@ def _run_batch_easyocr_detection(crop_images: List[np.ndarray]) -> Tuple[List[Tu
 
 
 def _load_easyocr_config() -> Dict[str, Any]:
-    """Load EasyOCR configuration from user.yaml file."""
+    """Load EasyOCR configuration from easyocr_params.yaml file."""
     try:
         # Find project root by looking for configs directory
         current_path = Path(__file__).parent
@@ -625,7 +625,7 @@ def _load_easyocr_config() -> Dict[str, Any]:
             print("[PLAYER_ID] Could not find configs directory")
             return {}
         
-        config_path = project_root / "configs" / "user.yaml"
+        config_path = project_root / "configs" / "easyocr_params.yaml"
         
         if config_path.exists():
             with open(config_path, 'r') as f:

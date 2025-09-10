@@ -34,7 +34,7 @@ from ..processing import (
 from ..processing.line_extraction import extract_raw_lines_from_segmentation
 from ..processing.jersey_tracker import get_jersey_tracker
 from ..config.settings import get_setting
-from ..constants import SHORTCUTS, DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS
+from ..constants import SHORTCUTS, DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS, FALLBACK_DEFAULTS
 from ..utils.video_utils import get_video_duration
 from ..utils.segmentation_utils import (
     apply_segmentation_to_warped_frame,
@@ -309,11 +309,7 @@ class MainTab(QWidget):
         self.player_id_method_combo.currentTextChanged.connect(self._on_player_id_method_changed)
         models_layout.addRow("Player ID Method:", self.player_id_method_combo)
         
-        # Field segmentation model dropdown
-        self.field_model_combo = QComboBox()
-        self._populate_model_combo(self.field_model_combo, "segmentation")
-        self.field_model_combo.currentTextChanged.connect(self._on_field_model_changed)
-        models_layout.addRow("Field Model:", self.field_model_combo)
+        # Note: Field segmentation model selection is now in the Field Segmentation section below
         
         models_group.setLayout(models_layout)
         layout.addWidget(models_group)
@@ -325,7 +321,7 @@ class MainTab(QWidget):
         # Show segmentation checkbox
         self.show_segmentation_checkbox = QCheckBox("Show Field Segmentation")
         self.show_segmentation_checkbox.setChecked(True)  # Enable by default to show field lines
-        self.show_segmentation_checkbox.stateChanged.connect(self._on_segmentation_toggled)
+        self.show_segmentation_checkbox.stateChanged.connect(self._on_field_segmentation_toggled)
         segmentation_layout.addWidget(self.show_segmentation_checkbox)
         
         # RANSAC line fitting checkbox
@@ -585,7 +581,52 @@ class MainTab(QWidget):
         model_files.sort()
         combo.addItems(model_files)
         
+        # Auto-select the default model if available
+        self._select_default_model(combo, model_type)
+        
         print(f"[MAIN_TAB] Found {len(model_files)} {model_type} models")
+    
+    def _select_default_model(self, combo: QComboBox, model_type: str):
+        """Auto-select the default model in the combo box.
+        
+        Args:
+            combo: QComboBox to update
+            model_type: Type of model ("detection" or "segmentation")
+        """
+        if combo.count() == 0:
+            return
+            
+        # Get the default model path from configuration
+        if model_type == "detection":
+            default_model = get_setting("models.detection.default_model", FALLBACK_DEFAULTS['model_detection'])
+        elif model_type == "segmentation":
+            default_model = get_setting("models.segmentation.default_model", FALLBACK_DEFAULTS['model_segmentation'])
+        else:
+            return
+        
+        # Convert absolute path to relative path for comparison
+        models_path = Path(get_setting("models.base_path", DEFAULT_PATHS['MODELS']))
+        try:
+            default_relative = Path(default_model).relative_to(models_path)
+        except ValueError:
+            # If default_model is not under models_path, try to find it directly
+            default_relative = Path(default_model)
+        
+        # Search for matching item in combo
+        for i in range(combo.count()):
+            item_text = combo.itemText(i)
+            if str(default_relative) == item_text or default_model in item_text:
+                combo.setCurrentIndex(i)
+                print(f"[MAIN_TAB] Auto-selected default {model_type} model: {item_text}")
+                
+                # Trigger the change handler to actually load the model
+                if model_type == "detection":
+                    self._on_detection_model_changed(item_text)
+                elif model_type == "segmentation":
+                    self._on_segmentation_model_changed(item_text)
+                break
+        else:
+            print(f"[MAIN_TAB] Default {model_type} model not found in available models: {default_model}")
     
     def _on_video_selection_changed(self, row: int):
         """Handle video selection change."""
@@ -1203,13 +1244,17 @@ class MainTab(QWidget):
         print(f"[MAIN_TAB] Field segmentation {'enabled' if checked else 'disabled'}")
         
         if checked:
-            # Ensure field segmentation model is loaded with the default path
-            default_model_path = Path(get_setting("models.base_path", DEFAULT_PATHS['MODELS'])) / "segmentation/field_finder_yolo11m-seg/segmentation_finetune/weights/best.pt"
-            if default_model_path.exists():
-                set_field_model(str(default_model_path))
-                print(f"[MAIN_TAB] Field segmentation model set to: {default_model_path}")
+            # Ensure field segmentation model is loaded with the default from configuration
+            default_model = get_setting(
+                "models.segmentation.default_model", 
+                FALLBACK_DEFAULTS['model_segmentation']
+            )
+            
+            if Path(default_model).exists():
+                set_field_model(str(default_model))
+                print(f"[MAIN_TAB] Field segmentation model set to: {default_model}")
             else:
-                print(f"[MAIN_TAB] Default field segmentation model not found at: {default_model_path}")
+                print(f"[MAIN_TAB] Default field segmentation model not found at: {default_model}")
                 print("[MAIN_TAB] Will use fallback models or mock results")
         # Clear cache when processing settings change
         self.frame_cache.clear()
@@ -1232,79 +1277,6 @@ class MainTab(QWidget):
     def _on_player_id_method_changed(self, method: str):
         """Handle player ID method change. Only EasyOCR is supported."""
         print(f"[MAIN_TAB] Player ID method: {method} (EasyOCR only)")
-    
-    def _on_field_model_changed(self, model_path: str):
-        """Handle field model change."""
-        if model_path:
-            full_path = Path(get_setting("models.base_path", DEFAULT_PATHS['MODELS'])) / model_path
-            set_field_model(str(full_path))
-            print(f"[MAIN_TAB] Field model changed to: {model_path}")
-    
-    def _load_segmentation_models(self):
-        """Load available field segmentation models using utility function."""
-        self.available_segmentation_models = load_segmentation_models()
-        
-        # Update combo box
-        if self.segmentation_model_combo is not None:
-            default_model_path = "data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt"
-            populate_segmentation_model_combo(
-                self.segmentation_model_combo, 
-                self.available_segmentation_models,
-                default_model_path
-            )
-        
-        print(f"[MAIN_TAB] Loaded {len(self.available_segmentation_models)} segmentation models")
-    
-    def _on_segmentation_toggled(self, state: int):
-        """Handle segmentation checkbox toggle."""
-        self.show_segmentation = state == 2  # Qt.Checked = 2
-        
-        print(f"[MAIN_TAB] Segmentation toggle: state={state}, show_segmentation={self.show_segmentation}")
-        
-        if self.show_segmentation:
-            print("[MAIN_TAB] Field segmentation enabled")
-            self.current_segmentation_results = None  # Force re-run on next frame
-        else:
-            print("[MAIN_TAB] Field segmentation disabled")
-            self.current_segmentation_results = None
-            self.ransac_lines = []
-            self.ransac_confidences = []
-            self.all_lines_for_display = {}
-            
-        self._request_display_update()
-    
-    def _on_ransac_toggled(self, state: int):
-        """Handle RANSAC line fitting checkbox toggle."""
-        ransac_enabled = state == 2  # Qt.Checked = 2
-        
-        print(f"[MAIN_TAB] RANSAC toggle: state={state}, ransac_enabled={ransac_enabled}")
-        
-        # Temporarily override the config value in memory
-        from ..config.settings import get_config
-        config = get_config()
-        if 'models' not in config:
-            config['models'] = {}
-        if 'segmentation' not in config['models']:
-            config['models']['segmentation'] = {}
-        if 'contour' not in config['models']['segmentation']:
-            config['models']['segmentation']['contour'] = {}
-        if 'ransac' not in config['models']['segmentation']['contour']:
-            config['models']['segmentation']['contour']['ransac'] = {}
-        
-        config['models']['segmentation']['contour']['ransac']['enabled'] = ransac_enabled
-        
-        # Clear cache to force re-processing with new RANSAC setting
-        self.frame_cache.clear()
-        print("[MAIN_TAB] Cleared frame cache due to RANSAC setting change")
-        
-        # Update displays if segmentation is currently shown
-        if self.show_segmentation and self.current_field_results:
-            # Force re-run segmentation with new RANSAC setting
-            self.current_field_results = None
-            self.ransac_lines = []
-            self.ransac_confidences = []
-            self.all_lines_for_display = {}
-            self._request_display_update()
     
     def _on_segmentation_model_changed(self, display_name: str):
         """Handle segmentation model selection change."""
@@ -1345,6 +1317,61 @@ class MainTab(QWidget):
             if self.homography_display_label:
                 self.homography_display_label.setText("Homography view disabled")
                 self.homography_warped_frame = None
+    
+    def _on_segmentation_toggled(self, state: int):
+        """Handle segmentation checkbox toggle."""
+        self.show_segmentation = state == 2  # Qt.Checked = 2
+        
+        print(f"[MAIN_TAB] Segmentation toggle: state={state}, show_segmentation={self.show_segmentation}")
+        
+        if self.show_segmentation:
+            print("[MAIN_TAB] Field segmentation enabled")
+            self._update_displays()
+        else:
+            print("[MAIN_TAB] Field segmentation disabled")
+            self.current_segmentation_results = None
+            self._update_displays()
+    
+    def _on_ransac_toggled(self, state: int):
+        """Handle RANSAC line fitting checkbox toggle."""
+        ransac_enabled = state == 2  # Qt.Checked = 2
+        
+        print(f"[MAIN_TAB] RANSAC toggle: state={state}, ransac_enabled={ransac_enabled}")
+        
+        # Temporarily override the config value in memory
+        from ..config.settings import get_config
+        config = get_config()
+        if 'models' not in config:
+            config['models'] = {}
+        if 'segmentation' not in config['models']:
+            config['models']['segmentation'] = {}
+        if 'contour' not in config['models']['segmentation']:
+            config['models']['segmentation']['contour'] = {}
+        if 'ransac' not in config['models']['segmentation']['contour']:
+            config['models']['segmentation']['contour']['ransac'] = {}
+        
+        config['models']['segmentation']['contour']['ransac']['enabled'] = ransac_enabled
+        
+        # Update displays if field segmentation is currently shown
+        if self.show_segmentation_checkbox.isChecked():
+            self._update_frame_display()
+    
+    def _load_segmentation_models(self):
+        """Load available field segmentation models using utility function."""
+        from ..utils.segmentation_utils import load_segmentation_models, populate_segmentation_model_combo
+        
+        self.available_segmentation_models = load_segmentation_models()
+        
+        # Update combo box
+        if hasattr(self, 'segmentation_model_combo') and self.segmentation_model_combo is not None:
+            default_model_path = "data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt"
+            populate_segmentation_model_combo(
+                self.segmentation_model_combo, 
+                self.available_segmentation_models,
+                default_model_path
+            )
+        
+        print(f"[MAIN_TAB] Loaded {len(self.available_segmentation_models)} segmentation models")
     
     def _map_tracked_objects_to_top_down(self, warped_frame: np.ndarray) -> np.ndarray:
         """Map tracked objects to the top-down view using their foot positions.
