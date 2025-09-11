@@ -281,13 +281,13 @@ class HomographyTab(QWidget):
     
     def __init__(self):
         super().__init__()
-        
+
         # Video player and state
         self.video_player = VideoPlayer()
         self.video_files: List[str] = []
         self.current_video_index: int = 0
         self.current_frame: Optional[np.ndarray] = None
-        
+
         # Homography parameters (H[2,2] = 1.0 fixed)
         # Default is identity matrix except for the bottom row scaling
         self.homography_params = {
@@ -295,7 +295,7 @@ class HomographyTab(QWidget):
             'H10': 0.0, 'H11': 1.0, 'H12': 0.0,
             'H20': 0.0, 'H21': 0.0
         }
-        
+
         # UI components
         self.video_list: Optional[QListWidget] = None
         self.frame_label: Optional[QLabel] = None
@@ -304,18 +304,17 @@ class HomographyTab(QWidget):
         self.param_sliders: Dict[str, QSlider] = {}
         self.param_labels: Dict[str, QLabel] = {}
         self.param_inputs: Dict[str, QLineEdit] = {}  # For direct text input
-        
         # Scrubbing controls
         self.scrubbing_slider: Optional[QSlider] = None
         self.scrubbing_frame_label: Optional[QLabel] = None
         self.current_video_label: Optional[QLabel] = None
-        
+
         # Zoom functionality
         self.original_scroll_area: Optional[QScrollArea] = None
         self.warped_scroll_area: Optional[QScrollArea] = None
-        
+
         # Field segmentation state
-        self.show_segmentation = True
+        self.show_segmentation = False  # Start with segmentation DISABLED for fast loading
         self.current_segmentation_results = None
         self.segmentation_model_combo: Optional[QComboBox] = None
         self.show_segmentation_checkbox: Optional[QCheckBox] = None
@@ -346,8 +345,15 @@ class HomographyTab(QWidget):
         # Initialize UI only
         self._init_ui()
         
+        print("[HOMOGRAPHY] Loading segmentation models...")
+        # Load segmentation models list (just file discovery, no model loading)
+        self._load_segmentation_models()
+
+        print("[HOMOGRAPHY] Loading default parameters...")
         # Load default homography parameters from config
         self._load_default_parameters()
+        
+        print("[HOMOGRAPHY] Tab initialization complete")
         
     def _init_ui(self):
         """Initialize the user interface."""
@@ -390,121 +396,125 @@ class HomographyTab(QWidget):
         """Create the left panel with video list and parameter controls."""
         panel = QWidget()
         layout = QVBoxLayout()
-        
+
         # Video selection section
         video_group = QGroupBox("Video Selection")
         video_layout = QVBoxLayout()
-        
+
         # Video list header
         list_header = QHBoxLayout()
         list_header.addWidget(QLabel("Videos"))
-        
+
         refresh_button = QPushButton("Refresh")
         refresh_button.clicked.connect(self._force_reload_videos)
         refresh_button.setToolTip("Refresh video list")
         list_header.addWidget(refresh_button)
-        
+
         video_layout.addLayout(list_header)
-        
+
         # Video list widget
         self.video_list = QListWidget()
         self.video_list.setMinimumHeight(150)
         self.video_list.currentRowChanged.connect(self._on_video_selection_changed)
         video_layout.addWidget(self.video_list)
-        
+
         # Frame navigation
         frame_nav_layout = QHBoxLayout()
         frame_nav_layout.addWidget(QLabel("Frame:"))
-        
+
         self.frame_label = QLabel("0 / 0")
         frame_nav_layout.addWidget(self.frame_label)
         frame_nav_layout.addStretch()
-        
+
         video_layout.addLayout(frame_nav_layout)
-        
+
         video_group.setLayout(video_layout)
         layout.addWidget(video_group)
-        
+
         # Homography parameters section
         params_group = QGroupBox("Homography Parameters")
         params_layout = QVBoxLayout()
-        
+
         # Create parameter sliders
         self._create_parameter_controls(params_layout)
-        
+
         # Control buttons
         button_layout = QHBoxLayout()
-        
+
         reset_button = QPushButton("Reset")
         reset_button.clicked.connect(self._reset_homography)
         reset_button.setToolTip("Reset to identity matrix")
         button_layout.addWidget(reset_button)
-        
+
         save_button = QPushButton("Save Params")
         save_button.clicked.connect(self._save_parameters)
         save_button.setToolTip("Save parameters to YAML file")
         button_layout.addWidget(save_button)
-        
+
         load_button = QPushButton("Load Params")
         load_button.clicked.connect(self._load_parameters)
         load_button.setToolTip("Load parameters from YAML file")
         button_layout.addWidget(load_button)
-        
+
         # Second row of buttons
         button_layout2 = QHBoxLayout()
-        
+
         save_default_button = QPushButton("Save as Default")
         save_default_button.clicked.connect(self._save_as_default_parameters)
         save_default_button.setToolTip("Save current parameters as default startup values")
         save_default_button.setStyleSheet("background-color: #2c5aa0; color: white; font-weight: bold;")
         button_layout2.addWidget(save_default_button)
-        
+
         load_default_button = QPushButton("Load Default")
         load_default_button.clicked.connect(self._load_default_parameters)
         load_default_button.setToolTip("Load default parameters from config")
         button_layout2.addWidget(load_default_button)
-        
+
         params_layout.addLayout(button_layout)
         params_layout.addLayout(button_layout2)
         params_group.setLayout(params_layout)
         layout.addWidget(params_group)
-        
+
         # Field Segmentation Controls
         segmentation_group = QGroupBox("Field Segmentation")
         segmentation_layout = QVBoxLayout()
-        
+
         # Show segmentation checkbox
         self.show_segmentation_checkbox = QCheckBox("Show Field Segmentation")
+        # Set checkbox state without triggering signal during initialization
+        self.show_segmentation_checkbox.blockSignals(True)
         self.show_segmentation_checkbox.setChecked(self.show_segmentation)
+        self.show_segmentation_checkbox.blockSignals(False)
         self.show_segmentation_checkbox.stateChanged.connect(self._on_segmentation_toggled)
         segmentation_layout.addWidget(self.show_segmentation_checkbox)
-        
+
         # RANSAC line fitting checkbox
         self.ransac_checkbox = QCheckBox("Use RANSAC Line Fitting")
         self.ransac_checkbox.setChecked(get_setting("models.segmentation.contour.ransac.enabled", True))
         self.ransac_checkbox.stateChanged.connect(self._on_ransac_toggled)
         self.ransac_checkbox.setToolTip("Fit straight lines to contour segments using RANSAC algorithm")
         segmentation_layout.addWidget(self.ransac_checkbox)
-        
+
+    # (Removed) Line classification toggle was removed — classification is disabled globally
+
         # Model selection
         model_layout = QHBoxLayout()
         model_layout.addWidget(QLabel("Model:"))
-        
+
         self.segmentation_model_combo = QComboBox()
         self.segmentation_model_combo.setMinimumWidth(150)
         self.segmentation_model_combo.currentTextChanged.connect(self._on_segmentation_model_changed)
         model_layout.addWidget(self.segmentation_model_combo)
-        
+
         refresh_models_button = QPushButton("↻")
         refresh_models_button.setMaximumWidth(30)
         refresh_models_button.setToolTip("Refresh model list")
         refresh_models_button.clicked.connect(self._load_segmentation_models)
         model_layout.addWidget(refresh_models_button)
-        
+
         segmentation_layout.addLayout(model_layout)
         segmentation_group.setLayout(segmentation_layout)
         layout.addWidget(segmentation_group)
-        
         # Runtime performance button
         runtime_group = QGroupBox("Performance Monitoring")
         runtime_layout = QVBoxLayout()
@@ -536,10 +546,9 @@ class HomographyTab(QWidget):
         # Initialize popup window (hidden)
         self.runtime_popup = None
         self.runtime_table = None
-        
         # Add stretch to push everything to top
         layout.addStretch()
-        
+
         panel.setLayout(layout)
         return panel
         
@@ -887,7 +896,20 @@ class HomographyTab(QWidget):
             first_frame = self.video_player.get_current_frame()
             if first_frame is not None:
                 self.current_frame = first_frame.copy()
-                self._update_displays()
+                # Update displays WITHOUT running segmentation initially (for fast loading)
+                self._update_displays_without_segmentation()
+                
+    def _update_displays_without_segmentation(self):
+        """Update displays without running segmentation - for fast initial loading."""
+        if self.current_frame is None:
+            return
+            
+        # Display original frame without segmentation overlay
+        self._display_frame(self.current_frame, self.original_display)
+        
+        # Create and display warped frame without segmentation overlay  
+        warped_frame = self._apply_homography(self.current_frame)
+        self._display_frame(warped_frame, self.warped_display)
                 
     def _on_frame_changed(self, frame_idx: int):
         """Handle frame slider change."""
@@ -1026,7 +1048,6 @@ class HomographyTab(QWidget):
             return
         
         update_start = time.time()
-        
         # Apply segmentation overlay to original frame if enabled
         original_frame = self.current_frame.copy()
         if self.show_segmentation and self.current_segmentation_results:
@@ -1109,7 +1130,7 @@ class HomographyTab(QWidget):
         # Record total display update time
         update_duration = (time.time() - update_start) * 1000
         self._add_runtime_measurement('Homography Display', update_duration)
-        
+
     def _get_homography_matrix(self) -> np.ndarray:
         """Get the homography transformation matrix from current parameters."""
         # Construct homography matrix from H parameters
@@ -1556,6 +1577,7 @@ class HomographyTab(QWidget):
         # Update displays if segmentation is currently shown
         if self.show_segmentation and self.current_segmentation_results:
             self._update_displays()
+    
         
     def _on_segmentation_model_changed(self, display_name: str):
         """Handle segmentation model selection change."""

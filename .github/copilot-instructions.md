@@ -1,3 +1,5 @@
+Strictly adhere to TaskSync Protocol #tasksync.md
+
 # Ultimate Analysis - AI Coding Agent Instructions
 
 This is a PyQt5-based video analysis application for Ultimate Frisbee game analysis using computer vision, YOLO models, and real-time processing.
