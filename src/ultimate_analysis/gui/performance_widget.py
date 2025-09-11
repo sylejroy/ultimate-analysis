@@ -37,10 +37,26 @@ class PerformanceMetrics:
         self.gpu_memory: Deque[float] = deque(maxlen=self.history_size)
         self.memory_usage: Deque[float] = deque(maxlen=self.history_size)
         self.timestamps: Deque[float] = deque(maxlen=self.history_size)
+        # FPS tracking
+        self.frame_timestamps: Deque[float] = deque(maxlen=30)  # Track last 30 frames for FPS
+        self.current_fps = 0.0
     
     def add_processing_time(self, process_name: str, duration_ms: float):
         """Add a processing time measurement."""
         self.processing_times[process_name].append(duration_ms)
+    
+    def add_frame_timestamp(self):
+        """Add a frame timestamp for FPS calculation."""
+        current_time = time.time()
+        self.frame_timestamps.append(current_time)
+        
+        # Calculate FPS from recent frames
+        if len(self.frame_timestamps) >= 2:
+            time_span = self.frame_timestamps[-1] - self.frame_timestamps[0]
+            if time_span > 0:
+                self.current_fps = (len(self.frame_timestamps) - 1) / time_span
+            else:
+                self.current_fps = 0.0
     
     def add_system_metrics(self, cpu_percent: float, memory_mb: float, gpu_percent: float = 0.0, gpu_memory_mb: float = 0.0):
         """Add system resource usage metrics."""
@@ -103,6 +119,8 @@ class MiniGraphWidget(QWidget):
             painter.drawText(5, self.height() - 5, f"{current_value:.1f}GB")
         elif "CPU" in self.title or "GPU" in self.title:
             painter.drawText(5, self.height() - 5, f"{current_value:.0f}%")
+        elif "FPS" in self.title:
+            painter.drawText(5, self.height() - 5, f"{current_value:.1f}fps")
         else:
             painter.drawText(5, self.height() - 5, f"{current_value:.1f}")
         
@@ -206,6 +224,11 @@ class PerformanceWidget(QWidget):
         self.cpu_graph.setToolTip("CPU usage per core (normalized)\nShows app CPU usage divided by number of cores")
         graphs_layout.addWidget(self.cpu_graph)
         
+        # FPS Graph
+        self.fps_graph = MiniGraphWidget("FPS", QColor(255, 200, 100), 60.0)
+        self.fps_graph.setToolTip("Frames per second during video playback")
+        graphs_layout.addWidget(self.fps_graph)
+        
         # GPU Usage Graph (if available)
         if GPU_AVAILABLE:
             self.gpu_graph = MiniGraphWidget("GPU %", QColor(255, 150, 100), 100.0)
@@ -285,15 +308,15 @@ class PerformanceWidget(QWidget):
     
     def init_timers(self):
         """Initialize update timers."""
-        # System metrics timer (every 500ms)
+        # System metrics timer (every 1000ms to reduce overhead)
         self.system_timer = QTimer()
         self.system_timer.timeout.connect(self._update_system_metrics)
-        self.system_timer.start(500)
+        self.system_timer.start(1000)
         
-        # UI update timer (every 200ms)
+        # UI update timer (every 500ms for smoother UI)
         self.ui_timer = QTimer()
         self.ui_timer.timeout.connect(self._update_ui)
-        self.ui_timer.start(200)
+        self.ui_timer.start(500)
     
     def _update_system_metrics(self):
         """Update system resource metrics."""
@@ -331,6 +354,7 @@ class PerformanceWidget(QWidget):
             # Update graphs
             self.cpu_graph.add_data_point(cpu_percent)
             self.memory_graph.add_data_point(memory_gb)  # Display as GB in graph
+            self.fps_graph.add_data_point(self.metrics.current_fps)
             if self.gpu_graph:
                 self.gpu_graph.add_data_point(gpu_percent)
                 
@@ -362,3 +386,7 @@ class PerformanceWidget(QWidget):
     def add_processing_measurement(self, process_name: str, duration_ms: float):
         """Add a processing time measurement."""
         self.metrics.add_processing_time(process_name, duration_ms)
+    
+    def add_frame_update(self):
+        """Record a frame update for FPS calculation."""
+        self.metrics.add_frame_timestamp()

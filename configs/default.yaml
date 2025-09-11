@@ -130,6 +130,18 @@ performance:
   cache_size_mb: 512
   enable_profiling: false
   profiling_interval_ms: 1000
+  enable_frame_caching: true
+  cache_size_frames: 50
+  debounce_delay_ms: 100
+
+# Asynchronous Processing Settings
+processing:
+  async:
+    enabled: true                     # Enable async processing to prevent UI freezing
+    max_queue_size: 10               # Maximum number of tasks in processing queue
+    auto_clear_old_tasks: true       # Automatically clear old tasks when queue is full
+    thread_priority: 1               # Thread priority (1=normal, 2=high)
+    enable_task_prioritization: true # Prioritize current frame over old frames
 
 # Logging Settings
 logging:

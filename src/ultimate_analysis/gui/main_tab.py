@@ -31,6 +31,7 @@ from ..processing import (
     set_detection_model, set_field_model, set_tracker_type, 
     reset_tracker, get_track_histories
 )
+from ..processing.async_processor import AsyncVideoProcessor, ProcessingResult
 from ..processing.line_extraction import extract_raw_lines_from_segmentation
 from ..processing.jersey_tracker import get_jersey_tracker
 from ..config.settings import get_setting
@@ -128,6 +129,22 @@ class MainTab(QWidget):
         self.update_timer.setSingleShot(True)
         self.update_timer.timeout.connect(self._delayed_update_displays)
         self.debounce_delay_ms = get_setting("performance.debounce_delay_ms", 100)
+        
+        # Async processing system
+        self.async_processor = AsyncVideoProcessor()
+        self.async_processor.processing_complete.connect(self._on_async_processing_complete)
+        self.async_processor.processing_error.connect(self._on_async_processing_error)
+        self.async_processor.queue_status_changed.connect(self._on_async_queue_status_changed)
+        
+        # Async processing state (always enabled)
+        self.enable_async_processing = True
+        self.pending_processing_tasks: Dict[str, int] = {}  # task_id -> frame_index
+        self.latest_async_results: Optional[ProcessingResult] = None
+        self.async_queue_size = 0
+        
+        # Display throttling for smooth UI
+        self.last_display_time = 0.0
+        self.min_display_interval = 1.0 / 30.0  # Max 30 FPS display during async processing
         
         # Initialize UI
         self._init_ui()
@@ -697,8 +714,59 @@ class MainTab(QWidget):
         if frame is None:
             return
         
-        # Apply processing if enabled (with caching optimization)
-        processed_frame = self._process_frame_cached(frame.copy())
+        # Check if async processing is enabled
+        if self.enable_async_processing:
+            # Display frame immediately with previous processing results
+            self._display_frame_with_cached_results(frame)
+            
+            # Submit frame for async processing if any processing is enabled
+            enabled_options = self._get_enabled_processing_options()
+            if any(enabled_options.values()):
+                self._submit_frame_for_async_processing(frame)
+        else:
+            # Use synchronous processing (original behavior)
+            processed_frame = self._process_frame_cached(frame.copy())
+            self._display_processed_frame(processed_frame)
+        
+        # Update homography display if enabled
+        if self.homography_enabled:
+            self._update_homography_display()
+    
+    def _display_frame_with_cached_results(self, frame):
+        """Display frame immediately using cached processing results.
+        
+        Args:
+            frame: Raw video frame to display
+        """
+        # Always apply the latest async results we have, even if they're from a recent frame
+        if (self.latest_async_results and 
+            self.latest_async_results.success):
+            
+            # Use the latest processing results (don't check frame timing during playback)
+            self.current_detections = self.latest_async_results.detections or []
+            self.current_tracks = self.latest_async_results.tracks or []
+            self.current_field_results = self.latest_async_results.field_results or []
+            self.current_player_ids = self.latest_async_results.player_ids or {}
+        
+        # Process the frame with current results (fast visualization only)
+        processed_frame = self._apply_visualizations(frame.copy())
+        self._display_processed_frame(processed_frame)
+    
+    def _display_processed_frame(self, processed_frame):
+        """Display a processed frame in the video label.
+        
+        Args:
+            processed_frame: Frame with visualizations applied
+        """
+        # Throttle display updates for smooth UI during async processing
+        current_time = time.time()
+        if self.is_playing and (current_time - self.last_display_time) < self.min_display_interval:
+            return  # Skip this frame to maintain smooth playback
+        
+        self.last_display_time = current_time
+        
+        # Record frame update for FPS tracking
+        self.performance_widget.add_frame_update()
         
         # Convert to Qt format and display
         height, width, channel = processed_frame.shape
@@ -709,10 +777,61 @@ class MainTab(QWidget):
         
         # Use ZoomableImageLabel's set_image method for zoom support
         self.video_label.set_image(pixmap)
+    
+    def _submit_frame_for_async_processing(self, frame):
+        """Submit frame for asynchronous processing.
         
-        # Update homography display if enabled
-        if self.homography_enabled:
-            self._update_homography_display()
+        Args:
+            frame: Video frame to process
+        """
+        if not self.video_player.is_loaded():
+            return
+        
+        # Get current frame index
+        video_info = self.video_player.get_video_info()
+        frame_index = video_info['current_frame']
+        
+        # Skip submission if we're playing and have too many pending tasks
+        # This improves performance during fast playback
+        max_pending = get_setting("processing.async.max_queue_size", 5)
+        if self.is_playing and len(self.pending_processing_tasks) >= max_pending:
+            # Skip every other frame during fast playback to maintain performance
+            if not hasattr(self, '_last_submitted_frame'):
+                self._last_submitted_frame = 0
+                
+            frame_skip = 2 if len(self.pending_processing_tasks) > max_pending // 2 else 1
+            if (frame_index - self._last_submitted_frame) < frame_skip:
+                return
+        
+        # Get enabled processing options
+        enabled_options = self._get_enabled_processing_options()
+        
+        # Submit for async processing with high priority for current frame
+        task_id = self.async_processor.process_frame_async(
+            frame=frame,
+            frame_index=frame_index,
+            enabled_options=enabled_options,
+            priority=10  # High priority for current frame
+        )
+        
+        # Track pending task and last submitted frame
+        self.pending_processing_tasks[task_id] = frame_index
+        self._last_submitted_frame = frame_index
+        
+        print(f"[MAIN_TAB] Submitted frame {frame_index} for async processing (task: {task_id})")
+    
+    def _get_enabled_processing_options(self) -> Dict[str, bool]:
+        """Get current enabled processing options.
+        
+        Returns:
+            Dictionary of enabled processing options
+        """
+        return {
+            'inference': self.inference_checkbox.isChecked(),
+            'tracking': self.tracking_checkbox.isChecked(),
+            'field_segmentation': self.field_segmentation_checkbox.isChecked(),
+            'player_id': self.player_id_checkbox.isChecked()
+        }
     
     def _compute_frame_hash(self, frame: np.ndarray) -> str:
         """Compute a hash of the frame content for caching.
@@ -1706,4 +1825,69 @@ class MainTab(QWidget):
         """Handle widget close event."""
         self._stop_playback()
         self.video_player.close_video()
+        
+        # Shutdown async processor
+        if hasattr(self, 'async_processor'):
+            self.async_processor.shutdown()
+        
         super().closeEvent(event)
+    
+    def _on_async_processing_complete(self, result: ProcessingResult):
+        """Handle completion of async processing task.
+        
+        Args:
+            result: ProcessingResult containing the analysis results
+        """
+        # Remove task from pending list
+        if result.task_id in self.pending_processing_tasks:
+            frame_index = self.pending_processing_tasks.pop(result.task_id)
+            
+            # Always update latest results if successful, regardless of frame timing
+            if result.success:
+                # Update processing results
+                self.current_detections = result.detections or []
+                self.current_tracks = result.tracks or []
+                self.current_field_results = result.field_results or []
+                self.current_player_ids = result.player_ids or {}
+                
+                # Store latest results
+                self.latest_async_results = result
+                
+                # Update performance metrics
+                if result.performance_metrics:
+                    for name, time_ms in result.performance_metrics.items():
+                        self.performance_widget.add_processing_measurement(name, time_ms)
+                
+                # Only request display update if we're not currently playing or it's been a while
+                # (during playback, the timer will handle frame display and throttling will apply)
+                current_time = time.time()
+                if not self.is_playing or (current_time - self.last_display_time) >= self.min_display_interval:
+                    self._request_display_update(immediate=True)
+                
+                print(f"[MAIN_TAB] Applied async results for frame {frame_index}")
+            else:
+                print(f"[MAIN_TAB] Failed async processing for frame {frame_index}")
+        else:
+            print(f"[MAIN_TAB] Received unexpected async result for task {result.task_id}")
+    
+    def _on_async_processing_error(self, task_id: str, error_message: str):
+        """Handle async processing error.
+        
+        Args:
+            task_id: ID of the failed task
+            error_message: Error description
+        """
+        print(f"[MAIN_TAB] Async processing error for task {task_id}: {error_message}")
+        
+        # Remove from pending tasks
+        if task_id in self.pending_processing_tasks:
+            self.pending_processing_tasks.pop(task_id)
+    
+    def _on_async_queue_status_changed(self, queue_size: int):
+        """Handle change in async processing queue size.
+        
+        Args:
+            queue_size: Current number of tasks in queue
+        """
+        self.async_queue_size = queue_size
+        # Could update UI indicator here if desired
