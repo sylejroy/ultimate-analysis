@@ -38,7 +38,7 @@ def run_player_id_on_tracks(frame: np.ndarray, tracks: List[Any]) -> Tuple[Dict[
     Returns:
         Tuple of (player_identifications, timing_info)
         player_identifications: Dictionary mapping track_id -> (jersey_number, detection_details)
-        timing_info: Dictionary with 'preprocessing_ms' and 'ocr_ms' totals
+        timing_info: Dictionary with 'preprocessing_ms', 'ocr_ms', and 'filtering_ms' totals
         
     Detection details now include both single-frame and historical tracking results:
         - 'single_frame': Single-frame EasyOCR result
@@ -54,7 +54,8 @@ def run_player_id_on_tracks(frame: np.ndarray, tracks: List[Any]) -> Tuple[Dict[
                     print(f"  {jersey}: {prob:.1%} ({count} measurements)")
     """
     player_identifications = {}
-    total_timing = {'preprocessing_ms': 0.0, 'ocr_ms': 0.0}
+    total_timing = {'preprocessing_ms': 0.0, 'ocr_ms': 0.0, 'filtering_ms': 0.0}
+    batch_timing: Dict[str, float] = {'preprocessing_ms': 0.0, 'ocr_ms': 0.0, 'filtering_ms': 0.0}
 
     if not tracks:
         return player_identifications, total_timing
@@ -196,9 +197,10 @@ def run_player_id_on_tracks(frame: np.ndarray, tracks: List[Any]) -> Tuple[Dict[
                 
                 print(f"[PLAYER_ID] Track {track_id}: Single-frame='{jersey_number}', Tracked='{best_tracked_number}' ({best_tracked_prob:.2%}), Primary='{primary_result}'")
         
-        # Add batch timing to totals
-        total_timing['preprocessing_ms'] += batch_timing['preprocessing_ms']
-        total_timing['ocr_ms'] += batch_timing['ocr_ms']
+    # Add batch timing to totals
+    total_timing['preprocessing_ms'] += batch_timing.get('preprocessing_ms', 0.0)
+    total_timing['ocr_ms'] += batch_timing.get('ocr_ms', 0.0)
+    total_timing['filtering_ms'] += batch_timing.get('filtering_ms', 0.0)
 
     return player_identifications, total_timing
 def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List], Dict[str, float]]:
@@ -209,9 +211,9 @@ def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List],
         
     Returns:
         Tuple of (jersey_number, ocr_results, timing_info)
-        timing_info contains 'preprocessing_ms' and 'ocr_ms'
+        timing_info contains 'preprocessing_ms', 'ocr_ms', and 'filtering_ms'
     """
-    timing_info = {'preprocessing_ms': 0.0, 'ocr_ms': 0.0}
+    timing_info = {'preprocessing_ms': 0.0, 'ocr_ms': 0.0, 'filtering_ms': 0.0}
     
     if _easyocr_reader is None:
         _initialize_easyocr()
@@ -236,6 +238,7 @@ def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List],
         if crop_width < min_crop_width or crop_height < min_crop_height:
             timing_info['preprocessing_ms'] = (time.time() - prep_start_time) * 1000
             timing_info['ocr_ms'] = 0.0
+            timing_info['filtering_ms'] = 0.0
             print(f"[PLAYER_ID] Crop too small ({crop_width}x{crop_height}), skipping OCR (min: {min_crop_width}x{min_crop_height})")
             return "Unknown", [], timing_info
         
@@ -288,6 +291,12 @@ def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List],
         # Run EasyOCR with user settings (same as tuning tab)
         ocr_results = _easyocr_reader.readtext(final_processed_crop, **readtext_params)
         
+        # End OCR timer
+        timing_info['ocr_ms'] = (time.time() - ocr_start_time) * 1000
+
+        # Start filtering/post-processing timer
+        filter_start_time = time.time()
+
         # Filter out low confidence detections (below 0.5)
         min_confidence = 0.5
         filtered_ocr_results = []
@@ -298,9 +307,6 @@ def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List],
                 print(f"[PLAYER_ID] Filtered out low confidence detection: '{text}' ({confidence:.3f} < {min_confidence})")
         
         print(f"[PLAYER_ID] OCR results: {len(ocr_results)} total, {len(filtered_ocr_results)} after confidence filter")
-        
-        # End OCR timer
-        timing_info['ocr_ms'] = (time.time() - ocr_start_time) * 1000
         
         # Process filtered results - find best numeric text (same as tuning tab)
         best_text = ""
@@ -343,6 +349,9 @@ def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List],
                 'crop_fraction': crop_config.get('crop_top_fraction', 0.33)
             }
         
+        # End filtering timer
+        timing_info['filtering_ms'] = (time.time() - filter_start_time) * 1000
+
         print(f"[PLAYER_ID] EasyOCR detected: {jersey_number} (confidence: {best_confidence:.3f})")
         return jersey_number, result_details, timing_info
         
@@ -371,7 +380,7 @@ def _run_batch_easyocr_detection(crop_images: List[np.ndarray]) -> Tuple[List[Tu
     Configuration:
         Set 'parallel_workers' in easyocr_params.yaml OCR config to control worker count (0 = auto, max 4)
     """
-    batch_timing = {'preprocessing_ms': 0.0, 'ocr_ms': 0.0}
+    batch_timing = {'preprocessing_ms': 0.0, 'ocr_ms': 0.0, 'filtering_ms': 0.0}
     batch_results = []
     
     if not crop_images:
@@ -384,7 +393,7 @@ def _run_batch_easyocr_detection(crop_images: List[np.ndarray]) -> Tuple[List[Tu
         print("[PLAYER_ID] EasyOCR not available for batch processing")
         # Return empty results for all crops
         for _ in crop_images:
-            individual_timing = {'preprocessing_ms': 0.0, 'ocr_ms': 0.0}
+            individual_timing = {'preprocessing_ms': 0.0, 'ocr_ms': 0.0, 'filtering_ms': 0.0}
             batch_results.append(("Unknown", None, individual_timing))
         return batch_results, batch_timing
 
@@ -538,7 +547,8 @@ def _run_batch_easyocr_detection(crop_images: List[np.ndarray]) -> Tuple[List[Tu
         for i, crop in enumerate(processed_crops):
             individual_timing = {
                 'preprocessing_ms': batch_timing['preprocessing_ms'] / len(crop_images),  # Distribute batch time
-                'ocr_ms': batch_timing['ocr_ms'] / max(1, len(valid_crops)) if valid_crops else 0.0  # Distribute OCR time among valid crops
+                'ocr_ms': batch_timing['ocr_ms'] / max(1, len(valid_crops)) if valid_crops else 0.0,
+                'filtering_ms': 0.0  # Will set per-crop below
             }
             
             if crop is None or crop_metadata[i] is None:
@@ -552,6 +562,7 @@ def _run_batch_easyocr_detection(crop_images: List[np.ndarray]) -> Tuple[List[Tu
                 valid_crop_index += 1
                 
                 # Filter low confidence detections (same as individual processing)
+                per_crop_filter_start = time.time()
                 min_confidence = 0.5
                 filtered_ocr_results = []
                 for bbox, text, confidence in ocr_results:
@@ -586,13 +597,18 @@ def _run_batch_easyocr_detection(crop_images: List[np.ndarray]) -> Tuple[List[Tu
                         **crop_metadata[i]  # Include preprocessing metadata
                     }
                 
+                # End per-crop filtering timer and accumulate
+                filtering_ms = (time.time() - per_crop_filter_start) * 1000
+                individual_timing['filtering_ms'] = filtering_ms
+                batch_timing['filtering_ms'] += filtering_ms
+
                 batch_results.append((jersey_number, result_details, individual_timing))
             else:
                 # No OCR results available
                 batch_results.append(("Unknown", None, individual_timing))
         
         print(f"[PLAYER_ID] Batch OCR processing complete: {len(batch_results)} results")
-        print(f"[PLAYER_ID] Batch timing - Preprocessing: {batch_timing['preprocessing_ms']:.1f}ms, OCR: {batch_timing['ocr_ms']:.1f}ms")
+        print(f"[PLAYER_ID] Batch timing - Preprocessing: {batch_timing['preprocessing_ms']:.1f}ms, OCR: {batch_timing['ocr_ms']:.1f}ms, Filtering: {batch_timing['filtering_ms']:.1f}ms")
         
         return batch_results, batch_timing
         
@@ -603,7 +619,7 @@ def _run_batch_easyocr_detection(crop_images: List[np.ndarray]) -> Tuple[List[Tu
         
         # Return empty results for all crops on error
         for _ in crop_images:
-            individual_timing = {'preprocessing_ms': 0.0, 'ocr_ms': 0.0}
+            individual_timing = {'preprocessing_ms': 0.0, 'ocr_ms': 0.0, 'filtering_ms': 0.0}
             batch_results.append(("Unknown", None, individual_timing))
         
         return batch_results, batch_timing

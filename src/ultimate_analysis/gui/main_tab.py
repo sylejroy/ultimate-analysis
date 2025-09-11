@@ -38,7 +38,6 @@ from ..constants import SHORTCUTS, DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS, FA
 from ..utils.video_utils import get_video_duration
 from ..utils.segmentation_utils import (
     apply_segmentation_to_warped_frame,
-    load_segmentation_models, populate_segmentation_model_combo
 )
 
 
@@ -676,10 +675,9 @@ class MainTab(QWidget):
             self.progress_bar.setMaximum(max(1, video_info['total_frames'] - 1))
             self.progress_bar.setValue(0)
             
-            # Display first frame
-            first_frame = self.video_player.get_current_frame()
-            if first_frame is not None:
-                self._display_frame(first_frame)
+            # Display first frame via unified pipeline to capture full per-frame timings
+            # (includes Frame I/O, processing, visualization, UI display, and Total Runtime)
+            self._process_and_display(mode="current")
             
             # Emit signal
             self.video_changed.emit(video_path)
@@ -701,14 +699,26 @@ class MainTab(QWidget):
         processed_frame = self._process_frame_cached(frame.copy())
         
         # Convert to Qt format and display
+        ui_disp_start = time.time()
         height, width, channel = processed_frame.shape
         bytes_per_line = 3 * width
-        
-        q_image = QImage(processed_frame.data, width, height, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
+
+        q_image = QImage(
+            processed_frame.data,
+            width,
+            height,
+            bytes_per_line,
+            QImage.Format_RGB888,
+        ).rgbSwapped()
         pixmap = QPixmap.fromImage(q_image)
-        
+
         # Use ZoomableImageLabel's set_image method for zoom support
         self.video_label.set_image(pixmap)
+        ui_disp_ms = (time.time() - ui_disp_start) * 1000
+        try:
+            self.performance_widget.add_processing_measurement("UI Display", ui_disp_ms)
+        except Exception:
+            pass
         
         # Update homography display if enabled
         if self.homography_enabled:
@@ -745,9 +755,8 @@ class MainTab(QWidget):
     def _delayed_update_displays(self) -> None:
         """Delayed update handler for debounced UI updates."""
         if self.pending_update and self.video_player.is_loaded():
-            frame = self.video_player.get_current_frame()
-            if frame is not None:
-                self._display_frame(frame)
+            # Process and display current frame with full timing coverage (no frame advance)
+            self._process_and_display(mode="current")
             self.pending_update = False
             print("[MAIN_TAB] Executed debounced display update")
     
@@ -761,13 +770,60 @@ class MainTab(QWidget):
             # Force immediate update but set pending flag for debounced processing
             self.pending_update = True
             if self.video_player.is_loaded():
-                frame = self.video_player.get_current_frame()
-                if frame is not None:
-                    self._display_frame(frame)
+                self._process_and_display(mode="current")
         else:
             # Standard debounced update
             self.pending_update = True
             self.update_timer.start(self.debounce_delay_ms)
+
+    def _process_and_display(self, mode: str = "current") -> None:
+        """End-to-end per-frame pipeline including Frame I/O and Total Runtime.
+
+        Args:
+            mode: "current" to use current frame without advancing; "next" to advance.
+        """
+        if not self.video_player.is_loaded():
+            self._stop_playback()
+            return
+
+        # Begin new frame for metrics
+        try:
+            self.performance_widget.begin_frame()
+        except Exception:
+            pass
+
+        # Total runtime timing starts before frame I/O
+        total_start = time.time()
+
+        # Frame I/O
+        io_start = time.time()
+        frame = (
+            self.video_player.get_next_frame()
+            if mode == "next"
+            else self.video_player.get_current_frame()
+        )
+        io_ms = (time.time() - io_start) * 1000
+        self.performance_widget.add_processing_measurement("Frame I/O", io_ms)
+
+        if frame is not None:
+            # Display/process frame (includes processing + homography display timings)
+            self._display_frame(frame)
+
+            # Update progress bar when advancing
+            if mode == "next":
+                video_info = self.video_player.get_video_info()
+                self.progress_bar.setValue(video_info['current_frame'])
+        else:
+            # End of video reached when advancing
+            if mode == "next":
+                print("[MAIN_TAB] End of video reached")
+                self._stop_playback()
+            # No frame to process; still record totals
+
+        # Record total runtime after full pipeline
+        total_ms = (time.time() - total_start) * 1000
+        self.performance_widget.add_processing_measurement("Total Runtime", total_ms)
+        self._update_fps(total_ms)
     def _cleanup_frame_cache(self) -> None:
         """Clean up old cache entries to maintain memory limits."""
         if len(self.frame_cache) <= self.cache_max_size:
@@ -798,25 +854,23 @@ class MainTab(QWidget):
         Returns:
             Processed frame with visualizations
         """
-        # Start total runtime timer at the very beginning
-        total_runtime_start = time.time()
-        
         if not self.cache_enabled:
             processed_frame = self._process_frame(frame)
-            # Record total runtime for non-cached processing
-            total_runtime_ms = (time.time() - total_runtime_start) * 1000
-            self.performance_widget.add_processing_measurement("Total Runtime", total_runtime_ms)
-            self._update_fps(total_runtime_ms)
             return processed_frame
-            
+
         # Compute frame content hash
         frame_hash = self._compute_frame_hash(frame)
         processing_key = self._get_processing_cache_key()
         cache_key = f"{frame_hash}_{processing_key}"
-        
-        # Check cache hit
+
+        # Cache lookup timing
         current_time = time.time()
-        if cache_key in self.frame_cache:
+        cache_lookup_start = time.time()
+        cache_hit = cache_key in self.frame_cache
+        cache_lookup_ms = (time.time() - cache_lookup_start) * 1000
+        self.performance_widget.add_processing_measurement("Cache - Lookup", cache_lookup_ms)
+
+        if cache_hit:
             # Cache hit - return cached results
             cached_data = self.frame_cache[cache_key]
             
@@ -828,16 +882,10 @@ class MainTab(QWidget):
             self.current_player_ids = cached_data['player_ids']
             
             # Apply visualizations to the frame
-            viz_start_time = time.time()
             processed_frame = self._apply_visualizations(frame.copy())
-            viz_duration_ms = (time.time() - viz_start_time) * 1000
             
-            # Record cache hit performance with total runtime from start of method
-            total_runtime_ms = (time.time() - total_runtime_start) * 1000
             self.cache_hit_count += 1
-            self.performance_widget.add_processing_measurement("Visualization", viz_duration_ms)
-            self.performance_widget.add_processing_measurement("Total Runtime", total_runtime_ms)
-            self._update_fps(total_runtime_ms)
+            # Visualization timing is emitted inside _apply_visualizations to avoid overlap
             
             # Log cache efficiency periodically
             if (self.cache_hit_count + self.cache_miss_count) % 30 == 0:
@@ -851,7 +899,8 @@ class MainTab(QWidget):
         self.cache_miss_count += 1
         processed_frame = self._process_frame(frame)
         
-        # Store results in cache
+        # Store results in cache (timed)
+        cache_store_start = time.time()
         self.frame_cache[cache_key] = {
             'timestamp': current_time,
             'detections': self.current_detections.copy(),
@@ -859,14 +908,11 @@ class MainTab(QWidget):
             'field_results': self.current_field_results.copy() if self.current_field_results else [],
             'player_ids': self.current_player_ids.copy()
         }
+        cache_store_ms = (time.time() - cache_store_start) * 1000
+        self.performance_widget.add_processing_measurement("Cache - Store", cache_store_ms)
         
         # Clean up cache if needed
         self._cleanup_frame_cache()
-        
-        # Record total runtime from start of method
-        total_runtime_ms = (time.time() - total_runtime_start) * 1000
-        self.performance_widget.add_processing_measurement("Total Runtime", total_runtime_ms)
-        self._update_fps(total_runtime_ms)
         
         self.last_frame_hash = frame_hash
         return processed_frame
@@ -880,8 +926,7 @@ class MainTab(QWidget):
         Returns:
             Processed frame with visualizations
         """
-        # Start total runtime timer
-        total_start_time = time.time()
+    # Start total runtime timer (measured in _process_frame_cached)
         
         # Reset detection/tracking results
         self.current_detections = []
@@ -935,37 +980,24 @@ class MainTab(QWidget):
             print(f"[MAIN_TAB] Total duration: {duration_ms:.1f}ms")
             
             # Add detailed timing measurements (only if there are actual measurements)
-            if player_id_timing['preprocessing_ms'] > 0 or player_id_timing['ocr_ms'] > 0:
+            if player_id_timing['preprocessing_ms'] > 0 or player_id_timing['ocr_ms'] > 0 or player_id_timing.get('filtering_ms', 0) > 0:
                 self.performance_widget.add_processing_measurement("Player ID - Preprocessing", player_id_timing['preprocessing_ms'])
                 self.performance_widget.add_processing_measurement("Player ID - EasyOCR", player_id_timing['ocr_ms'])
+                if player_id_timing.get('filtering_ms', 0) > 0:
+                    self.performance_widget.add_processing_measurement("Player ID - Jersey Number Filtering", player_id_timing['filtering_ms'])
             
             print(f"[MAIN_TAB] Identified {len(self.current_player_ids)} players")
-            print(f"[MAIN_TAB] Player ID timing - Preprocessing: {player_id_timing['preprocessing_ms']:.1f}ms, OCR: {player_id_timing['ocr_ms']:.1f}ms")
+            print(f"[MAIN_TAB] Player ID timing - Preprocessing: {player_id_timing['preprocessing_ms']:.1f}ms, OCR: {player_id_timing['ocr_ms']:.1f}ms, Filtering: {player_id_timing.get('filtering_ms', 0.0):.1f}ms")
         else:
             # Clear player IDs when not running
             self.current_player_ids = {}
-        
-        # Apply visualizations (with timing)
-        viz_start_time = time.time()
+
+        # Apply visualizations (Visualization timing emitted inside to avoid overlap)
         frame = self._apply_visualizations(frame)
-        viz_duration_ms = (time.time() - viz_start_time) * 1000
-        self.performance_widget.add_processing_measurement("Visualization", viz_duration_ms)
-        
-        # Add line extraction timing if RANSAC was used and field segmentation was enabled
-        if self.all_lines_for_display and self.field_segmentation_checkbox.isChecked():
-            # Estimate line extraction time (this is included in field segmentation timing)
-            line_count = len(self.all_lines_for_display)
-            estimated_line_extraction_ms = viz_duration_ms * 0.2  # Roughly 20% of viz time
-            self.performance_widget.add_processing_measurement("Line Extraction", estimated_line_extraction_ms)
-        elif not self.field_segmentation_checkbox.isChecked():
-            # Set line extraction to 0 when field segmentation is disabled
-            self.performance_widget.add_processing_measurement("Line Extraction", 0.0)
-        
-        # Add default homography measurements if homography is not enabled
-        if not self.homography_enabled:
-            self.performance_widget.add_processing_measurement("Homography Calculation", 0.0)
-            self.performance_widget.add_processing_measurement("Homography Display", 0.0)
-        
+
+        # Line extraction is timed inside _apply_visualizations when it actually runs
+        # No explicit 0ms entries; missing categories simply remain hidden/zeroed in the UI
+
         return frame
     
     def _apply_visualizations(self, frame):
@@ -985,24 +1017,34 @@ class MainTab(QWidget):
             # Add only FPS overlay for minimal processing
             self._draw_fps_overlay(frame)
             return frame
-        
+
         # Apply field segmentation overlay first (as background) - contour only for better performance
+        _viz_start = time.time()
+        _viz_excluded_ms = 0.0
         if self.current_field_results and self.field_segmentation_checkbox.isChecked():
             # Show raw segmentation model output if enabled
             from ..config.settings import get_setting
             show_raw_masks = get_setting("models.segmentation.show_raw_masks", True)
             if show_raw_masks:
                 frame = draw_field_segmentation(frame, self.current_field_results)
-                print(f"[MAIN_TAB] Applied raw segmentation masks to frame")
+                print("[MAIN_TAB] Applied raw segmentation masks to frame")
             
             # Create and display unified mask with RANSAC line detection
             frame_shape = frame.shape[:2]  # (height, width)
+            _unify_start = time.time()
             unified_mask = create_unified_field_mask(self.current_field_results, frame_shape)
+            _unify_ms = (time.time() - _unify_start) * 1000
+            self.performance_widget.add_processing_measurement("Mask Unification", _unify_ms)
+            _viz_excluded_ms += _unify_ms
             
             if unified_mask is not None:
-                # Extract raw RANSAC lines for direct use
+                # Extract raw RANSAC lines for direct use (timed)
+                _line_extract_start = time.time()
                 detected_lines, confidences = extract_raw_lines_from_segmentation(
                     self.current_field_results, frame_shape)
+                _line_extract_ms = (time.time() - _line_extract_start) * 1000
+                self.performance_widget.add_processing_measurement("Line Extraction", _line_extract_ms)
+                _viz_excluded_ms += _line_extract_ms
                 
                 # Store RANSAC lines directly
                 if detected_lines:
@@ -1018,7 +1060,7 @@ class MainTab(QWidget):
                 field_color = get_primary_field_color()  # Bright cyan (BGR) - same as segmentation
                 frame, raw_lines_dict, self.all_lines_for_display = draw_unified_field_mask(
                     frame, unified_mask, field_color, alpha=0.3, fill_mask=False)
-                print(f"[MAIN_TAB] Applied field contour (no fill) to frame: {np.sum(unified_mask)} pixels")
+                print(f"[MAIN_TAB] Applied field contour (no fill) to frame: {int(np.sum(unified_mask))} pixels")
                 
                 # Draw raw RANSAC lines only in main view (tracking data for top-down view)
                 if self.all_lines_for_display:
@@ -1057,11 +1099,15 @@ class MainTab(QWidget):
         
         # Add FPS overlay to top right (lightweight)
         self._draw_fps_overlay(frame)
-        
+
         # Add jersey tracking table overlay if player ID is enabled (conditional rendering)
         if self.player_id_checkbox.isChecked() and self.current_player_ids:
             self._draw_jersey_table_overlay(frame)
-        
+
+        # Emit Visualization timing excluding sub-steps measured separately
+        _viz_total_ms = (time.time() - _viz_start) * 1000
+        _viz_ms = max(0.0, _viz_total_ms - _viz_excluded_ms)
+        self.performance_widget.add_processing_measurement("Visualization", _viz_ms)
         return frame
     
     def _update_fps(self, frame_time_ms: float) -> None:
@@ -1158,24 +1204,7 @@ class MainTab(QWidget):
     
     def _on_timer_tick(self):
         """Handle playback timer tick."""
-        if not self.video_player.is_loaded():
-            self._stop_playback()
-            return
-        
-        # Get next frame
-        frame = self.video_player.get_next_frame()
-        
-        if frame is not None:
-            # Display frame
-            self._display_frame(frame)
-            
-            # Update progress bar
-            video_info = self.video_player.get_video_info()
-            self.progress_bar.setValue(video_info['current_frame'])
-        else:
-            # End of video reached
-            print("[MAIN_TAB] End of video reached")
-            self._stop_playback()
+        self._process_and_display(mode="next")
     
     def _on_seek(self, frame_idx: int):
         """Handle seek bar movement with immediate display update."""
@@ -1459,7 +1488,6 @@ class MainTab(QWidget):
                         history = track_histories[track_id]
                         if len(history) >= 2:
                             # Get last two foot positions and transform them
-                            last_pos = history[-1]
                             prev_pos = history[-2] if len(history) > 1 else history[-1]
                             
                             # Transform previous position
@@ -1488,7 +1516,7 @@ class MainTab(QWidget):
                                                       (transformed_x, transformed_y),
                                                       (arrow_end_x, arrow_end_y),
                                                       color, 2, tipLength=0.3)
-                            except:
+                            except Exception:
                                 pass  # Skip if transformation fails
                     
             except Exception as e:
@@ -1536,9 +1564,10 @@ class MainTab(QWidget):
         """Update the homography display with the current frame and transformation."""
         if not self.homography_enabled or self.homography_display_label is None:
             return
-        
+
         homography_start_time = time.time()
-        
+        homography_calc_duration_ms = 0.0
+
         try:
             # Get current frame
             if self.video_player.is_loaded():
@@ -1546,27 +1575,27 @@ class MainTab(QWidget):
                 if frame is None:
                     self.homography_display_label.setText("No frame available")
                     return
-                
+
                 # Apply homography transformation
                 if self.homography_matrix is not None:
                     # Apply the transformation with timing
                     homography_calc_start = time.time()
                     height, width = frame.shape[:2]
-                    
+
                     # Calculate output canvas size with 3:1 aspect ratio
                     output_width, output_height = self._calculate_output_canvas_size(width, height)
-                    
+
                     warped_frame = cv2.warpPerspective(frame, self.homography_matrix, (output_width, output_height))
                     homography_calc_duration_ms = (time.time() - homography_calc_start) * 1000
                     self.performance_widget.add_processing_measurement("Homography Calculation", homography_calc_duration_ms)
-                    
+
                     # Apply field segmentation to warped frame if available
                     if self.current_field_results and self.field_segmentation_checkbox.isChecked():
                         try:
                             # Transform the segmentation masks to match the warped frame
                             original_frame_shape = frame.shape[:2]  # (height, width)
                             warped_frame_with_segmentation = apply_segmentation_to_warped_frame(
-                                warped_frame, self.current_field_results, self.homography_matrix, 
+                                warped_frame, self.current_field_results, self.homography_matrix,
                                 original_frame_shape, "MAIN_TAB"
                             )
                             if warped_frame_with_segmentation is not None:
@@ -1576,51 +1605,69 @@ class MainTab(QWidget):
                                 print("[MAIN_TAB] Failed to apply transformed segmentation to homography view")
                         except Exception as e:
                             print(f"[MAIN_TAB] Error applying segmentation to homography view: {e}")
-                    
+
                     # Map tracked objects to top-down view if tracking is enabled
                     if self.tracking_checkbox.isChecked() and self.current_tracks:
                         warped_frame = self._map_tracked_objects_to_top_down(warped_frame)
                         print(f"[MAIN_TAB] Mapped {len(self.current_tracks)} tracked objects to top-down view")
-                    
+
                     # Add RANSAC field lines to top-down view
                     if self.ransac_lines:
                         # Use RANSAC lines with confidence display for top-down view
-                        warped_frame = draw_ransac_field_lines(warped_frame, self.ransac_lines, 
-                                                              self.ransac_confidences, self.homography_matrix, 
-                                                              scale_factor=2.0)
+                        warped_frame = draw_ransac_field_lines(
+                            warped_frame,
+                            self.ransac_lines,
+                            self.ransac_confidences,
+                            self.homography_matrix,
+                            scale_factor=2.0,
+                        )
                         print(f"[MAIN_TAB] Added RANSAC field lines to top-down view: {len(self.ransac_lines)} lines")
                     elif self.all_lines_for_display:
                         # Fallback to classified lines if no RANSAC lines available
-                        warped_frame = draw_all_field_lines(warped_frame, self.all_lines_for_display, 
-                                                          self.homography_matrix, scale_factor=2.0, 
-                                                          draw_raw_lines_only=False)
+                        warped_frame = draw_all_field_lines(
+                            warped_frame,
+                            self.all_lines_for_display,
+                            self.homography_matrix,
+                            scale_factor=2.0,
+                            draw_raw_lines_only=False,
+                        )
                         print(f"[MAIN_TAB] Added classified field lines to top-down view (fallback): {len(self.all_lines_for_display)} lines")
-                    
+
                     self.homography_warped_frame = warped_frame
-                    
+
                     # Convert warped frame to Qt format and display (preserve aspect ratio)
                     warped_height, warped_width, warped_channel = warped_frame.shape
                     bytes_per_line = 3 * warped_width
-                    
+
                     # Ensure the frame is contiguous for QImage
                     warped_frame = np.ascontiguousarray(warped_frame)
-                    
-                    q_image = QImage(warped_frame.data, warped_width, warped_height, bytes_per_line, QImage.Format_RGB888).rgbSwapped()
-                    
+
+                    q_image = QImage(
+                        warped_frame.data,
+                        warped_width,
+                        warped_height,
+                        bytes_per_line,
+                        QImage.Format_RGB888,
+                    ).rgbSwapped()
+
                     # Display with preserved aspect ratio using ZoomableImageLabel
                     pixmap = QPixmap.fromImage(q_image)
                     self.homography_display_label.set_image(pixmap)
-                    
+
                     # Record homography processing time
                     homography_duration_ms = (time.time() - homography_start_time) * 1000
-                    self.performance_widget.add_processing_measurement("Homography Display", homography_duration_ms)
-                    
+                    # Exclude calculation time from display time to avoid double counting
+                    homography_display_ms = max(0.0, homography_duration_ms - homography_calc_duration_ms)
+                    self.performance_widget.add_processing_measurement(
+                        "Homography Display", homography_display_ms
+                    )
+
                     print("[MAIN_TAB] Updated homography display using loaded matrix")
                 else:
                     self.homography_display_label.setText("Homography matrix not available")
             else:
                 self.homography_display_label.setText("No video loaded")
-                
+
         except Exception as e:
             print(f"[MAIN_TAB] Error updating homography display: {e}")
             self.homography_display_label.setText(f"Error: {str(e)}")
