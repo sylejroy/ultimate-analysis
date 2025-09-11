@@ -892,9 +892,6 @@ def draw_field_contour(frame: np.ndarray, contour: np.ndarray,
         print(f"[VISUALIZATION] Error drawing field contour: {e}")
     
     return result
-
-
-e
 def _segment_contour_points(points: np.ndarray, num_segments: int) -> List[np.ndarray]:
     """Divide contour points into segments for line fitting.
     
