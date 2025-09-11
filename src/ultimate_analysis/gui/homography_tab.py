@@ -7,6 +7,7 @@ with real-time perspective transformation visualization and YAML save/load funct
 import os
 import yaml
 import datetime
+import time
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 
@@ -16,24 +17,25 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, 
     QPushButton, QSlider, QListWidgetItem, QGroupBox,
     QFormLayout, QSplitter, QFileDialog, QMessageBox,
-    QScrollArea, QSizePolicy, QCheckBox, QSpinBox, QComboBox
+    QScrollArea, QSizePolicy, QCheckBox, QSpinBox, QComboBox,
+    QTableWidget, QTableWidgetItem, QHeaderView, QDialog, QLineEdit
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QPoint
-from PyQt5.QtGui import QPixmap, QImage, QWheelEvent, QPainter, QPen, QColor, QMouseEvent
+from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtGui import QPixmap, QImage, QWheelEvent, QPainter, QPen, QColor
 
 from .video_player import VideoPlayer
 from ..config.settings import get_setting
 from ..constants import DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS
 from ..processing.field_segmentation import run_field_segmentation, set_field_model
 from ..gui.visualization import (
-    draw_field_segmentation, 
     create_unified_field_mask, 
     draw_unified_field_mask,
-    calculate_field_contour,
-    draw_field_contour,
-    fit_field_lines_ransac,
-    draw_field_lines_ransac,
-    draw_all_field_lines
+    get_primary_field_color
+)
+from ..processing.line_extraction import extract_raw_lines_from_segmentation
+from ..utils.segmentation_utils import (
+    apply_segmentation_to_warped_frame, load_segmentation_models, 
+    populate_segmentation_model_combo
 )
 
 
@@ -301,7 +303,7 @@ class HomographyTab(QWidget):
         self.warped_display: Optional[ZoomableImageLabel] = None
         self.param_sliders: Dict[str, QSlider] = {}
         self.param_labels: Dict[str, QLabel] = {}
-
+        self.param_inputs: Dict[str, QLineEdit] = {}  # For direct text input
         # Scrubbing controls
         self.scrubbing_slider: Optional[QSlider] = None
         self.scrubbing_frame_label: Optional[QLabel] = None
@@ -318,16 +320,30 @@ class HomographyTab(QWidget):
         self.show_segmentation_checkbox: Optional[QCheckBox] = None
         self.ransac_checkbox: Optional[QCheckBox] = None
         self.available_segmentation_models: List[str] = []
-        # Field lines prepared for display: mapping id -> (line_points, confidence, is_classified)
-        self.all_lines_for_display: Dict[str, Tuple[np.ndarray, float, bool]] = {}
-
-        print("[HOMOGRAPHY] Initializing UI...")
-        # Initialize UI first
-        self._init_ui()
+        self.ransac_lines: List[Tuple[np.ndarray, np.ndarray]] = []  # Store RANSAC-calculated field lines
+        self.ransac_confidences: List[float] = []  # Store RANSAC line confidences
+        self.all_lines_for_display: Dict[str, Tuple[np.ndarray, float, bool]] = {}  # Store all lines for display
         
-        print("[HOMOGRAPHY] Loading video files...")
-        # Load videos (lightweight operation)
-        self._load_videos()
+        # Runtime performance tracking
+        self.runtime_popup: Optional[QDialog] = None
+        self.runtime_table: Optional[QTableWidget] = None
+        self.runtime_button: Optional[QPushButton] = None
+        self.processing_times: Dict[str, List[float]] = {
+            'Field Segmentation': [],
+            'Morphological Ops': [],
+            'RANSAC Fitting': [],
+            'Line Tracking': [],
+            'Homography Calc': [],
+            'Display Update': []
+        }
+        
+        # Lazy loading flags
+        self._videos_loaded = False
+        self._segmentation_models_loaded = False
+        self._ui_initialized = False
+        
+        # Initialize UI only
+        self._init_ui()
         
         print("[HOMOGRAPHY] Loading segmentation models...")
         # Load segmentation models list (just file discovery, no model loading)
@@ -360,6 +376,21 @@ class HomographyTab(QWidget):
         main_layout.addWidget(content_splitter)
         
         self.setLayout(main_layout)
+    
+    def showEvent(self, event):
+        """Override showEvent to implement lazy loading when tab becomes visible."""
+        super().showEvent(event)
+        
+        # Lazy load content when tab is first shown
+        if not self._videos_loaded:
+            print("[HOMOGRAPHY] Lazy loading videos...")
+            self._load_videos()
+            self._videos_loaded = True
+            
+        if not self._segmentation_models_loaded:
+            print("[HOMOGRAPHY] Lazy loading segmentation models...")
+            self._load_segmentation_models()
+            self._segmentation_models_loaded = True
         
     def _create_left_panel(self) -> QWidget:
         """Create the left panel with video list and parameter controls."""
@@ -375,7 +406,7 @@ class HomographyTab(QWidget):
         list_header.addWidget(QLabel("Videos"))
 
         refresh_button = QPushButton("Refresh")
-        refresh_button.clicked.connect(self._load_videos)
+        refresh_button.clicked.connect(self._force_reload_videos)
         refresh_button.setToolTip("Refresh video list")
         list_header.addWidget(refresh_button)
 
@@ -459,7 +490,7 @@ class HomographyTab(QWidget):
 
         # RANSAC line fitting checkbox
         self.ransac_checkbox = QCheckBox("Use RANSAC Line Fitting")
-        self.ransac_checkbox.setChecked(get_setting("models.segmentation.contour.ransac.enabled", False))
+        self.ransac_checkbox.setChecked(get_setting("models.segmentation.contour.ransac.enabled", True))
         self.ransac_checkbox.stateChanged.connect(self._on_ransac_toggled)
         self.ransac_checkbox.setToolTip("Fit straight lines to contour segments using RANSAC algorithm")
         segmentation_layout.addWidget(self.ransac_checkbox)
@@ -484,7 +515,37 @@ class HomographyTab(QWidget):
         segmentation_layout.addLayout(model_layout)
         segmentation_group.setLayout(segmentation_layout)
         layout.addWidget(segmentation_group)
-
+        # Runtime performance button
+        runtime_group = QGroupBox("Performance Monitoring")
+        runtime_layout = QVBoxLayout()
+        
+        self.runtime_button = QPushButton("Show Runtime Performance")
+        self.runtime_button.setMinimumHeight(40)
+        self.runtime_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2c5aa0;
+                color: white;
+                font-weight: bold;
+                border: 2px solid #1e3f73;
+                border-radius: 5px;
+                padding: 8px;
+            }
+            QPushButton:hover {
+                background-color: #3a6bb5;
+            }
+            QPushButton:pressed {
+                background-color: #1e3f73;
+            }
+        """)
+        self.runtime_button.clicked.connect(self._show_runtime_popup)
+        runtime_layout.addWidget(self.runtime_button)
+        
+        runtime_group.setLayout(runtime_layout)
+        layout.addWidget(runtime_group)
+        
+        # Initialize popup window (hidden)
+        self.runtime_popup = None
+        self.runtime_table = None
         # Add stretch to push everything to top
         layout.addStretch()
 
@@ -492,7 +553,7 @@ class HomographyTab(QWidget):
         return panel
         
     def _create_right_panel(self) -> QWidget:
-        """Create the right panel with vertically stacked zoomable displays."""
+        """Create the right panel with side-by-side zoomable displays."""
         panel = QWidget()
         layout = QVBoxLayout()
         
@@ -501,6 +562,9 @@ class HomographyTab(QWidget):
         header.setAlignment(Qt.AlignCenter)
         header.setStyleSheet("font-size: 14px; font-weight: bold; margin: 10px;")
         layout.addWidget(header)
+        
+        # Create horizontal layout for side-by-side image displays
+        images_layout = QHBoxLayout()
         
         # Original frame display with scroll area and scrubbing controls
         original_group = QGroupBox("Original Frame")
@@ -531,10 +595,10 @@ class HomographyTab(QWidget):
         original_layout.addWidget(scrubbing_panel)
         
         original_group.setLayout(original_layout)
-        layout.addWidget(original_group)
+        images_layout.addWidget(original_group)
         
         # Warped frame display with scroll area
-        warped_group = QGroupBox("Warped Frame (with buffer)")
+        warped_group = QGroupBox("Warped Frame (3:1 aspect ratio)")
         warped_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         warped_layout = QVBoxLayout()
         
@@ -557,7 +621,10 @@ class HomographyTab(QWidget):
         self.warped_scroll_area.setWidget(self.warped_display)
         warped_layout.addWidget(self.warped_scroll_area)
         warped_group.setLayout(warped_layout)
-        layout.addWidget(warped_group)
+        images_layout.addWidget(warped_group)
+        
+        # Add the side-by-side images layout to main layout
+        layout.addLayout(images_layout)
         
         # Reset zoom buttons
         zoom_layout = QHBoxLayout()
@@ -697,8 +764,14 @@ class HomographyTab(QWidget):
         form_layout = QFormLayout()
         
         for param_name, param_range, default_val, label_text in param_config:
-            # Parameter label and value display
+            # Parameter container with horizontal layout for slider and text input
+            param_container = QWidget()
             param_layout = QVBoxLayout()
+            param_layout.setContentsMargins(0, 0, 0, 0)
+            
+            # Horizontal layout for slider and text input
+            control_layout = QHBoxLayout()
+            control_layout.setContentsMargins(0, 0, 0, 0)
             
             # Slider for parameter
             slider = QSlider(Qt.Horizontal)
@@ -713,20 +786,32 @@ class HomographyTab(QWidget):
             slider.valueChanged.connect(lambda val, name=param_name: self._on_parameter_changed(name, val))
             self.param_sliders[param_name] = slider
             
-            # Value label
+            # Text input for exact value entry
+            text_input = QLineEdit()
+            text_input.setText(f"{default_val:.6f}")
+            text_input.setMaximumWidth(80)  # Compact width
+            text_input.setStyleSheet("font-family: monospace; font-size: 10px;")
+            text_input.editingFinished.connect(lambda name=param_name, widget=text_input: self._on_text_input_changed(name, widget.text()))
+            self.param_inputs[param_name] = text_input
+            
+            # Add slider and text input to horizontal layout
+            control_layout.addWidget(slider, 1)  # Slider takes most space
+            control_layout.addWidget(text_input, 0)  # Text input is compact
+            
+            # Value label (display only)
             value_label = QLabel(f"{default_val:.6f}")
             value_label.setAlignment(Qt.AlignCenter)
-            value_label.setStyleSheet("font-family: monospace; font-size: 10px;")
+            value_label.setStyleSheet("font-family: monospace; font-size: 9px; color: #888;")
             self.param_labels[param_name] = value_label
             
-            # Combine slider and label
-            param_layout.addWidget(slider)
+            # Combine in vertical layout
+            param_layout.addLayout(control_layout)
             param_layout.addWidget(value_label)
             
+            param_container.setLayout(param_layout)
+            
             # Add to form
-            combined_widget = QWidget()
-            combined_widget.setLayout(param_layout)
-            form_layout.addRow(f"{label_text} ({param_name}):", combined_widget)
+            form_layout.addRow(f"{label_text} ({param_name}):", param_container)
             
         layout.addLayout(form_layout)
         
@@ -768,6 +853,13 @@ class HomographyTab(QWidget):
         if self.video_files:
             self.video_list.setCurrentRow(0)
             self._load_selected_video()
+    
+    def _force_reload_videos(self):
+        """Force reload videos even if already loaded (for refresh button)."""
+        print("[HOMOGRAPHY] Force reloading videos...")
+        self._videos_loaded = False  # Reset flag to allow reloading
+        self._load_videos()
+        self._videos_loaded = True
             
     def _on_video_selection_changed(self, row: int):
         """Handle video selection change."""
@@ -886,31 +978,118 @@ class HomographyTab(QWidget):
         # Update displays
         self._update_displays()
         
+        # Update text input without triggering its change handler
+        if param_name in self.param_inputs:
+            text_input = self.param_inputs[param_name]
+            text_input.blockSignals(True)
+            text_input.setText(f"{param_value:.6f}")
+            text_input.blockSignals(False)
+    
+    def _on_text_input_changed(self, param_name: str, text_value: str):
+        """Handle homography parameter change from text input."""
+        try:
+            param_value = float(text_value)
+            
+            # Get parameter range for validation
+            if param_name in ['H00', 'H01', 'H10', 'H11']:
+                param_range = get_setting("homography.slider_range_main", [-50.0, 50.0])
+                if isinstance(param_range, list) and len(param_range) == 2:
+                    param_range = [float(param_range[0]), float(param_range[1])]
+                else:
+                    param_range = [-50.0, 50.0]
+            elif param_name in ['H20', 'H21']:
+                param_range = get_setting("homography.slider_range_perspective", [-0.2, 0.2])
+                if isinstance(param_range, list) and len(param_range) == 2:
+                    param_range = [float(param_range[0]), float(param_range[1])]
+                else:
+                    param_range = [-0.2, 0.2]
+            else:  # Translation parameters
+                param_range = [-10000.0, 10000.0]
+            
+            # Clamp value to range
+            param_value = max(param_range[0], min(param_range[1], param_value))
+            
+            # Update parameter
+            self.homography_params[param_name] = param_value
+            
+            # Update value label
+            self.param_labels[param_name].setText(f"{param_value:.6f}")
+            
+            # Update slider without triggering its change handler
+            if param_name in self.param_sliders:
+                slider = self.param_sliders[param_name]
+                normalized_val = (param_value - param_range[0]) / (param_range[1] - param_range[0])
+                slider_value = int(normalized_val * 1000)
+                slider.blockSignals(True)
+                slider.setValue(slider_value)
+                slider.blockSignals(False)
+            
+            # Update text input to show clamped value if it was changed
+            text_input = self.param_inputs[param_name]
+            if abs(float(text_input.text()) - param_value) > 1e-6:
+                text_input.blockSignals(True)
+                text_input.setText(f"{param_value:.6f}")
+                text_input.blockSignals(False)
+            
+            # Update displays
+            self._update_displays()
+            
+        except ValueError:
+            # Invalid input, revert to current parameter value
+            if param_name in self.homography_params:
+                text_input = self.param_inputs[param_name]
+                text_input.blockSignals(True)
+                text_input.setText(f"{self.homography_params[param_name]:.6f}")
+                text_input.blockSignals(False)
+        
     def _update_displays(self):
         """Update both original and warped frame displays."""
         if self.current_frame is None:
             return
         
-        # If segmentation is disabled, use fast update
-        if not self.show_segmentation:
-            self._update_displays_without_segmentation()
-            return
-            
+        update_start = time.time()
         # Apply segmentation overlay to original frame if enabled
         original_frame = self.current_frame.copy()
         if self.show_segmentation and self.current_segmentation_results:
             # Create and display unified mask on original frame
+            morphological_start = time.time()
             frame_shape = self.current_frame.shape[:2]  # (height, width)
             unified_mask = create_unified_field_mask(self.current_segmentation_results, frame_shape)
+            morphological_duration = (time.time() - morphological_start) * 1000
+            self._add_runtime_measurement('Morphological Ops', morphological_duration)
             
             if unified_mask is not None:
-                # Use bright green for unified field mask
-                field_color = (0, 255, 0)  # Bright green (BGR)
-                # draw_unified_field_mask returns (frame, classified_lines, all_lines_for_display)
-                original_frame, _, self.all_lines_for_display = draw_unified_field_mask(original_frame, unified_mask, field_color, alpha=0.4)
-                print(f"[HOMOGRAPHY] Applied unified mask to original frame: {np.sum(unified_mask)} pixels")
+                # Use same color as segmentation visualization for consistency
+                field_color = get_primary_field_color()  # Cyan (BGR)
+                
+                # Time the line extraction and tracking steps
+                extraction_start = time.time()
+                
+                # Extract raw RANSAC lines for direct use
+                detected_lines, confidences = extract_raw_lines_from_segmentation(
+                    self.current_segmentation_results, frame_shape)
+                
+                extraction_duration = (time.time() - extraction_start) * 1000
+                self._add_runtime_measurement('Line Extraction', extraction_duration)
+                
+                # Store RANSAC lines directly
+                if detected_lines:
+                    self.ransac_lines = detected_lines
+                    self.ransac_confidences = confidences
+                    print(f"[HOMOGRAPHY] Using {len(self.ransac_lines)} RANSAC lines directly")
+                else:
+                    self.ransac_lines = []
+                    self.ransac_confidences = []
+                
+                # Draw unified mask for visualization (lightweight version without RANSAC re-computation)
+                original_frame, raw_lines_dict, self.all_lines_for_display = draw_unified_field_mask(
+                    original_frame, unified_mask, field_color, alpha=0.4, fill_mask=False)
+                
+                print(f"[HOMOGRAPHY] Applied field contour (no fill) to original frame: {np.sum(unified_mask)} pixels")
             else:
                 print("[HOMOGRAPHY] No unified mask could be created for original frame")
+                self.ransac_lines = []
+                self.ransac_confidences = []
                 self.all_lines_for_display = {}
         elif self.show_segmentation:
             print("[HOMOGRAPHY] Segmentation enabled but no results available")
@@ -919,14 +1098,23 @@ class HomographyTab(QWidget):
         self._display_frame(original_frame, self.original_display)
         
         # Create warped frame
+        homography_start = time.time()
         warped_frame = self._apply_homography(self.current_frame)
+        homography_duration = (time.time() - homography_start) * 1000
+        self._add_runtime_measurement('Homography Calculation', homography_duration)
+        
         print(f"[HOMOGRAPHY] Warped frame shape: {warped_frame.shape}, dtype: {warped_frame.dtype}")
         
         # For warped view, apply segmentation overlay if enabled
         if self.show_segmentation and self.current_segmentation_results:
             try:
                 # Transform the segmentation masks to match the warped frame
-                warped_frame_with_segmentation = self._apply_segmentation_to_warped_frame(warped_frame, self.current_segmentation_results)
+                original_frame_shape = self.current_frame.shape[:2]  # (height, width)
+                h_matrix = self._get_homography_matrix()
+                warped_frame_with_segmentation = apply_segmentation_to_warped_frame(
+                    warped_frame, self.current_segmentation_results, h_matrix,
+                    original_frame_shape, "HOMOGRAPHY"
+                )
                 if warped_frame_with_segmentation is not None:
                     warped_frame = warped_frame_with_segmentation
                     print(f"[HOMOGRAPHY] Applied transformed segmentation to warped frame: {len(self.current_segmentation_results)} results")
@@ -939,66 +1127,10 @@ class HomographyTab(QWidget):
         
         self._display_frame(warped_frame, self.warped_display)
         
-    def _apply_segmentation_to_warped_frame(self, warped_frame: np.ndarray, segmentation_results: list) -> np.ndarray:
-        """Apply segmentation overlay to warped frame by transforming contour points from original image."""
-        if not segmentation_results:
-            return warped_frame
-            
-        try:
-            # Create unified mask from segmentation results on original frame
-            original_frame_shape = self.current_frame.shape[:2]  # (height, width)
-            unified_mask = create_unified_field_mask(segmentation_results, original_frame_shape)
-            
-            if unified_mask is None:
-                print("[HOMOGRAPHY] No unified mask could be created")
-                return warped_frame
-            
-            print(f"[HOMOGRAPHY] Created unified mask with shape {unified_mask.shape}, {np.sum(unified_mask)} pixels")
-            
-            # Calculate contour on the original image
-            original_contour = calculate_field_contour(unified_mask)
-            
-            if original_contour is None or len(original_contour) == 0:
-                print("[HOMOGRAPHY] No contour found in original unified mask")
-                return warped_frame
-            
-            # Transform contour points using homography matrix
-            h_matrix = self._get_homography_matrix()
-            transformed_contour = self._transform_contour_points(original_contour, h_matrix)
-            
-            if transformed_contour is None:
-                print("[HOMOGRAPHY] Failed to transform contour points")
-                return warped_frame
-            
-            # Create mask from transformed contour points
-            warped_mask = np.zeros((warped_frame.shape[0], warped_frame.shape[1]), dtype=np.uint8)
-            cv2.fillPoly(warped_mask, [transformed_contour], 1)
-            
-            # Apply overlay and draw contour on warped frame
-            field_color = (0, 255, 0)  # Bright green (BGR)
-            result_frame, _, _ = draw_unified_field_mask(warped_frame, warped_mask, field_color, alpha=0.4, draw_contour=False)
-            
-            # Draw the transformed contour directly
-            result_frame = draw_field_contour(result_frame, transformed_contour)
-            
-            # Draw prepared field lines for display (if available)
-            if self.all_lines_for_display:
-                homography_matrix = self._get_homography_matrix()
-                try:
-                    result_frame = draw_all_field_lines(result_frame, self.all_lines_for_display, homography_matrix)
-                    print(f"[HOMOGRAPHY] Drew {len(self.all_lines_for_display)} total field lines on warped frame")
-                except Exception as e:
-                    print(f"[HOMOGRAPHY] Error drawing field lines: {e}")
-            
-            print(f"[HOMOGRAPHY] Applied transformed contour to warped frame: {len(transformed_contour)} points")
-            return result_frame
-            
-        except Exception as e:
-            print(f"[HOMOGRAPHY] Error applying transformed segmentation to warped frame: {e}")
-            import traceback
-            traceback.print_exc()
-            return warped_frame
-    
+        # Record total display update time
+        update_duration = (time.time() - update_start) * 1000
+        self._add_runtime_measurement('Homography Display', update_duration)
+
     def _get_homography_matrix(self) -> np.ndarray:
         """Get the homography transformation matrix from current parameters."""
         # Construct homography matrix from H parameters
@@ -1010,36 +1142,40 @@ class HomographyTab(QWidget):
         
         return h_matrix
     
-    def _transform_contour_points(self, contour: np.ndarray, h_matrix: np.ndarray) -> Optional[np.ndarray]:
-        """Transform contour points using homography matrix.
+    def _calculate_output_canvas_size(self, input_width: int, input_height: int) -> Tuple[int, int]:
+        """Calculate output canvas size with specified aspect ratio.
         
         Args:
-            contour: Contour points as numpy array of shape (N, 1, 2)
-            h_matrix: 3x3 homography transformation matrix
+            input_width: Original frame width
+            input_height: Original frame height
             
         Returns:
-            Transformed contour points in same format, or None if transformation fails
+            Tuple of (output_width, output_height) with 3:1 aspect ratio
         """
-        if contour is None or len(contour) == 0:
-            return None
-            
-        try:
-            # Reshape contour points for perspective transformation
-            # contour is (N, 1, 2), we need (N, 2) for cv2.perspectiveTransform
-            points = contour.reshape(-1, 1, 2).astype(np.float32)
-            
-            # Apply perspective transformation
-            transformed_points = cv2.perspectiveTransform(points, h_matrix)
-            
-            # Reshape back to contour format (N, 1, 2)
-            transformed_contour = transformed_points.reshape(-1, 1, 2).astype(np.int32)
-            
-            print(f"[HOMOGRAPHY] Transformed {len(contour)} contour points")
-            return transformed_contour
-            
-        except Exception as e:
-            print(f"[HOMOGRAPHY] Error transforming contour points: {e}")
-            return None
+        # Get configuration settings
+        buffer_factor = get_setting("homography.buffer_factor", 2.5)
+        aspect_ratio = get_setting("homography.output_aspect_ratio", 3.0)  # height:width
+        
+        # Calculate total area we want to maintain (similar to original but with buffer)
+        original_area = input_width * input_height
+        target_area = int(original_area * buffer_factor)
+        
+        # Calculate output dimensions with specified aspect ratio
+        # For aspect_ratio = height/width, we have: height = aspect_ratio * width
+        # Area = width * height = width * (aspect_ratio * width) = aspect_ratio * width^2
+        # Therefore: width = sqrt(area / aspect_ratio), height = aspect_ratio * width
+        
+        if aspect_ratio >= 1.0:
+            # Height >= Width (e.g., 3:1 ratio means height = 3 * width)
+            output_width = int(np.sqrt(target_area / aspect_ratio))
+            output_height = int(output_width * aspect_ratio)
+        else:
+            # Width > Height (e.g., 1:3 ratio means width = 3 * height)
+            output_height = int(np.sqrt(target_area * aspect_ratio))
+            output_width = int(output_height / aspect_ratio)
+        
+        print(f"[HOMOGRAPHY] Canvas size: {input_width}x{input_height} -> {output_width}x{output_height} (aspect {aspect_ratio:.1f}:1, area: {input_width*input_height} -> {output_width*output_height})")
+        return output_width, output_height
     
     def _display_frame(self, frame: np.ndarray, label: ZoomableImageLabel):
         """Display a frame in the specified zoomable label widget."""
@@ -1063,7 +1199,7 @@ class HomographyTab(QWidget):
             frame: Input frame to transform
             
         Returns:
-            Warped frame using original frame dimensions
+            Warped frame using 3:1 aspect ratio canvas
         """
         # Use the same homography matrix calculation as for segmentation
         h_matrix = self._get_homography_matrix()
@@ -1071,8 +1207,11 @@ class HomographyTab(QWidget):
         # Get original dimensions
         original_height, original_width = frame.shape[:2]
         
-        # Apply perspective transform using original frame size
-        warped = cv2.warpPerspective(frame, h_matrix, (original_width, original_height))
+        # Calculate output canvas size with 3:1 aspect ratio
+        output_width, output_height = self._calculate_output_canvas_size(original_width, original_height)
+        
+        # Apply perspective transform using calculated canvas size
+        warped = cv2.warpPerspective(frame, h_matrix, (output_width, output_height))
         
         return warped
         
@@ -1246,6 +1385,10 @@ class HomographyTab(QWidget):
                         slider_val = max(0, min(1000, slider_val))  # Clamp to valid range
                         self.param_sliders[param_name].setValue(slider_val)
                         
+                        # Update text input
+                        if param_name in self.param_inputs:
+                            self.param_inputs[param_name].setText(f"{value:.6f}")
+                        
                         # Update label
                         self.param_labels[param_name].setText(f"{value:.6f}")
                 
@@ -1308,6 +1451,10 @@ class HomographyTab(QWidget):
                     slider_val = max(0, min(1000, slider_val))  # Clamp to valid range
                     self.param_sliders[param_name].setValue(slider_val)
                     
+                    # Update text input
+                    if param_name in self.param_inputs:
+                        self.param_inputs[param_name].setText(f"{value:.6f}")
+                    
                     # Update label
                     self.param_labels[param_name].setText(f"{value:.6f}")
             
@@ -1358,9 +1505,13 @@ class HomographyTab(QWidget):
             
         try:
             print("[HOMOGRAPHY] Running field segmentation on current frame")
+            segmentation_start = time.time()
             self.current_segmentation_results = run_field_segmentation(self.current_frame)
+            segmentation_duration = (time.time() - segmentation_start) * 1000
+            self._add_runtime_measurement('Field Segmentation', segmentation_duration)
+            
             if self.current_segmentation_results:
-                print(f"[HOMOGRAPHY] Segmentation complete: {len(self.current_segmentation_results)} results")
+                print(f"[HOMOGRAPHY] Segmentation complete: {len(self.current_segmentation_results)} results ({segmentation_duration:.1f}ms)")
                 # Debug: Check if results have masks
                 for i, result in enumerate(self.current_segmentation_results):
                     if hasattr(result, 'masks') and result.masks is not None:
@@ -1374,69 +1525,19 @@ class HomographyTab(QWidget):
             self.current_segmentation_results = None
             
     def _load_segmentation_models(self):
-        """Load available field segmentation models using the same logic as main tab."""
-        self.available_segmentation_models.clear()
-        
-        # Look for models in the models directory (same logic as main tab)
-        models_path = Path(get_setting("models.base_path", DEFAULT_PATHS['MODELS']))
-        
-        if not models_path.exists():
-            print(f"[HOMOGRAPHY] Models directory not found: {models_path}")
-            return
-        
-        # Search for segmentation model files
-        model_files = []
-        for model_dir in models_path.rglob("*"):
-            if model_dir.is_file() and model_dir.suffix == ".pt":
-                # Skip last.pt files - we only want best.pt from finetuned models
-                if model_dir.name == "last.pt":
-                    continue
-                    
-                # Check if this is a segmentation model
-                if "segmentation" in str(model_dir).lower():
-                    model_files.append(str(model_dir))
-        
-        # Add pretrained segmentation models
-        pretrained_path = models_path / "pretrained"
-        if pretrained_path.exists():
-            for model_file in pretrained_path.glob("*seg*.pt"):
-                model_files.append(str(model_file))
-        
-        # Store the full paths
-        self.available_segmentation_models = model_files
+        """Load available field segmentation models using utility function."""
+        self.available_segmentation_models = load_segmentation_models()
         
         # Update combo box
         if self.segmentation_model_combo is not None:
-            self.segmentation_model_combo.clear()
-            for model_path in self.available_segmentation_models:
-                # Create display name from path
-                if 'pretrained' in model_path:
-                    display_name = f"Pretrained: {Path(model_path).stem}"
-                else:
-                    # Extract model name from path
-                    path_parts = Path(model_path).parts
-                    if 'segmentation' in path_parts:
-                        seg_index = path_parts.index('segmentation')
-                        if seg_index + 1 < len(path_parts):
-                            display_name = path_parts[seg_index + 1]
-                        else:
-                            display_name = Path(model_path).parent.parent.name
-                    else:
-                        display_name = Path(model_path).parent.parent.name
-                
-                self.segmentation_model_combo.addItem(display_name, model_path)
-                
-        print(f"[HOMOGRAPHY] Loaded {len(self.available_segmentation_models)} segmentation models")
-        
-        # Auto-select the new default model if available
-        if self.segmentation_model_combo is not None:
             default_model_path = "data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt"
-            for i in range(self.segmentation_model_combo.count()):
-                item_path = self.segmentation_model_combo.itemData(i)
-                if item_path and default_model_path in str(item_path):
-                    self.segmentation_model_combo.setCurrentIndex(i)
-                    print(f"[HOMOGRAPHY] Auto-selected default segmentation model: {self.segmentation_model_combo.itemText(i)}")
-                    break
+            populate_segmentation_model_combo(
+                self.segmentation_model_combo, 
+                self.available_segmentation_models,
+                default_model_path
+            )
+        
+        print(f"[HOMOGRAPHY] Loaded {len(self.available_segmentation_models)} segmentation models")
         
     def _on_segmentation_toggled(self, state: int):
         """Handle segmentation checkbox toggle."""
@@ -1499,3 +1600,160 @@ class HomographyTab(QWidget):
                 print(f"[HOMOGRAPHY] Error loading segmentation model: {e}")
         else:
             print(f"[HOMOGRAPHY] Invalid model path: {model_path}")
+    
+    def _show_runtime_popup(self) -> None:
+        """Show the runtime performance popup window."""
+        if self.runtime_popup is None:
+            # Create the popup window
+            self.runtime_popup = QDialog(self)
+            self.runtime_popup.setWindowTitle("Processing Runtime Performance")
+            self.runtime_popup.setModal(False)  # Allow interaction with main window
+            self.runtime_popup.resize(500, 350)
+            
+            # Set dark background
+            self.runtime_popup.setStyleSheet("""
+                QDialog {
+                    background-color: #1a1a1a;
+                    color: #ffffff;
+                }
+                QLabel {
+                    color: #ffffff;
+                    font-size: 12px;
+                }
+                QTableWidget {
+                    background-color: #000000;
+                    color: #ffffff;
+                    gridline-color: #333333;
+                    border: 1px solid #555555;
+                    selection-background-color: #2c5aa0;
+                }
+                QTableWidget::item {
+                    padding: 4px;
+                    border-bottom: 1px solid #333333;
+                }
+                QTableWidget QHeaderView::section {
+                    background-color: #2a2a2a;
+                    color: #ffffff;
+                    padding: 4px;
+                    border: 1px solid #555555;
+                    font-weight: bold;
+                }
+            """)
+            
+            # Create layout
+            popup_layout = QVBoxLayout()
+            
+            # Add title
+            title_label = QLabel("Processing Runtime Performance (ms)")
+            title_label.setStyleSheet("font-size: 14px; font-weight: bold; margin: 10px;")
+            popup_layout.addWidget(title_label)
+            
+            # Create table
+            self.runtime_table = QTableWidget()
+            self.runtime_table.setColumnCount(4)
+            self.runtime_table.setHorizontalHeaderLabels(["Process", "Current", "Average", "Max"])
+            
+            # Set table properties
+            self.runtime_table.horizontalHeader().setStretchLastSection(True)
+            self.runtime_table.verticalHeader().setVisible(False)
+            self.runtime_table.setAlternatingRowColors(True)
+            
+            # Initialize table with processing steps
+            processes = ['Field Segmentation', 'Morphological Ops', 'Line Extraction', 
+                        'Homography Calculation', 'Homography Display']
+            self.runtime_table.setRowCount(len(processes))
+            
+            for i, process in enumerate(processes):
+                self.runtime_table.setItem(i, 0, QTableWidgetItem(process))
+                self.runtime_table.setItem(i, 1, QTableWidgetItem("0.0"))
+                self.runtime_table.setItem(i, 2, QTableWidgetItem("0.0"))
+                self.runtime_table.setItem(i, 3, QTableWidgetItem("0.0"))
+            
+            # Set column widths
+            header = self.runtime_table.horizontalHeader()
+            header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+            header.setSectionResizeMode(1, QHeaderView.Fixed)
+            header.setSectionResizeMode(2, QHeaderView.Fixed)
+            header.setSectionResizeMode(3, QHeaderView.Stretch)
+            self.runtime_table.setColumnWidth(1, 80)
+            self.runtime_table.setColumnWidth(2, 80)
+            
+            popup_layout.addWidget(self.runtime_table)
+            
+            # Add info label
+            info_label = QLabel("Real-time performance monitoring. Window can be kept open while using the application.")
+            info_label.setStyleSheet("font-size: 10px; color: #cccccc; margin: 5px;")
+            popup_layout.addWidget(info_label)
+            
+            # Add close button
+            close_button = QPushButton("Close")
+            close_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #555555;
+                    color: white;
+                    border: 1px solid #777777;
+                    border-radius: 3px;
+                    padding: 6px;
+                    min-width: 80px;
+                }
+                QPushButton:hover {
+                    background-color: #666666;
+                }
+                QPushButton:pressed {
+                    background-color: #444444;
+                }
+            """)
+            close_button.clicked.connect(self.runtime_popup.close)
+            
+            button_layout = QHBoxLayout()
+            button_layout.addStretch()
+            button_layout.addWidget(close_button)
+            popup_layout.addLayout(button_layout)
+            
+            self.runtime_popup.setLayout(popup_layout)
+        
+        # Show the popup
+        self.runtime_popup.show()
+        self.runtime_popup.raise_()
+        self.runtime_popup.activateWindow()
+    
+    def _add_runtime_measurement(self, process_name: str, duration_ms: float) -> None:
+        """Add a runtime measurement for a specific process.
+        
+        Args:
+            process_name: Name of the process (e.g., 'Field Segmentation')
+            duration_ms: Duration in milliseconds
+        """
+        if process_name in self.processing_times:
+            # Add to history (keep last 10 measurements for rolling average)
+            self.processing_times[process_name].append(duration_ms)
+            if len(self.processing_times[process_name]) > 10:
+                self.processing_times[process_name].pop(0)
+            
+            # Update table
+            self._update_runtime_table()
+    
+    def _update_runtime_table(self) -> None:
+        """Update the runtime performance table with current measurements."""
+        if not self.runtime_table:
+            return
+        
+        processes = ['Field Segmentation', 'Morphological Ops', 'Line Extraction', 
+                    'Homography Calculation', 'Homography Display']
+        
+        for i, process in enumerate(processes):
+            if process in self.processing_times and self.processing_times[process]:
+                times = self.processing_times[process]
+                current = times[-1]  # Most recent measurement
+                average = sum(times) / len(times)  # Rolling average
+                maximum = max(times)  # Maximum in current history
+                
+                # Update table cells
+                self.runtime_table.setItem(i, 1, QTableWidgetItem(f"{current:.1f}"))
+                self.runtime_table.setItem(i, 2, QTableWidgetItem(f"{average:.1f}"))
+                self.runtime_table.setItem(i, 3, QTableWidgetItem(f"{maximum:.1f}"))
+            else:
+                # No measurements yet
+                self.runtime_table.setItem(i, 1, QTableWidgetItem("0.0"))
+                self.runtime_table.setItem(i, 2, QTableWidgetItem("0.0"))
+                self.runtime_table.setItem(i, 3, QTableWidgetItem("0.0"))

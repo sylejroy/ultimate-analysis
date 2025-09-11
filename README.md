@@ -83,7 +83,7 @@ Reliable multi-object tracking featuring:
 
 Configuration files are in `configs/`:
 - `default.yaml` - Base settings
-- `user.yaml` - User overrides
+- `easyocr_params.yaml` - EasyOCR parameters and preprocessing settings
 - `training.yaml` - Model training parameters
 - `homography_params.yaml` - Saved homography transformations
 

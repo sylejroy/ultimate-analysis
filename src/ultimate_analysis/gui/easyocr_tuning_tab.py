@@ -4,13 +4,11 @@ This module provides a specialized interface for tuning EasyOCR parameters
 on detected player bounding boxes for optimal jersey number recognition.
 """
 
-import os
 import cv2
 import numpy as np
 import yaml
 import random
 import traceback
-import time
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 
@@ -18,16 +16,17 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QLabel, 
     QPushButton, QSlider, QListWidgetItem, QGroupBox,
     QFormLayout, QComboBox, QSpinBox, QDoubleSpinBox,
-    QCheckBox, QTextEdit, QSplitter, QScrollArea, QGridLayout,
-    QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView
+    QCheckBox, QSplitter, QScrollArea, QGridLayout,
+    QLineEdit
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QThread, pyqtSlot
-from PyQt5.QtGui import QPixmap, QImage, QFont
+from PyQt5.QtCore import Qt, pyqtSlot
+from PyQt5.QtGui import QPixmap, QImage
 
 from .video_player import VideoPlayer
 from ..processing import run_inference, set_detection_model
-from ..config.settings import get_setting, get_config
-from ..constants import DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS, JERSEY_NUMBER_MIN, JERSEY_NUMBER_MAX
+from ..config.settings import get_setting
+from ..constants import DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS
+from ..utils.video_utils import get_video_duration
 
 # Try to import EasyOCR for parameter checking
 try:
@@ -115,7 +114,7 @@ class EasyOCRTuningTab(QWidget):
         # Initialize UI
         self._init_ui()
         self._load_videos()
-        # Load parameters from config (including user.yaml) automatically on startup
+        # Load parameters from config (including easyocr_params.yaml) automatically on startup
         self._load_parameters_from_config()
         
         print("[EASYOCR_TUNING] EasyOCR Tuning Tab initialized with user configuration loaded")
@@ -248,7 +247,7 @@ class EasyOCRTuningTab(QWidget):
         
         save_button = QPushButton("Save to Config")
         save_button.clicked.connect(self._save_parameters_to_config)
-        save_button.setToolTip("Save current parameters to user.yaml")
+        save_button.setToolTip("Save current parameters to easyocr_params.yaml")
         button_layout.addWidget(save_button)
         
         layout.addLayout(button_layout)
@@ -741,7 +740,7 @@ class EasyOCRTuningTab(QWidget):
         
         # Populate list with video info
         for video_path in self.video_files:
-            duration = self._get_video_duration(video_path)
+            duration = get_video_duration(video_path)
             filename = Path(video_path).name
             
             # Create list item with filename and duration
@@ -762,26 +761,6 @@ class EasyOCRTuningTab(QWidget):
             
             # Load the selected video
             self._load_selected_video()
-    
-    def _get_video_duration(self, video_path: str) -> str:
-        """Get video duration as formatted string."""
-        try:
-            cap = cv2.VideoCapture(video_path)
-            if cap.isOpened():
-                fps = cap.get(cv2.CAP_PROP_FPS)
-                frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-                cap.release()
-                
-                if fps > 0:
-                    duration_seconds = frame_count / fps
-                    minutes = int(duration_seconds // 60)
-                    seconds = int(duration_seconds % 60)
-                    return f"{minutes:02d}:{seconds:02d}"
-            
-        except Exception as e:
-            print(f"[EASYOCR_TUNING] Error getting duration for {video_path}: {e}")
-        
-        return "Unknown"
     
     def _populate_model_combo(self):
         """Populate detection model combo box."""
@@ -1556,7 +1535,7 @@ class EasyOCRTuningTab(QWidget):
     def _load_parameters_from_config(self):
         """Load parameters from configuration."""
         try:
-            # Load user.yaml overrides if they exist
+            # Load easyocr_params.yaml overrides if they exist
             user_config = self._load_user_config()
             
             print(f"[EASYOCR_TUNING] Loading parameters from config...")
@@ -1659,7 +1638,7 @@ class EasyOCRTuningTab(QWidget):
             # Continue with default values if config loading fails
     
     def _load_user_config(self) -> Dict[str, Any]:
-        """Load user.yaml configuration if it exists.
+        """Load easyocr_params.yaml configuration if it exists.
         
         Returns:
             User configuration dictionary or empty dict if not found
@@ -1677,7 +1656,7 @@ class EasyOCRTuningTab(QWidget):
             if project_root is None:
                 return {}
             
-            user_config_file = project_root / "configs" / "user.yaml"
+            user_config_file = project_root / "configs" / "easyocr_params.yaml"
             
             if not user_config_file.exists():
                 return {}
@@ -1944,7 +1923,7 @@ class EasyOCRTuningTab(QWidget):
     def _save_parameters_to_config(self):
         """Save current parameters to configuration file."""
         try:
-            # Find project root and construct absolute path to user.yaml
+            # Find project root and construct absolute path to easyocr_params.yaml
             current_dir = Path(__file__).parent
             project_root = None
             
@@ -1957,7 +1936,7 @@ class EasyOCRTuningTab(QWidget):
                 print("[EASYOCR_TUNING] Error: Could not find project root with configs directory")
                 return
             
-            config_path = project_root / "configs" / "user.yaml"
+            config_path = project_root / "configs" / "easyocr_params.yaml"
             
             # Create config updates with all parameters
             config_updates = {

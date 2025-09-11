@@ -174,8 +174,9 @@ def run_field_segmentation(frame: np.ndarray) -> List[Any]:
         print("[FIELD_SEG] YOLO not available, returning mock results")
         return _create_mock_results(frame)
     
-    # Load default model if none is loaded
+    # Load default model if none is loaded (lazy loading optimization)
     if _field_model is None:
+        print("[FIELD_SEG] Loading default model on first use (lazy loading)")
         _load_default_model()
     
     if _field_model is None:
@@ -329,20 +330,23 @@ def get_current_field_model_path() -> Optional[str]:
 def _load_default_model() -> None:
     """Load the default field segmentation model if none is loaded."""
     if _field_model is None:
-        # Use the specified default model path
-        default_model_path = "data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt"
+        # Get the default model path from configuration
+        default_model = get_setting(
+            "models.segmentation.default_model", 
+            "data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt"
+        )
         
-        # Try the specified model first
-        models_base = Path(get_setting("models.base_path", "data/models"))
-        full_path = models_base / "segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt"
+        print(f"[FIELD_SEG] Loading default segmentation model: {default_model}")
         
-        if full_path.exists():
-            print(f"[FIELD_SEG] Loading default field segmentation model: {full_path}")
-            set_field_model(str(full_path))
+        # Try the configured model path first
+        if Path(default_model).exists():
+            set_field_model(default_model)
             return
         
         # Fallback to other segmentation models
+        models_base = Path(get_setting("models.base_path", "data/models"))
         fallback_paths = [
+            models_base / "segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt",
             models_base / "segmentation/field_finder_yolo11m-seg/segmentation_finetune/weights/best.pt",
             models_base / "segmentation/field_finder_yolo11m-seg/finetune/weights/best.pt",
             models_base / "segmentation/field_finder_yolo11n-seg/segmentation_finetune/weights/best.pt", 
@@ -359,8 +363,9 @@ def _load_default_model() -> None:
         print("[FIELD_SEG] No field segmentation models found, will use mock results")
 
 
-# Initialize with default model when module is imported
-_load_default_model()
+# Initialize with default model when first needed (lazy loading)
+# This optimization prevents slow startup by deferring model loading until actually used
+# _load_default_model()  # Commented out for performance optimization
 
 
 def visualize_segmentation(frame: np.ndarray, results: List[Any], alpha: float = 0.5) -> np.ndarray:

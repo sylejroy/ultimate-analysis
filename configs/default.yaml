@@ -22,21 +22,22 @@ video:
 models:
   base_path: "data/models"
   detection:
-    default_model: "data/models/detection/object_detection_yolo11l/finetune3/weights/best.pt"
+    default_model: "data/models/detection/20250802_1_detection_yolo11s_object_detection.v3i.yolov8/finetune_20250802_102035/weights/best.pt"
     confidence_threshold: 0.5
     nms_threshold: 0.45
     max_detections: 100
     cache_results: true
   
   segmentation:
-    default_model: "yolo11l-seg.pt"
+    default_model: "data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt"
     confidence_threshold: 0.6
     mask_alpha: 0.3
+    show_raw_masks: false       # Whether to show raw segmentation model output masks
     
     # Morphological operations for mask smoothing
     morphological:
-      opening_kernel_size: 0     # Size for noise removal (0 to disable)
-      closing_kernel_size: 0    # Size for hole filling (0 to disable)
+      opening_kernel_size: 5     # Size for noise removal (0 to disable)
+      closing_kernel_size: 5    # Size for hole filling (0 to disable)
       fill_holes: false           # Apply flood fill for remaining holes
     
     # Contour calculation and drawings
@@ -52,7 +53,7 @@ models:
       # Contour interpolation parameters
       interpolation:
         enabled: true            # Whether to interpolate contour points for denser sampling
-        max_point_distance: 10   # Maximum distance between consecutive points in pixels
+        max_point_distance: 20   # Maximum distance between consecutive points in pixels
         min_point_distance: 3    # Minimum distance to avoid over-densification
       
       # RANSAC line fitting parameters
@@ -61,22 +62,21 @@ models:
         num_lines: 4            # Number of line segments to fit (3-4 for field boundaries)
         distance_threshold: 5.0 # Maximum distance from point to line for inliers
         min_samples: 2          # Minimum number of points needed to fit a line
-        max_trials: 100        # Maximum RANSAC iterations per line segment
-        classification_confidence_threshold: 0.5  # Minimum confidence for line classification
+        max_trials: 20        # Maximum RANSAC iterations per line segment
         line_color: [0, 255, 0] # BGR color for RANSAC lines (green)
         outlier_color: [0, 165, 255] # BGR color for RANSAC outlier points (orange)
-        outlier_radius: 4       # Radius for outlier point visualization
-        show_outliers: true     # Whether to visualize RANSAC outliers
+        outlier_radius: 6       # Radius for outlier point visualization (increased for visibility)
+        show_outliers: true     # Whether to visualize RANSAC outliers (enabled)
         inlier_color: [0, 255, 0] # BGR color for RANSAC inlier points (green)
-        inlier_radius: 2        # Radius for inlier point visualization
-        show_inliers: true      # Whether to visualize RANSAC inliers
+        inlier_radius: 5        # Radius for inlier point visualization (increased for visibility)
+        show_inliers: true      # Whether to visualize RANSAC inliers (enabled)
         
         # Edge filtering parameters
         edge_filtering:
           enabled: true         # Whether to filter points near image edges
           margin: 15           # Distance from edge in pixels to consider as "near edge"
           edge_point_color: [0, 0, 255] # BGR color for filtered edge points (red)
-          edge_point_radius: 4  # Radius for edge point visualization
+          edge_point_radius: 6  # Radius for edge point visualization (increased for visibility)
           show_edge_points: true # Whether to visualize filtered edge points
   
   tracking:
@@ -162,6 +162,7 @@ data:
 homography:
   save_directory: "configs"
   default_params_file: "configs/homography_params.yaml"
-  slider_range_main: [-50.0, 50.0]           # Range for H00, H01, H10, H11 (scale/skew/extreme)
+  slider_range_main: [-100.0, 100.0]          # Range for H00, H01, H10, H11 (scale/skew/extreme) - expanded from [-50.0, 50.0]
   slider_range_perspective: [-0.2, 0.2]      # Range for H20, H21 (perspective/extreme)
-  buffer_factor: 2.5                         # Output canvas size multiplier (2.5 = 150% larger)
+  buffer_factor: 1.8                         # Output canvas size multiplier (1.8 = 80% larger)
+  output_aspect_ratio: 3.0                   # Height:width ratio for homography output canvas (3.0 = 3:1)

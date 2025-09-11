@@ -89,8 +89,8 @@ FALLBACK_DEFAULTS = {
     'confidence_threshold': 0.5,
     'nms_threshold': 0.45,
     'tracker_type': 'deepsort',
-    'model_detection': 'data/models/detection/object_detection_yolo11l/finetune3/weights/best.pt',
-    'model_segmentation': 'yolo11l-seg.pt',
+    'model_detection': 'data/models/detection/20250802_1_detection_yolo11s_object_detection.v3i.yolov8/finetune_20250802_102035/weights/best.pt',
+    'model_segmentation': 'data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt',
 }
 
 # Video file extensions (system constraint)

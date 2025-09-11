@@ -12,6 +12,28 @@ from ..constants import VISUALIZATION_COLORS
 from ..config.settings import get_setting
 
 
+def get_segmentation_colors() -> Dict[int, Tuple[int, int, int]]:
+    """Get the standard segmentation colors used throughout the application.
+    
+    Returns:
+        Dictionary mapping class indices to BGR color tuples
+    """
+    return {
+        0: (0, 255, 255),    # Central Field: bright cyan (BGR)
+        1: (255, 0, 255)     # Endzone: bright magenta (BGR)
+    }
+
+
+def get_primary_field_color() -> Tuple[int, int, int]:
+    """Get the primary field color (central field) for consistent visualization.
+    
+    Returns:
+        BGR color tuple for the primary field area
+    """
+    colors = get_segmentation_colors()
+    return colors[0]  # Return central field color (cyan)
+
+
 def filter_edge_points(contour: np.ndarray, 
                       frame_shape: tuple,
                       edge_margin: int = 20) -> tuple[np.ndarray, np.ndarray]:
@@ -728,11 +750,8 @@ def _draw_segmentation_masks(frame: np.ndarray, masks: np.ndarray) -> np.ndarray
     overlay = frame.copy()
     color_mask = np.zeros_like(frame)
     
-    # Define colors for different field regions - made much brighter for better visibility
-    color_dict = {
-        0: (0, 255, 255),    # Central Field: bright cyan (BGR)
-        1: (255, 0, 255)     # Endzone: bright magenta (BGR)
-    }
+    # Use centralized segmentation colors for consistency
+    color_dict = get_segmentation_colors()
     
     name_dict = {
         0: "Central Field", 
@@ -797,6 +816,8 @@ def calculate_field_contour(unified_mask: np.ndarray,
                            min_contour_area: int = None) -> Optional[np.ndarray]:
     """Calculate and simplify the contour of the field mask.
     
+    This function now delegates to the processing module for consistent algorithm.
+    
     Args:
         unified_mask: Binary mask (H, W) where 1 indicates field area
         simplify_epsilon: Epsilon parameter for contour simplification (as fraction of perimeter)
@@ -805,46 +826,9 @@ def calculate_field_contour(unified_mask: np.ndarray,
     Returns:
         Simplified contour points as numpy array of shape (N, 1, 2), or None if no contour found
     """
-    if unified_mask is None or not np.any(unified_mask):
-        return None
-    
     # Import here to avoid circular imports
-    from ..config.settings import get_setting
-    
-    # Use config values if parameters not provided
-    if simplify_epsilon is None:
-        simplify_epsilon = get_setting("models.segmentation.contour.simplify_epsilon", 0.01)
-    if min_contour_area is None:
-        min_contour_area = get_setting("models.segmentation.contour.min_area", 5000)
-    
-    try:
-        # Find contours
-        contours, _ = cv2.findContours(unified_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        if not contours:
-            return None
-        
-        # Find the largest contour (main field boundary)
-        largest_contour = max(contours, key=cv2.contourArea)
-        
-        # Check if contour meets minimum area requirement
-        contour_area = cv2.contourArea(largest_contour)
-        if contour_area < min_contour_area:
-            print(f"[VISUALIZATION] Contour area {contour_area} below threshold {min_contour_area}")
-            return None
-        
-        # Simplify contour using Douglas-Peucker algorithm
-        perimeter = cv2.arcLength(largest_contour, True)
-        epsilon = simplify_epsilon * perimeter
-        simplified_contour = cv2.approxPolyDP(largest_contour, epsilon, True)
-        
-        print(f"[VISUALIZATION] Original contour points: {len(largest_contour)}, simplified: {len(simplified_contour)}")
-        
-        return simplified_contour
-        
-    except Exception as e:
-        print(f"[VISUALIZATION] Error calculating field contour: {e}")
-        return None
+    from ..processing.field_analysis import calculate_field_contour_processing
+    return calculate_field_contour_processing(unified_mask, simplify_epsilon, min_contour_area)
 
 
 def draw_field_contour(frame: np.ndarray, contour: np.ndarray,
@@ -910,138 +894,7 @@ def draw_field_contour(frame: np.ndarray, contour: np.ndarray,
     return result
 
 
-def fit_field_lines_ransac(contour: np.ndarray, 
-                          frame: np.ndarray,
-                          num_lines: int = 4,
-                          distance_threshold: float = 10.0,
-                          min_samples: int = 2,
-                          max_trials: int = 1000) -> Optional[Tuple[List[Tuple[np.ndarray, np.ndarray]], List[np.ndarray], List[np.ndarray], List[np.ndarray], Dict, Dict]]:
-    """Fit straight lines to contour segments using RANSAC.
-    
-    This function segments the contour and fits straight lines to each segment,
-    which is useful for field boundary detection where we expect rectangular shapes.
-    
-    Args:
-        contour: Contour points as numpy array of shape (N, 1, 2)
-        frame: Input frame for determining shape (used for edge filtering)
-        num_lines: Number of line segments to fit (typically 3-4 for field boundaries)
-        distance_threshold: Maximum distance from point to line to be considered inlier
-        min_samples: Minimum number of points needed to fit a line
-        max_trials: Maximum RANSAC iterations per line segment
-        
-    Returns:
-        Tuple of (fitted_lines, outlier_points, inlier_points, edge_filtered_points, classified_lines, all_lines_for_display) where:
-        - fitted_lines: List of (start_point, end_point) tuples for each fitted line
-        - outlier_points: List of outlier point arrays for each segment
-        - inlier_points: List of inlier point arrays for each segment
-        - edge_filtered_points: Points that were filtered out during edge filtering
-        - classified_lines: Dictionary of high-confidence classified lines
-        - all_lines_for_display: Dictionary of all lines (classified and unclassified) for visualization
-        Returns (None, None, None, None, {}, {}) if fitting fails
-    """
-    if contour is None or len(contour) < num_lines * min_samples:
-        return None, None, None, None, {}, {}
-
-    try:
-        # Convert contour to 2D points array
-        points = contour.reshape(-1, 2).astype(np.float32)
-        edge_filtered_points = np.array([]).reshape(0, 2)  # Store edge-filtered points
-
-        # Apply interpolation if enabled (before edge filtering)
-        interpolation_enabled = get_setting("models.segmentation.contour.interpolation.enabled", False)
-        if interpolation_enabled:
-            max_distance = get_setting("models.segmentation.contour.interpolation.max_point_distance", 10)
-            min_distance = get_setting("models.segmentation.contour.interpolation.min_point_distance", 3)
-
-            # Convert to contour format for interpolation
-            contour_format = points.reshape(-1, 1, 2)
-            interpolated_contour = interpolate_contour_points(contour_format, max_distance, min_distance)
-            points = interpolated_contour.reshape(-1, 2).astype(np.float32)
-
-            print(f"[VISUALIZATION] Interpolated contour: {len(contour_format.reshape(-1, 2))} -> {len(points)} points")
-
-        # Apply edge filtering after interpolation if enabled
-        edge_filtering_enabled = get_setting("models.segmentation.contour.ransac.edge_filtering.enabled", False)
-        if edge_filtering_enabled:
-            edge_margin = get_setting("models.segmentation.contour.ransac.edge_filtering.margin", 20)
-
-            # Convert to contour format for edge filtering
-            contour_format = points.reshape(-1, 1, 2)
-            filtered_contour, edge_points = filter_edge_points(contour_format, frame.shape, edge_margin)
-
-            # Update points to use only non-edge points
-            if len(filtered_contour) > 0:
-                original_count = len(points)
-                points = filtered_contour.reshape(-1, 2).astype(np.float32)
-                edge_filtered_points = edge_points.reshape(-1, 2).astype(np.float32) if len(edge_points) > 0 else np.array([]).reshape(0, 2)
-                print(f"[VISUALIZATION] Edge filtering: {original_count} -> {len(points)} points ({len(edge_filtered_points)} filtered)")
-            else:
-                print(f"[VISUALIZATION] Warning: Edge filtering removed all points!")
-
-        # Sequential RANSAC: Find lines one by one, removing inliers each time
-        remaining_points = points.copy()
-        fitted_lines = []
-        line_confidences = []  # Store confidence for each line
-        all_outliers = []
-        all_inliers = []
-
-        for iteration in range(num_lines):
-            if len(remaining_points) < min_samples:
-                print(f"[VISUALIZATION] Iteration {iteration}: Not enough remaining points ({len(remaining_points)} < {min_samples})")
-                break
-
-            print(f"[VISUALIZATION] Iteration {iteration}: Fitting line to {len(remaining_points)} remaining points")
-
-            # Fit line to remaining points using RANSAC
-            result = _fit_line_ransac_with_outliers(remaining_points, distance_threshold, min_samples, max_trials)
-
-            if result is not None:
-                line_points, outliers, inliers, confidence = result
-                fitted_lines.append(line_points)
-                line_confidences.append(confidence)
-                all_inliers.append(inliers)
-
-                # Remove inliers from remaining points for next iteration
-                remaining_points = outliers
-
-                print(f"[VISUALIZATION] Line {iteration}: Found line with {len(inliers)} inliers, {len(outliers)} points remaining, confidence={confidence:.3f}")
-            else:
-                print(f"[VISUALIZATION] Iteration {iteration}: Failed to fit line, stopping sequential RANSAC")
-                break
-
-        # All remaining points after all iterations are final outliers
-        if len(remaining_points) > 0:
-            all_outliers.append(remaining_points)
-            print(f"[VISUALIZATION] Final outliers: {len(remaining_points)} points")
-        else:
-            all_outliers.append(np.array([]).reshape(0, 2))
-
-        print(f"[VISUALIZATION] Sequential RANSAC: Successfully fitted {len(fitted_lines)} out of {num_lines} lines")
-
-        # Classification removed: do not perform any further classification
-        classified_lines = {}
-
-        # Create a dictionary of all lines (including low-confidence ones) for display purposes
-        # Store as (line_coords, confidence, is_classified) tuples
-        all_lines_for_display = {}
-
-        # Add all fitted lines with their original indices for display (mark as unclassified)
-        for i, (line, confidence) in enumerate(zip(fitted_lines, line_confidences)):
-            if line is not None:
-                all_lines_for_display[f"unclassified_line_{i}"] = (line, confidence, False)
-
-        # Filter out None entries from fitted_lines but keep all for display
-        valid_lines = [line for line in fitted_lines if line is not None]
-        return (valid_lines, all_outliers, all_inliers, edge_filtered_points, classified_lines, all_lines_for_display) if valid_lines else (None, None, None, edge_filtered_points, {}, {})
-
-    except Exception as e:
-        print(f"[VISUALIZATION] Error in RANSAC line fitting: {e}")
-        return None, None, None, np.array([]).reshape(0, 2), {}, {}
-
-
-# Field line classification helper removed per user request. Classification is disabled.
-
-
+e
 def _segment_contour_points(points: np.ndarray, num_segments: int) -> List[np.ndarray]:
     """Divide contour points into segments for line fitting.
     
@@ -1067,311 +920,6 @@ def _segment_contour_points(points: np.ndarray, num_segments: int) -> List[np.nd
         segments.append(segment_points)
     
     return segments
-
-
-def _fit_line_ransac(points: np.ndarray, 
-                    distance_threshold: float,
-                    min_samples: int,
-                    max_trials: int) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-    """Fit a line to points using RANSAC algorithm.
-    
-    Args:
-        points: Array of 2D points (N, 2)
-        distance_threshold: Maximum distance for inliers
-        min_samples: Minimum samples to fit line
-        max_trials: Maximum RANSAC iterations
-        
-    Returns:
-        Tuple of (start_point, end_point) for the fitted line, or None if fitting fails
-    """
-    if len(points) < min_samples:
-        return None
-    
-    best_line = None
-    best_inliers = 0
-    
-    for trial in range(max_trials):
-        # Randomly sample minimum points needed to fit a line
-        sample_indices = np.random.choice(len(points), min_samples, replace=False)
-        sample_points = points[sample_indices]
-        
-        # Fit line to sample points
-        if min_samples == 2:
-            # Simple case: line through two points
-            p1, p2 = sample_points[0], sample_points[1]
-            
-            # Skip if points are too close (degenerate case)
-            if np.linalg.norm(p2 - p1) < 1e-6:
-                continue
-                
-            # Calculate distances from all points to this line
-            line_vec = p2 - p1
-            line_length = np.linalg.norm(line_vec)
-            line_unit = line_vec / line_length
-            
-        else:
-            # Fit line using least squares for more points
-            try:
-                # Use SVD to fit line
-                centroid = np.mean(sample_points, axis=0)
-                centered_points = sample_points - centroid
-                
-                # SVD: line direction is first principal component
-                _, _, vh = np.linalg.svd(centered_points.T)
-                line_unit = vh[0]  # First row is the principal direction
-                p1 = centroid
-                
-            except np.linalg.LinAlgError:
-                continue
-        
-        # Count inliers: points within distance_threshold of the line
-        inlier_count = 0
-        for point in points:
-            if min_samples == 2:
-                # Distance from point to line defined by p1, p2
-                to_point = point - p1
-                projection_length = np.dot(to_point, line_unit)
-                closest_point_on_line = p1 + projection_length * line_unit
-                distance = np.linalg.norm(point - closest_point_on_line)
-            else:
-                # Distance from point to line through centroid with direction line_unit
-                to_point = point - p1
-                projection_length = np.dot(to_point, line_unit)
-                closest_point_on_line = p1 + projection_length * line_unit
-                distance = np.linalg.norm(point - closest_point_on_line)
-            
-            if distance <= distance_threshold:
-                inlier_count += 1
-        
-        # Update best line if this one has more inliers
-        if inlier_count > best_inliers:
-            best_inliers = inlier_count
-            
-            # Find extent of inliers along the line
-            inlier_projections = []
-            for point in points:
-                if min_samples == 2:
-                    to_point = point - p1
-                    projection_length = np.dot(to_point, line_unit)
-                    closest_point_on_line = p1 + projection_length * line_unit
-                    distance = np.linalg.norm(point - closest_point_on_line)
-                else:
-                    to_point = point - p1
-                    projection_length = np.dot(to_point, line_unit)
-                    closest_point_on_line = p1 + projection_length * line_unit
-                    distance = np.linalg.norm(point - closest_point_on_line)
-                
-                if distance <= distance_threshold:
-                    if min_samples == 2:
-                        inlier_projections.append(np.dot(to_point, line_unit))
-                    else:
-                        inlier_projections.append(projection_length)
-            
-            if inlier_projections:
-                min_proj = min(inlier_projections)
-                max_proj = max(inlier_projections)
-                
-                if min_samples == 2:
-                    start_point = p1 + min_proj * line_unit
-                    end_point = p1 + max_proj * line_unit
-                else:
-                    start_point = p1 + min_proj * line_unit
-                    end_point = p1 + max_proj * line_unit
-                
-                best_line = (start_point, end_point)
-    
-    # Return best line if it has enough inliers
-    min_inliers = max(min_samples, len(points) // 4)  # At least 25% of points should be inliers
-    if best_inliers >= min_inliers:
-        return best_line
-    
-    return None
-
-
-def _fit_line_ransac_with_outliers(points: np.ndarray, 
-                                  distance_threshold: float,
-                                  min_samples: int,
-                                  max_trials: int) -> Optional[Tuple[Tuple[np.ndarray, np.ndarray], np.ndarray, np.ndarray, float]]:
-    """Fit a line to points using RANSAC algorithm and return outliers, inliers, and goodness of fit.
-    
-    Args:
-        points: Array of 2D points (N, 2)
-        distance_threshold: Maximum distance for inliers
-        min_samples: Minimum samples to fit line
-        max_trials: Maximum RANSAC iterations
-        
-    Returns:
-        Tuple of ((start_point, end_point), outlier_points, inlier_points, confidence) for the fitted line, outliers, inliers, and confidence score,
-        or None if fitting fails
-    """
-    if len(points) < min_samples:
-        return None
-    
-    best_line = None
-    best_inliers = 0
-    best_inlier_mask = None
-    
-    for trial in range(max_trials):
-        # Randomly sample minimum points needed to fit a line
-        sample_indices = np.random.choice(len(points), min_samples, replace=False)
-        sample_points = points[sample_indices]
-        
-        # Fit line to sample points
-        if min_samples == 2:
-            # Simple case: line through two points
-            p1, p2 = sample_points[0], sample_points[1]
-            
-            # Skip if points are too close (degenerate case)
-            if np.linalg.norm(p2 - p1) < 1e-6:
-                continue
-                
-            # Calculate distances from all points to this line
-            line_vec = p2 - p1
-            line_length = np.linalg.norm(line_vec)
-            line_unit = line_vec / line_length
-            
-        else:
-            # Fit line using least squares for more points
-            try:
-                # Use SVD to fit line
-                centroid = np.mean(sample_points, axis=0)
-                centered_points = sample_points - centroid
-                
-                # SVD: line direction is first principal component
-                _, _, vh = np.linalg.svd(centered_points.T)
-                line_unit = vh[0]  # First row is the principal direction
-                p1 = centroid
-                
-            except np.linalg.LinAlgError:
-                continue
-        
-        # Count inliers and create mask: points within distance_threshold of the line
-        inlier_mask = np.zeros(len(points), dtype=bool)
-        inlier_count = 0
-        
-        for idx, point in enumerate(points):
-            if min_samples == 2:
-                # Distance from point to line defined by p1, p2
-                to_point = point - p1
-                projection_length = np.dot(to_point, line_unit)
-                closest_point_on_line = p1 + projection_length * line_unit
-                distance = np.linalg.norm(point - closest_point_on_line)
-            else:
-                # Distance from point to line through centroid with direction line_unit
-                to_point = point - p1
-                projection_length = np.dot(to_point, line_unit)
-                closest_point_on_line = p1 + projection_length * line_unit
-                distance = np.linalg.norm(point - closest_point_on_line)
-            
-            if distance <= distance_threshold:
-                inlier_mask[idx] = True
-                inlier_count += 1
-        
-        # Update best line if this one has more inliers
-        if inlier_count > best_inliers:
-            best_inliers = inlier_count
-            best_inlier_mask = inlier_mask.copy()
-            
-            # Find extent of inliers along the line
-            inlier_projections = []
-            for idx, point in enumerate(points):
-                if inlier_mask[idx]:
-                    if min_samples == 2:
-                        to_point = point - p1
-                        projection_length = np.dot(to_point, line_unit)
-                    else:
-                        to_point = point - p1
-                        projection_length = np.dot(to_point, line_unit)
-                    
-                    inlier_projections.append(projection_length)
-            
-            if inlier_projections:
-                min_proj = min(inlier_projections)
-                max_proj = max(inlier_projections)
-                
-                if min_samples == 2:
-                    start_point = p1 + min_proj * line_unit
-                    end_point = p1 + max_proj * line_unit
-                else:
-                    start_point = p1 + min_proj * line_unit
-                    end_point = p1 + max_proj * line_unit
-                
-                best_line = (start_point, end_point)
-    
-    # Return best line, outliers, and inliers if it has enough inliers
-    min_inliers = max(min_samples, len(points) // 4)  # At least 25% of points should be inliers
-    if best_inliers >= min_inliers and best_inlier_mask is not None:
-        outliers = points[~best_inlier_mask]  # Points that are NOT inliers
-        inliers = points[best_inlier_mask]    # Points that ARE inliers
-        
-        # Calculate confidence based on the fitting error (Weighted RMSE) of inliers
-        if len(inliers) > 0 and best_line is not None:
-            start_point, end_point = best_line
-            
-            # Calculate line parameters for distance computation
-            line_vec = end_point - start_point
-            line_length = np.linalg.norm(line_vec)
-            
-            if line_length > 1e-6:  # Avoid division by zero
-                line_unit = line_vec / line_length
-                
-                # Calculate weights based on point density (nearby point count)
-                weights = []
-                neighbor_radius = 20.0  # pixels - adjust based on typical field line spacing
-                
-                for i, pt in enumerate(inliers):
-                    # Count nearby points within radius
-                    nearby_count = 0
-                    for other_pt in inliers:
-                        distance = np.linalg.norm(pt - other_pt)
-                        if distance <= neighbor_radius:
-                            nearby_count += 1
-                    
-                    # Weight is the count of nearby points (including itself)
-                    weights.append(nearby_count)
-                
-                # Calculate Weighted RMSE for inlier points
-                weighted_squared_errors = []
-                total_weight = 0
-                
-                for i, point in enumerate(inliers):
-                    # Distance from point to line
-                    to_point = point - start_point
-                    projection_length = np.dot(to_point, line_unit)
-                    closest_point_on_line = start_point + projection_length * line_unit
-                    distance = np.linalg.norm(point - closest_point_on_line)
-                    
-                    # Weight the squared error by point density
-                    weight = weights[i]
-                    weighted_squared_errors.append((distance ** 2) * weight)
-                    total_weight += weight
-                
-                # Calculate Weighted RMSE
-                if total_weight > 0:
-                    weighted_rmse = np.sqrt(sum(weighted_squared_errors) / total_weight)
-                else:
-                    weighted_rmse = float('inf')
-                
-                # Convert Weighted RMSE to confidence (0 to 1)
-                # Lower weighted RMSE = higher confidence
-                # Dense, well-fitted lines get higher confidence than sparse, noisy lines
-                # Use exponential decay to map Weighted RMSE to confidence
-                # Weighted RMSE of 0 -> confidence = 1.0
-                # Weighted RMSE of 5 pixels -> confidence ≈ 0.37
-                # Weighted RMSE of 10 pixels -> confidence ≈ 0.14
-                max_expected_rmse = 10.0  # pixels
-                confidence = np.exp(-weighted_rmse / (max_expected_rmse / 3.0))
-                confidence = min(1.0, max(0.0, confidence))  # Clamp to [0, 1]
-            else:
-                # Degenerate line case
-                confidence = 0.0
-        else:
-            # No inliers or no line
-            confidence = 0.0
-        
-        return best_line, outliers, inliers, confidence
-    
-    return None
 
 
 def draw_field_lines_ransac(frame: np.ndarray, 
@@ -1469,6 +1017,9 @@ def draw_field_lines_ransac_with_outliers(frame: np.ndarray,
                 if segment_outliers is not None and len(segment_outliers) > 0:
                     for point in segment_outliers:
                         center = (int(point[0]), int(point[1]))
+                        # Draw white border for better visibility
+                        cv2.circle(result, center, outlier_radius + 1, (255, 255, 255), -1)
+                        # Draw colored point on top
                         cv2.circle(result, center, outlier_radius, outlier_color, -1)
                         outlier_count += 1
             
@@ -1487,95 +1038,27 @@ def _apply_morphological_smoothing(mask: np.ndarray,
                                  fill_holes: bool = None) -> np.ndarray:
     """Apply morphological operations to smooth a binary mask.
     
-    Args:
-        mask: Binary mask (H, W) with values 0 or 1
-        opening_kernel_size: Size of kernel for opening operation (removes noise)
-        closing_kernel_size: Size of kernel for closing operation (fills gaps)
-        fill_holes: Whether to apply hole filling
-        
-    Returns:
-        Smoothed binary mask
+    This function now delegates to the processing module for consistent algorithm.
     """
-    if not np.any(mask):
-        return mask
-    
     # Import here to avoid circular imports
-    from ..config.settings import get_setting
-    
-    # Use config values if parameters not provided
-    if opening_kernel_size is None:
-        opening_kernel_size = get_setting("models.segmentation.morphological.opening_kernel_size", 5)
-    if closing_kernel_size is None:
-        closing_kernel_size = get_setting("models.segmentation.morphological.closing_kernel_size", 15)
-    if fill_holes is None:
-        fill_holes = get_setting("models.segmentation.morphological.fill_holes", True)
-    
-    try:
-        # Ensure mask is binary
-        mask_binary = (mask > 0).astype(np.uint8)
-        
-        # 1. Opening operation: erosion followed by dilation
-        # This removes small noise and disconnected components
-        if opening_kernel_size > 0:
-            opening_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, 
-                                                     (opening_kernel_size, opening_kernel_size))
-            mask_binary = cv2.morphologyEx(mask_binary, cv2.MORPH_OPEN, opening_kernel)
-        
-        # 2. Closing operation: dilation followed by erosion
-        # This fills small gaps and holes within the field area
-        if closing_kernel_size > 0:
-            closing_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, 
-                                                     (closing_kernel_size, closing_kernel_size))
-            mask_binary = cv2.morphologyEx(mask_binary, cv2.MORPH_CLOSE, closing_kernel)
-        
-        # 3. Fill remaining holes using flood fill
-        if fill_holes:
-            mask_binary = _fill_holes_flood_fill(mask_binary)
-        
-        return mask_binary
-        
-    except Exception as e:
-        print(f"[VISUALIZATION] Error in morphological smoothing: {e}")
-        return mask
+    from ..processing.field_analysis import apply_morphological_smoothing
+    return apply_morphological_smoothing(mask, opening_kernel_size, closing_kernel_size, fill_holes)
 
 
 def _fill_holes_flood_fill(mask: np.ndarray) -> np.ndarray:
     """Fill holes in a binary mask using flood fill from the borders.
     
-    Args:
-        mask: Binary mask (H, W) with values 0 or 1
-        
-    Returns:
-        Mask with holes filled
+    This function now delegates to the processing module for consistent algorithm.
     """
-    try:
-        # Create a copy to work with
-        filled_mask = mask.copy()
-        h, w = mask.shape
-        
-        # Create a mask that is 2 pixels larger in each dimension
-        # This allows flood fill to work from the border
-        flood_mask = np.zeros((h + 2, w + 2), dtype=np.uint8)
-        
-        # Copy the original mask to the center of the flood mask
-        flood_mask[1:-1, 1:-1] = 1 - filled_mask  # Invert: 0 becomes 1, 1 becomes 0
-        
-        # Flood fill from the top-left corner (which should be background)
-        cv2.floodFill(flood_mask, None, (0, 0), 0)
-        
-        # Extract the filled region and invert back
-        filled_region = flood_mask[1:-1, 1:-1]
-        filled_mask = 1 - filled_region
-        
-        return filled_mask.astype(np.uint8)
-        
-    except Exception as e:
-        print(f"[VISUALIZATION] Error in hole filling: {e}")
-        return mask
+    # Import here to avoid circular imports
+    from ..processing.field_analysis import _fill_holes_flood_fill as processing_fill_holes
+    return processing_fill_holes(mask)
 
 
 def create_unified_field_mask(segmentation_results: List[Any], frame_shape: Tuple[int, int]) -> Optional[np.ndarray]:
     """Create a unified mask combining all segmentation classes into one binary mask.
+    
+    This function now delegates to the processing module for consistent algorithm.
     
     Args:
         segmentation_results: List of segmentation result objects
@@ -1584,63 +1067,17 @@ def create_unified_field_mask(segmentation_results: List[Any], frame_shape: Tupl
     Returns:
         Unified binary mask (H, W) where 1 indicates field area, or None if no results
     """
-    if not segmentation_results:
-        return None
-    
-    frame_h, frame_w = frame_shape
-    unified_mask = np.zeros((frame_h, frame_w), dtype=np.uint8)
-    
-    for result in segmentation_results:
-        if not hasattr(result, 'masks') or result.masks is None:
-            continue
-            
-        try:
-            # Get mask data
-            if hasattr(result.masks, 'data'):
-                mask_data = result.masks.data
-            else:
-                continue
-                
-            # Convert to numpy if needed
-            if hasattr(mask_data, 'cpu'):
-                masks = mask_data.cpu().numpy()
-            else:
-                masks = mask_data.numpy() if hasattr(mask_data, 'numpy') else mask_data
-            
-            # Combine all class masks into unified mask
-            for mask in masks:
-                # Ensure mask is 2D
-                if len(mask.shape) == 3:
-                    mask = mask[0]
-                
-                # Resize to target frame size if needed
-                if mask.shape != (frame_h, frame_w):
-                    mask_resized = cv2.resize(
-                        mask.astype(np.float32), 
-                        (frame_w, frame_h), 
-                        interpolation=cv2.INTER_NEAREST
-                    )
-                else:
-                    mask_resized = mask
-                
-                # Add to unified mask (any field class becomes 1)
-                unified_mask = np.logical_or(unified_mask, mask_resized > 0.5).astype(np.uint8)
-                
-        except Exception as e:
-            print(f"[VISUALIZATION] Error creating unified mask: {e}")
-    
-    # Apply morphological operations to smooth the mask
-    if np.any(unified_mask):
-        unified_mask = _apply_morphological_smoothing(unified_mask)
-            
-    return unified_mask if np.any(unified_mask) else None
+    # Import here to avoid circular imports
+    from ..processing.field_analysis import create_unified_field_mask_processing
+    return create_unified_field_mask_processing(segmentation_results, frame_shape)
 
 
 def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray, 
                            color: Tuple[int, int, int] = (0, 255, 0), 
                            alpha: float = 0.4,
-                           draw_contour: bool = True) -> Tuple[np.ndarray, Dict[str, np.ndarray], Dict[str, Tuple[np.ndarray, float, bool]]]:
-    """Draw a unified field mask with a single color overlay and optional contour.
+                           draw_contour: bool = True,
+                           fill_mask: bool = False) -> Tuple[np.ndarray, Dict[str, np.ndarray], Dict[str, Tuple[np.ndarray, float, bool]]]:
+    """Draw a unified field mask with optional fill and contour.
     
     Args:
         frame: Input frame to draw on
@@ -1648,9 +1085,10 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
         color: BGR color tuple for the overlay
         alpha: Transparency for overlay (0.0 = transparent, 1.0 = opaque)
         draw_contour: Whether to calculate and draw simplified contours
+        fill_mask: Whether to fill the mask area (False = contour only)
         
     Returns:
-        Tuple of (frame with unified mask overlay and optional contour, classified_lines dictionary, all_lines_for_display dictionary)
+        Tuple of (frame with unified mask overlay and optional contour, empty dictionary, all_lines_for_display dictionary)
     """
     if unified_mask is None or not np.any(unified_mask):
         return frame, {}, {}
@@ -1658,17 +1096,17 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
     # Import here to avoid circular imports
     from ..config.settings import get_setting
     
-    overlay = frame.copy()
-    classified_lines = {}  # Initialize empty classified lines dictionary
+    result = frame.copy()
+    classified_lines = {}  # Always empty since classification removed
     all_lines_for_display = {}  # Initialize empty all lines dictionary
     
-    # Create colored overlay where mask is present
-    overlay[unified_mask == 1] = color
+    # Only fill mask if explicitly requested (disabled by default for better runtime)
+    if fill_mask:
+        overlay = frame.copy()
+        overlay[unified_mask == 1] = color
+        result = cv2.addWeighted(frame, 1 - alpha, overlay, alpha, 0)
     
-    # Blend with original frame
-    result = cv2.addWeighted(frame, 1 - alpha, overlay, alpha, 0)
-    
-    # Draw basic border contours for mask visibility
+    # Always draw contour for field boundary visibility 
     contours, _ = cv2.findContours(unified_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if contours:
         border_color = tuple(int(c * 0.7) for c in color)
@@ -1688,6 +1126,9 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
                 distance_threshold = get_setting("models.segmentation.contour.ransac.distance_threshold", 10.0)
                 min_samples = get_setting("models.segmentation.contour.ransac.min_samples", 2)
                 max_trials = get_setting("models.segmentation.contour.ransac.max_trials", 1000)
+                
+                # Import processing function directly
+                from ..processing.field_analysis import fit_field_lines_ransac
                 
                 fitted_lines, outlier_points, inlier_points, edge_filtered_points, classified_lines, all_lines_for_display = fit_field_lines_ransac(
                     simplified_contour, 
@@ -1720,6 +1161,9 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
                         for point in edge_filtered_points:
                             x, y = int(point[0]), int(point[1])
                             if 0 <= x < result.shape[1] and 0 <= y < result.shape[0]:
+                                # Draw white border for better visibility
+                                cv2.circle(result, (x, y), edge_radius + 1, (255, 255, 255), -1)
+                                # Draw colored point on top
                                 cv2.circle(result, (x, y), edge_radius, edge_color, -1)
                         
                         print(f"[VISUALIZATION] Drew {len(edge_filtered_points)} edge-filtered points")
@@ -1738,6 +1182,9 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
                                 for point in inlier_segment:
                                     x, y = int(point[0]), int(point[1])
                                     if 0 <= x < result.shape[1] and 0 <= y < result.shape[0]:
+                                        # Draw white border for better visibility
+                                        cv2.circle(result, (x, y), inlier_radius + 1, (255, 255, 255), -1)
+                                        # Draw colored point on top
                                         cv2.circle(result, (x, y), inlier_radius, inlier_color, -1)
                                         total_inliers += 1
                         
@@ -1757,13 +1204,16 @@ def draw_unified_field_mask(frame: np.ndarray, unified_mask: np.ndarray,
 
 
 def draw_all_field_lines(frame: np.ndarray, all_lines_for_display: Dict[str, Tuple[np.ndarray, float, bool]],
-                        transformation_matrix: Optional[np.ndarray] = None) -> np.ndarray:
+                        transformation_matrix: Optional[np.ndarray] = None, scale_factor: float = 1.0,
+                        draw_raw_lines_only: bool = False) -> np.ndarray:
     """Draw all field lines (both classified and unclassified) with appropriate coloring based on confidence.
     
     Args:
         frame: Frame to draw on
         all_lines_for_display: Dictionary mapping line types to (line_coordinates, confidence, is_classified) tuples
         transformation_matrix: Optional homography matrix to transform lines to warped view
+        scale_factor: Scale factor for text and line thickness (useful for top-down view)
+        draw_raw_lines_only: If True, only draw simple white lines without any special colors/labels
         
     Returns:
         Frame with all lines drawn
@@ -1773,7 +1223,7 @@ def draw_all_field_lines(frame: np.ndarray, all_lines_for_display: Dict[str, Tup
         
     result = frame.copy()
     
-    # Define colors for different line types
+    # Define fallback colors for different line types (kept for compatibility)
     line_colors = {
         'left_sideline': (255, 0, 0),      # Blue
         'right_sideline': (255, 0, 255),   # Magenta  
@@ -1783,7 +1233,7 @@ def draw_all_field_lines(frame: np.ndarray, all_lines_for_display: Dict[str, Tup
         'near_endzone_back': (255, 255, 0)  # Cyan
     }
     
-    line_thickness = 3
+    line_thickness = max(1, int(3 * scale_factor))  # Scale line thickness
     
     for line_type, line_data in all_lines_for_display.items():
         line_coords, confidence, is_classified = line_data
@@ -1791,22 +1241,24 @@ def draw_all_field_lines(frame: np.ndarray, all_lines_for_display: Dict[str, Tup
         if line_coords is None or len(line_coords) != 2:
             continue
             
-        # Determine color based on classification status and confidence
-        if is_classified:
-            # Use the specific color for classified lines
-            base_color = line_colors.get(line_type, (255, 255, 255))  # Default white
+        # Determine color based on mode
+        if draw_raw_lines_only:
+            # Use a single color for all raw RANSAC lines
+            color = (0, 255, 0)  # Green for all raw lines
         else:
-            # Use grey for unclassified lines
-            base_color = (128, 128, 128)  # Grey for unclassified
-        
-        # Further grey out lines with very low confidence (< 0.5)
-        confidence_threshold = 0.5
-        if confidence < confidence_threshold:
-            # Convert to darker grey for low confidence
-            grey_intensity = int(sum(base_color) / 3 * 0.4)  # Even darker grey for low confidence
-            color = (grey_intensity, grey_intensity, grey_intensity)
-        else:
-            color = base_color
+            # Use simple coloring (no classification)
+            if is_classified:
+                base_color = line_colors.get(line_type, (255, 255, 255))  # Default white
+            else:
+                base_color = (128, 128, 128)  # Grey for unclassified
+            
+            # Further grey out lines with very low confidence (< 0.5)
+            confidence_threshold = 0.5
+            if confidence < confidence_threshold:
+                grey_intensity = int(sum(base_color) / 3 * 0.4)  # Even darker grey
+                color = (grey_intensity, grey_intensity, grey_intensity)
+            else:
+                color = base_color
         
         start_point = line_coords[0].copy()
         end_point = line_coords[1].copy()
@@ -1837,8 +1289,8 @@ def draw_all_field_lines(frame: np.ndarray, all_lines_for_display: Dict[str, Tup
             0 <= end_int[0] < w and 0 <= end_int[1] < h):
             cv2.line(result, start_int, end_int, color, line_thickness)
             
-            # Add text label with confidence score (only for classified lines or high-confidence unclassified)
-            if is_classified or confidence >= 0.3:  # Show labels for classified or reasonably confident lines
+            # Add text labels only for classified lines in top-down view (not raw mode)
+            if not draw_raw_lines_only and is_classified and scale_factor > 1.0:  # Only in top-down view
                 mid_point = ((start_int[0] + end_int[0]) // 2, (start_int[1] + end_int[1]) // 2)
                 
                 # Calculate offset perpendicular to the line
@@ -1848,8 +1300,8 @@ def draw_all_field_lines(frame: np.ndarray, all_lines_for_display: Dict[str, Tup
                 # Perpendicular vector (rotate 90 degrees)
                 perp_vec = (-line_vec[1], line_vec[0])
                 
-                # Normalize and scale for offset distance
-                offset_distance = 25  # pixels
+                # Normalize and scale for offset distance  
+                offset_distance = max(10, int(15 * scale_factor))  # Smaller offset for simpler text
                 offset_x = int((perp_vec[0] / line_length) * offset_distance)
                 offset_y = int((perp_vec[1] / line_length) * offset_distance)
                 
@@ -1859,13 +1311,14 @@ def draw_all_field_lines(frame: np.ndarray, all_lines_for_display: Dict[str, Tup
                 # Ensure text position is within frame bounds
                 text_pos = (max(10, min(w - 10, text_pos[0])), max(20, min(h - 10, text_pos[1])))
                 
-                # Create label showing only the confidence score (no classification text)
-                confidence_label = f"{confidence:.2f}"
+                # Create simple label - just the line type name
+                clean_name = line_type.replace('_', ' ').title()
+                simple_label = clean_name.replace(' ', '')  # Remove spaces for compactness
                 
-                # Draw text with larger font size and better visibility
-                font_scale = 0.8  # Increased from 0.5
-                font_thickness = 2  # Increased from 1
-                cv2.putText(result, confidence_label, text_pos, 
+                # Draw simple text with smaller font for better readability in top-down view
+                font_scale = max(0.4, 0.6 * scale_factor)  # Smaller, simpler font
+                font_thickness = max(1, int(1 * scale_factor))  # Thinner text
+                cv2.putText(result, simple_label, text_pos, 
                            cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, font_thickness)
             
             print(f"[VISUALIZATION] Drew {line_type} line from {start_int} to {end_int}")
