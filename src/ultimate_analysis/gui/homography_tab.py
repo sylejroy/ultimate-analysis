@@ -8,7 +8,7 @@ import datetime
 import os
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -16,6 +16,7 @@ import yaml
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QWheelEvent
 from PyQt5.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -29,6 +30,7 @@ from PyQt5.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -40,6 +42,13 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+try:
+    from PyQt5.QtChart import QChart, QChartView, QLineSeries, QValueAxis
+    CHARTS_AVAILABLE = True
+except ImportError:
+    CHARTS_AVAILABLE = False
+    print("[HOMOGRAPHY] Warning: PyQt5.QtChart not available, fitness chart disabled")
 
 from ..config.settings import get_setting
 from ..constants import DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS
@@ -380,6 +389,30 @@ class HomographyTab(QWidget):
         self._segmentation_models_loaded = False
         self._ui_initialized = False
 
+        # Genetic algorithm state
+        self.ga_optimizer = None
+        self.ga_running = False
+        self.ga_generation_history = []
+        self.ga_fitness_history = []
+        
+        # GA UI components
+        self.ga_start_button: Optional[QPushButton] = None
+        self.ga_next_gen_button: Optional[QPushButton] = None
+        self.ga_multi_gen_button: Optional[QPushButton] = None
+        self.ga_reset_button: Optional[QPushButton] = None
+        self.ga_apply_button: Optional[QPushButton] = None
+        self.ga_generation_label: Optional[QLabel] = None
+        self.ga_fitness_label: Optional[QLabel] = None
+        self.ga_population_label: Optional[QLabel] = None
+        
+        # GA fitness chart components (optional)
+        if CHARTS_AVAILABLE:
+            self.ga_chart_view: Optional[Any] = None
+            self.ga_chart: Optional[Any] = None
+            self.ga_fitness_series: Optional[Any] = None
+            self.ga_axis_x: Optional[Any] = None
+            self.ga_axis_y: Optional[Any] = None
+
         # Initialize UI only
         self._init_ui()
 
@@ -594,6 +627,109 @@ class HomographyTab(QWidget):
         # Initialize popup window (hidden)
         self.runtime_popup = None
         self.runtime_table = None
+
+        # Genetic Algorithm Optimization Panel
+        ga_group = QGroupBox("Genetic Algorithm Optimization")
+        ga_layout = QVBoxLayout()
+
+        # Info label
+        ga_info = QLabel("Optimize homography matrix using genetic algorithm")
+        ga_info.setWordWrap(True)
+        ga_info.setStyleSheet("color: #ccc; font-size: 11px; margin: 5px;")
+        ga_layout.addWidget(ga_info)
+
+        # Control buttons (Row 1)
+        ga_buttons1 = QHBoxLayout()
+
+        self.ga_start_button = QPushButton("Start GA")
+        self.ga_start_button.setToolTip("Initialize genetic algorithm with current parameters")
+        self.ga_start_button.clicked.connect(self._start_genetic_algorithm)
+        ga_buttons1.addWidget(self.ga_start_button)
+
+        self.ga_next_gen_button = QPushButton("Next Gen")
+        self.ga_next_gen_button.setToolTip("Proceed to next generation")
+        self.ga_next_gen_button.clicked.connect(self._evolve_ga_next_generation)
+        self.ga_next_gen_button.setEnabled(False)
+        ga_buttons1.addWidget(self.ga_next_gen_button)
+
+        ga_layout.addLayout(ga_buttons1)
+
+        # Control buttons (Row 2)
+        ga_buttons2 = QHBoxLayout()
+
+        self.ga_multi_gen_button = QPushButton("Skip 10 Gens")
+        self.ga_multi_gen_button.setToolTip("Proceed by 10 generations")
+        self.ga_multi_gen_button.clicked.connect(lambda: self._evolve_ga_generations(10))
+        self.ga_multi_gen_button.setEnabled(False)
+        ga_buttons2.addWidget(self.ga_multi_gen_button)
+
+        self.ga_reset_button = QPushButton("Reset GA")
+        self.ga_reset_button.setToolTip("Reset genetic algorithm")
+        self.ga_reset_button.clicked.connect(self._reset_genetic_algorithm)
+        self.ga_reset_button.setEnabled(False)
+        ga_buttons2.addWidget(self.ga_reset_button)
+
+        ga_layout.addLayout(ga_buttons2)
+
+        # Apply best button
+        self.ga_apply_button = QPushButton("Apply Best Parameters")
+        self.ga_apply_button.setToolTip("Apply best parameters found so far")
+        self.ga_apply_button.clicked.connect(self._apply_ga_best_parameters)
+        self.ga_apply_button.setEnabled(False)
+        self.ga_apply_button.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #2c5aa0;
+                color: white;
+                font-weight: bold;
+                border: 2px solid #1e3f73;
+                border-radius: 3px;
+                padding: 6px;
+                margin: 2px;
+            }
+            QPushButton:hover {
+                background-color: #3a6bb5;
+            }
+            QPushButton:disabled {
+                background-color: #444;
+                color: #888;
+                border-color: #666;
+            }
+        """
+        )
+        ga_layout.addWidget(self.ga_apply_button)
+
+        # Status display
+        ga_status = QFormLayout()
+        self.ga_generation_label = QLabel("0")
+        self.ga_generation_label.setStyleSheet("font-family: monospace; color: #fff;")
+        ga_status.addRow("Generation:", self.ga_generation_label)
+
+        self.ga_fitness_label = QLabel("0.000")
+        self.ga_fitness_label.setStyleSheet("font-family: monospace; color: #fff;")
+        ga_status.addRow("Best Fitness:", self.ga_fitness_label)
+
+        self.ga_population_label = QLabel("20")
+        self.ga_population_label.setStyleSheet("font-family: monospace; color: #fff;")
+        ga_status.addRow("Population:", self.ga_population_label)
+
+        ga_layout.addLayout(ga_status)
+
+        # Fitness progress chart (if available)
+        if CHARTS_AVAILABLE:
+            self.ga_chart_view = self._create_fitness_chart()
+            self.ga_chart_view.setMinimumHeight(120)
+            self.ga_chart_view.setMaximumHeight(150)
+            ga_layout.addWidget(self.ga_chart_view)
+        else:
+            chart_unavailable = QLabel("Fitness chart unavailable\n(PyQt5.QtChart not installed)")
+            chart_unavailable.setAlignment(Qt.AlignCenter)
+            chart_unavailable.setStyleSheet("color: #888; font-size: 10px; margin: 10px;")
+            ga_layout.addWidget(chart_unavailable)
+
+        ga_group.setLayout(ga_layout)
+        layout.addWidget(ga_group)
+
         # Add stretch to push everything to top
         layout.addStretch()
 
@@ -1905,3 +2041,428 @@ class HomographyTab(QWidget):
                 self.runtime_table.setItem(i, 1, QTableWidgetItem("0.0"))
                 self.runtime_table.setItem(i, 2, QTableWidgetItem("0.0"))
                 self.runtime_table.setItem(i, 3, QTableWidgetItem("0.0"))
+
+    # ===== GENETIC ALGORITHM METHODS =====
+
+    def _create_fitness_chart(self) -> Optional[Any]:
+        """Create fitness progress chart if PyQt5.QtChart is available.
+        
+        Returns:
+            QChartView widget or None if charts not available
+        """
+        if not CHARTS_AVAILABLE:
+            return None
+            
+        try:
+            self.ga_chart_view = QChartView()
+            self.ga_chart_view.setRenderHint(QPainter.Antialiasing)
+
+            # Create chart
+            self.ga_chart = QChart()
+            self.ga_chart.setTitle("Fitness Progress")
+            self.ga_chart.setAnimationOptions(QChart.SeriesAnimations)
+            self.ga_chart.setTheme(QChart.ChartThemeDark)
+
+            # Fitness series
+            self.ga_fitness_series = QLineSeries()
+            self.ga_fitness_series.setName("Best Fitness")
+            self.ga_chart.addSeries(self.ga_fitness_series)
+
+            # Setup axes
+            self.ga_axis_x = QValueAxis()
+            self.ga_axis_x.setLabelFormat("%d")
+            self.ga_axis_x.setTitleText("Generation")
+            self.ga_axis_x.setRange(0, 10)
+            self.ga_chart.addAxis(self.ga_axis_x, Qt.AlignBottom)
+            self.ga_fitness_series.attachAxis(self.ga_axis_x)
+
+            self.ga_axis_y = QValueAxis()
+            self.ga_axis_y.setLabelFormat("%.3f")
+            self.ga_axis_y.setTitleText("Fitness")
+            self.ga_axis_y.setRange(0, 1)
+            self.ga_chart.addAxis(self.ga_axis_y, Qt.AlignLeft)
+            self.ga_fitness_series.attachAxis(self.ga_axis_y)
+
+            self.ga_chart_view.setChart(self.ga_chart)
+            return self.ga_chart_view
+            
+        except Exception as e:
+            print(f"[HOMOGRAPHY] Error creating fitness chart: {e}")
+            return None
+
+    def _validate_ga_prerequisites(self) -> bool:
+        """Validate that genetic algorithm can be started.
+        
+        Returns:
+            True if GA can be started, False otherwise
+        """
+        if self.current_frame is None:
+            QMessageBox.warning(
+                self,
+                "Cannot Start GA",
+                "No video frame loaded. Please load a video first.",
+            )
+            return False
+
+        if not self.ransac_lines or len(self.ransac_lines) < 2:
+            QMessageBox.warning(
+                self,
+                "Insufficient Line Data",
+                "Need at least 2 detected field lines for optimization.\n\n"
+                "Please:\n"
+                "1. Enable field segmentation\n"
+                "2. Ensure lines are detected in the current frame\n"
+                "3. Try adjusting segmentation parameters if needed",
+            )
+            return False
+
+        return True
+
+    def _start_genetic_algorithm(self):
+        """Initialize and start genetic algorithm with current parameters."""
+        if not self._validate_ga_prerequisites():
+            return
+
+        try:
+            # Import GA module
+            from ..optimization.homography_optimizer import HomographyOptimizer
+
+            # Initialize optimizer with current parameters
+            self.ga_optimizer = HomographyOptimizer(
+                initial_params=self.homography_params,
+                population_size=get_setting("optimization.ga_population_size", 20),
+                elite_size=get_setting("optimization.ga_elite_size", 2),
+                mutation_rate=get_setting("optimization.ga_mutation_rate", 0.2),
+                crossover_rate=get_setting("optimization.ga_crossover_rate", 0.7),
+            )
+
+            # Calculate initial fitness
+            print("[HOMOGRAPHY] Evaluating initial GA population...")
+            self.ga_optimizer.evaluate_population(
+                self.current_frame, self.ransac_lines, self.ransac_confidences
+            )
+
+            # Update UI state
+            self.ga_running = True
+            self._update_ga_ui_state(running=True)
+            self._update_ga_display()
+
+            # Clear and initialize fitness chart
+            if CHARTS_AVAILABLE and self.ga_fitness_series:
+                self.ga_fitness_series.clear()
+                self._update_fitness_chart()
+
+            print(
+                f"[HOMOGRAPHY] GA started with population size {self.ga_optimizer.population_size}, "
+                f"initial best fitness: {self.ga_optimizer.best_fitness:.4f}"
+            )
+
+            # Show info message
+            QMessageBox.information(
+                self,
+                "GA Started",
+                f"Genetic algorithm initialized with current parameters.\n\n"
+                f"Population size: {self.ga_optimizer.population_size}\n"
+                f"Initial best fitness: {self.ga_optimizer.best_fitness:.4f}\n\n"
+                f"Click 'Next Gen' to evolve the population or 'Skip 10 Gens' to run multiple generations.\n"
+                f"You can apply the best solution at any time with 'Apply Best Parameters'.",
+            )
+
+        except Exception as e:
+            print(f"[HOMOGRAPHY] Error starting genetic algorithm: {e}")
+            QMessageBox.critical(
+                self, "GA Error", f"Failed to start genetic algorithm:\n{str(e)}"
+            )
+
+    def _evolve_ga_next_generation(self):
+        """Evolve genetic algorithm to the next generation."""
+        if not self.ga_optimizer or not self.ga_running:
+            return
+
+        try:
+            print(f"[HOMOGRAPHY] Evolving to generation {self.ga_optimizer.generation + 1}")
+
+            # Evolve to next generation
+            self.ga_optimizer.evolve()
+
+            # Evaluate new population
+            self.ga_optimizer.evaluate_population(
+                self.current_frame, self.ransac_lines, self.ransac_confidences
+            )
+
+            # Update UI
+            self._update_ga_display()
+            self._update_fitness_chart()
+
+            # Preview best parameters automatically
+            self._preview_ga_best_parameters()
+
+            print(
+                f"[HOMOGRAPHY] Generation {self.ga_optimizer.generation} complete, "
+                f"best fitness: {self.ga_optimizer.best_fitness:.4f}"
+            )
+
+        except Exception as e:
+            print(f"[HOMOGRAPHY] Error evolving generation: {e}")
+            QMessageBox.critical(
+                self, "GA Error", f"Error during evolution:\n{str(e)}"
+            )
+
+    def _evolve_ga_generations(self, num_generations: int):
+        """Evolve genetic algorithm for multiple generations.
+        
+        Args:
+            num_generations: Number of generations to evolve
+        """
+        if not self.ga_optimizer or not self.ga_running:
+            return
+
+        # Disable buttons during processing
+        self._update_ga_ui_state(running=True, processing=True)
+
+        # Create progress dialog
+        progress = QProgressDialog(
+            f"Evolving {num_generations} generations...", "Cancel", 0, num_generations, self
+        )
+        progress.setWindowTitle("Genetic Algorithm Evolution")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)  # Show immediately
+
+        try:
+            print(f"[HOMOGRAPHY] Evolving {num_generations} generations in batch")
+
+            # Process generations
+            for i in range(num_generations):
+                if progress.wasCanceled():
+                    print("[HOMOGRAPHY] GA evolution canceled by user")
+                    break
+
+                # Evolve and evaluate
+                self.ga_optimizer.evolve()
+                self.ga_optimizer.evaluate_population(
+                    self.current_frame, self.ransac_lines, self.ransac_confidences
+                )
+
+                # Update progress
+                progress.setValue(i + 1)
+                progress.setLabelText(
+                    f"Generation {self.ga_optimizer.generation}: "
+                    f"Best fitness {self.ga_optimizer.best_fitness:.4f}"
+                )
+
+                # Process events to keep UI responsive
+                QApplication.processEvents()
+
+            # Update UI
+            self._update_ga_display()
+            self._update_fitness_chart()
+
+            # Preview best parameters automatically
+            self._preview_ga_best_parameters()
+
+            print(
+                f"[HOMOGRAPHY] Batch evolution complete. Final generation: {self.ga_optimizer.generation}, "
+                f"best fitness: {self.ga_optimizer.best_fitness:.4f}"
+            )
+
+        except Exception as e:
+            print(f"[HOMOGRAPHY] Error during batch evolution: {e}")
+            QMessageBox.critical(
+                self, "GA Error", f"Error during batch evolution:\n{str(e)}"
+            )
+        finally:
+            # Re-enable buttons
+            self._update_ga_ui_state(running=True, processing=False)
+
+    def _preview_ga_best_parameters(self):
+        """Preview the best parameters found by genetic algorithm without permanently applying them."""
+        if not self.ga_optimizer:
+            return
+
+        try:
+            # Store original parameters
+            original_params = self.homography_params.copy()
+
+            # Temporarily apply best parameters
+            best_params = self.ga_optimizer.get_best_parameters()
+            for name, value in best_params.items():
+                if name in self.homography_params:
+                    self.homography_params[name] = value
+
+            # Update displays
+            self._update_displays()
+
+            # Restore original parameters (this keeps the display but reverts internal state)
+            self.homography_params = original_params
+
+        except Exception as e:
+            print(f"[HOMOGRAPHY] Error previewing GA parameters: {e}")
+
+    def _apply_ga_best_parameters(self):
+        """Apply the best parameters found by genetic algorithm."""
+        if not self.ga_optimizer or not self.ga_running:
+            return
+
+        try:
+            # Get best parameters
+            best_params = self.ga_optimizer.get_best_parameters()
+
+            # Apply to homography parameters and update UI
+            for name, value in best_params.items():
+                if name in self.homography_params:
+                    self.homography_params[name] = value
+                    self._update_parameter_ui(name, value)
+
+            # Update displays
+            self._update_displays()
+
+            # Show success message
+            stats = self.ga_optimizer.get_population_stats()
+            QMessageBox.information(
+                self,
+                "GA Parameters Applied",
+                f"Applied best parameters from generation {self.ga_optimizer.generation}\n\n"
+                f"Best fitness: {stats['best_fitness']:.4f}\n"
+                f"Average fitness: {stats['average_fitness']:.4f}\n"
+                f"Population std: {stats['fitness_std']:.4f}\n\n"
+                f"Parameters have been permanently applied.",
+            )
+
+            print(f"[HOMOGRAPHY] Applied GA best parameters with fitness {stats['best_fitness']:.4f}")
+
+        except Exception as e:
+            print(f"[HOMOGRAPHY] Error applying GA parameters: {e}")
+            QMessageBox.critical(
+                self, "GA Error", f"Error applying parameters:\n{str(e)}"
+            )
+
+    def _reset_genetic_algorithm(self):
+        """Reset genetic algorithm to initial state."""
+        self.ga_optimizer = None
+        self.ga_running = False
+        self.ga_generation_history.clear()
+        self.ga_fitness_history.clear()
+
+        # Update UI state
+        self._update_ga_ui_state(running=False)
+        self._clear_fitness_chart()
+
+        print("[HOMOGRAPHY] Genetic algorithm reset")
+
+    def _update_ga_ui_state(self, running: bool, processing: bool = False):
+        """Update GA UI button states.
+        
+        Args:
+            running: Whether GA is currently running
+            processing: Whether GA is currently processing (disable all controls)
+        """
+        if processing:
+            # Disable all buttons during processing
+            self.ga_start_button.setEnabled(False)
+            self.ga_next_gen_button.setEnabled(False)
+            self.ga_multi_gen_button.setEnabled(False)
+            self.ga_reset_button.setEnabled(False)
+            self.ga_apply_button.setEnabled(False)
+        elif running:
+            # GA is running, enable evolution controls
+            self.ga_start_button.setEnabled(False)
+            self.ga_next_gen_button.setEnabled(True)
+            self.ga_multi_gen_button.setEnabled(True)
+            self.ga_reset_button.setEnabled(True)
+            self.ga_apply_button.setEnabled(True)
+        else:
+            # GA not running, only enable start
+            self.ga_start_button.setEnabled(True)
+            self.ga_next_gen_button.setEnabled(False)
+            self.ga_multi_gen_button.setEnabled(False)
+            self.ga_reset_button.setEnabled(False)
+            self.ga_apply_button.setEnabled(False)
+
+    def _update_ga_display(self):
+        """Update GA status display with current information."""
+        if not self.ga_optimizer:
+            self.ga_generation_label.setText("0")
+            self.ga_fitness_label.setText("0.000")
+            self.ga_population_label.setText("20")
+            return
+
+        # Update status labels
+        self.ga_generation_label.setText(str(self.ga_optimizer.generation))
+        self.ga_fitness_label.setText(f"{self.ga_optimizer.best_fitness:.4f}")
+        self.ga_population_label.setText(str(self.ga_optimizer.population_size))
+
+    def _update_fitness_chart(self):
+        """Update fitness chart with new data point."""
+        if not CHARTS_AVAILABLE or not self.ga_optimizer or not self.ga_fitness_series:
+            return
+
+        try:
+            generation = self.ga_optimizer.generation
+            fitness = self.ga_optimizer.best_fitness
+
+            # Add data point
+            self.ga_fitness_series.append(generation, fitness)
+
+            # Auto-scale axes
+            if generation > self.ga_axis_x.max():
+                self.ga_axis_x.setRange(0, max(10, generation * 1.2))
+            if fitness > self.ga_axis_y.max():
+                self.ga_axis_y.setRange(0, max(1.0, fitness * 1.1))
+
+        except Exception as e:
+            print(f"[HOMOGRAPHY] Error updating fitness chart: {e}")
+
+    def _clear_fitness_chart(self):
+        """Clear fitness chart data."""
+        if CHARTS_AVAILABLE and self.ga_fitness_series:
+            self.ga_fitness_series.clear()
+            self.ga_axis_x.setRange(0, 10)
+            self.ga_axis_y.setRange(0, 1)
+
+    def _update_parameter_ui(self, param_name: str, value: float):
+        """Update UI elements for a specific parameter.
+        
+        Args:
+            param_name: Name of the parameter (e.g., 'H00')
+            value: New parameter value
+        """
+        try:
+            # Update slider position
+            if param_name in self.param_sliders:
+                # Get parameter range
+                if param_name in ["H00", "H01", "H10", "H11"]:
+                    param_range = get_setting("homography.slider_range_main", [-100.0, 100.0])
+                elif param_name in ["H20", "H21"]:
+                    param_range = get_setting("homography.slider_range_perspective", [-0.2, 0.2])
+                else:
+                    param_range = [-10000.0, 10000.0]
+
+                # Ensure range is a list of floats
+                if isinstance(param_range, list) and len(param_range) == 2:
+                    param_range = [float(param_range[0]), float(param_range[1])]
+                else:
+                    param_range = [-100.0, 100.0]  # Fallback
+
+                # Calculate slider position
+                slider_val = int(
+                    ((value - param_range[0]) / (param_range[1] - param_range[0])) * 1000
+                )
+                slider_val = max(0, min(1000, slider_val))  # Clamp to valid range
+
+                # Update slider without triggering change handler
+                self.param_sliders[param_name].blockSignals(True)
+                self.param_sliders[param_name].setValue(slider_val)
+                self.param_sliders[param_name].blockSignals(False)
+
+            # Update text input
+            if param_name in self.param_inputs:
+                self.param_inputs[param_name].blockSignals(True)
+                self.param_inputs[param_name].setText(f"{value:.6f}")
+                self.param_inputs[param_name].blockSignals(False)
+
+            # Update label
+            if param_name in self.param_labels:
+                self.param_labels[param_name].setText(f"{value:.6f}")
+
+        except Exception as e:
+            print(f"[HOMOGRAPHY] Error updating parameter UI for {param_name}: {e}")

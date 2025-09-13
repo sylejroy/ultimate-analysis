@@ -181,3 +181,55 @@ homography:
   slider_range_perspective: [-0.2, 0.2]      # Range for H20, H21 (perspective/extreme)
   buffer_factor: 1.8                         # Output canvas size multiplier (1.8 = 80% larger)
   output_aspect_ratio: 3.0                   # Height:width ratio for homography output canvas (3.0 = 3:1)
+
+# Genetic Algorithm Optimization Settings
+optimization:
+  # Population Parameters
+  ga_population_size: 20
+  ga_elite_size: 2              # Number of best individuals to preserve
+  ga_mutation_rate: 0.2         # Probability of parameter mutation
+  ga_crossover_rate: 0.7        # Probability of crossover between parents
+  ga_generations_per_batch: 10  # Default for "Skip N Gens" button
+  
+  # Fitness Function Weights (must sum to 1.0)
+  ga_fitness_weights:
+    alignment: 0.35             # Line alignment (vertical/horizontal)
+    coverage: 0.2               # Field coverage preservation  
+    visibility: 0.15            # Line visibility in warped view
+    proportion: 0.1             # Field proportion accuracy
+    distortion: 0.05            # Perspective distortion penalty
+    orientation: 0.15           # Vertical/horizontal line balance reward
+  
+  # Mutation Parameters
+  ga_mutation_amount: 0.1       # Scale factor for mutation magnitude
+  ga_adaptive_mutation: false   # Whether to decrease mutation over time
+  
+  # Convergence Parameters
+  ga_convergence_threshold: 0.001  # Stop if fitness improvement < this
+  ga_convergence_generations: 5    # Generations without improvement to trigger stop
+  ga_max_generations: 100          # Maximum generations before auto-stop
+  
+  # Line Alignment Evaluation
+  ga_line_alignment:
+    vertical_tolerance: 5.0     # Degrees tolerance for vertical lines
+    horizontal_tolerance: 5.0   # Degrees tolerance for horizontal lines
+    min_line_length: 10         # Minimum line length to consider (pixels)
+    confidence_weight: true     # Weight by RANSAC confidence scores
+  
+  # Field Coverage Evaluation  
+  ga_field_coverage:
+    black_pixel_threshold: 10   # Pixels below this value considered "black"
+    optimal_coverage_ratio: 0.75 # Optimal ratio of non-black pixels (avoids over-zooming)
+    edge_penalty: 0.1           # Penalty for content near edges
+  
+  # Field Proportion Evaluation
+  ga_field_proportion:
+    expected_ratio: 2.7         # Ultimate field width:length ratio
+    ratio_tolerance: 0.5        # Acceptable deviation from expected ratio
+
+  # Line Orientation Balance Evaluation
+  ga_line_orientation:
+    vertical_tolerance: 15.0    # Degrees tolerance for vertical line classification
+    horizontal_tolerance: 15.0  # Degrees tolerance for horizontal line classification  
+    min_line_length: 20         # Minimum line length to consider (pixels)
+    missing_orientation_penalty: 0.5  # Penalty for missing vertical OR horizontal lines
