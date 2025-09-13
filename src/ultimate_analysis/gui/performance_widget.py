@@ -9,9 +9,9 @@ Changes:
 """
 
 from collections import defaultdict, deque
-from typing import Deque, Dict, List, Optional, Tuple, Set
+from typing import Deque, Dict, List, Optional, Set, Tuple
 
-from PyQt5.QtCore import QTimer, pyqtSignal, Qt
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QGroupBox,
@@ -244,7 +244,9 @@ class PerformanceWidget(QWidget):
             return total
 
         own = self.metrics.get_stats(category, None)
-        has_own = (category, None) in self.metrics.series and len(self.metrics.series[(category, None)]) > 0
+        has_own = (category, None) in self.metrics.series and len(
+            self.metrics.series[(category, None)]
+        ) > 0
         if has_own:
             return own
 
@@ -286,13 +288,18 @@ class PerformanceWidget(QWidget):
             # Determine 'last' for display: 0 if not touched in this frame
             # For categories with own series, check (cat, None). Otherwise, check any child touched
             display_last = stats["last"]
-            has_own_series = (cat, None) in self.metrics.series and len(self.metrics.series[(cat, None)]) > 0
+            has_own_series = (cat, None) in self.metrics.series and len(
+                self.metrics.series[(cat, None)]
+            ) > 0
             if has_own_series:
                 if (cat, None) not in self._touched:
                     display_last = 0.0
             else:
                 # Sum-of-children category: if none of the children were touched this frame, show 0
-                any_child_touched = any((cat, sub) in self._touched for sub in self.metrics.children_of(cat) or self.known_children.get(cat, []))
+                any_child_touched = any(
+                    (cat, sub) in self._touched
+                    for sub in self.metrics.children_of(cat) or self.known_children.get(cat, [])
+                )
                 if not any_child_touched:
                     display_last = 0.0
 
@@ -308,8 +315,7 @@ class PerformanceWidget(QWidget):
                     child = self._ensure_child(cat, sub)
                     s = self.metrics.get_stats(cat, sub)
                     # Show 0 for 'last' if not touched this frame
-                    child_last = s['last'] if (cat, sub) in self._touched else 0.0
+                    child_last = s["last"] if (cat, sub) in self._touched else 0.0
                     child.setText(1, f"{child_last:.1f}")
                     child.setText(2, f"{s['avg']:.1f}")
                     child.setText(3, f"{s['max']:.1f}")
-

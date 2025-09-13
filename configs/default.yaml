@@ -21,12 +21,27 @@ video:
 # Model Configuration
 models:
   base_path: "data/models"
+  
+  # Backward compatibility - will be deprecated
   detection:
     default_model: "data/models/detection/20250802_1_detection_yolo11s_object_detection.v3i.yolov8/finetune_20250802_102035/weights/best.pt"
     confidence_threshold: 0.5
     nms_threshold: 0.45
     max_detections: 100
     cache_results: true
+  
+  # Separate player and disc detection models
+  player_detection:
+    default_model: "data/models/detection/20250802_1_detection_yolo11s_object_detection.v3i.yolov8/finetune_20250802_102035/weights/best.pt"
+    confidence_threshold: 0.5
+    nms_threshold: 0.45
+    max_detections: 50
+    
+  disc_detection:
+    default_model: "data/models/detection/20250802_1_detection_yolo11s_object_detection.v3i.yolov8/finetune_20250802_102035/weights/best.pt"
+    confidence_threshold: 0.6
+    nms_threshold: 0.45
+    max_detections: 5
   
   segmentation:
     default_model: "data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt"
