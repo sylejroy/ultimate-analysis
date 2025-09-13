@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 import yaml
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QWheelEvent
 from PyQt5.QtWidgets import (
     QApplication,
@@ -57,6 +57,7 @@ from ..gui.visualization import (
     draw_unified_field_mask,
     get_primary_field_color,
 )
+from ..gui.ransac_line_visualization import draw_ransac_field_lines
 from ..processing.field_segmentation import run_field_segmentation, set_field_model
 from ..processing.line_extraction import extract_raw_lines_from_segmentation
 from ..utils.segmentation_utils import (
@@ -357,11 +358,21 @@ class HomographyTab(QWidget):
         self.warped_scroll_area: Optional[QScrollArea] = None
 
         # Field segmentation state
-        self.show_segmentation = False  # Start with segmentation DISABLED for fast loading
+        self.show_segmentation = True  # Auto-enable for GA optimization
         self.current_segmentation_results = None
         self.segmentation_model_combo: Optional[QComboBox] = None
-        self.show_segmentation_checkbox: Optional[QCheckBox] = None
-        self.ransac_checkbox: Optional[QCheckBox] = None
+        # Auto-enable RANSAC line fitting for GA optimization
+        from ..config.settings import get_config
+        config = get_config()
+        if "models" not in config:
+            config["models"] = {}
+        if "segmentation" not in config["models"]:
+            config["models"]["segmentation"] = {}
+        if "contour" not in config["models"]["segmentation"]:
+            config["models"]["segmentation"]["contour"] = {}
+        if "ransac" not in config["models"]["segmentation"]["contour"]:
+            config["models"]["segmentation"]["contour"]["ransac"] = {}
+        config["models"]["segmentation"]["contour"]["ransac"]["enabled"] = True
         self.available_segmentation_models: List[str] = []
         self.ransac_lines: List[Tuple[np.ndarray, np.ndarray]] = (
             []
@@ -392,6 +403,7 @@ class HomographyTab(QWidget):
         # Genetic algorithm state
         self.ga_optimizer = None
         self.ga_running = False
+        self.ga_continuous_timer: Optional[QTimer] = None  # Timer for continuous evolution
         self.ga_generation_history = []
         self.ga_fitness_history = []
         
@@ -401,6 +413,8 @@ class HomographyTab(QWidget):
         self.ga_multi_gen_button: Optional[QPushButton] = None
         self.ga_reset_button: Optional[QPushButton] = None
         self.ga_apply_button: Optional[QPushButton] = None
+        self.ga_continuous_button: Optional[QPushButton] = None
+        self.ga_stop_button: Optional[QPushButton] = None
         self.ga_generation_label: Optional[QLabel] = None
         self.ga_fitness_label: Optional[QLabel] = None
         self.ga_population_label: Optional[QLabel] = None
@@ -430,10 +444,10 @@ class HomographyTab(QWidget):
         """Initialize the user interface."""
         main_layout = QVBoxLayout()
 
-        # Main content with splitter
+        # Main content with splitter (top part)
         content_splitter = QSplitter(Qt.Horizontal)
 
-        # Left panel: Video list and parameter controls
+        # Left panel: Video list and parameter controls (excluding GA)
         left_panel = self._create_left_panel()
         content_splitter.addWidget(left_panel)
 
@@ -445,6 +459,10 @@ class HomographyTab(QWidget):
         content_splitter.setSizes([300, 1200])
 
         main_layout.addWidget(content_splitter)
+
+        # GA controls below images for better chart visibility
+        ga_panel = self._create_ga_panel()
+        main_layout.addWidget(ga_panel)
 
         self.setLayout(main_layout)
 
@@ -548,31 +566,9 @@ class HomographyTab(QWidget):
         params_group.setLayout(params_layout)
         layout.addWidget(params_group)
 
-        # Field Segmentation Controls
+        # Field Segmentation Controls (Auto-enabled for GA optimization)
         segmentation_group = QGroupBox("Field Segmentation")
         segmentation_layout = QVBoxLayout()
-
-        # Show segmentation checkbox
-        self.show_segmentation_checkbox = QCheckBox("Show Field Segmentation")
-        # Set checkbox state without triggering signal during initialization
-        self.show_segmentation_checkbox.blockSignals(True)
-        self.show_segmentation_checkbox.setChecked(self.show_segmentation)
-        self.show_segmentation_checkbox.blockSignals(False)
-        self.show_segmentation_checkbox.stateChanged.connect(self._on_segmentation_toggled)
-        segmentation_layout.addWidget(self.show_segmentation_checkbox)
-
-        # RANSAC line fitting checkbox
-        self.ransac_checkbox = QCheckBox("Use RANSAC Line Fitting")
-        self.ransac_checkbox.setChecked(
-            get_setting("models.segmentation.contour.ransac.enabled", True)
-        )
-        self.ransac_checkbox.stateChanged.connect(self._on_ransac_toggled)
-        self.ransac_checkbox.setToolTip(
-            "Fit straight lines to contour segments using RANSAC algorithm"
-        )
-        segmentation_layout.addWidget(self.ransac_checkbox)
-
-        # (Removed) Line classification toggle was removed — classification is disabled globally
 
         # Model selection
         model_layout = QHBoxLayout()
@@ -628,6 +624,17 @@ class HomographyTab(QWidget):
         self.runtime_popup = None
         self.runtime_table = None
 
+        # Add stretch to push everything to top
+        layout.addStretch()
+
+        panel.setLayout(layout)
+        return panel
+
+    def _create_ga_panel(self) -> QWidget:
+        """Create the genetic algorithm optimization panel below images."""
+        panel = QWidget()
+        layout = QHBoxLayout()
+
         # Genetic Algorithm Optimization Panel
         ga_group = QGroupBox("Genetic Algorithm Optimization")
         ga_layout = QVBoxLayout()
@@ -670,6 +677,65 @@ class HomographyTab(QWidget):
         ga_buttons2.addWidget(self.ga_reset_button)
 
         ga_layout.addLayout(ga_buttons2)
+
+        # Continuous evolution controls (Row 3)
+        ga_buttons3 = QHBoxLayout()
+
+        self.ga_continuous_button = QPushButton("Evolve Continuously")
+        self.ga_continuous_button.setToolTip("Start continuous evolution - runs generations automatically")
+        self.ga_continuous_button.clicked.connect(self._start_continuous_evolution)
+        self.ga_continuous_button.setEnabled(False)
+        self.ga_continuous_button.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #28a745;
+                color: white;
+                font-weight: bold;
+                border: 2px solid #1e7e34;
+                border-radius: 3px;
+                padding: 6px;
+                margin: 2px;
+            }
+            QPushButton:hover {
+                background-color: #34ce57;
+            }
+            QPushButton:disabled {
+                background-color: #444;
+                color: #888;
+                border-color: #666;
+            }
+        """
+        )
+        ga_buttons3.addWidget(self.ga_continuous_button)
+
+        self.ga_stop_button = QPushButton("Stop Evolution")
+        self.ga_stop_button.setToolTip("Stop continuous evolution")
+        self.ga_stop_button.clicked.connect(self._stop_continuous_evolution)
+        self.ga_stop_button.setEnabled(False)
+        self.ga_stop_button.setStyleSheet(
+            """
+            QPushButton {
+                background-color: #dc3545;
+                color: white;
+                font-weight: bold;
+                border: 2px solid #c82333;
+                border-radius: 3px;
+                padding: 6px;
+                margin: 2px;
+            }
+            QPushButton:hover {
+                background-color: #e94966;
+            }
+            QPushButton:disabled {
+                background-color: #444;
+                color: #888;
+                border-color: #666;
+            }
+        """
+        )
+        ga_buttons3.addWidget(self.ga_stop_button)
+
+        ga_layout.addLayout(ga_buttons3)
 
         # Apply best button
         self.ga_apply_button = QPushButton("Apply Best Parameters")
@@ -715,23 +781,33 @@ class HomographyTab(QWidget):
 
         ga_layout.addLayout(ga_status)
 
-        # Fitness progress chart (if available)
+        ga_group.setLayout(ga_layout)
+        layout.addWidget(ga_group)
+
+        # Fitness progress chart (if available) - now has more space
         if CHARTS_AVAILABLE:
+            chart_group = QGroupBox("Fitness Evolution")
+            chart_layout = QVBoxLayout()
+            
             self.ga_chart_view = self._create_fitness_chart()
-            self.ga_chart_view.setMinimumHeight(120)
-            self.ga_chart_view.setMaximumHeight(150)
-            ga_layout.addWidget(self.ga_chart_view)
+            if self.ga_chart_view is not None:
+                self.ga_chart_view.setMinimumHeight(200)  # Increased height for better visibility
+                self.ga_chart_view.setMaximumHeight(300)
+                chart_layout.addWidget(self.ga_chart_view)
+                
+                chart_group.setLayout(chart_layout)
+                layout.addWidget(chart_group)
+                print("[HOMOGRAPHY] Fitness chart widget added to layout successfully")
+            else:
+                chart_unavailable = QLabel("Fitness chart creation failed")
+                chart_unavailable.setAlignment(Qt.AlignCenter)
+                chart_unavailable.setStyleSheet("color: #888; font-size: 10px; margin: 10px;")
+                layout.addWidget(chart_unavailable)
         else:
             chart_unavailable = QLabel("Fitness chart unavailable\n(PyQt5.QtChart not installed)")
             chart_unavailable.setAlignment(Qt.AlignCenter)
             chart_unavailable.setStyleSheet("color: #888; font-size: 10px; margin: 10px;")
-            ga_layout.addWidget(chart_unavailable)
-
-        ga_group.setLayout(ga_layout)
-        layout.addWidget(ga_group)
-
-        # Add stretch to push everything to top
-        layout.addStretch()
+            layout.addWidget(chart_unavailable)
 
         panel.setLayout(layout)
         return panel
@@ -1326,7 +1402,21 @@ class HomographyTab(QWidget):
                     print(
                         f"[HOMOGRAPHY] Applied transformed segmentation to warped frame: {len(self.current_segmentation_results)} results"
                     )
-                else:
+                
+                # Add RANSAC lines to the warped frame if available
+                if self.ransac_lines:
+                    warped_frame = draw_ransac_field_lines(
+                        warped_frame,
+                        self.ransac_lines,
+                        self.ransac_confidences,
+                        h_matrix,
+                        scale_factor=2.0,
+                    )
+                    print(
+                        f"[HOMOGRAPHY] Added RANSAC field lines to top-down view: {len(self.ransac_lines)} lines"
+                    )
+                
+                if warped_frame_with_segmentation is None:
                     print("[HOMOGRAPHY] Failed to apply transformed segmentation to warped frame")
             except Exception as e:
                 print(f"[HOMOGRAPHY] Error applying segmentation to warped frame: {e}")
@@ -1805,47 +1895,7 @@ class HomographyTab(QWidget):
 
         print(f"[HOMOGRAPHY] Loaded {len(self.available_segmentation_models)} segmentation models")
 
-    def _on_segmentation_toggled(self, state: int):
-        """Handle segmentation checkbox toggle."""
-        self.show_segmentation = state == 2  # Qt.Checked = 2
-
-        print(
-            f"[HOMOGRAPHY] Segmentation toggle: state={state}, show_segmentation={self.show_segmentation}"
-        )
-
-        if self.show_segmentation:
-            print("[HOMOGRAPHY] Field segmentation enabled")
-            self._run_segmentation_on_current_frame()
-        else:
-            print("[HOMOGRAPHY] Field segmentation disabled")
-            self.current_segmentation_results = None
-
-        self._update_displays()
-
-    def _on_ransac_toggled(self, state: int):
-        """Handle RANSAC line fitting checkbox toggle."""
-        ransac_enabled = state == 2  # Qt.Checked = 2
-
-        print(f"[HOMOGRAPHY] RANSAC toggle: state={state}, ransac_enabled={ransac_enabled}")
-
-        # Temporarily override the config value in memory
-        from ..config.settings import get_config
-
-        config = get_config()
-        if "models" not in config:
-            config["models"] = {}
-        if "segmentation" not in config["models"]:
-            config["models"]["segmentation"] = {}
-        if "contour" not in config["models"]["segmentation"]:
-            config["models"]["segmentation"]["contour"] = {}
-        if "ransac" not in config["models"]["segmentation"]["contour"]:
-            config["models"]["segmentation"]["contour"]["ransac"] = {}
-
-        config["models"]["segmentation"]["contour"]["ransac"]["enabled"] = ransac_enabled
-
-        # Update displays if segmentation is currently shown
-        if self.show_segmentation and self.current_segmentation_results:
-            self._update_displays()
+    # Removed segmentation and RANSAC toggle methods - features are now auto-enabled
 
     def _on_segmentation_model_changed(self, display_name: str):
         """Handle segmentation model selection change."""
@@ -2054,8 +2104,9 @@ class HomographyTab(QWidget):
             return None
             
         try:
-            self.ga_chart_view = QChartView()
-            self.ga_chart_view.setRenderHint(QPainter.Antialiasing)
+            # Create chart view
+            chart_view = QChartView()
+            chart_view.setRenderHint(QPainter.Antialiasing)
 
             # Create chart
             self.ga_chart = QChart()
@@ -2083,11 +2134,14 @@ class HomographyTab(QWidget):
             self.ga_chart.addAxis(self.ga_axis_y, Qt.AlignLeft)
             self.ga_fitness_series.attachAxis(self.ga_axis_y)
 
-            self.ga_chart_view.setChart(self.ga_chart)
-            return self.ga_chart_view
+            chart_view.setChart(self.ga_chart)
+            
+            print("[HOMOGRAPHY] Fitness chart created successfully")
+            return chart_view
             
         except Exception as e:
             print(f"[HOMOGRAPHY] Error creating fitness chart: {e}")
+            self.ga_fitness_series = None  # Ensure it's None on failure
             return None
 
     def _validate_ga_prerequisites(self) -> bool:
@@ -2148,7 +2202,7 @@ class HomographyTab(QWidget):
             self._update_ga_display()
 
             # Clear and initialize fitness chart
-            if CHARTS_AVAILABLE and self.ga_fitness_series:
+            if CHARTS_AVAILABLE and self.ga_fitness_series is not None:
                 self.ga_fitness_series.clear()
                 self._update_fitness_chart()
 
@@ -2338,6 +2392,10 @@ class HomographyTab(QWidget):
 
     def _reset_genetic_algorithm(self):
         """Reset genetic algorithm to initial state."""
+        # Stop continuous evolution if running
+        if self.ga_continuous_timer and self.ga_continuous_timer.isActive():
+            self.ga_continuous_timer.stop()
+        
         self.ga_optimizer = None
         self.ga_running = False
         self.ga_generation_history.clear()
@@ -2363,6 +2421,10 @@ class HomographyTab(QWidget):
             self.ga_multi_gen_button.setEnabled(False)
             self.ga_reset_button.setEnabled(False)
             self.ga_apply_button.setEnabled(False)
+            if self.ga_continuous_button:
+                self.ga_continuous_button.setEnabled(False)
+            if self.ga_stop_button:
+                self.ga_stop_button.setEnabled(False)
         elif running:
             # GA is running, enable evolution controls
             self.ga_start_button.setEnabled(False)
@@ -2370,6 +2432,10 @@ class HomographyTab(QWidget):
             self.ga_multi_gen_button.setEnabled(True)
             self.ga_reset_button.setEnabled(True)
             self.ga_apply_button.setEnabled(True)
+            if self.ga_continuous_button:
+                self.ga_continuous_button.setEnabled(True)
+            if self.ga_stop_button:
+                self.ga_stop_button.setEnabled(False)
         else:
             # GA not running, only enable start
             self.ga_start_button.setEnabled(True)
@@ -2377,6 +2443,10 @@ class HomographyTab(QWidget):
             self.ga_multi_gen_button.setEnabled(False)
             self.ga_reset_button.setEnabled(False)
             self.ga_apply_button.setEnabled(False)
+            if self.ga_continuous_button:
+                self.ga_continuous_button.setEnabled(False)
+            if self.ga_stop_button:
+                self.ga_stop_button.setEnabled(False)
 
     def _update_ga_display(self):
         """Update GA status display with current information."""
@@ -2393,28 +2463,58 @@ class HomographyTab(QWidget):
 
     def _update_fitness_chart(self):
         """Update fitness chart with new data point."""
-        if not CHARTS_AVAILABLE or not self.ga_optimizer or not self.ga_fitness_series:
+        if not CHARTS_AVAILABLE:
+            return
+        if not self.ga_optimizer:
+            return
+        if self.ga_fitness_series is None:
             return
 
         try:
             generation = self.ga_optimizer.generation
             fitness = self.ga_optimizer.best_fitness
+            
+            print(f"[HOMOGRAPHY] Adding fitness data point: generation={generation}, fitness={fitness:.4f}")
 
             # Add data point
             self.ga_fitness_series.append(generation, fitness)
+            
+            print(f"[HOMOGRAPHY] Fitness series now has {len(self.ga_fitness_series.pointsVector())} points")
 
             # Auto-scale axes
             if generation > self.ga_axis_x.max():
-                self.ga_axis_x.setRange(0, max(10, generation * 1.2))
-            if fitness > self.ga_axis_y.max():
-                self.ga_axis_y.setRange(0, max(1.0, fitness * 1.1))
+                new_range = max(10, generation * 1.2)
+                print(f"[HOMOGRAPHY] Scaling X axis to: 0-{new_range}")
+                self.ga_axis_x.setRange(0, new_range)
+            
+            # Dynamic Y-axis scaling based on actual data range
+            points = self.ga_fitness_series.pointsVector()
+            if len(points) > 0:
+                fitness_values = [point.y() for point in points]
+                min_fitness = min(fitness_values)
+                max_fitness = max(fitness_values)
+                
+                # Add 10% padding above and below the data range
+                range_padding = (max_fitness - min_fitness) * 0.1
+                if range_padding < 0.01:  # Minimum padding for very close values
+                    range_padding = 0.01
+                
+                y_min = max(0, min_fitness - range_padding)
+                y_max = max_fitness + range_padding
+                
+                # Only update if the range has changed significantly
+                current_min = self.ga_axis_y.min()
+                current_max = self.ga_axis_y.max()
+                if abs(y_min - current_min) > 0.001 or abs(y_max - current_max) > 0.001:
+                    print(f"[HOMOGRAPHY] Scaling Y axis to: {y_min:.4f}-{y_max:.4f}")
+                    self.ga_axis_y.setRange(y_min, y_max)
 
         except Exception as e:
             print(f"[HOMOGRAPHY] Error updating fitness chart: {e}")
 
     def _clear_fitness_chart(self):
         """Clear fitness chart data."""
-        if CHARTS_AVAILABLE and self.ga_fitness_series:
+        if CHARTS_AVAILABLE and self.ga_fitness_series is not None:
             self.ga_fitness_series.clear()
             self.ga_axis_x.setRange(0, 10)
             self.ga_axis_y.setRange(0, 1)
@@ -2466,3 +2566,76 @@ class HomographyTab(QWidget):
 
         except Exception as e:
             print(f"[HOMOGRAPHY] Error updating parameter UI for {param_name}: {e}")
+
+    def _start_continuous_evolution(self):
+        """Start continuous evolution using a timer."""
+        if not self.ga_optimizer or not self.ga_running:
+            print("[HOMOGRAPHY] Cannot start continuous evolution - GA not running")
+            return
+
+        print("[HOMOGRAPHY] Starting continuous evolution...")
+        
+        # Initialize timer if not already created
+        if not self.ga_continuous_timer:
+            self.ga_continuous_timer = QTimer()
+            self.ga_continuous_timer.timeout.connect(self._continuous_evolution_step)
+        
+        # Set timer interval (1 second between generations)
+        evolution_interval = get_setting("optimization.continuous_evolution_interval_ms", 1000)
+        self.ga_continuous_timer.start(evolution_interval)
+        
+        # Update button states
+        if self.ga_continuous_button:
+            self.ga_continuous_button.setEnabled(False)
+        if self.ga_stop_button:
+            self.ga_stop_button.setEnabled(True)
+        
+        # Disable other GA buttons during continuous evolution
+        if self.ga_next_gen_button:
+            self.ga_next_gen_button.setEnabled(False)
+        if self.ga_multi_gen_button:
+            self.ga_multi_gen_button.setEnabled(False)
+
+    def _stop_continuous_evolution(self):
+        """Stop continuous evolution."""
+        print("[HOMOGRAPHY] Stopping continuous evolution...")
+        
+        if self.ga_continuous_timer and self.ga_continuous_timer.isActive():
+            self.ga_continuous_timer.stop()
+        
+        # Update button states
+        if self.ga_continuous_button:
+            self.ga_continuous_button.setEnabled(True)
+        if self.ga_stop_button:
+            self.ga_stop_button.setEnabled(False)
+        
+        # Re-enable other GA buttons
+        if self.ga_next_gen_button:
+            self.ga_next_gen_button.setEnabled(True)
+        if self.ga_multi_gen_button:
+            self.ga_multi_gen_button.setEnabled(True)
+
+    def _continuous_evolution_step(self):
+        """Execute a single evolution step for continuous mode."""
+        try:
+            if not self.ga_optimizer or not self.ga_running:
+                print("[HOMOGRAPHY] GA stopped - stopping continuous evolution")
+                self._stop_continuous_evolution()
+                return
+            
+            # Run next generation
+            self._evolve_ga_next_generation()
+            
+            # Optional: Stop if convergence criteria are met
+            convergence_threshold = get_setting("optimization.convergence_threshold", 0.95)
+            max_generations = get_setting("optimization.max_generations", 200)
+            
+            if (self.ga_optimizer.best_fitness >= convergence_threshold or 
+                self.ga_optimizer.generation >= max_generations):
+                print(f"[HOMOGRAPHY] Stopping continuous evolution - convergence reached "
+                      f"(fitness: {self.ga_optimizer.best_fitness:.4f}, generation: {self.ga_optimizer.generation})")
+                self._stop_continuous_evolution()
+                
+        except Exception as e:
+            print(f"[HOMOGRAPHY] Error in continuous evolution step: {e}")
+            self._stop_continuous_evolution()

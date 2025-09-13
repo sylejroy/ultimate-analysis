@@ -2,18 +2,18 @@ detection:
   augment: false
   batch_size: 0.8
   copy_paste: 0.0
-  cosine_lr: false
-  epochs: 10
+  cosine_lr: true
+  epochs: 100
   hsv_h: 0.015
   hsv_s: 0.7
   hsv_v: 0.4
-  imgsz: 960
-  learning_rate: 0.01
+  imgsz: 640
+  learning_rate: 0.001
   mixup: 0.0
   momentum: 0.937
   mosaic: 1.0
-  optimizer: SGD
-  patience: 10
+  optimizer: AdamW
+  patience: 20
   weight_decay: 0.0005
   workers: 8
 output:

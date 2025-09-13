@@ -209,6 +209,11 @@ optimization:
   ga_convergence_generations: 5    # Generations without improvement to trigger stop
   ga_max_generations: 100          # Maximum generations before auto-stop
   
+  # Continuous Evolution Settings
+  continuous_evolution_interval_ms: 1000  # Milliseconds between generations in continuous mode
+  convergence_threshold: 0.95             # Fitness threshold to stop continuous evolution
+  max_generations: 200                    # Maximum generations for continuous evolution
+  
   # Line Alignment Evaluation
   ga_line_alignment:
     vertical_tolerance: 5.0     # Degrees tolerance for vertical lines
