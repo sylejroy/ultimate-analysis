@@ -175,29 +175,41 @@ def draw_detections(frame: np.ndarray, detections: List[Dict[str, Any]]) -> np.n
         bbox = detection.get("bbox", [])
         confidence = detection.get("confidence", 0.0)
         class_name = detection.get("class_name", "unknown")
+        model_type = detection.get("model_type", "unknown")
 
         if len(bbox) != 4:
             continue
 
         x1, y1, x2, y2 = map(int, bbox)
 
-        # Choose color based on class - disc should be bright and easy to spot, player subtle
+        # Choose color based on model type to differentiate between the two detection models
         color = VISUALIZATION_COLORS["DETECTION_BOX"]  # Default fallback (green)
 
-        # Ensure we have a valid class_name
-        if class_name and isinstance(class_name, str):
-            class_name_lower = class_name.lower().strip()
+        # Primary color selection based on model type
+        if model_type == "player_model":
+            color = VISUALIZATION_COLORS["PLAYER_MODEL"]  # Bright green for player model
+        elif model_type == "disc_model":
+            color = VISUALIZATION_COLORS["DISC_MODEL"]  # Bright orange for disc model
+        else:
+            # Fallback to class-based coloring for backward compatibility
+            if class_name and isinstance(class_name, str):
+                class_name_lower = class_name.lower().strip()
+                if class_name_lower == "disc" or "disc" in class_name_lower:
+                    color = VISUALIZATION_COLORS["DISC"]  # Bright cyan for disc
+                elif class_name_lower == "player" or "player" in class_name_lower:
+                    color = VISUALIZATION_COLORS["PLAYER"]  # Subtle gray for player
 
-            if class_name_lower == "disc" or "disc" in class_name_lower:
-                color = VISUALIZATION_COLORS["DISC"]  # Bright cyan for disc - very easy to spot
-            elif class_name_lower == "player" or "player" in class_name_lower:
-                color = VISUALIZATION_COLORS["PLAYER"]  # Subtle gray for player
+        # Draw bounding box with thicker line for better visibility
+        cv2.rectangle(vis_frame, (x1, y1), (x2, y2), color, 3)
 
-        # Draw bounding box
-        cv2.rectangle(vis_frame, (x1, y1), (x2, y2), color, 2)
-
-        # Draw label
-        label = f"{class_name}: {confidence:.2f}"
+        # Create enhanced label showing both class and model
+        model_label = ""
+        if model_type == "player_model":
+            model_label = " [PM]"  # Player Model
+        elif model_type == "disc_model":
+            model_label = " [DM]"  # Disc Model
+        
+        label = f"{class_name}: {confidence:.2f}{model_label}"
         label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
 
         # Draw label background
@@ -451,6 +463,42 @@ def draw_tracks(
 
         # Draw bounding box with unique track color
         cv2.rectangle(vis_frame, (x1, y1), (x2, y2), color, 3)  # Thicker line for better visibility
+
+        # Add model type indicator in corner if available
+        model_type = getattr(track, "model_type", None)
+        if model_type:
+            # Add colored corner marker to indicate model type
+            corner_size = 15
+            if model_type == "player_model":
+                corner_color = VISUALIZATION_COLORS["PLAYER_MODEL"]  # Bright green
+                # Top-left corner marker
+                cv2.rectangle(
+                    vis_frame, 
+                    (x1, y1), 
+                    (x1 + corner_size, y1 + corner_size), 
+                    corner_color, 
+                    -1
+                )
+                # Add "P" for player model
+                cv2.putText(
+                    vis_frame, "P", (x1 + 2, y1 + 12), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1
+                )
+            elif model_type == "disc_model":
+                corner_color = VISUALIZATION_COLORS["DISC_MODEL"]  # Bright orange
+                # Top-right corner marker
+                cv2.rectangle(
+                    vis_frame, 
+                    (x2 - corner_size, y1), 
+                    (x2, y1 + corner_size), 
+                    corner_color, 
+                    -1
+                )
+                # Add "D" for disc model
+                cv2.putText(
+                    vis_frame, "D", (x2 - 12, y1 + 12), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1
+                )
 
         # Draw track ID with background for better visibility
         track_label = f"ID:{track_id}"

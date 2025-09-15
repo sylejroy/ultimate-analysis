@@ -4,8 +4,9 @@ This module handles running YOLO models for object detection on video frames.
 Detects players, discs, and other relevant objects in Ultimate Frisbee games.
 """
 
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import yaml
@@ -68,8 +69,8 @@ def _get_model_training_params(model_path: str) -> Dict[str, Any]:
 
 def _run_single_model_inference(
     frame: np.ndarray, model: Any, model_imgsz: Optional[int], config_prefix: str, target_class: str
-) -> List[Dict[str, Any]]:
-    """Run inference on a single model and return normalized detections.
+) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
+    """Run inference on a single model and return normalized detections with detailed timing.
 
     Args:
         frame: Input video frame
@@ -79,11 +80,24 @@ def _run_single_model_inference(
         target_class: Target class name to assign to all detections
 
     Returns:
-        List of detection dictionaries
+        Tuple of (List of detection dictionaries, timing_breakdown dict)
     """
     detections: List[Dict[str, Any]] = []
+    
+    # Timing breakdown structure
+    timing = {
+        "preprocessing": 0.0,
+        "inference": 0.0,
+        "postprocessing": 0.0,
+        "total": 0.0
+    }
+    
+    total_start = time.perf_counter()
 
     try:
+        # === PREPROCESSING PHASE ===
+        preprocess_start = time.perf_counter()
+        
         # Get inference parameters from config
         confidence_threshold = get_setting(f"{config_prefix}.confidence_threshold", 0.5)
         nms_threshold = get_setting(f"{config_prefix}.nms_threshold", 0.45)
@@ -91,7 +105,13 @@ def _run_single_model_inference(
         # Determine image size to use - prefer model's training size
         imgsz = model_imgsz if model_imgsz else 640
 
-        # Run YOLO inference
+        # Determine model type from config prefix
+        model_type = "player_model" if "player_detection" in config_prefix else "disc_model"
+        
+        timing["preprocessing"] = time.perf_counter() - preprocess_start
+
+        # === INFERENCE PHASE ===
+        inference_start = time.perf_counter()
         results = model.predict(
             frame,
             conf=confidence_threshold,
@@ -101,7 +121,11 @@ def _run_single_model_inference(
             save=False,
             show=False,
         )
+        timing["inference"] = time.perf_counter() - inference_start
 
+        # === POSTPROCESSING PHASE ===
+        postprocess_start = time.perf_counter()
+        
         # Process results
         for result in results:
             if hasattr(result, "boxes") and result.boxes is not None:
@@ -124,8 +148,11 @@ def _run_single_model_inference(
                             "confidence": conf,
                             "class_id": cls,
                             "class_name": target_class,  # Explicitly set target class
+                            "model_type": model_type,  # Add model type for visualization differentiation
                         }
                     )
+        
+        timing["postprocessing"] = time.perf_counter() - postprocess_start
 
     except Exception as e:
         print(f"[INFERENCE] Error during {target_class} model inference: {e}")
@@ -133,8 +160,16 @@ def _run_single_model_inference(
 
         traceback.print_exc()
 
-    print(f"[INFERENCE] Found {len(detections)} {target_class} detections")
-    return detections
+    timing["total"] = time.perf_counter() - total_start
+    
+    # Enhanced logging with subcategories
+    print(f"[INFERENCE] {target_class.title()} model breakdown:")
+    print(f"[INFERENCE]   ├─ Preprocessing: {timing['preprocessing']*1000:5.1f}ms")
+    print(f"[INFERENCE]   ├─ Inference:     {timing['inference']*1000:5.1f}ms")
+    print(f"[INFERENCE]   ├─ Postprocessing:{timing['postprocessing']*1000:5.1f}ms")
+    print(f"[INFERENCE]   └─ Total:         {timing['total']*1000:5.1f}ms ({len(detections)} detections)")
+    
+    return detections, timing
 
 
 def _resolve_model_path(model_path: str) -> Optional[str]:
@@ -292,26 +327,40 @@ def set_disc_model(model_path: str) -> bool:
         return False
 
 
-def run_inference(frame: np.ndarray, model_name: Optional[str] = None) -> List[Dict[str, Any]]:
+def run_inference(
+    frame: np.ndarray, 
+    model_name: Optional[str] = None, 
+    return_timing: bool = False
+) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], Dict[str, float]]]:
     """Run YOLO inference on a video frame using separate player and disc models.
 
     Args:
         frame: Input video frame as numpy array (H, W, C) in BGR format
         model_name: Optional model name for backward compatibility (will set as player model)
+        return_timing: If True, return tuple of (detections, timing_info)
 
     Returns:
-        List of detection dictionaries with keys:
-        - bbox: [x1, y1, x2, y2] bounding box coordinates
-        - confidence: Detection confidence score
-        - class_id: Integer class ID (local to each model)
-        - class_name: String class name ('player' or 'disc')
+        If return_timing=False:
+            List of detection dictionaries with keys:
+            - bbox: [x1, y1, x2, y2] bounding box coordinates
+            - confidence: Detection confidence score
+            - class_id: Integer class ID (local to each model)
+            - class_name: String class name ('player' or 'disc')
+            - model_type: String model type ('player_model' or 'disc_model')
+            
+        If return_timing=True:
+            Tuple of (detections_list, timing_dict) where timing_dict contains:
+            - player_time: Player model inference time in seconds
+            - disc_time: Disc model inference time in seconds
+            - total_time: Total inference time in seconds
+            - player_count: Number of player detections
+            - disc_count: Number of disc detections
 
     Example:
         detections = run_inference(frame)
-        for det in detections:
-            x1, y1, x2, y2 = det['bbox']
-            conf = det['confidence']
-            class_name = det['class_name']
+        # Or with timing:
+        detections, timing = run_inference(frame, return_timing=True)
+        print(f"Player model took {timing['player_time']*1000:.1f}ms")
     """
     global _player_model, _disc_model, _detection_model, _current_model_path
 
@@ -336,43 +385,126 @@ def run_inference(frame: np.ndarray, model_name: Optional[str] = None) -> List[D
 
     # Collect detections from both models
     all_detections: List[Dict[str, Any]] = []
+    total_inference_start = time.perf_counter()
+    
+    player_timing = {}
+    disc_timing = {}
+    player_count = 0
+    disc_count = 0
 
     # Run player detection
     if _player_model is not None:
-        player_detections = _run_single_model_inference(
+        print(f"[INFERENCE] ┌─ Running player model inference...")
+        player_detections, player_timing = _run_single_model_inference(
             frame, _player_model, _player_model_imgsz, "models.player_detection", "player"
         )
+        player_count = len(player_detections)
         all_detections.extend(player_detections)
+    else:
+        print("[INFERENCE] Player model not loaded")
 
     # Run disc detection
     if _disc_model is not None:
-        disc_detections = _run_single_model_inference(
+        print(f"[INFERENCE] ┌─ Running disc model inference...")
+        disc_detections, disc_timing = _run_single_model_inference(
             frame, _disc_model, _disc_model_imgsz, "models.disc_detection", "disc"
         )
+        disc_count = len(disc_detections)
         all_detections.extend(disc_detections)
+    else:
+        print("[INFERENCE] Disc model not loaded")
+
+    total_inference_time = time.perf_counter() - total_inference_start
+    
+    # Hierarchical timing summary
+    print(f"[INFERENCE] ═══ INFERENCE TIMING SUMMARY ═══")
+    
+    if player_timing:
+        print(f"[INFERENCE] Player Model ({player_count} detections):")
+        print(f"[INFERENCE]   ├─ Preprocessing: {player_timing.get('preprocessing', 0)*1000:5.1f}ms")
+        print(f"[INFERENCE]   ├─ Inference:     {player_timing.get('inference', 0)*1000:5.1f}ms")
+        print(f"[INFERENCE]   ├─ Postprocessing:{player_timing.get('postprocessing', 0)*1000:5.1f}ms")
+        print(f"[INFERENCE]   └─ Subtotal:      {player_timing.get('total', 0)*1000:5.1f}ms")
+    else:
+        print(f"[INFERENCE] Player Model: Not loaded")
+    
+    if disc_timing:
+        print(f"[INFERENCE] Disc Model ({disc_count} detections):")
+        print(f"[INFERENCE]   ├─ Preprocessing: {disc_timing.get('preprocessing', 0)*1000:5.1f}ms")
+        print(f"[INFERENCE]   ├─ Inference:     {disc_timing.get('inference', 0)*1000:5.1f}ms")
+        print(f"[INFERENCE]   ├─ Postprocessing:{disc_timing.get('postprocessing', 0)*1000:5.1f}ms")
+        print(f"[INFERENCE]   └─ Subtotal:      {disc_timing.get('total', 0)*1000:5.1f}ms")
+    else:
+        print(f"[INFERENCE] Disc Model: Not loaded")
+    
+    print(f"[INFERENCE] ─────────────────────────────────")
+    print(f"[INFERENCE] TOTAL TIME:      {total_inference_time*1000:5.1f}ms")
+    print(f"[INFERENCE] TOTAL DETECTIONS: {len(all_detections)}")
+    
+    # Performance comparison
+    player_total = player_timing.get('total', 0) if player_timing else 0
+    disc_total = disc_timing.get('total', 0) if disc_timing else 0
+    
+    if player_total > 0 and disc_total > 0:
+        print(f"[INFERENCE] MODEL RATIO:     {player_total/disc_total:.2f}x (Player/Disc)")
+        
+        # Show which phases take the most time
+        player_inference_time = player_timing.get('inference', 0)
+        disc_inference_time = disc_timing.get('inference', 0)
+        total_inference_only = player_inference_time + disc_inference_time
+        
+        if total_inference_only > 0:
+            inference_percentage = (total_inference_only / total_inference_time) * 100
+            print(f"[INFERENCE] INFERENCE %:     {inference_percentage:.1f}% of total time")
+    
+    print(f"[INFERENCE] ═══════════════════════════════════")
 
     # If no models are available, return debug detections
     if _player_model is None and _disc_model is None:
         print("[INFERENCE] No detection models available")
+        debug_detections = []
         if get_setting("app.debug", False):
             h, w = frame.shape[:2]
-            return [
+            debug_detections = [
                 {
                     "bbox": [w // 4, h // 4, 3 * w // 4, 3 * h // 4],
                     "confidence": 0.85,
                     "class_id": 0,
                     "class_name": "player",
+                    "model_type": "player_model",
                 },
                 {
                     "bbox": [w // 2 - 20, h // 2 - 20, w // 2 + 20, h // 2 + 20],
                     "confidence": 0.75,
                     "class_id": 0,
                     "class_name": "disc",
+                    "model_type": "disc_model",
                 },
             ]
-        return []
+        
+        if return_timing:
+            timing_info = {
+                "player_time": 0.0,
+                "disc_time": 0.0,
+                "total_time": 0.0,
+                "player_count": 0,
+                "disc_count": 0
+            }
+            return debug_detections, timing_info
+        return debug_detections
 
     print(f"[INFERENCE] Found {len(all_detections)} total detections")
+    
+    if return_timing:
+        timing_info = {
+            "player_timing": player_timing,
+            "disc_timing": disc_timing,
+            "total_time": total_inference_time,
+            "player_count": player_count,
+            "disc_count": disc_count
+        }
+        return all_detections, timing_info
+    
     return all_detections
 
 

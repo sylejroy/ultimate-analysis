@@ -38,8 +38,8 @@ models:
     max_detections: 50
     
   disc_detection:
-    default_model: "data/models/detection/20250802_1_detection_yolo11s_object_detection.v3i.yolov8/finetune_20250802_102035/weights/best.pt"
-    confidence_threshold: 0.6
+    default_model: "data/models/detection/20250913_4_detection_disc_yolo11s_object_detection_disc.v1i.yolov8/finetune_20250913_205313/weights/best.pt"
+    confidence_threshold: 0.3
     nms_threshold: 0.45
     max_detections: 5
   

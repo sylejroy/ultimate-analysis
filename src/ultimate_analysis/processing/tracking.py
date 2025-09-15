@@ -40,12 +40,14 @@ class Track:
         class_id: int,
         confidence: float,
         class_name: str = "unknown",
+        model_type: str = "unknown",
     ):
         self.track_id = track_id
         self.bbox = bbox  # [x1, y1, x2, y2]
         self.class_id = class_id
         self.confidence = confidence
         self.class_name = class_name
+        self.model_type = model_type  # Track which model detected this
         self.det_class = class_name  # For compatibility with existing code
 
     def to_ltrb(self) -> List[float]:
@@ -219,6 +221,9 @@ def _run_deepsort_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) 
 
             # Map class_id to class_name
             class_name = _get_class_name_from_id(class_id)
+            
+            # Determine model type from class name (this works since each model specializes in its class)
+            model_type = "player_model" if class_name == "player" else "disc_model"
 
             # Create our Track object
             our_track = Track(
@@ -227,6 +232,7 @@ def _run_deepsort_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) 
                 class_id=class_id,
                 confidence=confidence,
                 class_name=class_name,
+                model_type=model_type,
             )
 
             tracks.append(our_track)
@@ -268,6 +274,7 @@ def _run_simple_tracking(detections: List[Dict[str, Any]]) -> List[Track]:
             class_id=detection["class_id"],
             confidence=detection["confidence"],
             class_name=detection.get("class_name", "unknown"),
+            model_type=detection.get("model_type", "unknown"),
         )
         tracks.append(track)
 

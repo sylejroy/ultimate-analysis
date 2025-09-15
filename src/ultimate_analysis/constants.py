@@ -61,6 +61,9 @@ VISUALIZATION_COLORS = {
     # Class-specific colors
     "DISC": (0, 255, 255),  # Bright cyan - easy to spot
     "PLAYER": (128, 128, 128),  # Subtle gray
+    # Model-specific colors for differentiation
+    "PLAYER_MODEL": (0, 200, 0),  # Bright green for player model detections
+    "DISC_MODEL": (0, 0, 255),  # Bright red for disc model detections (changed from orange for better visibility)
 }
 
 # Performance monitoring
@@ -89,7 +92,7 @@ FALLBACK_DEFAULTS = {
     "tracker_type": "deepsort",
     "model_detection": "data/models/detection/20250802_1_detection_yolo11s_object_detection.v3i.yolov8/finetune_20250802_102035/weights/best.pt",
     "model_player_detection": "data/models/detection/20250802_1_detection_yolo11s_object_detection.v3i.yolov8/finetune_20250802_102035/weights/best.pt",
-    "model_disc_detection": "data/models/detection/20250802_1_detection_yolo11s_object_detection.v3i.yolov8/finetune_20250802_102035/weights/best.pt",
+    "model_disc_detection": "data/models/detection/20250913_4_detection_disc_yolo11s_object_detection_disc.v1i.yolov8/finetune_20250913_205313/weights/best.pt",
     "model_segmentation": "data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt",
 }
 

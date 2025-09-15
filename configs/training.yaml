@@ -3,17 +3,17 @@ detection:
   batch_size: 0.8
   copy_paste: 0.0
   cosine_lr: true
-  epochs: 100
+  epochs: 1000
   hsv_h: 0.015
   hsv_s: 0.7
   hsv_v: 0.4
-  imgsz: 640
+  imgsz: 1280
   learning_rate: 0.001
   mixup: 0.0
   momentum: 0.937
   mosaic: 1.0
   optimizer: AdamW
-  patience: 20
+  patience: 100
   weight_decay: 0.0005
   workers: 8
 output:
