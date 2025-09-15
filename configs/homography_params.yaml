@@ -1,16 +1,16 @@
 homography_parameters:
   H00: 3.4000000000000057
   H01: 7.800000000000011
-  H02: -2580.0
+  H02: -2716.560363495172
   H10: 0.0
-  H11: 57.80000000000001
-  H12: -6000.0
+  H11: 51.33107148888665
+  H12: -6653.672295443896
   H20: 0.0
   H21: 0.014800000000000008
 metadata:
-  created_at: '2025-09-10T15:31:26.875304'
+  created_at: '2025-09-13T20:50:41.368696'
   description: Default homography parameters (updated by user)
   video_file: portland_vs_san_francisco_2024_snippet_4_40912.mp4
-  frame_index: 132
+  frame_index: 20
   application: Ultimate Analysis
   version: '1.0'
