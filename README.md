@@ -1,35 +1,37 @@
+
 # Ultimate Analysis
 
-A PyQt5-based video analysis application for Ultimate Frisbee game analysis using computer vision and YOLO models.
+A PyQt5-based video analysis application for Ultimate Frisbee, featuring real-time computer vision using YOLO models, DeepSORT tracking, and OCR-based player identification.
 
 ![Main Analysis Interface](docs/gui_example_main_analysis.png)
 
-## Features
+## Implemented Features
 
-- **Real-time Object Detection**: YOLO-based player and disc tracking
-- **Player Identification**: Jersey number recognition with OCR
-- **Field Segmentation**: Automated field boundary detection
-- **Homography Estimation**: Interactive perspective correction and field mapping
-- **Model Training**: Custom YOLO model training interface
-- **Performance Monitoring**: Built-in timing and memory analysis
+- **Real-time Object Detection**: Detects players and discs in video frames using YOLO models. Supports separate models for player and disc detection.
+- **Multi-object Tracking**: Maintains consistent player and disc identities across frames using DeepSORT. Visualizes track histories and foot-level positions.
+- **Player Identification (OCR)**: Recognizes jersey numbers using EasyOCR, with a dedicated tab for parameter tuning and crop extraction.
+- **Field Segmentation**: Detects field boundaries and regions using YOLO-based segmentation models. Visualizes overlays and supports perspective correction.
+- **Homography Estimation**: Interactive tab for perspective correction, field mapping, and overlaying segmentation results. Includes parameter sliders, real-time preview, and genetic algorithm optimization.
+- **Model Training Interface**: GUI for training custom YOLO detection and segmentation models. Supports dataset selection, parameter tuning, live progress monitoring, and baseline comparison.
+- **Performance Monitoring**: Built-in timing and memory analysis widgets for runtime profiling.
 
 ## Screenshots
 
 ### Main Analysis Interface
 ![Main Analysis](docs/gui_example_main_analysis.png)
-*Real-time video analysis with object detection and tracking*
+*Real-time video analysis with object detection, tracking, and player ID*
 
 ### Homography Estimation Interface
 ![Homography Estimation](docs/gui_example_homography.png)
-*Interactive perspective correction with real-time transformation preview*
+*Interactive perspective correction and field mapping*
 
-### Model Training Interface  
+### Model Training Interface
 ![Model Training](docs/gui_example_model_training.png)
-*Train custom YOLO models for improved detection accuracy*
+*Train custom YOLO models with live progress graphs and baseline comparison*
 
 ### OCR Tuning Interface
 ![OCR Tuning](docs/gui_example_ocr_tuning.png)
-*Fine-tune player identification and jersey number recognition*
+*Fine-tune OCR parameters for jersey number recognition*
 
 ## Quick Start
 
@@ -56,28 +58,11 @@ A PyQt5-based video analysis application for Ultimate Frisbee game analysis usin
 
 ### Basic Usage
 
-1. Load a video file through the File menu
-2. Select appropriate YOLO models in settings
+1. Load a video file through the Main Analysis tab
+2. Select YOLO models for player/disc detection and field segmentation
 3. Click play to start real-time analysis
 4. Use the Homography tab for perspective correction and field mapping
-5. Access training and OCR tuning features through their respective tabs
-
-## Key Features Detail
-
-### Homography Estimation
-Interactive perspective correction tool with:
-- **Real-time Preview**: Side-by-side original and transformed views
-- **Parameter Sliders**: Fine-tune transformation matrix values
-- **Field Segmentation Overlay**: Visualize field boundaries on corrected perspective
-- **Save/Load**: Persist homography parameters for different camera angles
-- **Zoom & Grid**: Enhanced visualization aids for precise alignment
-
-### DeepSORT Tracking
-Reliable multi-object tracking featuring:
-- **Consistent IDs**: Maintains player identities across frames
-- **Jersey Integration**: Links jersey numbers with tracking IDs
-- **Trajectory History**: Visualizes player movement patterns
-- **Foot-level Tracking**: Accurate ground-plane position tracking
+5. Access Model Training and OCR Tuning tabs for advanced features
 
 ## Configuration
 
@@ -89,20 +74,20 @@ Configuration files are in `configs/`:
 
 ## Development
 
-The project follows the KISS principle with a 500-line file limit. Key directories:
+Project follows the KISS principle (max 500 lines per file). Key directories:
 
-- `src/ultimate_analysis/gui/` - PyQt5 interface
-- `src/ultimate_analysis/processing/` - ML inference and tracking
+- `src/ultimate_analysis/gui/` - PyQt5 interface and tabs
+- `src/ultimate_analysis/processing/` - ML inference, tracking, segmentation
 - `src/ultimate_analysis/config/` - YAML configuration management
 - `data/models/` - YOLO models (detection, segmentation, pose)
 
-See `docs/DEVELOPMENT_GUIDELINES.md` for detailed development standards.
+See `docs/DEVELOPMENT_GUIDELINES.md` for coding standards.
 
 ## Models
 
-Uses custom-trained YOLO models:
-- **Detection**: Player and disc detection (`yolo11l.pt`)
-- **Segmentation**: Field boundary detection (`yolo11l-seg.pt`)  
+Custom-trained YOLO models:
+- **Detection**: Player and disc detection (`yolo11l.pt`, `yolo11s.pt`, etc.)
+- **Segmentation**: Field boundary detection (`yolo11l-seg.pt`, etc.)
 - **Player ID**: EasyOCR for jersey number recognition
 
 Models are cached for performance and organized by training runs in `data/models/`.
@@ -111,9 +96,7 @@ Models are cached for performance and organized by training runs in `data/models
 
 GNU General Public License v3.0 - see LICENSE file for details.
 
-## Upcoming Features & Improvements
+## Notes
 
-- Enhance disc detection by implementing separate models for player and disc identification.
-- Introduce a “Realtime Mode” that launches the app with only the main tab, streamlining the interface and removing exploratory tabs.
-- Utilize detected field lines to refine the homography matrix—consider integrating a particle filter for improved accuracy.
-- Implement asynchronous processing to boost realtime performance.
+- All features listed above are confirmed as implemented in the codebase.
+- Upcoming features and experimental ideas are tracked in project documentation, not in this README.
