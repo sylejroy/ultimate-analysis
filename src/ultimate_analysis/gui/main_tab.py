@@ -1801,10 +1801,12 @@ class MainTab(QWidget):
 
                     # Calculate output canvas size with 3:1 aspect ratio
                     output_width, output_height = self._calculate_output_canvas_size(width, height)
-
+                    
+                    # Map the full frame to top-down view
                     warped_frame = cv2.warpPerspective(
                         frame, self.homography_matrix, (output_width, output_height)
                     )
+                    
                     homography_calc_duration_ms = (time.time() - homography_calc_start) * 1000
                     self.performance_widget.add_processing_measurement(
                         "Homography Calculation", homography_calc_duration_ms
@@ -1870,11 +1872,13 @@ class MainTab(QWidget):
                     self.homography_warped_frame = warped_frame
 
                     # Convert warped frame to Qt format and display (preserve aspect ratio)
+                    qt_convert_start = time.time()
                     warped_height, warped_width, warped_channel = warped_frame.shape
                     bytes_per_line = 3 * warped_width
 
                     # Ensure the frame is contiguous for QImage
-                    warped_frame = np.ascontiguousarray(warped_frame)
+                    if not warped_frame.flags['C_CONTIGUOUS']:
+                        warped_frame = np.ascontiguousarray(warped_frame)
 
                     q_image = QImage(
                         warped_frame.data,
@@ -1886,19 +1890,31 @@ class MainTab(QWidget):
 
                     # Display with preserved aspect ratio using ZoomableImageLabel
                     pixmap = QPixmap.fromImage(q_image)
-                    self.homography_display_label.set_image(pixmap)
-
-                    # Record homography processing time
-                    homography_duration_ms = (time.time() - homography_start_time) * 1000
-                    # Exclude calculation time from display time to avoid double counting
-                    homography_display_ms = max(
-                        0.0, homography_duration_ms - homography_calc_duration_ms
-                    )
+                    qt_convert_ms = (time.time() - qt_convert_start) * 1000
                     self.performance_widget.add_processing_measurement(
-                        "Homography Display", homography_display_ms
+                        "Homography Qt Conversion", qt_convert_ms
                     )
 
-                    self.logger.debug("[MAIN_TAB] Updated homography display using loaded matrix")
+                    # Set image timing
+                    qt_display_start = time.time()
+                    self.homography_display_label.set_image(pixmap)
+                    qt_display_ms = (time.time() - qt_display_start) * 1000
+                    self.performance_widget.add_processing_measurement(
+                        "Homography Qt Display", qt_display_ms
+                    )
+
+                    # Record total homography processing time (excluding sub-components)
+                    homography_duration_ms = (time.time() - homography_start_time) * 1000
+                    # Exclude already-measured times to avoid double counting
+                    homography_other_ms = max(
+                        0.0, homography_duration_ms - homography_calc_duration_ms - qt_convert_ms - qt_display_ms
+                    )
+                    if homography_other_ms > 1.0:  # Only report if significant
+                        self.performance_widget.add_processing_measurement(
+                            "Homography Other", homography_other_ms
+                        )
+
+                    self.logger.debug(f"[MAIN_TAB] Updated homography display ({warped_width}x{warped_height}px) - Calc: {homography_calc_duration_ms:.1f}ms, Qt: {qt_convert_ms + qt_display_ms:.1f}ms")
                 else:
                     self.homography_display_label.setText("Homography matrix not available")
             else:
