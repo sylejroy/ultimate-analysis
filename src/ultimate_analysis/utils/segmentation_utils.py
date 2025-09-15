@@ -11,6 +11,7 @@ import numpy as np
 
 from ..config.settings import get_setting
 from ..constants import DEFAULT_PATHS
+from ..utils.logger import get_logger
 from ..gui.visualization import (
     calculate_field_contour,
     create_unified_field_mask,
@@ -78,10 +79,12 @@ def apply_segmentation_to_warped_frame(
         unified_mask = create_unified_field_mask(segmentation_results, original_frame_shape)
 
         if unified_mask is None:
-            print(f"[{tab_name}] No unified mask could be created")
+            logger = get_logger("SEGMENTATION_UTILS")
+            logger.debug(f"[{tab_name}] No unified mask could be created")
             return warped_frame
 
-        print(
+        logger = get_logger("SEGMENTATION_UTILS")
+        logger.debug(
             f"[{tab_name}] Created unified mask with shape {unified_mask.shape}, {np.sum(unified_mask)} pixels"
         )
 
@@ -112,7 +115,8 @@ def apply_segmentation_to_warped_frame(
         # Draw the transformed contour directly
         result_frame = draw_field_contour(result_frame, transformed_contour)
 
-        print(
+        logger = get_logger("SEGMENTATION_UTILS")
+        logger.debug(
             f"[{tab_name}] Applied transformed contour to warped frame: {len(transformed_contour)} points"
         )
         return result_frame

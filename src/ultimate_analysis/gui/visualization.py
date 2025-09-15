@@ -11,6 +11,10 @@ import numpy as np
 
 from ..config.settings import get_setting
 from ..constants import VISUALIZATION_COLORS
+from ..utils.logger import get_logger
+
+# Initialize logger
+logger = get_logger("VISUALIZATION")
 
 
 def get_segmentation_colors() -> Dict[int, Tuple[int, int, int]]:
@@ -933,7 +937,7 @@ def draw_field_contour(
                 # Add small white border for better visibility
                 cv2.circle(result, center, point_radius + 1, (255, 255, 255), 1)
 
-        print(f"[VISUALIZATION] Drew contour with {len(contour)} points")
+        logger.debug(f"[VISUALIZATION] Drew contour with {len(contour)} points")
 
     except Exception as e:
         print(f"[VISUALIZATION] Error drawing field contour: {e}")
@@ -1013,7 +1017,7 @@ def draw_field_lines_ransac(
             cv2.circle(result, start, line_thickness + 2, line_color, -1)
             cv2.circle(result, end, line_thickness + 2, line_color, -1)
 
-        print(f"[VISUALIZATION] Drew {len(fitted_lines)} RANSAC-fitted field lines")
+        logger.debug(f"[VISUALIZATION] Drew {len(fitted_lines)} RANSAC-fitted field lines")
 
     except Exception as e:
         print(f"[VISUALIZATION] Error drawing RANSAC lines: {e}")
@@ -1084,7 +1088,7 @@ def draw_field_lines_ransac_with_outliers(
                         outlier_count += 1
 
             if outlier_count > 0:
-                print(f"[VISUALIZATION] Drew {outlier_count} RANSAC outlier points")
+                logger.debug(f"[VISUALIZATION] Drew {outlier_count} RANSAC outlier points")
 
     except Exception as e:
         print(f"[VISUALIZATION] Error drawing RANSAC lines and outliers: {e}")
@@ -1265,7 +1269,7 @@ def draw_unified_field_mask(
                                 # Draw colored point on top
                                 cv2.circle(result, (x, y), edge_radius, edge_color, -1)
 
-                        print(
+                        logger.debug(
                             f"[VISUALIZATION] Drew {len(edge_filtered_points)} edge-filtered points"
                         )
 
@@ -1301,7 +1305,7 @@ def draw_unified_field_mask(
                                         cv2.circle(result, (x, y), inlier_radius, inlier_color, -1)
                                         total_inliers += 1
 
-                        print(f"[VISUALIZATION] Drew {total_inliers} inlier points")
+                        logger.debug(f"[VISUALIZATION] Drew {total_inliers} inlier points")
                 else:
                     print("[VISUALIZATION] RANSAC line fitting failed, falling back to contour")
                     result = draw_field_contour(result, simplified_contour)
@@ -1453,7 +1457,7 @@ def draw_all_field_lines(
                     font_thickness,
                 )
 
-            print(f"[VISUALIZATION] Drew {line_type} line from {start_int} to {end_int}")
+            logger.debug(f"[VISUALIZATION] Drew {line_type} line from {start_int} to {end_int}")
 
     return result
 

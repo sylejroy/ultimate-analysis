@@ -9,6 +9,7 @@ from typing import Any, List, Tuple
 import numpy as np
 
 from ..config.settings import get_setting
+from ..utils.logger import get_logger
 
 
 def extract_raw_lines_from_segmentation(
@@ -85,12 +86,14 @@ def extract_raw_lines_from_segmentation(
 
                         confidences.append(confidence)
 
-                    print(
+                    logger = get_logger("LINE_EXTRACTION")
+                    logger.debug(
                         f"[LINE_EXTRACTION] Extracted {len(detected_lines)} raw lines with confidences: {[f'{c:.3f}' for c in confidences]}"
                     )
 
     except Exception as e:
-        print(f"[LINE_EXTRACTION] Error extracting lines: {e}")
+        logger = get_logger("LINE_EXTRACTION")
+        logger.error(f"[LINE_EXTRACTION] Error extracting lines: {e}")
 
     return detected_lines, confidences
 

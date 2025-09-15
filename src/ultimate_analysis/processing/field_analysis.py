@@ -124,7 +124,8 @@ def calculate_field_contour_processing(
         epsilon = simplify_epsilon * perimeter
         simplified_contour = cv2.approxPolyDP(largest_contour, epsilon, True)
 
-        print(
+        logger = get_logger("FIELD_ANALYSIS") 
+        logger.debug(
             f"[FIELD_ANALYSIS] Original contour points: {len(largest_contour)}, simplified: {len(simplified_contour)}"
         )
 

@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from ..utils.logger import get_logger
+
 import cv2
 import numpy as np
 import yaml
@@ -100,6 +102,9 @@ class MainTab(QWidget):
 
     def __init__(self):
         super().__init__()
+        
+        # Initialize logger
+        self.logger = get_logger("MAIN_TAB")
 
         # Video player and state
         self.video_player = VideoPlayer()
@@ -873,7 +878,7 @@ class MainTab(QWidget):
             # Process and display current frame with full timing coverage (no frame advance)
             self._process_and_display(mode="current")
             self.pending_update = False
-            print("[MAIN_TAB] Executed debounced display update")
+            self.logger.debug("[MAIN_TAB] Executed debounced display update")
 
     def _request_display_update(self, immediate: bool = False) -> None:
         """Request a display update with debouncing to prevent excessive recomputation.
@@ -1055,7 +1060,7 @@ class MainTab(QWidget):
 
         # Run inference if enabled
         if self.inference_checkbox.isChecked():
-            print("[MAIN_TAB] Running inference...")
+            self.logger.debug("[MAIN_TAB] Running inference...")
             start_time = time.time()
             self.current_detections = run_inference(frame)
             duration_ms = (time.time() - start_time) * 1000
@@ -1063,7 +1068,7 @@ class MainTab(QWidget):
 
         # Run tracking if enabled
         if self.tracking_checkbox.isChecked() and self.current_detections:
-            print("[MAIN_TAB] Running tracking...")
+            self.logger.debug("[MAIN_TAB] Running tracking...")
             start_time = time.time()
             self.current_tracks = run_tracking(frame, self.current_detections)
             duration_ms = (time.time() - start_time) * 1000
@@ -1071,7 +1076,7 @@ class MainTab(QWidget):
 
         # Run field segmentation if enabled
         if self.field_segmentation_checkbox.isChecked():
-            print("[MAIN_TAB] Running field segmentation...")
+            self.logger.debug("[MAIN_TAB] Running field segmentation...")
             start_time = time.time()
             self.current_field_results = run_field_segmentation(frame)
             duration_ms = (time.time() - start_time) * 1000
@@ -1085,7 +1090,7 @@ class MainTab(QWidget):
 
         # Run player ID if enabled (requires tracking to be active)
         if self.player_id_checkbox.isChecked() and self.current_tracks:
-            print(
+            self.logger.debug(
                 f"[MAIN_TAB] Running player identification on {len(self.current_tracks)} tracks..."
             )
             start_time = time.time()
@@ -1095,12 +1100,12 @@ class MainTab(QWidget):
             duration_ms = (time.time() - start_time) * 1000
 
             # Debug timing values and results
-            print(f"[MAIN_TAB] Player ID results: {len(self.current_player_ids)} tracks processed")
+            self.logger.debug(f"[MAIN_TAB] Player ID results: {len(self.current_player_ids)} tracks processed")
             for track_id, (jersey_number, details) in self.current_player_ids.items():
                 confidence = details.get("confidence", 0.0) if details else 0.0
-                print(f"[MAIN_TAB]   Track {track_id}: #{jersey_number} (conf: {confidence:.3f})")
-            print(f"[MAIN_TAB] Raw timing: {player_id_timing}")
-            print(f"[MAIN_TAB] Total duration: {duration_ms:.1f}ms")
+                self.logger.debug(f"[MAIN_TAB]   Track {track_id}: #{jersey_number} (conf: {confidence:.3f})")
+            self.logger.debug(f"[MAIN_TAB] Raw timing: {player_id_timing}")
+            self.logger.debug(f"[MAIN_TAB] Total duration: {duration_ms:.1f}ms")
 
             # Add detailed timing measurements (only if there are actual measurements)
             if (
@@ -1119,7 +1124,7 @@ class MainTab(QWidget):
                         "Player ID - Jersey Number Filtering", player_id_timing["filtering_ms"]
                     )
 
-            print(f"[MAIN_TAB] Identified {len(self.current_player_ids)} players")
+            self.logger.debug(f"[MAIN_TAB] Identified {len(self.current_player_ids)} players")
             print(
                 f"[MAIN_TAB] Player ID timing - Preprocessing: {player_id_timing['preprocessing_ms']:.1f}ms, OCR: {player_id_timing['ocr_ms']:.1f}ms, Filtering: {player_id_timing.get('filtering_ms', 0.0):.1f}ms"
             )
@@ -1166,7 +1171,7 @@ class MainTab(QWidget):
             show_raw_masks = get_setting("models.segmentation.show_raw_masks", True)
             if show_raw_masks:
                 frame = draw_field_segmentation(frame, self.current_field_results)
-                print("[MAIN_TAB] Applied raw segmentation masks to frame")
+                self.logger.debug("[MAIN_TAB] Applied raw segmentation masks to frame")
 
             # Create and display unified mask with RANSAC line detection
             frame_shape = frame.shape[:2]  # (height, width)
@@ -1192,7 +1197,7 @@ class MainTab(QWidget):
                 if detected_lines:
                     self.ransac_lines = detected_lines
                     self.ransac_confidences = confidences
-                    print(f"[MAIN_TAB] Using {len(self.ransac_lines)} RANSAC lines directly")
+                    self.logger.debug(f"[MAIN_TAB] Using {len(self.ransac_lines)} RANSAC lines directly")
                 else:
                     self.ransac_lines = []
                     self.ransac_confidences = []
@@ -1204,7 +1209,7 @@ class MainTab(QWidget):
                 frame, raw_lines_dict, self.all_lines_for_display = draw_unified_field_mask(
                     frame, unified_mask, field_color, alpha=0.3, fill_mask=False
                 )
-                print(
+                self.logger.debug(
                     f"[MAIN_TAB] Applied field contour (no fill) to frame: {int(np.sum(unified_mask))} pixels"
                 )
 
@@ -1216,7 +1221,7 @@ class MainTab(QWidget):
                         scale_factor=1.0,
                         draw_raw_lines_only=True,
                     )
-                    print(
+                    self.logger.debug(
                         f"[MAIN_TAB] Added raw RANSAC lines for {len(self.all_lines_for_display)} field lines"
                     )
 
@@ -1229,7 +1234,7 @@ class MainTab(QWidget):
                         transformation_matrix=None,
                         scale_factor=1.0,
                     )
-                    print(f"[MAIN_TAB] Added {len(self.ransac_lines)} RANSAC lines to main view")
+                    self.logger.debug(f"[MAIN_TAB] Added {len(self.ransac_lines)} RANSAC lines to main view")
             else:
                 print("[MAIN_TAB] No unified mask could be created")
                 self.ransac_lines = []
@@ -1767,7 +1772,7 @@ class MainTab(QWidget):
             output_height = int(np.sqrt(target_area * aspect_ratio))
             output_width = int(output_height / aspect_ratio)
 
-        print(
+        self.logger.debug(
             f"[MAIN_TAB] Canvas size: {input_width}x{input_height} -> {output_width}x{output_height} (aspect {aspect_ratio:.1f}:1, area: {input_width*input_height} -> {output_width*output_height})"
         )
         return output_width, output_height
@@ -1819,7 +1824,7 @@ class MainTab(QWidget):
                             )
                             if warped_frame_with_segmentation is not None:
                                 warped_frame = warped_frame_with_segmentation
-                                print(
+                                self.logger.debug(
                                     f"[MAIN_TAB] Applied transformed segmentation to homography view: {len(self.current_field_results)} results"
                                 )
                             else:
@@ -1832,7 +1837,7 @@ class MainTab(QWidget):
                     # Map tracked objects to top-down view if tracking is enabled
                     if self.tracking_checkbox.isChecked() and self.current_tracks:
                         warped_frame = self._map_tracked_objects_to_top_down(warped_frame)
-                        print(
+                        self.logger.debug(
                             f"[MAIN_TAB] Mapped {len(self.current_tracks)} tracked objects to top-down view"
                         )
 
@@ -1846,7 +1851,7 @@ class MainTab(QWidget):
                             self.homography_matrix,
                             scale_factor=2.0,
                         )
-                        print(
+                        self.logger.debug(
                             f"[MAIN_TAB] Added RANSAC field lines to top-down view: {len(self.ransac_lines)} lines"
                         )
                     elif self.all_lines_for_display:
@@ -1893,7 +1898,7 @@ class MainTab(QWidget):
                         "Homography Display", homography_display_ms
                     )
 
-                    print("[MAIN_TAB] Updated homography display using loaded matrix")
+                    self.logger.debug("[MAIN_TAB] Updated homography display using loaded matrix")
                 else:
                     self.homography_display_label.setText("Homography matrix not available")
             else:

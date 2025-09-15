@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
+
+from ..utils.logger import get_logger
 import yaml
 
 from ..config.settings import get_setting
@@ -162,12 +164,13 @@ def _run_single_model_inference(
 
     timing["total"] = time.perf_counter() - total_start
     
-    # Enhanced logging with subcategories
-    print(f"[INFERENCE] {target_class.title()} model breakdown:")
-    print(f"[INFERENCE]   ├─ Preprocessing: {timing['preprocessing']*1000:5.1f}ms")
-    print(f"[INFERENCE]   ├─ Inference:     {timing['inference']*1000:5.1f}ms")
-    print(f"[INFERENCE]   ├─ Postprocessing:{timing['postprocessing']*1000:5.1f}ms")
-    print(f"[INFERENCE]   └─ Total:         {timing['total']*1000:5.1f}ms ({len(detections)} detections)")
+    # Enhanced logging with subcategories (debug level to avoid spamming)
+    logger = get_logger("INFERENCE")
+    logger.debug(f"{target_class.title()} model breakdown:")
+    logger.debug(f"  ├─ Preprocessing: {timing['preprocessing']*1000:5.1f}ms")
+    logger.debug(f"  ├─ Inference:     {timing['inference']*1000:5.1f}ms")
+    logger.debug(f"  ├─ Postprocessing:{timing['postprocessing']*1000:5.1f}ms")
+    logger.debug(f"  └─ Total:         {timing['total']*1000:5.1f}ms ({len(detections)} detections)")
     
     return detections, timing
 
@@ -363,11 +366,12 @@ def run_inference(
         print(f"Player model took {timing['player_time']*1000:.1f}ms")
     """
     global _player_model, _disc_model, _detection_model, _current_model_path
+    logger = get_logger("INFERENCE")
 
-    print(f"[INFERENCE] Processing frame with shape {frame.shape}")
+    logger.debug(f"Processing frame with shape {frame.shape}")
 
     if not YOLO_AVAILABLE:
-        print("[INFERENCE] YOLO not available, returning empty detections")
+        logger.warning("YOLO not available, returning empty detections")
         return []
 
     # Handle backward compatibility
@@ -394,7 +398,7 @@ def run_inference(
 
     # Run player detection
     if _player_model is not None:
-        print(f"[INFERENCE] ┌─ Running player model inference...")
+        logger.debug(f"[INFERENCE] ┌─ Running player model inference...")
         player_detections, player_timing = _run_single_model_inference(
             frame, _player_model, _player_model_imgsz, "models.player_detection", "player"
         )
@@ -405,7 +409,7 @@ def run_inference(
 
     # Run disc detection
     if _disc_model is not None:
-        print(f"[INFERENCE] ┌─ Running disc model inference...")
+        logger.debug(f"[INFERENCE] ┌─ Running disc model inference...")
         disc_detections, disc_timing = _run_single_model_inference(
             frame, _disc_model, _disc_model_imgsz, "models.disc_detection", "disc"
         )
@@ -416,37 +420,38 @@ def run_inference(
 
     total_inference_time = time.perf_counter() - total_inference_start
     
-    # Hierarchical timing summary
-    print(f"[INFERENCE] ═══ INFERENCE TIMING SUMMARY ═══")
+    # Hierarchical timing summary (debug level to avoid spamming)
+    logger = get_logger("INFERENCE")
+    logger.debug("═══ INFERENCE TIMING SUMMARY ═══")
     
     if player_timing:
-        print(f"[INFERENCE] Player Model ({player_count} detections):")
-        print(f"[INFERENCE]   ├─ Preprocessing: {player_timing.get('preprocessing', 0)*1000:5.1f}ms")
-        print(f"[INFERENCE]   ├─ Inference:     {player_timing.get('inference', 0)*1000:5.1f}ms")
-        print(f"[INFERENCE]   ├─ Postprocessing:{player_timing.get('postprocessing', 0)*1000:5.1f}ms")
-        print(f"[INFERENCE]   └─ Subtotal:      {player_timing.get('total', 0)*1000:5.1f}ms")
+        logger.debug(f"Player Model ({player_count} detections):")
+        logger.debug(f"  ├─ Preprocessing: {player_timing.get('preprocessing', 0)*1000:5.1f}ms")
+        logger.debug(f"  ├─ Inference:     {player_timing.get('inference', 0)*1000:5.1f}ms")
+        logger.debug(f"  ├─ Postprocessing:{player_timing.get('postprocessing', 0)*1000:5.1f}ms")
+        logger.debug(f"  └─ Subtotal:      {player_timing.get('total', 0)*1000:5.1f}ms")
     else:
-        print(f"[INFERENCE] Player Model: Not loaded")
+        logger.debug("Player Model: Not loaded")
     
     if disc_timing:
-        print(f"[INFERENCE] Disc Model ({disc_count} detections):")
-        print(f"[INFERENCE]   ├─ Preprocessing: {disc_timing.get('preprocessing', 0)*1000:5.1f}ms")
-        print(f"[INFERENCE]   ├─ Inference:     {disc_timing.get('inference', 0)*1000:5.1f}ms")
-        print(f"[INFERENCE]   ├─ Postprocessing:{disc_timing.get('postprocessing', 0)*1000:5.1f}ms")
-        print(f"[INFERENCE]   └─ Subtotal:      {disc_timing.get('total', 0)*1000:5.1f}ms")
+        logger.debug(f"Disc Model ({disc_count} detections):")
+        logger.debug(f"  ├─ Preprocessing: {disc_timing.get('preprocessing', 0)*1000:5.1f}ms")
+        logger.debug(f"  ├─ Inference:     {disc_timing.get('inference', 0)*1000:5.1f}ms")
+        logger.debug(f"  ├─ Postprocessing:{disc_timing.get('postprocessing', 0)*1000:5.1f}ms")
+        logger.debug(f"  └─ Subtotal:      {disc_timing.get('total', 0)*1000:5.1f}ms")
     else:
-        print(f"[INFERENCE] Disc Model: Not loaded")
+        logger.debug("Disc Model: Not loaded")
     
-    print(f"[INFERENCE] ─────────────────────────────────")
-    print(f"[INFERENCE] TOTAL TIME:      {total_inference_time*1000:5.1f}ms")
-    print(f"[INFERENCE] TOTAL DETECTIONS: {len(all_detections)}")
+    logger.debug("─────────────────────────────────")
+    logger.debug(f"TOTAL TIME:      {total_inference_time*1000:5.1f}ms")
+    logger.debug(f"TOTAL DETECTIONS: {len(all_detections)}")
     
     # Performance comparison
     player_total = player_timing.get('total', 0) if player_timing else 0
     disc_total = disc_timing.get('total', 0) if disc_timing else 0
     
     if player_total > 0 and disc_total > 0:
-        print(f"[INFERENCE] MODEL RATIO:     {player_total/disc_total:.2f}x (Player/Disc)")
+        logger.debug(f"MODEL RATIO:     {player_total/disc_total:.2f}x (Player/Disc)")
         
         # Show which phases take the most time
         player_inference_time = player_timing.get('inference', 0)
@@ -455,9 +460,9 @@ def run_inference(
         
         if total_inference_only > 0:
             inference_percentage = (total_inference_only / total_inference_time) * 100
-            print(f"[INFERENCE] INFERENCE %:     {inference_percentage:.1f}% of total time")
+            logger.debug(f"INFERENCE %:     {inference_percentage:.1f}% of total time")
     
-    print(f"[INFERENCE] ═══════════════════════════════════")
+    logger.debug("═══════════════════════════════════")
 
     # If no models are available, return debug detections
     if _player_model is None and _disc_model is None:
@@ -493,7 +498,7 @@ def run_inference(
             return debug_detections, timing_info
         return debug_detections
 
-    print(f"[INFERENCE] Found {len(all_detections)} total detections")
+    logger.debug(f"Found {len(all_detections)} total detections")
     
     if return_timing:
         timing_info = {
