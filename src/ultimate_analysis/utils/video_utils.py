@@ -7,6 +7,8 @@ from typing import Optional
 
 import cv2
 
+from ..utils.logger import get_logger
+
 
 def get_video_duration(video_path: str) -> str:
     """Get video duration as formatted string.
@@ -31,7 +33,8 @@ def get_video_duration(video_path: str) -> str:
                 return f"{minutes:02d}:{seconds:02d}"
 
     except Exception as e:
-        print(f"[VIDEO_UTILS] Error getting duration for {video_path}: {e}")
+        logger = get_logger("VIDEO_UTILS")
+        logger.error(f"Error getting duration for {video_path}: {e}")
 
     return "Unknown"
 
@@ -66,6 +69,7 @@ def get_video_info(video_path: str) -> Optional[dict]:
             }
 
     except Exception as e:
-        print(f"[VIDEO_UTILS] Error getting video info for {video_path}: {e}")
+        logger = get_logger("VIDEO_UTILS") 
+        logger.error(f"Error getting video info for {video_path}: {e}")
 
     return None

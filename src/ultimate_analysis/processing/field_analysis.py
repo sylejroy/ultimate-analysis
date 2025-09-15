@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 
 from ..config.settings import get_setting
+from ..utils.logger import get_logger
 
 
 def create_unified_field_mask_processing(
@@ -68,7 +69,8 @@ def create_unified_field_mask_processing(
                 unified_mask = np.logical_or(unified_mask, mask_resized > 0.5).astype(np.uint8)
 
         except Exception as e:
-            print(f"[FIELD_ANALYSIS] Error creating unified mask: {e}")
+            logger = get_logger("FIELD_ANALYSIS")
+            logger.error(f"Error creating unified mask: {e}")
 
     # Apply morphological operations to smooth the mask
     if np.any(unified_mask):
@@ -129,7 +131,8 @@ def calculate_field_contour_processing(
         return simplified_contour
 
     except Exception as e:
-        print(f"[FIELD_ANALYSIS] Error calculating field contour: {e}")
+        logger = get_logger("FIELD_ANALYSIS")
+        logger.error(f"Error calculating field contour: {e}")
         return None
 
 
@@ -237,7 +240,7 @@ try:
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
-    print("[FIELD_ANALYSIS] Warning: sklearn not available, using fallback RANSAC implementation")
+    # Warning will be logged when RANSAC is actually used
 
 
 

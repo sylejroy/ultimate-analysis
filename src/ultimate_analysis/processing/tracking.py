@@ -11,6 +11,7 @@ import numpy as np
 
 from ..config.settings import get_setting
 from ..constants import TRACK_HISTORY_MAX_LENGTH
+from ..utils.logger import get_logger
 
 # Try to import DeepSORT
 try:
@@ -18,7 +19,8 @@ try:
 
     DEEPSORT_AVAILABLE = True
 except ImportError:
-    print("[TRACKING] DeepSORT not available, install with: pip install deep-sort-realtime")
+    logger = get_logger("TRACKING")
+    logger.warning("DeepSORT not available, install with: pip install deep-sort-realtime")
     DEEPSORT_AVAILABLE = False
     DeepSort = None
 
@@ -63,9 +65,10 @@ class Track:
 def _initialize_deepsort_tracker():
     """Initialize DeepSORT tracker with optimal settings."""
     global _deepsort_tracker
+    logger = get_logger("TRACKING")
 
     if not DEEPSORT_AVAILABLE:
-        print("[TRACKING] Cannot initialize DeepSORT - not available")
+        logger.warning("Cannot initialize DeepSORT - not available")
         return False
 
     if _deepsort_tracker is not None:
@@ -92,11 +95,11 @@ def _initialize_deepsort_tracker():
             today=None,
         )
 
-        print("[TRACKING] DeepSORT tracker initialized successfully")
+        logger.info("DeepSORT tracker initialized successfully")
         return True
 
     except Exception as e:
-        print(f"[TRACKING] Failed to initialize DeepSORT: {e}")
+        logger.error(f"Failed to initialize DeepSORT: {e}")
         _deepsort_tracker = None
         return False
 
@@ -119,10 +122,9 @@ def run_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) -> List[Tr
     """
     global _frame_count
     _frame_count += 1
+    logger = get_logger("TRACKING")
 
-    print(
-        f"[TRACKING] Processing {len(detections)} detections with DeepSORT tracker (frame {_frame_count})"
-    )
+    logger.debug(f"Processing {len(detections)} detections with DeepSORT tracker (frame {_frame_count})")
 
     if not detections:
         return []
@@ -140,36 +142,36 @@ def _run_deepsort_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) 
     Returns:
         List of Track objects with consistent IDs
     """
+    logger = get_logger("TRACKING")
+    
     if not _initialize_deepsort_tracker():
-        print("[TRACKING] DeepSORT not available, falling back to simple tracking")
+        logger.warning("DeepSORT not available, falling back to simple tracking")
         return _run_simple_tracking(detections)
 
     try:
         # Convert detections to DeepSORT format: [([x1, y1, x2, y2], confidence, class_id), ...]
         deepsort_detections = []
 
-        print(f"[TRACKING] Processing {len(detections)} detections for DeepSORT")
+        logger.debug(f"Processing {len(detections)} detections for DeepSORT")
 
         for i, det in enumerate(detections):
-            print(f"[TRACKING] Detection {i}: {det}")
+            logger.debug(f"Detection {i}: {det}")
 
             bbox = det.get("bbox")
             confidence = det.get("confidence")
             class_id = det.get("class_id")
 
-            print(f"[TRACKING] bbox: {bbox} (type: {type(bbox)})")
-            print(f"[TRACKING] confidence: {confidence} (type: {type(confidence)})")
-            print(f"[TRACKING] class_id: {class_id} (type: {type(class_id)})")
+            logger.debug(f"bbox: {bbox} (type: {type(bbox)})")
+            logger.debug(f"confidence: {confidence} (type: {type(confidence)})")
+            logger.debug(f"class_id: {class_id} (type: {type(class_id)})")
 
             # Ensure bbox exists and has 4 values
             if bbox is None:
-                print("[TRACKING] Warning: bbox is None, skipping detection")
+                logger.warning("bbox is None, skipping detection")
                 continue
 
             if not hasattr(bbox, "__len__") or len(bbox) != 4:
-                print(
-                    f"[TRACKING] Warning: Invalid bbox format or length {bbox}, skipping detection"
-                )
+                logger.warning(f"Invalid bbox format or length {bbox}, skipping detection")
                 continue
 
             try:
@@ -189,19 +191,17 @@ def _run_deepsort_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) 
                 deepsort_det = ([x, y, width, height], conf, cls)
                 deepsort_detections.append(deepsort_det)
 
-                print(
-                    f"[TRACKING] Formatted detection: LTRB {[x1, y1, x2, y2]} -> TLWH {[x, y, width, height]}"
-                )
+                logger.debug(f"Formatted detection: LTRB {[x1, y1, x2, y2]} -> TLWH {[x, y, width, height]}")
 
             except (ValueError, TypeError) as e:
-                print(f"[TRACKING] Warning: Invalid detection values, skipping: {e}")
+                logger.warning(f"Invalid detection values, skipping: {e}")
                 continue
 
         if not deepsort_detections:
-            print("[TRACKING] No valid detections for DeepSORT")
+            logger.debug("No valid detections for DeepSORT")
             return []
 
-        print(f"[TRACKING] Formatted {len(deepsort_detections)} detections for DeepSORT")
+        logger.debug(f"Formatted {len(deepsort_detections)} detections for DeepSORT")
 
         # Update tracker with current frame and detections
         tracks_deepsort = _deepsort_tracker.update_tracks(deepsort_detections, frame=frame)
@@ -242,11 +242,11 @@ def _run_deepsort_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) 
             foot_y = ltrb[3]  # Bottom Y (feet level)
             _update_track_history(our_track.track_id, (int(foot_x), int(foot_y)))
 
-        print(f"[TRACKING] DeepSORT returned {len(tracks)} confirmed tracks")
+        logger.debug(f"DeepSORT returned {len(tracks)} confirmed tracks")
         return tracks
 
     except Exception as e:
-        print(f"[TRACKING] Error in DeepSORT tracking: {e}")
+        logger.error(f"Error in DeepSORT tracking: {e}")
         import traceback
 
         traceback.print_exc()
@@ -314,14 +314,15 @@ def set_tracker_type(tracker_type: str) -> bool:
         set_tracker_type("deepsort")
     """
     global _tracker_type, _deepsort_tracker
+    logger = get_logger("TRACKING")
 
     tracker_type = tracker_type.lower()
 
     if tracker_type != "deepsort":
-        print(f"[TRACKING] Unsupported tracker type: {tracker_type}. Only 'deepsort' is supported.")
+        logger.warning(f"Unsupported tracker type: {tracker_type}. Only 'deepsort' is supported.")
         return False
 
-    print(f"[TRACKING] Setting tracker type to: {tracker_type}")
+    logger.info(f"Setting tracker type to: {tracker_type}")
     _tracker_type = tracker_type
 
     # Reset tracker instance to force reinitialization
@@ -338,8 +339,9 @@ def reset_tracker() -> None:
     This should be called when switching videos or when tracking quality degrades.
     """
     global _deepsort_tracker, _track_histories, _frame_count
+    logger = get_logger("TRACKING")
 
-    print("[TRACKING] Resetting tracker state")
+    logger.info("Resetting tracker state")
 
     # Reset DeepSORT tracker
     if _deepsort_tracker is not None:
@@ -355,9 +357,9 @@ def reset_tracker() -> None:
 
         reset_jersey_tracker()
     except ImportError:
-        print("[TRACKING] Jersey tracker not available for reset")
+        logger.debug("Jersey tracker not available for reset")
 
-    print("[TRACKING] Tracker reset complete")
+    logger.info("Tracker reset complete")
 
 
 def get_tracker_type() -> str:

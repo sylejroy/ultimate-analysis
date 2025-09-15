@@ -365,6 +365,9 @@ def reset_jersey_tracker() -> None:
     This should be called when the main tracker is reset or when switching videos.
     """
     global _jersey_tracker
-    print("[JERSEY_TRACKER] Resetting jersey tracking state")
+    from ..utils.logger import get_logger
+    logger = get_logger("JERSEY_TRACKER")
+    
+    logger.info("Resetting jersey tracking state")
     _jersey_tracker = None  # This will force recreation on next access
-    print("[JERSEY_TRACKER] Jersey tracking state reset complete")
+    logger.info("Jersey tracking state reset complete")

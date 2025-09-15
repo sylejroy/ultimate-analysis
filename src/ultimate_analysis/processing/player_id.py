@@ -20,9 +20,12 @@ try:
     EASYOCR_AVAILABLE = True
 except ImportError:
     EASYOCR_AVAILABLE = False
-    print("[PLAYER_ID] Warning: EasyOCR not available, using mock results")
+    # Import logger after we know easyocr is not available
+    from ..utils.logger import get_logger
+    get_logger("PLAYER_ID").warning("EasyOCR not available, using mock results")
 
 from ..constants import JERSEY_NUMBER_MAX, JERSEY_NUMBER_MIN
+from ..utils.logger import get_logger
 from .jersey_tracker import (
     add_jersey_measurement,
     get_best_jersey_number,
@@ -56,11 +59,12 @@ def run_player_id_on_tracks(
     Example:
         results, timing = run_player_id_on_tracks(frame, current_tracks)
         for track_id, (number, details) in results.items():
-            print(f"Track {track_id}: Player #{number}")
+            logger.debug(f"Track {track_id}: Player #{number}")
             if 'tracking_history' in details:
                 for jersey, prob, count in details['tracking_history']:
-                    print(f"  {jersey}: {prob:.1%} ({count} measurements)")
+                    logger.debug(f"  {jersey}: {prob:.1%} ({count} measurements)")
     """
+    logger = get_logger("PLAYER_ID")
     player_identifications = {}
     total_timing = {"preprocessing_ms": 0.0, "ocr_ms": 0.0, "filtering_ms": 0.0}
     batch_timing: Dict[str, float] = {"preprocessing_ms": 0.0, "ocr_ms": 0.0, "filtering_ms": 0.0}
@@ -122,7 +126,7 @@ def run_player_id_on_tracks(
                 player_identifications[track_id] = ("Unknown", None)
 
         except Exception as e:
-            print(f"[PLAYER_ID] Error preparing track: {e}")
+            logger.error(f"Error preparing track: {e}")
             continue
 
     # Run batch OCR processing if we have crops
@@ -227,13 +231,14 @@ def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List],
         Tuple of (jersey_number, ocr_results, timing_info)
         timing_info contains 'preprocessing_ms', 'ocr_ms', and 'filtering_ms'
     """
+    logger = get_logger("PLAYER_ID")
     timing_info = {"preprocessing_ms": 0.0, "ocr_ms": 0.0, "filtering_ms": 0.0}
 
     if _easyocr_reader is None:
         _initialize_easyocr()
 
     if not EASYOCR_AVAILABLE or _easyocr_reader is None:
-        print("[PLAYER_ID] EasyOCR not available, returning Unknown")
+        logger.debug("EasyOCR not available, returning Unknown")
         return "Unknown", [], timing_info
 
     try:
@@ -374,11 +379,11 @@ def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List],
         # End filtering timer
         timing_info["filtering_ms"] = (time.time() - filter_start_time) * 1000
 
-        print(f"[PLAYER_ID] EasyOCR detected: {jersey_number} (confidence: {best_confidence:.3f})")
+        logger.debug(f"EasyOCR detected: {jersey_number} (confidence: {best_confidence:.3f})")
         return jersey_number, result_details, timing_info
 
     except Exception as e:
-        print(f"[PLAYER_ID] EasyOCR error: {e}")
+        logger.error(f"EasyOCR error: {e}")
         return "Unknown", [], timing_info
 
 
@@ -404,6 +409,7 @@ def _run_batch_easyocr_detection(
     Configuration:
         Set 'parallel_workers' in easyocr_params.yaml OCR config to control worker count (0 = auto, max 4)
     """
+    logger = get_logger("PLAYER_ID")
     batch_timing = {"preprocessing_ms": 0.0, "ocr_ms": 0.0, "filtering_ms": 0.0}
     batch_results = []
 
@@ -414,7 +420,7 @@ def _run_batch_easyocr_detection(
         _initialize_easyocr()
 
     if not EASYOCR_AVAILABLE or _easyocr_reader is None:
-        print("[PLAYER_ID] EasyOCR not available for batch processing")
+        logger.debug("EasyOCR not available for batch processing")
         # Return empty results for all crops
         for _ in crop_images:
             individual_timing = {"preprocessing_ms": 0.0, "ocr_ms": 0.0, "filtering_ms": 0.0}
@@ -422,7 +428,7 @@ def _run_batch_easyocr_detection(
         return batch_results, batch_timing
 
     try:
-        print(f"[PLAYER_ID] Starting batch OCR processing for {len(crop_images)} crops")
+        logger.debug(f"Starting batch OCR processing for {len(crop_images)} crops")
 
         # Start preprocessing timer for batch
         prep_start_time = time.time()
@@ -511,7 +517,7 @@ def _run_batch_easyocr_detection(
         batch_ocr_results = []
 
         if valid_crops:
-            print(f"[PLAYER_ID] Running parallel batch OCR on {len(valid_crops)} valid crops")
+            logger.debug(f"Running parallel batch OCR on {len(valid_crops)} valid crops")
 
             # Determine optimal number of workers from config or default
             config_workers = ocr_params.get("parallel_workers", 0)  # 0 = auto
@@ -523,7 +529,7 @@ def _run_batch_easyocr_detection(
 
             if len(valid_crops) == 1 or max_workers == 1:
                 # Single crop or forced single worker - process sequentially
-                print(f"[PLAYER_ID] Using sequential processing for {len(valid_crops)} crop(s)")
+                logger.debug(f"Using sequential processing for {len(valid_crops)} crop(s)")
                 for crop in valid_crops:
                     ocr_results = _easyocr_reader.readtext(crop, **readtext_params)
                     batch_ocr_results.append(ocr_results)
@@ -536,7 +542,7 @@ def _run_batch_easyocr_detection(
                         ocr_results = _easyocr_reader.readtext(crop, **readtext_params)
                         return crop_index, ocr_results
                     except Exception as e:
-                        print(f"[PLAYER_ID] Error processing crop {crop_index} in parallel: {e}")
+                        logger.error(f"Error processing crop {crop_index} in parallel: {e}")
                         return crop_index, []
 
                 # Create indexed crop data for parallel processing
@@ -545,7 +551,7 @@ def _run_batch_easyocr_detection(
                 # Process crops in parallel
                 parallel_results = {}
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    print(f"[PLAYER_ID] Using {max_workers} parallel workers for OCR processing")
+                    logger.debug(f"Using {max_workers} parallel workers for OCR processing")
 
                     # Submit all tasks
                     future_to_index = {
@@ -638,15 +644,15 @@ def _run_batch_easyocr_detection(
                 # No OCR results available
                 batch_results.append(("Unknown", None, individual_timing))
 
-        print(f"[PLAYER_ID] Batch OCR processing complete: {len(batch_results)} results")
-        print(
-            f"[PLAYER_ID] Batch timing - Preprocessing: {batch_timing['preprocessing_ms']:.1f}ms, OCR: {batch_timing['ocr_ms']:.1f}ms, Filtering: {batch_timing['filtering_ms']:.1f}ms"
+        logger.debug(f"Batch OCR processing complete: {len(batch_results)} results")
+        logger.debug(
+            f"Batch timing - Preprocessing: {batch_timing['preprocessing_ms']:.1f}ms, OCR: {batch_timing['ocr_ms']:.1f}ms, Filtering: {batch_timing['filtering_ms']:.1f}ms"
         )
 
         return batch_results, batch_timing
 
     except Exception as e:
-        print(f"[PLAYER_ID] Error in batch OCR processing: {e}")
+        logger.error(f"Error in batch OCR processing: {e}")
         import traceback
 
         traceback.print_exc()
