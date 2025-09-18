@@ -1,4 +1,5 @@
-Strictly adhere to TaskSync Protocol #tasksync.md
+Strictly adhere to TaskSync Protocol #tasksync.md.
+Always launch python files with a .venv activated.
 
 # Ultimate Analysis - AI Coding Agent Instructions
 
