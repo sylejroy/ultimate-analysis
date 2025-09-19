@@ -1,5 +1,5 @@
 """Optimization package initialization."""
 
-from .homography_optimizer import HomographyOptimizer, HomographyIndividual
+from .homography_optimizer import HomographyIndividual, HomographyOptimizer
 
-__all__ = ['HomographyOptimizer', 'HomographyIndividual']
+__all__ = ["HomographyOptimizer", "HomographyIndividual"]

@@ -10,7 +10,6 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-
 from ..config.settings import get_setting
 
 
@@ -366,8 +365,9 @@ def reset_jersey_tracker() -> None:
     """
     global _jersey_tracker
     from ..utils.logger import get_logger
+
     logger = get_logger("JERSEY_TRACKER")
-    
+
     logger.info("Resetting jersey tracking state")
     _jersey_tracker = None  # This will force recreation on next access
     logger.info("Jersey tracking state reset complete")

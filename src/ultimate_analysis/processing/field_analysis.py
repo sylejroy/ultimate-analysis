@@ -6,7 +6,7 @@ to maintain clear separation between processing and display logic.
 
 Performance optimizations:
 - Cached morphological kernels
-- Vectorized operations for contour processing  
+- Vectorized operations for contour processing
 - Optimized RANSAC with squared distance calculations
 - Reduced logging frequency for real-time processing
 - Efficient array operations with minimal reshaping
@@ -19,47 +19,23 @@ import numpy as np
 
 from ..config.settings import get_setting
 from ..utils.logger import get_logger
+from .contour_utils import normalize_contour_to_points, points_to_contour_format
 
 # Cache for morphological kernels to avoid recreation
 _kernel_cache = {}
 
 
-def _normalize_contour_to_points(contour: np.ndarray) -> np.ndarray:
-    """Normalize contour input to (N, 2) points format efficiently.
-    
-    Args:
-        contour: Contour as (N, 1, 2) or (N, 2) array
-        
-    Returns:
-        Points as (N, 2) array
-    """
-    if contour.ndim == 3 and contour.shape[1] == 1:
-        return contour.reshape(-1, 2)
-    elif contour.ndim == 2 and contour.shape[1] == 2:
-        return contour
-    else:
-        return contour.reshape(-1, 2)
-
-
-def _points_to_contour_format(points: np.ndarray) -> np.ndarray:
-    """Convert points to standard contour format (N, 1, 2).
-    
-    Args:
-        points: Points as (N, 2) array
-        
-    Returns:
-        Contour as (N, 1, 2) array
-    """
-    return points.reshape(-1, 1, 2) if len(points) > 0 else np.array([]).reshape(0, 1, 2)
+_normalize_contour_to_points = normalize_contour_to_points
+_points_to_contour_format = points_to_contour_format
 
 
 def _get_morphological_kernel(size: int, shape=cv2.MORPH_ELLIPSE) -> np.ndarray:
     """Get a cached morphological kernel or create and cache a new one.
-    
+
     Args:
         size: Kernel size
         shape: Kernel shape (default: cv2.MORPH_ELLIPSE)
-        
+
     Returns:
         Cached or newly created kernel
     """
@@ -170,9 +146,7 @@ def calculate_field_contour_processing(
         contour_area = cv2.contourArea(largest_contour)
         if contour_area < min_contour_area:
             logger = get_logger("FIELD_ANALYSIS")
-            logger.debug(
-                f"Contour area {contour_area} below threshold {min_contour_area}"
-            )
+            logger.debug(f"Contour area {contour_area} below threshold {min_contour_area}")
             return None
 
         # Simplify contour using Douglas-Peucker algorithm
@@ -264,14 +238,14 @@ def _fill_holes_flood_fill_optimized(mask: np.ndarray) -> np.ndarray:
     """
     try:
         h, w = mask.shape
-        
+
         # Early return if mask is empty or full
         if not np.any(mask) or np.all(mask):
             return mask
 
         # Create a padded mask for flood fill (more efficient than copying)
         flood_mask = np.zeros((h + 2, w + 2), dtype=np.uint8)
-        
+
         # Copy inverted mask to center (vectorized operation)
         flood_mask[1:-1, 1:-1] = 1 - mask
 
@@ -281,7 +255,7 @@ def _fill_holes_flood_fill_optimized(mask: np.ndarray) -> np.ndarray:
 
         # Extract filled region and invert back (vectorized)
         filled_mask = 1 - flood_mask[1:-1, 1:-1]
-        
+
         return filled_mask.astype(np.uint8)
 
     except Exception as e:
@@ -305,11 +279,11 @@ def _fill_holes_flood_fill(mask: np.ndarray) -> np.ndarray:
 
 try:
     from sklearn.linear_model import RANSACRegressor
+
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
     # Fallback implementation will be used automatically when needed
-
 
 
 def filter_edge_points(
@@ -346,10 +320,10 @@ def filter_edge_points(
 
     # Create boolean mask for valid points (vectorized operations)
     valid_mask = (
-        (x_coords >= edge_margin) &
-        (x_coords <= width - edge_margin) &
-        (y_coords >= edge_margin) &
-        (y_coords <= height - edge_margin)
+        (x_coords >= edge_margin)
+        & (x_coords <= width - edge_margin)
+        & (y_coords >= edge_margin)
+        & (y_coords <= height - edge_margin)
     )
 
     # Split points using boolean indexing
@@ -407,17 +381,22 @@ def interpolate_contour_points(
             # Generate intermediate points using vectorized operations
             if num_intermediate > 0:
                 # Create interpolation factors
-                alphas = np.linspace(1 / (num_intermediate + 1), 
-                                   num_intermediate / (num_intermediate + 1), 
-                                   num_intermediate)
-                
+                alphas = np.linspace(
+                    1 / (num_intermediate + 1),
+                    num_intermediate / (num_intermediate + 1),
+                    num_intermediate,
+                )
+
                 # Vectorized interpolation
                 intermediate_points = current_point + alphas[:, np.newaxis] * diff
-                
+
                 # Apply minimum distance constraint
                 for intermediate_point in intermediate_points:
-                    if (len(interpolated_points) == 0 or 
-                        np.linalg.norm(intermediate_point - interpolated_points[-1]) >= min_distance):
+                    if (
+                        len(interpolated_points) == 0
+                        or np.linalg.norm(intermediate_point - interpolated_points[-1])
+                        >= min_distance
+                    ):
                         interpolated_points.append(intermediate_point)
 
     # Convert to numpy array and reshape to original format
@@ -601,7 +580,7 @@ def _fit_line_ransac_sklearn(
 ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, float]]:
     """Fit a line using sklearn RANSAC."""
     logger = get_logger("FIELD_ANALYSIS")
-    
+
     try:
         # Validate input dimensions once
         if points.ndim != 2 or points.shape[1] != 2 or len(points) < min_samples:
@@ -609,7 +588,7 @@ def _fit_line_ransac_sklearn(
 
         # Prepare data for RANSAC (avoid reshape when possible)
         X = points[:, 0:1]  # Keep as 2D without reshape
-        y = points[:, 1]    # 1D array for y values
+        y = points[:, 1]  # 1D array for y values
 
         # Create RANSAC regressor
         ransac = RANSACRegressor(
@@ -651,7 +630,7 @@ def _fit_line_ransac_sklearn(
         # Batch predict for endpoints
         endpoints_x = np.array([[x_min], [x_max]])
         endpoints_y = ransac.predict(endpoints_x)
-        
+
         # Create line endpoints
         line_points = np.column_stack([endpoints_x.ravel(), endpoints_y])
 
@@ -667,19 +646,19 @@ def _fit_line_ransac_fallback(
 ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, float]]:
     """Fallback RANSAC implementation when sklearn is not available."""
     logger = get_logger("FIELD_ANALYSIS")
-    
+
     try:
         if len(points) < min_samples:
             return None
-            
+
         best_inliers = None
         best_line = None
         best_inlier_count = 0
-        
+
         # Pre-compute for efficiency
         num_points = len(points)
-        threshold_sq = distance_threshold ** 2  # Use squared distance to avoid sqrt
-        
+        threshold_sq = distance_threshold**2  # Use squared distance to avoid sqrt
+
         for trial in range(max_trials):
             # Randomly sample min_samples points
             sample_indices = np.random.choice(num_points, min_samples, replace=False)
@@ -688,17 +667,17 @@ def _fit_line_ransac_fallback(
             # For 2-point sampling (most common case)
             if min_samples == 2:
                 p1, p2 = sample_points[0], sample_points[1]
-                
+
                 # Calculate direction vector
                 direction = p2 - p1
                 direction_norm_sq = np.dot(direction, direction)
-                
+
                 # Skip if points are too close
                 if direction_norm_sq < 1e-12:
                     continue
-                
+
                 direction_norm = np.sqrt(direction_norm_sq)
-                
+
                 # Normal vector to the line (perpendicular)
                 normal = np.array([-direction[1], direction[0]]) / direction_norm
                 a, b = normal[0], normal[1]
@@ -706,7 +685,7 @@ def _fit_line_ransac_fallback(
 
                 # Vectorized distance calculation (much faster)
                 distances_sq = (a * points[:, 0] + b * points[:, 1] + c) ** 2
-                
+
                 # Find inliers using squared threshold
                 inlier_mask = distances_sq <= threshold_sq
                 inlier_count = np.sum(inlier_mask)
@@ -789,6 +768,7 @@ def extract_field_lines_ransac_processing(
     }
 
     import time
+
     start_time = time.time()
 
     try:

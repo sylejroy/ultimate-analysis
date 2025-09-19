@@ -10,8 +10,6 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..utils.logger import get_logger
-
 import cv2
 import numpy as np
 import yaml
@@ -56,6 +54,7 @@ from ..processing import (
 )
 from ..processing.jersey_tracker import get_jersey_tracker
 from ..processing.line_extraction import extract_raw_lines_from_segmentation
+from ..utils.logger import get_logger
 from ..utils.segmentation_utils import (
     apply_segmentation_to_warped_frame,
 )
@@ -102,7 +101,7 @@ class MainTab(QWidget):
 
     def __init__(self):
         super().__init__()
-        
+
         # Initialize logger
         self.logger = get_logger("MAIN_TAB")
 
@@ -1100,10 +1099,14 @@ class MainTab(QWidget):
             duration_ms = (time.time() - start_time) * 1000
 
             # Debug timing values and results
-            self.logger.debug(f"[MAIN_TAB] Player ID results: {len(self.current_player_ids)} tracks processed")
+            self.logger.debug(
+                f"[MAIN_TAB] Player ID results: {len(self.current_player_ids)} tracks processed"
+            )
             for track_id, (jersey_number, details) in self.current_player_ids.items():
                 confidence = details.get("confidence", 0.0) if details else 0.0
-                self.logger.debug(f"[MAIN_TAB]   Track {track_id}: #{jersey_number} (conf: {confidence:.3f})")
+                self.logger.debug(
+                    f"[MAIN_TAB]   Track {track_id}: #{jersey_number} (conf: {confidence:.3f})"
+                )
             self.logger.debug(f"[MAIN_TAB] Raw timing: {player_id_timing}")
             self.logger.debug(f"[MAIN_TAB] Total duration: {duration_ms:.1f}ms")
 
@@ -1197,7 +1200,9 @@ class MainTab(QWidget):
                 if detected_lines:
                     self.ransac_lines = detected_lines
                     self.ransac_confidences = confidences
-                    self.logger.debug(f"[MAIN_TAB] Using {len(self.ransac_lines)} RANSAC lines directly")
+                    self.logger.debug(
+                        f"[MAIN_TAB] Using {len(self.ransac_lines)} RANSAC lines directly"
+                    )
                 else:
                     self.ransac_lines = []
                     self.ransac_confidences = []
@@ -1234,7 +1239,9 @@ class MainTab(QWidget):
                         transformation_matrix=None,
                         scale_factor=1.0,
                     )
-                    self.logger.debug(f"[MAIN_TAB] Added {len(self.ransac_lines)} RANSAC lines to main view")
+                    self.logger.debug(
+                        f"[MAIN_TAB] Added {len(self.ransac_lines)} RANSAC lines to main view"
+                    )
             else:
                 print("[MAIN_TAB] No unified mask could be created")
                 self.ransac_lines = []
@@ -1801,12 +1808,12 @@ class MainTab(QWidget):
 
                     # Calculate output canvas size with 3:1 aspect ratio
                     output_width, output_height = self._calculate_output_canvas_size(width, height)
-                    
+
                     # Map the full frame to top-down view
                     warped_frame = cv2.warpPerspective(
                         frame, self.homography_matrix, (output_width, output_height)
                     )
-                    
+
                     homography_calc_duration_ms = (time.time() - homography_calc_start) * 1000
                     self.performance_widget.add_processing_measurement(
                         "Homography Calculation", homography_calc_duration_ms
@@ -1877,7 +1884,7 @@ class MainTab(QWidget):
                     bytes_per_line = 3 * warped_width
 
                     # Ensure the frame is contiguous for QImage
-                    if not warped_frame.flags['C_CONTIGUOUS']:
+                    if not warped_frame.flags["C_CONTIGUOUS"]:
                         warped_frame = np.ascontiguousarray(warped_frame)
 
                     q_image = QImage(
@@ -1907,14 +1914,20 @@ class MainTab(QWidget):
                     homography_duration_ms = (time.time() - homography_start_time) * 1000
                     # Exclude already-measured times to avoid double counting
                     homography_other_ms = max(
-                        0.0, homography_duration_ms - homography_calc_duration_ms - qt_convert_ms - qt_display_ms
+                        0.0,
+                        homography_duration_ms
+                        - homography_calc_duration_ms
+                        - qt_convert_ms
+                        - qt_display_ms,
                     )
                     if homography_other_ms > 1.0:  # Only report if significant
                         self.performance_widget.add_processing_measurement(
                             "Homography Other", homography_other_ms
                         )
 
-                    self.logger.debug(f"[MAIN_TAB] Updated homography display ({warped_width}x{warped_height}px) - Calc: {homography_calc_duration_ms:.1f}ms, Qt: {qt_convert_ms + qt_display_ms:.1f}ms")
+                    self.logger.debug(
+                        f"[MAIN_TAB] Updated homography display ({warped_width}x{warped_height}px) - Calc: {homography_calc_duration_ms:.1f}ms, Qt: {qt_convert_ms + qt_display_ms:.1f}ms"
+                    )
                 else:
                     self.homography_display_label.setText("Homography matrix not available")
             else:

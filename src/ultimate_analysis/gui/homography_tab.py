@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 import yaml
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QWheelEvent
 from PyQt5.QtWidgets import (
     QApplication,
@@ -45,6 +45,7 @@ from PyQt5.QtWidgets import (
 
 try:
     from PyQt5.QtChart import QChart, QChartView, QLineSeries, QValueAxis
+
     CHARTS_AVAILABLE = True
 except ImportError:
     CHARTS_AVAILABLE = False
@@ -52,12 +53,12 @@ except ImportError:
 
 from ..config.settings import get_setting
 from ..constants import DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS
+from ..gui.ransac_line_visualization import draw_ransac_field_lines
 from ..gui.visualization import (
     create_unified_field_mask,
     draw_unified_field_mask,
     get_primary_field_color,
 )
-from ..gui.ransac_line_visualization import draw_ransac_field_lines
 from ..processing.field_segmentation import run_field_segmentation, set_field_model
 from ..processing.line_extraction import extract_raw_lines_from_segmentation
 from ..utils.segmentation_utils import (
@@ -66,253 +67,7 @@ from ..utils.segmentation_utils import (
     populate_segmentation_model_combo,
 )
 from .video_player import VideoPlayer
-
-
-class ZoomableImageLabel(QLabel):
-    """Custom QLabel that supports mouse wheel zooming."""
-
-    zoom_changed = pyqtSignal(float)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.zoom_factor = 1.0
-        self.original_pixmap: Optional[QPixmap] = None
-        self.setAlignment(Qt.AlignCenter)
-        self.setMinimumSize(400, 300)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setScaledContents(False)
-
-        # Grid overlay properties
-        self.show_grid = True
-        self.grid_spacing = 50  # pixels at 1.0 zoom
-        self.grid_color = QColor(255, 255, 255, 80)  # Semi-transparent white
-        self.grid_line_width = 1
-
-    def wheelEvent(self, event: QWheelEvent):
-        """Handle mouse wheel for zooming to mouse position."""
-        if self.original_pixmap is None:
-            return
-
-        # Get the scroll area parent
-        scroll_area = None
-        parent = self.parent()
-        while parent:
-            if isinstance(parent, QScrollArea):
-                scroll_area = parent
-                break
-            parent = parent.parent()
-
-        if scroll_area is None:
-            # Fallback to center zoom if no scroll area found
-            zoom_in = event.angleDelta().y() > 0
-            zoom_delta = 0.15 if zoom_in else -0.15
-            new_zoom = max(0.1, min(10.0, self.zoom_factor + zoom_delta))
-
-            if new_zoom != self.zoom_factor:
-                self.zoom_factor = new_zoom
-                self._update_display()
-                self.zoom_changed.emit(self.zoom_factor)
-            return
-
-        # Get mouse position
-        mouse_pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
-
-        # Calculate zoom change
-        zoom_in = event.angleDelta().y() > 0
-        zoom_delta = 0.15 if zoom_in else -0.15
-        old_zoom = self.zoom_factor
-        new_zoom = max(0.1, min(10.0, old_zoom + zoom_delta))
-
-        if new_zoom == old_zoom:
-            return
-
-        # Get scrollbars
-        h_scroll = scroll_area.horizontalScrollBar()
-        v_scroll = scroll_area.verticalScrollBar()
-
-        # Store old scroll positions
-        old_h = h_scroll.value()
-        old_v = v_scroll.value()
-
-        # Calculate mouse position in the "image coordinate system"
-        # This is the key: we need to find what point in the original image
-        # is currently under the mouse cursor
-
-        # For a QLabel with pixmap, the coordinate calculation is:
-        # 1. Mouse position relative to the label widget
-        # 2. Account for the label's alignment (center alignment means offset)
-        # 3. Account for scroll position
-        # 4. Account for current zoom level
-
-        widget_rect = self.rect()
-        if self.pixmap():
-            pixmap_size = self.pixmap().size()
-
-            # Calculate where the pixmap is positioned within the widget
-            # QLabel centers the pixmap when it's smaller than the widget
-            x_offset = max(0, (widget_rect.width() - pixmap_size.width()) // 2)
-            y_offset = max(0, (widget_rect.height() - pixmap_size.height()) // 2)
-
-            # Mouse position relative to the actual image (accounting for centering)
-            img_mouse_x = mouse_pos.x() - x_offset
-            img_mouse_y = mouse_pos.y() - y_offset
-
-            # Account for scroll position and current zoom to get original image coordinates
-            orig_img_x = (img_mouse_x + old_h) / old_zoom
-            orig_img_y = (img_mouse_y + old_v) / old_zoom
-
-            # Apply new zoom
-            self.zoom_factor = new_zoom
-            self._update_display()
-
-            # Calculate new offsets after zoom
-            if self.pixmap():
-                new_pixmap_size = self.pixmap().size()
-                new_x_offset = max(0, (widget_rect.width() - new_pixmap_size.width()) // 2)
-                new_y_offset = max(0, (widget_rect.height() - new_pixmap_size.height()) // 2)
-
-                # Calculate where the scroll position should be to keep the same
-                # original image point under the mouse
-                target_img_x = orig_img_x * new_zoom
-                target_img_y = orig_img_y * new_zoom
-
-                new_h = target_img_x - (mouse_pos.x() - new_x_offset)
-                new_v = target_img_y - (mouse_pos.y() - new_y_offset)
-
-                # Apply new scroll positions with bounds checking
-                h_scroll.setValue(max(0, min(h_scroll.maximum(), int(new_h))))
-                v_scroll.setValue(max(0, min(v_scroll.maximum(), int(new_v))))
-        else:
-            # If no pixmap, just update zoom
-            self.zoom_factor = new_zoom
-            self._update_display()
-
-        self.zoom_changed.emit(self.zoom_factor)
-
-    def set_image(self, pixmap: QPixmap):
-        """Set the image and reset zoom to fit the container."""
-        self.original_pixmap = pixmap
-        # Calculate initial zoom to fit the container while maintaining aspect ratio
-        if pixmap and not pixmap.isNull():
-            container_size = self.size()
-            pixmap_size = pixmap.size()
-
-            # Calculate scale factors for width and height
-            scale_w = (
-                container_size.width() / pixmap_size.width() if pixmap_size.width() > 0 else 1.0
-            )
-            scale_h = (
-                container_size.height() / pixmap_size.height() if pixmap_size.height() > 0 else 1.0
-            )
-
-            # Use the smaller scale factor to ensure the image fits completely
-            initial_zoom = min(
-                scale_w, scale_h, 1.0
-            )  # Don't scale up beyond original size initially
-            self.zoom_factor = max(0.1, initial_zoom)
-        else:
-            self.zoom_factor = 1.0
-
-        self._update_display()
-        self.zoom_changed.emit(self.zoom_factor)
-
-    def set_zoom(self, zoom_factor: float):
-        """Set zoom factor programmatically."""
-        self.zoom_factor = max(0.1, min(10.0, zoom_factor))
-        self._update_display()
-
-    def _update_display(self):
-        """Update the displayed image with current zoom."""
-        if self.original_pixmap is None:
-            return
-
-        # Scale the pixmap
-        scaled_size = self.original_pixmap.size() * self.zoom_factor
-        scaled_pixmap = self.original_pixmap.scaled(
-            scaled_size, Qt.KeepAspectRatio, Qt.SmoothTransformation
-        )
-
-        self.setPixmap(scaled_pixmap)
-
-        # Set the minimum size so the scroll area recognizes the content size
-        self.setMinimumSize(scaled_pixmap.size())
-
-        # Also set the size hint for proper scroll area calculation
-        self.resize(scaled_pixmap.size())
-
-        # Update the scroll area geometry
-        parent = self.parent()
-        if isinstance(parent, QScrollArea):
-            parent.updateGeometry()
-
-    def paintEvent(self, event):
-        """Override paint event to draw grid overlay on top of the image."""
-        # First, let the parent QLabel draw the image
-        super().paintEvent(event)
-
-        # Draw grid overlay if enabled and we have an image
-        if self.show_grid and self.pixmap() and not self.pixmap().isNull():
-            painter = QPainter(self)
-            painter.setRenderHint(QPainter.Antialiasing, True)
-
-            # Set up the grid pen
-            pen = QPen(self.grid_color)
-            pen.setWidth(self.grid_line_width)
-            painter.setPen(pen)
-
-            # Get the image area within the widget
-            pixmap_rect = self.pixmap().rect()
-            widget_rect = self.rect()
-
-            # Calculate the image position (centered in widget)
-            x_offset = max(0, (widget_rect.width() - pixmap_rect.width()) // 2)
-            y_offset = max(0, (widget_rect.height() - pixmap_rect.height()) // 2)
-
-            # Calculate actual grid spacing based on current zoom
-            actual_grid_spacing = self.grid_spacing * self.zoom_factor
-
-            # Draw vertical lines
-            image_left = x_offset
-            image_right = x_offset + pixmap_rect.width()
-            image_top = y_offset
-            image_bottom = y_offset + pixmap_rect.height()
-
-            # Start from the first grid line within the image
-            start_x = (
-                image_left
-                + (actual_grid_spacing - (image_left % actual_grid_spacing)) % actual_grid_spacing
-            )
-            x = start_x
-            while x < image_right:
-                painter.drawLine(int(x), image_top, int(x), image_bottom)
-                x += actual_grid_spacing
-
-            # Draw horizontal lines
-            start_y = (
-                image_top
-                + (actual_grid_spacing - (image_top % actual_grid_spacing)) % actual_grid_spacing
-            )
-            y = start_y
-            while y < image_bottom:
-                painter.drawLine(image_left, int(y), image_right, int(y))
-                y += actual_grid_spacing
-
-            painter.end()
-
-    def set_grid_visible(self, visible: bool):
-        """Toggle grid visibility."""
-        self.show_grid = visible
-        self.update()  # Trigger a repaint
-
-    def set_grid_spacing(self, spacing: int):
-        """Set grid spacing in pixels at 1.0 zoom."""
-        self.grid_spacing = spacing
-        self.update()  # Trigger a repaint
-
-    def set_grid_color(self, color: QColor):
-        """Set grid color."""
-        self.grid_color = color
-        self.update()  # Trigger a repaint
+from .widgets.zoomable_image_label import ZoomableImageLabel
 
 
 class HomographyTab(QWidget):
@@ -363,6 +118,7 @@ class HomographyTab(QWidget):
         self.segmentation_model_combo: Optional[QComboBox] = None
         # Auto-enable RANSAC line fitting for GA optimization
         from ..config.settings import get_config
+
         config = get_config()
         if "models" not in config:
             config["models"] = {}
@@ -406,7 +162,7 @@ class HomographyTab(QWidget):
         self.ga_continuous_timer: Optional[QTimer] = None  # Timer for continuous evolution
         self.ga_generation_history = []
         self.ga_fitness_history = []
-        
+
         # GA UI components
         self.ga_start_button: Optional[QPushButton] = None
         self.ga_next_gen_button: Optional[QPushButton] = None
@@ -418,7 +174,7 @@ class HomographyTab(QWidget):
         self.ga_generation_label: Optional[QLabel] = None
         self.ga_fitness_label: Optional[QLabel] = None
         self.ga_population_label: Optional[QLabel] = None
-        
+
         # GA fitness chart components (optional)
         if CHARTS_AVAILABLE:
             self.ga_chart_view: Optional[Any] = None
@@ -682,7 +438,9 @@ class HomographyTab(QWidget):
         ga_buttons3 = QHBoxLayout()
 
         self.ga_continuous_button = QPushButton("Evolve Continuously")
-        self.ga_continuous_button.setToolTip("Start continuous evolution - runs generations automatically")
+        self.ga_continuous_button.setToolTip(
+            "Start continuous evolution - runs generations automatically"
+        )
         self.ga_continuous_button.clicked.connect(self._start_continuous_evolution)
         self.ga_continuous_button.setEnabled(False)
         self.ga_continuous_button.setStyleSheet(
@@ -788,13 +546,13 @@ class HomographyTab(QWidget):
         if CHARTS_AVAILABLE:
             chart_group = QGroupBox("Fitness Evolution")
             chart_layout = QVBoxLayout()
-            
+
             self.ga_chart_view = self._create_fitness_chart()
             if self.ga_chart_view is not None:
                 self.ga_chart_view.setMinimumHeight(200)  # Increased height for better visibility
                 self.ga_chart_view.setMaximumHeight(300)
                 chart_layout.addWidget(self.ga_chart_view)
-                
+
                 chart_group.setLayout(chart_layout)
                 layout.addWidget(chart_group)
                 print("[HOMOGRAPHY] Fitness chart widget added to layout successfully")
@@ -1402,7 +1160,7 @@ class HomographyTab(QWidget):
                     print(
                         f"[HOMOGRAPHY] Applied transformed segmentation to warped frame: {len(self.current_segmentation_results)} results"
                     )
-                
+
                 # Add RANSAC lines to the warped frame if available
                 if self.ransac_lines:
                     warped_frame = draw_ransac_field_lines(
@@ -1415,7 +1173,7 @@ class HomographyTab(QWidget):
                     print(
                         f"[HOMOGRAPHY] Added RANSAC field lines to top-down view: {len(self.ransac_lines)} lines"
                     )
-                
+
                 if warped_frame_with_segmentation is None:
                     print("[HOMOGRAPHY] Failed to apply transformed segmentation to warped frame")
             except Exception as e:
@@ -2096,13 +1854,13 @@ class HomographyTab(QWidget):
 
     def _create_fitness_chart(self) -> Optional[Any]:
         """Create fitness progress chart if PyQt5.QtChart is available.
-        
+
         Returns:
             QChartView widget or None if charts not available
         """
         if not CHARTS_AVAILABLE:
             return None
-            
+
         try:
             # Create chart view
             chart_view = QChartView()
@@ -2135,10 +1893,10 @@ class HomographyTab(QWidget):
             self.ga_fitness_series.attachAxis(self.ga_axis_y)
 
             chart_view.setChart(self.ga_chart)
-            
+
             print("[HOMOGRAPHY] Fitness chart created successfully")
             return chart_view
-            
+
         except Exception as e:
             print(f"[HOMOGRAPHY] Error creating fitness chart: {e}")
             self.ga_fitness_series = None  # Ensure it's None on failure
@@ -2146,7 +1904,7 @@ class HomographyTab(QWidget):
 
     def _validate_ga_prerequisites(self) -> bool:
         """Validate that genetic algorithm can be started.
-        
+
         Returns:
             True if GA can be started, False otherwise
         """
@@ -2224,9 +1982,7 @@ class HomographyTab(QWidget):
 
         except Exception as e:
             print(f"[HOMOGRAPHY] Error starting genetic algorithm: {e}")
-            QMessageBox.critical(
-                self, "GA Error", f"Failed to start genetic algorithm:\n{str(e)}"
-            )
+            QMessageBox.critical(self, "GA Error", f"Failed to start genetic algorithm:\n{str(e)}")
 
     def _evolve_ga_next_generation(self):
         """Evolve genetic algorithm to the next generation."""
@@ -2258,13 +2014,11 @@ class HomographyTab(QWidget):
 
         except Exception as e:
             print(f"[HOMOGRAPHY] Error evolving generation: {e}")
-            QMessageBox.critical(
-                self, "GA Error", f"Error during evolution:\n{str(e)}"
-            )
+            QMessageBox.critical(self, "GA Error", f"Error during evolution:\n{str(e)}")
 
     def _evolve_ga_generations(self, num_generations: int):
         """Evolve genetic algorithm for multiple generations.
-        
+
         Args:
             num_generations: Number of generations to evolve
         """
@@ -2321,9 +2075,7 @@ class HomographyTab(QWidget):
 
         except Exception as e:
             print(f"[HOMOGRAPHY] Error during batch evolution: {e}")
-            QMessageBox.critical(
-                self, "GA Error", f"Error during batch evolution:\n{str(e)}"
-            )
+            QMessageBox.critical(self, "GA Error", f"Error during batch evolution:\n{str(e)}")
         finally:
             # Re-enable buttons
             self._update_ga_ui_state(running=True, processing=False)
@@ -2382,20 +2134,20 @@ class HomographyTab(QWidget):
                 f"Parameters have been permanently applied.",
             )
 
-            print(f"[HOMOGRAPHY] Applied GA best parameters with fitness {stats['best_fitness']:.4f}")
+            print(
+                f"[HOMOGRAPHY] Applied GA best parameters with fitness {stats['best_fitness']:.4f}"
+            )
 
         except Exception as e:
             print(f"[HOMOGRAPHY] Error applying GA parameters: {e}")
-            QMessageBox.critical(
-                self, "GA Error", f"Error applying parameters:\n{str(e)}"
-            )
+            QMessageBox.critical(self, "GA Error", f"Error applying parameters:\n{str(e)}")
 
     def _reset_genetic_algorithm(self):
         """Reset genetic algorithm to initial state."""
         # Stop continuous evolution if running
         if self.ga_continuous_timer and self.ga_continuous_timer.isActive():
             self.ga_continuous_timer.stop()
-        
+
         self.ga_optimizer = None
         self.ga_running = False
         self.ga_generation_history.clear()
@@ -2409,7 +2161,7 @@ class HomographyTab(QWidget):
 
     def _update_ga_ui_state(self, running: bool, processing: bool = False):
         """Update GA UI button states.
-        
+
         Args:
             running: Whether GA is currently running
             processing: Whether GA is currently processing (disable all controls)
@@ -2473,35 +2225,39 @@ class HomographyTab(QWidget):
         try:
             generation = self.ga_optimizer.generation
             fitness = self.ga_optimizer.best_fitness
-            
-            print(f"[HOMOGRAPHY] Adding fitness data point: generation={generation}, fitness={fitness:.4f}")
+
+            print(
+                f"[HOMOGRAPHY] Adding fitness data point: generation={generation}, fitness={fitness:.4f}"
+            )
 
             # Add data point
             self.ga_fitness_series.append(generation, fitness)
-            
-            print(f"[HOMOGRAPHY] Fitness series now has {len(self.ga_fitness_series.pointsVector())} points")
+
+            print(
+                f"[HOMOGRAPHY] Fitness series now has {len(self.ga_fitness_series.pointsVector())} points"
+            )
 
             # Auto-scale axes
             if generation > self.ga_axis_x.max():
                 new_range = max(10, generation * 1.2)
                 print(f"[HOMOGRAPHY] Scaling X axis to: 0-{new_range}")
                 self.ga_axis_x.setRange(0, new_range)
-            
+
             # Dynamic Y-axis scaling based on actual data range
             points = self.ga_fitness_series.pointsVector()
             if len(points) > 0:
                 fitness_values = [point.y() for point in points]
                 min_fitness = min(fitness_values)
                 max_fitness = max(fitness_values)
-                
+
                 # Add 10% padding above and below the data range
                 range_padding = (max_fitness - min_fitness) * 0.1
                 if range_padding < 0.01:  # Minimum padding for very close values
                     range_padding = 0.01
-                
+
                 y_min = max(0, min_fitness - range_padding)
                 y_max = max_fitness + range_padding
-                
+
                 # Only update if the range has changed significantly
                 current_min = self.ga_axis_y.min()
                 current_max = self.ga_axis_y.max()
@@ -2521,7 +2277,7 @@ class HomographyTab(QWidget):
 
     def _update_parameter_ui(self, param_name: str, value: float):
         """Update UI elements for a specific parameter.
-        
+
         Args:
             param_name: Name of the parameter (e.g., 'H00')
             value: New parameter value
@@ -2574,22 +2330,22 @@ class HomographyTab(QWidget):
             return
 
         print("[HOMOGRAPHY] Starting continuous evolution...")
-        
+
         # Initialize timer if not already created
         if not self.ga_continuous_timer:
             self.ga_continuous_timer = QTimer()
             self.ga_continuous_timer.timeout.connect(self._continuous_evolution_step)
-        
+
         # Set timer interval (1 second between generations)
         evolution_interval = get_setting("optimization.continuous_evolution_interval_ms", 1000)
         self.ga_continuous_timer.start(evolution_interval)
-        
+
         # Update button states
         if self.ga_continuous_button:
             self.ga_continuous_button.setEnabled(False)
         if self.ga_stop_button:
             self.ga_stop_button.setEnabled(True)
-        
+
         # Disable other GA buttons during continuous evolution
         if self.ga_next_gen_button:
             self.ga_next_gen_button.setEnabled(False)
@@ -2599,16 +2355,16 @@ class HomographyTab(QWidget):
     def _stop_continuous_evolution(self):
         """Stop continuous evolution."""
         print("[HOMOGRAPHY] Stopping continuous evolution...")
-        
+
         if self.ga_continuous_timer and self.ga_continuous_timer.isActive():
             self.ga_continuous_timer.stop()
-        
+
         # Update button states
         if self.ga_continuous_button:
             self.ga_continuous_button.setEnabled(True)
         if self.ga_stop_button:
             self.ga_stop_button.setEnabled(False)
-        
+
         # Re-enable other GA buttons
         if self.ga_next_gen_button:
             self.ga_next_gen_button.setEnabled(True)
@@ -2622,20 +2378,24 @@ class HomographyTab(QWidget):
                 print("[HOMOGRAPHY] GA stopped - stopping continuous evolution")
                 self._stop_continuous_evolution()
                 return
-            
+
             # Run next generation
             self._evolve_ga_next_generation()
-            
+
             # Optional: Stop if convergence criteria are met
             convergence_threshold = get_setting("optimization.convergence_threshold", 0.95)
             max_generations = get_setting("optimization.max_generations", 200)
-            
-            if (self.ga_optimizer.best_fitness >= convergence_threshold or 
-                self.ga_optimizer.generation >= max_generations):
-                print(f"[HOMOGRAPHY] Stopping continuous evolution - convergence reached "
-                      f"(fitness: {self.ga_optimizer.best_fitness:.4f}, generation: {self.ga_optimizer.generation})")
+
+            if (
+                self.ga_optimizer.best_fitness >= convergence_threshold
+                or self.ga_optimizer.generation >= max_generations
+            ):
+                print(
+                    f"[HOMOGRAPHY] Stopping continuous evolution - convergence reached "
+                    f"(fitness: {self.ga_optimizer.best_fitness:.4f}, generation: {self.ga_optimizer.generation})"
+                )
                 self._stop_continuous_evolution()
-                
+
         except Exception as e:
             print(f"[HOMOGRAPHY] Error in continuous evolution step: {e}")
             self._stop_continuous_evolution()

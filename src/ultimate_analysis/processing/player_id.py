@@ -22,6 +22,7 @@ except ImportError:
     EASYOCR_AVAILABLE = False
     # Import logger after we know easyocr is not available
     from ..utils.logger import get_logger
+
     get_logger("PLAYER_ID").warning("EasyOCR not available, using mock results")
 
 from ..constants import JERSEY_NUMBER_MAX, JERSEY_NUMBER_MIN

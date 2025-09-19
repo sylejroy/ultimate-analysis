@@ -11,7 +11,6 @@ import numpy as np
 
 from ..config.settings import get_setting
 from ..constants import DEFAULT_PATHS
-from ..utils.logger import get_logger
 from ..gui.visualization import (
     calculate_field_contour,
     create_unified_field_mask,
@@ -19,6 +18,7 @@ from ..gui.visualization import (
     draw_unified_field_mask,
     get_primary_field_color,
 )
+from ..utils.logger import get_logger
 
 
 def transform_contour_points(contour: np.ndarray, h_matrix: np.ndarray) -> Optional[np.ndarray]:
