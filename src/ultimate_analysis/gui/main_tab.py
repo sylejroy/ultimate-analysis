@@ -1057,35 +1057,70 @@ class MainTab(QWidget):
         self.current_field_results = []
         self.current_player_ids = {}
 
-        # Run inference if enabled
+        # Run inference and field segmentation in parallel if both are enabled
+        inference_start = None
+        field_start = None
+
         if self.inference_checkbox.isChecked():
-            self.logger.debug("[MAIN_TAB] Running inference...")
-            start_time = time.time()
-            self.current_detections = run_inference(frame)
-            duration_ms = (time.time() - start_time) * 1000
-            self.performance_widget.add_processing_measurement("Inference", duration_ms)
+            from concurrent.futures import ThreadPoolExecutor
+            import concurrent.futures
 
-        # Run tracking if enabled
-        if self.tracking_checkbox.isChecked() and self.current_detections:
-            self.logger.debug("[MAIN_TAB] Running tracking...")
-            start_time = time.time()
-            self.current_tracks = run_tracking(frame, self.current_detections)
-            duration_ms = (time.time() - start_time) * 1000
-            self.performance_widget.add_processing_measurement("Tracking", duration_ms)
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                # Submit inference task
+                inference_start = time.time()
+                inference_future = executor.submit(run_inference, frame.copy())
 
-        # Run field segmentation if enabled
-        if self.field_segmentation_checkbox.isChecked():
-            self.logger.debug("[MAIN_TAB] Running field segmentation...")
-            start_time = time.time()
-            self.current_field_results = run_field_segmentation(frame)
-            duration_ms = (time.time() - start_time) * 1000
-            self.performance_widget.add_processing_measurement("Field Segmentation", duration_ms)
+                # Submit field segmentation task if enabled
+                if self.field_segmentation_checkbox.isChecked():
+                    field_start = time.time()
+                    field_future = executor.submit(run_field_segmentation, frame.copy())
+                else:
+                    field_future = None
+
+                # Get inference results
+                try:
+                    self.current_detections = inference_future.result(timeout=30.0)  # 30 second timeout
+                    inference_duration_ms = (time.time() - inference_start) * 1000
+                    self.performance_widget.add_processing_measurement("Inference", inference_duration_ms)
+                except concurrent.futures.TimeoutError:
+                    self.logger.error("[MAIN_TAB] Inference timed out after 30 seconds")
+                    self.current_detections = []
+                except Exception as e:
+                    self.logger.error(f"[MAIN_TAB] Inference failed: {e}")
+                    self.current_detections = []
+
+                # Get field segmentation results
+                if field_future is not None:
+                    try:
+                        self.current_field_results = field_future.result(timeout=30.0)  # 30 second timeout
+                        field_duration_ms = (time.time() - field_start) * 1000
+                        self.performance_widget.add_processing_measurement("Field Segmentation", field_duration_ms)
+                    except concurrent.futures.TimeoutError:
+                        self.logger.error("[MAIN_TAB] Field segmentation timed out after 30 seconds")
+                        self.current_field_results = []
+                    except Exception as e:
+                        self.logger.error(f"[MAIN_TAB] Field segmentation failed: {e}")
+                        self.current_field_results = []
+                else:
+                    # Clear field results when disabled
+                    self.current_field_results = []
+                    self.ransac_lines = []
+                    self.ransac_confidences = []
+                    self.all_lines_for_display = {}
         else:
-            # Clear field results when disabled
-            self.current_field_results = []
-            self.ransac_lines = []
-            self.ransac_confidences = []
-            self.all_lines_for_display = {}
+            # Run field segmentation only if inference is disabled but field segmentation is enabled
+            if self.field_segmentation_checkbox.isChecked():
+                self.logger.debug("[MAIN_TAB] Running field segmentation...")
+                start_time = time.time()
+                self.current_field_results = run_field_segmentation(frame)
+                duration_ms = (time.time() - start_time) * 1000
+                self.performance_widget.add_processing_measurement("Field Segmentation", duration_ms)
+            else:
+                # Clear field results when disabled
+                self.current_field_results = []
+                self.ransac_lines = []
+                self.ransac_confidences = []
+                self.all_lines_for_display = {}
 
         # Run player ID if enabled (requires tracking to be active)
         if self.player_id_checkbox.isChecked() and self.current_tracks:

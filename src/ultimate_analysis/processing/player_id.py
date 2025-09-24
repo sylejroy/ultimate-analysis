@@ -6,7 +6,7 @@ Includes probabilistic tracking for reliable jersey number identification.
 """
 
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -36,6 +36,38 @@ from .jersey_tracker import (
 
 # Global player ID state - only EasyOCR is supported
 _easyocr_reader = None
+
+
+def _process_single_crop_parallel(crop_data, ocr_params, readtext_params):
+    """Process a single crop with OCR in a separate process.
+    
+    This function is at module level so it can be pickled for multiprocessing.
+    
+    Args:
+        crop_data: Tuple of (crop_index, crop_image)
+        ocr_params: OCR configuration parameters
+        readtext_params: EasyOCR readtext parameters
+        
+    Returns:
+        Tuple of (crop_index, ocr_results)
+    """
+    crop_index, crop = crop_data
+    try:
+        # Initialize EasyOCR in this process if needed
+        if not EASYOCR_AVAILABLE:
+            return crop_index, []
+        
+        # Create a new EasyOCR reader for this process
+        # Use same config as main process
+        languages = ["en"]
+        gpu = ocr_params.get("gpu", True)
+        reader = easyocr.Reader(languages, gpu=gpu, verbose=False)
+        
+        ocr_results = reader.readtext(crop, **readtext_params)
+        return crop_index, ocr_results
+    except Exception as e:
+        print(f"Error processing crop {crop_index} in parallel: {e}")
+        return crop_index, []
 
 
 def run_player_id_on_tracks(
@@ -402,7 +434,7 @@ def _run_batch_easyocr_detection(
         - total_timing: Dict with 'preprocessing_ms' and 'ocr_ms' totals for the batch
 
     Performance Features:
-        - Parallel OCR processing using ThreadPoolExecutor (configurable workers)
+        - Parallel OCR processing using ProcessPoolExecutor (configurable workers)
         - Batch preprocessing to reduce setup overhead
         - Shared EasyOCR parameters across all crops
         - Graceful fallback to sequential processing for single crops or errors
@@ -536,27 +568,17 @@ def _run_batch_easyocr_detection(
                     batch_ocr_results.append(ocr_results)
             else:
                 # Multiple crops - use parallel processing
-                def process_single_crop(crop_data):
-                    """Process a single crop with OCR."""
-                    crop_index, crop = crop_data
-                    try:
-                        ocr_results = _easyocr_reader.readtext(crop, **readtext_params)
-                        return crop_index, ocr_results
-                    except Exception as e:
-                        logger.error(f"Error processing crop {crop_index} in parallel: {e}")
-                        return crop_index, []
-
                 # Create indexed crop data for parallel processing
                 indexed_crops = [(i, crop) for i, crop in enumerate(valid_crops)]
 
-                # Process crops in parallel
+                # Process crops in parallel using processes
                 parallel_results = {}
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    logger.debug(f"Using {max_workers} parallel workers for OCR processing")
+                with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                    logger.debug(f"Using {max_workers} parallel processes for OCR processing")
 
-                    # Submit all tasks
+                    # Submit all tasks with parameters
                     future_to_index = {
-                        executor.submit(process_single_crop, crop_data): crop_data[0]
+                        executor.submit(_process_single_crop_parallel, crop_data, ocr_params, readtext_params): crop_data[0]
                         for crop_data in indexed_crops
                     }
 

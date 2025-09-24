@@ -13,6 +13,7 @@ Performance optimizations:
 """
 
 from typing import Any, Dict, List, Optional, Tuple
+import concurrent.futures
 
 import cv2
 import numpy as np
@@ -284,6 +285,60 @@ try:
 except ImportError:
     SKLEARN_AVAILABLE = False
     # Fallback implementation will be used automatically when needed
+
+
+def _ransac_trial_parallel(points: np.ndarray, min_samples: int, threshold_sq: float) -> Optional[Tuple[np.ndarray, int, np.ndarray]]:
+    """Perform a single RANSAC trial for parallel execution.
+
+    Args:
+        points: All points to fit line to
+        min_samples: Number of points to sample for line estimation
+        threshold_sq: Squared distance threshold for inliers
+
+    Returns:
+        Tuple of (line_params, inlier_count, inlier_mask) or None if trial fails
+    """
+    try:
+        num_points = len(points)
+
+        # Randomly sample min_samples points
+        sample_indices = np.random.choice(num_points, min_samples, replace=False)
+        sample_points = points[sample_indices]
+
+        # For 2-point sampling (most common case)
+        if min_samples == 2:
+            p1, p2 = sample_points[0], sample_points[1]
+
+            # Calculate direction vector
+            direction = p2 - p1
+            direction_norm_sq = np.dot(direction, direction)
+
+            # Skip if points are too close
+            if direction_norm_sq < 1e-12:
+                return None
+
+            direction_norm = np.sqrt(direction_norm_sq)
+
+            # Normal vector to the line (perpendicular)
+            normal = np.array([-direction[1], direction[0]]) / direction_norm
+            a, b = normal[0], normal[1]
+            c = -(a * p1[0] + b * p1[1])
+
+            # Vectorized distance calculation (much faster)
+            distances_sq = (a * points[:, 0] + b * points[:, 1] + c) ** 2
+
+            # Find inliers using squared threshold
+            inlier_mask = distances_sq <= threshold_sq
+            inlier_count = np.sum(inlier_mask)
+
+            # Return line parameters and results
+            line_params = np.array([a, b, c])
+            return line_params, inlier_count, inlier_mask
+
+        return None
+
+    except Exception:
+        return None
 
 
 def filter_edge_points(
@@ -651,66 +706,54 @@ def _fit_line_ransac_fallback(
         if len(points) < min_samples:
             return None
 
-        best_inliers = None
-        best_line = None
-        best_inlier_count = 0
-
         # Pre-compute for efficiency
         num_points = len(points)
         threshold_sq = distance_threshold**2  # Use squared distance to avoid sqrt
 
-        for trial in range(max_trials):
-            # Randomly sample min_samples points
-            sample_indices = np.random.choice(num_points, min_samples, replace=False)
-            sample_points = points[sample_indices]
+        # Use ThreadPoolExecutor for parallel RANSAC trials
+        # This can significantly speed up RANSAC fitting on multi-core systems
+        best_inliers = None
+        best_line = None
+        best_inlier_count = 0
 
-            # For 2-point sampling (most common case)
-            if min_samples == 2:
-                p1, p2 = sample_points[0], sample_points[1]
+        # Determine optimal number of workers (don't exceed max_trials)
+        max_workers = min(max_trials, 8)  # Cap at 8 workers to avoid overhead
 
-                # Calculate direction vector
-                direction = p2 - p1
-                direction_norm_sq = np.dot(direction, direction)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all trials
+            future_to_trial = {
+                executor.submit(_ransac_trial_parallel, points, min_samples, threshold_sq): trial
+                for trial in range(max_trials)
+            }
 
-                # Skip if points are too close
-                if direction_norm_sq < 1e-12:
-                    continue
+            # Process results as they complete
+            for future in concurrent.futures.as_completed(future_to_trial):
+                trial_result = future.result()
+                if trial_result is not None:
+                    line_params, inlier_count, inlier_mask = trial_result
 
-                direction_norm = np.sqrt(direction_norm_sq)
+                    # Update best model if this is better
+                    if inlier_count > best_inlier_count:
+                        best_inlier_count = inlier_count
+                        best_inliers = inlier_mask
 
-                # Normal vector to the line (perpendicular)
-                normal = np.array([-direction[1], direction[0]]) / direction_norm
-                a, b = normal[0], normal[1]
-                c = -(a * p1[0] + b * p1[1])
+                        # Calculate line endpoints from all inliers
+                        inlier_points = points[inlier_mask]
+                        if len(inlier_points) >= 2:
+                            a, b, c = line_params
+                            x_coords = inlier_points[:, 0]
+                            x_min, x_max = x_coords.min(), x_coords.max()
 
-                # Vectorized distance calculation (much faster)
-                distances_sq = (a * points[:, 0] + b * points[:, 1] + c) ** 2
+                            # Calculate corresponding y values on the line
+                            if abs(b) > 1e-6:  # Line is not vertical
+                                y_min = -(a * x_min + c) / b
+                                y_max = -(a * x_max + c) / b
+                            else:  # Vertical line
+                                y_coords = inlier_points[:, 1]
+                                y_min, y_max = y_coords.min(), y_coords.max()
+                                x_min = x_max = -c / a
 
-                # Find inliers using squared threshold
-                inlier_mask = distances_sq <= threshold_sq
-                inlier_count = np.sum(inlier_mask)
-
-                # Update best model if this is better
-                if inlier_count > best_inlier_count:
-                    best_inlier_count = inlier_count
-                    best_inliers = inlier_mask
-
-                    # Calculate line endpoints from all inliers
-                    inlier_points = points[inlier_mask]
-                    if len(inlier_points) >= 2:
-                        x_coords = inlier_points[:, 0]
-                        x_min, x_max = x_coords.min(), x_coords.max()
-
-                        # Calculate corresponding y values on the line
-                        if abs(b) > 1e-6:  # Line is not vertical
-                            y_min = -(a * x_min + c) / b
-                            y_max = -(a * x_max + c) / b
-                        else:  # Vertical line
-                            y_coords = inlier_points[:, 1]
-                            y_min, y_max = y_coords.min(), y_coords.max()
-                            x_min = x_max = -c / a
-
-                        best_line = np.array([[x_min, y_min], [x_max, y_max]])
+                            best_line = np.array([[x_min, y_min], [x_max, y_max]])
 
         if best_inliers is not None and best_line is not None:
             # Validate mask dimensions
