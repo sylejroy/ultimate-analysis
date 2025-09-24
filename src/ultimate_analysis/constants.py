@@ -4,7 +4,6 @@ This file contains immutable system constraints, validation bounds, and fallback
 Use configuration files for runtime-configurable settings.
 """
 
-
 # File size constraints (enforced during development)
 MAX_FILE_SIZE_LINES = 500
 
@@ -63,7 +62,11 @@ VISUALIZATION_COLORS = {
     "PLAYER": (128, 128, 128),  # Subtle gray
     # Model-specific colors for differentiation
     "PLAYER_MODEL": (0, 200, 0),  # Bright green for player model detections
-    "DISC_MODEL": (0, 0, 255),  # Bright red for disc model detections (changed from orange for better visibility)
+    "DISC_MODEL": (
+        0,
+        0,
+        255,
+    ),  # Bright red for disc model detections (changed from orange for better visibility)
 }
 
 # Performance monitoring

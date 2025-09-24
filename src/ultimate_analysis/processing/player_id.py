@@ -8,7 +8,7 @@ Includes probabilistic tracking for reliable jersey number identification.
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
@@ -22,8 +22,10 @@ except ImportError:
     EASYOCR_AVAILABLE = False
     # Import logger after we know easyocr is not available
     from ..utils.logger import get_logger
+
     get_logger("PLAYER_ID").warning("EasyOCR not available, using mock results")
 
+from ..config.settings import get_setting
 from ..constants import JERSEY_NUMBER_MAX, JERSEY_NUMBER_MIN
 from ..utils.logger import get_logger
 from .jersey_tracker import (
@@ -37,17 +39,40 @@ from .jersey_tracker import (
 _easyocr_reader = None
 
 
+def _get_player_id_setting(key: str, default: Any) -> Any:
+    """Fetch a player_id setting from config supporting both legacy and nested namespaces.
+
+    Lookup order:
+      1. player_id.<key>
+      2. models.player_id.<key>
+    Environment overrides have been removed; only YAML is consulted.
+    """
+    # Direct path
+    value = get_setting(f"player_id.{key}", None)
+    if value is not None:
+        return value
+    # Fallback nested under models.player_id
+    return get_setting(f"models.player_id.{key}", default)
+
+
 def run_player_id_on_tracks(
-    frame: np.ndarray, tracks: List[Any]
-) -> Tuple[Dict[int, Tuple[str, Any]], Dict[str, float]]:
+    frame: np.ndarray,
+    tracks: List[Any],
+    frame_index: int = 0,
+    finalized_tracks: Optional[Set[int]] = None,
+) -> Tuple[Dict[int, Tuple[str, Any]], Dict[str, float], Set[int]]:
     """Run player identification on tracked objects using batch EasyOCR with probabilistic tracking.
 
     Args:
         frame: Current video frame
         tracks: List of track objects from tracking system
 
+    Args:
+        frame_index: Current global frame index (for interval/stagger logic)
+        finalized_tracks: Set of track_ids whose jersey number is finalized (probability >= threshold)
+
     Returns:
-        Tuple of (player_identifications, timing_info)
+        Tuple of (player_identifications, timing_info, finalized_tracks)
         player_identifications: Dictionary mapping track_id -> (jersey_number, detection_details)
         timing_info: Dictionary with 'preprocessing_ms', 'ocr_ms', and 'filtering_ms' totals
 
@@ -56,7 +81,14 @@ def run_player_id_on_tracks(
         - 'tracking_history': Top 3 probabilities from historical tracking
         - 'best_tracked': Most probable jersey number from tracking
 
-    Example:
+        Performance optimizations:
+                - OCR interval (player_id.ocr_frame_interval): each track is processed only every N frames
+                - Staggering: optional (player_id.ocr_frame_interval_stagger) uses (frame_index + track_id) % N
+                    so not all tracks run OCR on the same frame
+                - Finalization: once best tracked probability exceeds
+                    player_id.finalized_certainty_threshold the track is skipped for future OCR calls
+
+        Example:
         results, timing = run_player_id_on_tracks(frame, current_tracks)
         for track_id, (number, details) in results.items():
             logger.debug(f"Track {track_id}: Player #{number}")
@@ -65,12 +97,21 @@ def run_player_id_on_tracks(
                     logger.debug(f"  {jersey}: {prob:.1%} ({count} measurements)")
     """
     logger = get_logger("PLAYER_ID")
+
     player_identifications = {}
+    if finalized_tracks is None:
+        finalized_tracks = set()
+
+    # Optimization settings
+    ocr_frame_interval = max(1, _get_player_id_setting("ocr_frame_interval", 1))
+    stagger_enabled = _get_player_id_setting("ocr_frame_interval_stagger", True)
+    finalized_threshold = _get_player_id_setting("finalized_certainty_threshold", 0.999)
+    verbose_debug = _get_player_id_setting("verbose_debug", False)
     total_timing = {"preprocessing_ms": 0.0, "ocr_ms": 0.0, "filtering_ms": 0.0}
     batch_timing: Dict[str, float] = {"preprocessing_ms": 0.0, "ocr_ms": 0.0, "filtering_ms": 0.0}
 
     if not tracks:
-        return player_identifications, total_timing
+        return player_identifications, total_timing, finalized_tracks
 
     # Initialize EasyOCR if needed
     if _easyocr_reader is None:
@@ -80,6 +121,10 @@ def run_player_id_on_tracks(
     player_crops = []
     track_metadata = []
 
+    tracks_for_ocr: List[Any] = []  # subset that will have OCR this frame
+
+    skipped_interval = 0
+    skipped_finalized = 0
     for track in tracks:
         try:
             # Extract track information
@@ -107,6 +152,23 @@ def run_player_id_on_tracks(
             elif hasattr(track, "class_name") and track.class_name.lower() == "disc":
                 continue
 
+            # Skip if track already finalized
+            if track_id in finalized_tracks:
+                skipped_finalized += 1
+                continue
+
+            # Interval / stagger decision: only process a subset of tracks this frame
+            if ocr_frame_interval > 1:
+                if stagger_enabled:
+                    # Stagger by track_id so load is distributed; each track processed every N frames
+                    if (frame_index + track_id) % ocr_frame_interval != 0:
+                        skipped_interval += 1
+                        continue
+                else:
+                    if frame_index % ocr_frame_interval != 0:
+                        skipped_interval += 1
+                        continue
+
             # Ensure bbox is within frame bounds
             h, w = frame.shape[:2]
             x1 = max(0, min(x1, w - 1))
@@ -122,6 +184,7 @@ def run_player_id_on_tracks(
                 track_metadata.append(
                     {"track_id": track_id, "bbox": (x1, y1, x2, y2), "crop_width": x2 - x1}
                 )
+                tracks_for_ocr.append(track_id)
             else:
                 player_identifications[track_id] = ("Unknown", None)
 
@@ -182,6 +245,12 @@ def run_player_id_on_tracks(
                 tracking_history = get_jersey_probabilities(track_id, top_k=3)
                 best_tracked_number, best_tracked_prob = get_best_jersey_number(track_id)
 
+                # Finalization check
+                is_finalized = False
+                if best_tracked_number and best_tracked_prob >= finalized_threshold:
+                    finalized_tracks.add(track_id)
+                    is_finalized = True
+
                 # Prepare enhanced details
                 enhanced_details = details.copy() if details else {}
                 enhanced_details.update(
@@ -195,7 +264,9 @@ def run_player_id_on_tracks(
                             "jersey_number": best_tracked_number,
                             "probability": best_tracked_prob,
                         },
-                        "jersey_tracker": get_jersey_tracker(),  # Add tracker instance for top probabilities
+                        "finalized": is_finalized,
+                        # Only attach tracker object for debugging (it is large)
+                        **({"jersey_tracker": get_jersey_tracker()} if verbose_debug else {}),
                     }
                 )
 
@@ -209,16 +280,22 @@ def run_player_id_on_tracks(
 
                 player_identifications[track_id] = (primary_result, enhanced_details)
 
-                print(
-                    f"[PLAYER_ID] Track {track_id}: Single-frame='{jersey_number}', Tracked='{best_tracked_number}' ({best_tracked_prob:.2%}), Primary='{primary_result}'"
-                )
+                if verbose_debug:
+                    logger.debug(
+                        f"Track {track_id}: single='{jersey_number}' tracked='{best_tracked_number}' ({best_tracked_prob:.2%}) primary='{primary_result}' finalized={'yes' if track_id in finalized_tracks else 'no'}"
+                    )
 
     # Add batch timing to totals
     total_timing["preprocessing_ms"] += batch_timing.get("preprocessing_ms", 0.0)
     total_timing["ocr_ms"] += batch_timing.get("ocr_ms", 0.0)
     total_timing["filtering_ms"] += batch_timing.get("filtering_ms", 0.0)
 
-    return player_identifications, total_timing
+    # Attach simple counters for caller visibility (in timing dict to avoid signature change)
+    total_timing["tracks_total"] = len(tracks)
+    total_timing["tracks_ocr"] = len(tracks_for_ocr)
+    total_timing["tracks_skipped_interval"] = skipped_interval
+    total_timing["tracks_skipped_finalized"] = skipped_finalized
+    return player_identifications, total_timing, finalized_tracks
 
 
 def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List], Dict[str, float]]:
@@ -258,9 +335,10 @@ def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List],
             timing_info["preprocessing_ms"] = (time.time() - prep_start_time) * 1000
             timing_info["ocr_ms"] = 0.0
             timing_info["filtering_ms"] = 0.0
-            print(
-                f"[PLAYER_ID] Crop too small ({crop_width}x{crop_height}), skipping OCR (min: {min_crop_width}x{min_crop_height})"
-            )
+            if get_setting("player_id.verbose_debug", False):
+                logger.debug(
+                    f"Crop too small ({crop_width}x{crop_height}), skipping OCR (min: {min_crop_width}x{min_crop_height})"
+                )
             return "Unknown", [], timing_info
 
         # Apply top crop fraction like tuning tab
@@ -327,13 +405,15 @@ def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List],
             if confidence >= min_confidence:
                 filtered_ocr_results.append((bbox, text, confidence))
             else:
-                print(
-                    f"[PLAYER_ID] Filtered out low confidence detection: '{text}' ({confidence:.3f} < {min_confidence})"
-                )
+                if get_setting("player_id.verbose_debug", False):
+                    logger.debug(
+                        f"Filtered out low confidence detection: '{text}' ({confidence:.3f} < {min_confidence})"
+                    )
 
-        print(
-            f"[PLAYER_ID] OCR results: {len(ocr_results)} total, {len(filtered_ocr_results)} after confidence filter"
-        )
+        if get_setting("player_id.verbose_debug", False):
+            logger.debug(
+                f"OCR results: {len(ocr_results)} total, {len(filtered_ocr_results)} after confidence filter"
+            )
 
         # Process filtered results - find best numeric text (same as tuning tab)
         best_text = ""
@@ -449,9 +529,10 @@ def _run_batch_easyocr_detection(
 
                 crop_height, crop_width = crop_image.shape[:2]
                 if crop_width < min_crop_width or crop_height < min_crop_height:
-                    print(
-                        f"[PLAYER_ID] Batch crop {i} too small ({crop_width}x{crop_height}), skipping"
-                    )
+                    if get_setting("player_id.verbose_debug", False):
+                        logger.debug(
+                            f"Batch crop {i} too small ({crop_width}x{crop_height}), skipping"
+                        )
                     processed_crops.append(None)  # Placeholder for skipped crop
                     crop_metadata.append(None)
                     continue
@@ -474,7 +555,8 @@ def _run_batch_easyocr_detection(
                 )
 
             except Exception as e:
-                print(f"[PLAYER_ID] Error preprocessing batch crop {i}: {e}")
+                if get_setting("player_id.verbose_debug", False):
+                    logger.debug(f"Error preprocessing batch crop {i}: {e}")
                 processed_crops.append(None)
                 crop_metadata.append(None)
 
@@ -566,9 +648,10 @@ def _run_batch_easyocr_detection(
                             parallel_results[crop_index] = ocr_results
                         except Exception as e:
                             crop_index = future_to_index[future]
-                            print(
-                                f"[PLAYER_ID] Parallel processing failed for crop {crop_index}: {e}"
-                            )
+                            if get_setting("player_id.verbose_debug", False):
+                                logger.debug(
+                                    f"Parallel processing failed for crop {crop_index}: {e}"
+                                )
                             parallel_results[crop_index] = []
 
                 # Reconstruct results in original order
@@ -678,7 +761,8 @@ def _load_easyocr_config() -> Dict[str, Any]:
                 break
 
         if project_root is None:
-            print("[PLAYER_ID] Could not find configs directory")
+            if get_setting("player_id.verbose_debug", False):
+                print("[PLAYER_ID] Could not find configs directory")
             return {}
 
         config_path = project_root / "configs" / "easyocr_params.yaml"
@@ -688,11 +772,13 @@ def _load_easyocr_config() -> Dict[str, Any]:
                 config = yaml.safe_load(f)
                 return config.get("player_id", {})
         else:
-            print(f"[PLAYER_ID] Config file not found: {config_path}")
+            if get_setting("player_id.verbose_debug", False):
+                print(f"[PLAYER_ID] Config file not found: {config_path}")
             return {}
 
     except Exception as e:
-        print(f"[PLAYER_ID] Error loading config: {e}")
+        if get_setting("player_id.verbose_debug", False):
+            print(f"[PLAYER_ID] Error loading config: {e}")
         return {}
 
 
@@ -815,7 +901,9 @@ def _initialize_easyocr() -> None:
     if _easyocr_reader is not None:
         return
 
-    print("[PLAYER_ID] Initializing EasyOCR reader")
+    logger = get_logger("PLAYER_ID")
+    if get_setting("player_id.verbose_debug", False):
+        logger.debug("Initializing EasyOCR reader")
 
     try:
         if EASYOCR_AVAILABLE:
@@ -828,13 +916,14 @@ def _initialize_easyocr() -> None:
             gpu = easyocr_config.get("gpu", True)
 
             _easyocr_reader = easyocr.Reader(languages, gpu=gpu)
-            print("[PLAYER_ID] EasyOCR reader initialized successfully")
+            if get_setting("player_id.verbose_debug", False):
+                logger.debug("EasyOCR reader initialized successfully")
         else:
-            print("[PLAYER_ID] EasyOCR not available, using mock reader")
+            logger.warning("EasyOCR not available, using mock reader")
             _easyocr_reader = None
 
     except Exception as e:
-        print(f"[PLAYER_ID] Failed to initialize EasyOCR: {e}")
+        logger.error(f"Failed to initialize EasyOCR: {e}")
         _easyocr_reader = None
 
 

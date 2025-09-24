@@ -212,7 +212,7 @@ def draw_detections(frame: np.ndarray, detections: List[Dict[str, Any]]) -> np.n
             model_label = " [PM]"  # Player Model
         elif model_type == "disc_model":
             model_label = " [DM]"  # Disc Model
-        
+
         label = f"{class_name}: {confidence:.2f}{model_label}"
         label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
 
@@ -309,8 +309,13 @@ def draw_tracks_with_player_ids(
             2,
         )
 
-        # Draw detection regions if OCR results are available for known players
-        if jersey_number != "Unknown" and isinstance(details, dict) and "ocr_results" in details:
+        # Draw detection regions if OCR results are available for known players AND not finalized
+        if (
+            jersey_number != "Unknown"
+            and isinstance(details, dict)
+            and "ocr_results" in details
+            and not details.get("finalized", False)
+        ):
             ocr_results = details["ocr_results"]
             if ocr_results:
                 # Get transformation information
@@ -477,31 +482,33 @@ def draw_tracks(
                 corner_color = VISUALIZATION_COLORS["PLAYER_MODEL"]  # Bright green
                 # Top-left corner marker
                 cv2.rectangle(
-                    vis_frame, 
-                    (x1, y1), 
-                    (x1 + corner_size, y1 + corner_size), 
-                    corner_color, 
-                    -1
+                    vis_frame, (x1, y1), (x1 + corner_size, y1 + corner_size), corner_color, -1
                 )
                 # Add "P" for player model
                 cv2.putText(
-                    vis_frame, "P", (x1 + 2, y1 + 12), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1
+                    vis_frame,
+                    "P",
+                    (x1 + 2, y1 + 12),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4,
+                    (255, 255, 255),
+                    1,
                 )
             elif model_type == "disc_model":
                 corner_color = VISUALIZATION_COLORS["DISC_MODEL"]  # Bright orange
                 # Top-right corner marker
                 cv2.rectangle(
-                    vis_frame, 
-                    (x2 - corner_size, y1), 
-                    (x2, y1 + corner_size), 
-                    corner_color, 
-                    -1
+                    vis_frame, (x2 - corner_size, y1), (x2, y1 + corner_size), corner_color, -1
                 )
                 # Add "D" for disc model
                 cv2.putText(
-                    vis_frame, "D", (x2 - 12, y1 + 12), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1
+                    vis_frame,
+                    "D",
+                    (x2 - 12, y1 + 12),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4,
+                    (255, 255, 255),
+                    1,
                 )
 
         # Draw track ID with background for better visibility

@@ -10,8 +10,6 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..utils.logger import get_logger
-
 import cv2
 import numpy as np
 import yaml
@@ -54,8 +52,9 @@ from ..processing import (
     set_field_model,
     set_tracker_type,
 )
-from ..processing.jersey_tracker import get_jersey_tracker
+from ..processing.jersey_tracker import get_jersey_tracker, get_best_jersey_number
 from ..processing.line_extraction import extract_raw_lines_from_segmentation
+from ..utils.logger import get_logger
 from ..utils.segmentation_utils import (
     apply_segmentation_to_warped_frame,
 )
@@ -102,7 +101,7 @@ class MainTab(QWidget):
 
     def __init__(self):
         super().__init__()
-        
+
         # Initialize logger
         self.logger = get_logger("MAIN_TAB")
 
@@ -159,6 +158,12 @@ class MainTab(QWidget):
         self.frame_times: List[float] = []
         self.max_frame_samples = 30  # Rolling average over 30 frames
         self.current_fps = 0.0
+        # Global frame counter for optimization intervals
+        self.global_frame_index: int = 0
+        # Tracks whose jersey numbers are finalized (certainty threshold reached)
+        self.finalized_player_id_tracks: set[int] = set()
+        # Track last frame we updated a jersey number (for pruning stale entries)
+        self.player_id_last_seen: Dict[int, int] = {}
 
         # Playback timer
         self.playback_timer = QTimer()
@@ -319,6 +324,8 @@ class MainTab(QWidget):
         self.player_id_checkbox.setToolTip(
             f"Enable/disable player ID based on jersey numbers [{SHORTCUTS['TOGGLE_PLAYER_ID']}]"
         )
+        # Enable player ID by default so OCR-based jersey identification starts automatically
+        self.player_id_checkbox.setChecked(True)
         self.player_id_checkbox.stateChanged.connect(self._on_player_id_toggled)
 
         self.field_segmentation_checkbox = QCheckBox("Field Segmentation")
@@ -961,9 +968,11 @@ class MainTab(QWidget):
             cache_key = sorted_entries[i][0]
             del self.frame_cache[cache_key]
 
-        print(
-            f"[MAIN_TAB] Cache cleanup: removed {entries_to_remove} entries, {len(self.frame_cache)} remaining"
-        )
+        from ..config.settings import get_setting as _ua_get_setting_verbose
+        if _ua_get_setting_verbose("player_id.verbose_debug", _ua_get_setting_verbose("models.player_id.verbose_debug", False)):
+            print(
+                f"[MAIN_TAB] Cache cleanup: removed {entries_to_remove} entries, {len(self.frame_cache)} remaining"
+            )
 
     def _process_frame_cached(self, frame: np.ndarray) -> np.ndarray:
         """Process frame with caching optimization to avoid redundant computations.
@@ -1041,7 +1050,7 @@ class MainTab(QWidget):
         self.last_frame_hash = frame_hash
         return processed_frame
 
-    def _process_frame(self, frame):
+    def _process_frame(self, frame: np.ndarray) -> np.ndarray:
         """Apply enabled processing to a frame.
 
         Args:
@@ -1050,13 +1059,11 @@ class MainTab(QWidget):
         Returns:
             Processed frame with visualizations
         """
-        # Start total runtime timer (measured in _process_frame_cached)
-
-        # Reset detection/tracking results
+        # Reset detection/tracking results (but keep existing jersey IDs for persistence)
         self.current_detections = []
         self.current_tracks = []
         self.current_field_results = []
-        self.current_player_ids = {}
+        # Do NOT clear current_player_ids here; we may reuse previous frame's IDs when OCR is skipped
 
         # Run inference if enabled
         if self.inference_checkbox.isChecked():
@@ -1089,21 +1096,33 @@ class MainTab(QWidget):
             self.all_lines_for_display = {}
 
         # Run player ID if enabled (requires tracking to be active)
+        new_player_id_results: Dict[int, Tuple[str, Any]] = {}
         if self.player_id_checkbox.isChecked() and self.current_tracks:
             self.logger.debug(
                 f"[MAIN_TAB] Running player identification on {len(self.current_tracks)} tracks..."
             )
             start_time = time.time()
-            self.current_player_ids, player_id_timing = run_player_id_on_tracks(
-                frame, self.current_tracks
+            (
+                new_player_id_results,
+                player_id_timing,
+                self.finalized_player_id_tracks,
+            ) = run_player_id_on_tracks(
+                frame,
+                self.current_tracks,
+                frame_index=self.global_frame_index,
+                finalized_tracks=self.finalized_player_id_tracks,
             )
             duration_ms = (time.time() - start_time) * 1000
 
             # Debug timing values and results
-            self.logger.debug(f"[MAIN_TAB] Player ID results: {len(self.current_player_ids)} tracks processed")
-            for track_id, (jersey_number, details) in self.current_player_ids.items():
+            self.logger.debug(
+                f"[MAIN_TAB] Player ID results: {len(new_player_id_results)} tracks processed"
+            )
+            for track_id, (jersey_number, details) in new_player_id_results.items():
                 confidence = details.get("confidence", 0.0) if details else 0.0
-                self.logger.debug(f"[MAIN_TAB]   Track {track_id}: #{jersey_number} (conf: {confidence:.3f})")
+                self.logger.debug(
+                    f"[MAIN_TAB]   Track {track_id}: #{jersey_number} (conf: {confidence:.3f})"
+                )
             self.logger.debug(f"[MAIN_TAB] Raw timing: {player_id_timing}")
             self.logger.debug(f"[MAIN_TAB] Total duration: {duration_ms:.1f}ms")
 
@@ -1124,20 +1143,58 @@ class MainTab(QWidget):
                         "Player ID - Jersey Number Filtering", player_id_timing["filtering_ms"]
                     )
 
-            self.logger.debug(f"[MAIN_TAB] Identified {len(self.current_player_ids)} players")
-            print(
-                f"[MAIN_TAB] Player ID timing - Preprocessing: {player_id_timing['preprocessing_ms']:.1f}ms, OCR: {player_id_timing['ocr_ms']:.1f}ms, Filtering: {player_id_timing.get('filtering_ms', 0.0):.1f}ms"
-            )
+            self.logger.debug(f"[MAIN_TAB] Identified {len(new_player_id_results)} players this frame")
+            from ..config.settings import get_setting as _ua_get_setting_verbose
+            if _ua_get_setting_verbose("player_id.verbose_debug", _ua_get_setting_verbose("models.player_id.verbose_debug", False)):
+                print(
+                    f"[MAIN_TAB] Player ID timing - Preprocessing: {player_id_timing['preprocessing_ms']:.1f}ms, OCR: {player_id_timing['ocr_ms']:.1f}ms, Filtering: {player_id_timing.get('filtering_ms', 0.0):.1f}ms"
+                )
         else:
             # Clear player IDs when not running
-            self.current_player_ids = {}
+            if not self.player_id_checkbox.isChecked():
+                self.current_player_ids = {}
+                self.player_id_last_seen.clear()
+
+        # Merge new OCR results into persistent map (if player ID enabled)
+        if self.player_id_checkbox.isChecked() and self.current_tracks:
+            # Update / add new results
+            for track_id, value in new_player_id_results.items():
+                self.current_player_ids[track_id] = value
+                self.player_id_last_seen[track_id] = self.global_frame_index
+
+            # For tracks not updated this frame, attempt to fill using tracker probabilities if missing or Unknown
+            for track in self.current_tracks:
+                track_id = getattr(track, "track_id", getattr(track, "id", None))
+                if track_id is None:
+                    continue
+                if track_id not in self.current_player_ids or self.current_player_ids[track_id][0] in ("Unknown", None, ""):
+                    best_num, best_prob = get_best_jersey_number(track_id)
+                    if best_num and best_prob > 0.0:
+                        # Create lightweight details structure
+                        existing_details = (
+                            self.current_player_ids.get(track_id, ("Unknown", {}))[1] or {}
+                        )
+                        existing_details.setdefault("best_tracked", {})
+                        existing_details["best_tracked"] = {
+                            "jersey_number": best_num,
+                            "probability": best_prob,
+                        }
+                        self.current_player_ids[track_id] = (best_num, existing_details)
+                        self.player_id_last_seen[track_id] = self.global_frame_index
+
+            # Prune entries for tracks no longer present (simple approach)
+            current_ids = {getattr(t, "track_id", getattr(t, "id", -1)) for t in self.current_tracks}
+            stale_ids = [tid for tid in self.current_player_ids.keys() if tid not in current_ids]
+            for tid in stale_ids:
+                # Allow a short grace maybe? For now remove immediately to avoid clutter
+                self.current_player_ids.pop(tid, None)
+                self.player_id_last_seen.pop(tid, None)
 
         # Apply visualizations (Visualization timing emitted inside to avoid overlap)
         frame = self._apply_visualizations(frame)
 
-        # Line extraction is timed inside _apply_visualizations when it actually runs
-        # No explicit 0ms entries; missing categories simply remain hidden/zeroed in the UI
-
+        # Increment global frame counter safely (avoid overflow by wrapping)
+        self.global_frame_index = (self.global_frame_index + 1) % 2_147_483_647
         return frame
 
     def _apply_visualizations(self, frame):
@@ -1197,7 +1254,9 @@ class MainTab(QWidget):
                 if detected_lines:
                     self.ransac_lines = detected_lines
                     self.ransac_confidences = confidences
-                    self.logger.debug(f"[MAIN_TAB] Using {len(self.ransac_lines)} RANSAC lines directly")
+                    self.logger.debug(
+                        f"[MAIN_TAB] Using {len(self.ransac_lines)} RANSAC lines directly"
+                    )
                 else:
                     self.ransac_lines = []
                     self.ransac_confidences = []
@@ -1234,7 +1293,9 @@ class MainTab(QWidget):
                         transformation_matrix=None,
                         scale_factor=1.0,
                     )
-                    self.logger.debug(f"[MAIN_TAB] Added {len(self.ransac_lines)} RANSAC lines to main view")
+                    self.logger.debug(
+                        f"[MAIN_TAB] Added {len(self.ransac_lines)} RANSAC lines to main view"
+                    )
             else:
                 print("[MAIN_TAB] No unified mask could be created")
                 self.ransac_lines = []
@@ -1402,6 +1463,8 @@ class MainTab(QWidget):
         """Reset the object tracker."""
         reset_tracker()
         print("[MAIN_TAB] Tracker reset")
+        # Clear finalized jersey numbers when tracker is reset
+        self.finalized_player_id_tracks.clear()
 
     # Processing control event handlers with debounced updates
     def _on_inference_toggled(self, checked: bool):
@@ -1801,12 +1864,12 @@ class MainTab(QWidget):
 
                     # Calculate output canvas size with 3:1 aspect ratio
                     output_width, output_height = self._calculate_output_canvas_size(width, height)
-                    
+
                     # Map the full frame to top-down view
                     warped_frame = cv2.warpPerspective(
                         frame, self.homography_matrix, (output_width, output_height)
                     )
-                    
+
                     homography_calc_duration_ms = (time.time() - homography_calc_start) * 1000
                     self.performance_widget.add_processing_measurement(
                         "Homography Calculation", homography_calc_duration_ms
@@ -1877,7 +1940,7 @@ class MainTab(QWidget):
                     bytes_per_line = 3 * warped_width
 
                     # Ensure the frame is contiguous for QImage
-                    if not warped_frame.flags['C_CONTIGUOUS']:
+                    if not warped_frame.flags["C_CONTIGUOUS"]:
                         warped_frame = np.ascontiguousarray(warped_frame)
 
                     q_image = QImage(
@@ -1907,14 +1970,20 @@ class MainTab(QWidget):
                     homography_duration_ms = (time.time() - homography_start_time) * 1000
                     # Exclude already-measured times to avoid double counting
                     homography_other_ms = max(
-                        0.0, homography_duration_ms - homography_calc_duration_ms - qt_convert_ms - qt_display_ms
+                        0.0,
+                        homography_duration_ms
+                        - homography_calc_duration_ms
+                        - qt_convert_ms
+                        - qt_display_ms,
                     )
                     if homography_other_ms > 1.0:  # Only report if significant
                         self.performance_widget.add_processing_measurement(
                             "Homography Other", homography_other_ms
                         )
 
-                    self.logger.debug(f"[MAIN_TAB] Updated homography display ({warped_width}x{warped_height}px) - Calc: {homography_calc_duration_ms:.1f}ms, Qt: {qt_convert_ms + qt_display_ms:.1f}ms")
+                    self.logger.debug(
+                        f"[MAIN_TAB] Updated homography display ({warped_width}x{warped_height}px) - Calc: {homography_calc_duration_ms:.1f}ms, Qt: {qt_convert_ms + qt_display_ms:.1f}ms"
+                    )
                 else:
                     self.homography_display_label.setText("Homography matrix not available")
             else:

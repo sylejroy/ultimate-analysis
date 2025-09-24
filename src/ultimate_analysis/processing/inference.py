@@ -9,12 +9,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
-
-from ..utils.logger import get_logger
 import yaml
 
 from ..config.settings import get_setting
 from ..constants import FALLBACK_DEFAULTS
+from ..utils.logger import get_logger
 
 try:
     from ultralytics import YOLO
@@ -85,21 +84,16 @@ def _run_single_model_inference(
         Tuple of (List of detection dictionaries, timing_breakdown dict)
     """
     detections: List[Dict[str, Any]] = []
-    
+
     # Timing breakdown structure
-    timing = {
-        "preprocessing": 0.0,
-        "inference": 0.0,
-        "postprocessing": 0.0,
-        "total": 0.0
-    }
-    
+    timing = {"preprocessing": 0.0, "inference": 0.0, "postprocessing": 0.0, "total": 0.0}
+
     total_start = time.perf_counter()
 
     try:
         # === PREPROCESSING PHASE ===
         preprocess_start = time.perf_counter()
-        
+
         # Get inference parameters from config
         confidence_threshold = get_setting(f"{config_prefix}.confidence_threshold", 0.5)
         nms_threshold = get_setting(f"{config_prefix}.nms_threshold", 0.45)
@@ -109,7 +103,7 @@ def _run_single_model_inference(
 
         # Determine model type from config prefix
         model_type = "player_model" if "player_detection" in config_prefix else "disc_model"
-        
+
         timing["preprocessing"] = time.perf_counter() - preprocess_start
 
         # === INFERENCE PHASE ===
@@ -127,7 +121,7 @@ def _run_single_model_inference(
 
         # === POSTPROCESSING PHASE ===
         postprocess_start = time.perf_counter()
-        
+
         # Process results
         for result in results:
             if hasattr(result, "boxes") and result.boxes is not None:
@@ -153,7 +147,7 @@ def _run_single_model_inference(
                             "model_type": model_type,  # Add model type for visualization differentiation
                         }
                     )
-        
+
         timing["postprocessing"] = time.perf_counter() - postprocess_start
 
     except Exception as e:
@@ -163,15 +157,17 @@ def _run_single_model_inference(
         traceback.print_exc()
 
     timing["total"] = time.perf_counter() - total_start
-    
+
     # Enhanced logging with subcategories (debug level to avoid spamming)
     logger = get_logger("INFERENCE")
     logger.debug(f"{target_class.title()} model breakdown:")
     logger.debug(f"  ├─ Preprocessing: {timing['preprocessing']*1000:5.1f}ms")
     logger.debug(f"  ├─ Inference:     {timing['inference']*1000:5.1f}ms")
     logger.debug(f"  ├─ Postprocessing:{timing['postprocessing']*1000:5.1f}ms")
-    logger.debug(f"  └─ Total:         {timing['total']*1000:5.1f}ms ({len(detections)} detections)")
-    
+    logger.debug(
+        f"  └─ Total:         {timing['total']*1000:5.1f}ms ({len(detections)} detections)"
+    )
+
     return detections, timing
 
 
@@ -331,9 +327,7 @@ def set_disc_model(model_path: str) -> bool:
 
 
 def run_inference(
-    frame: np.ndarray, 
-    model_name: Optional[str] = None, 
-    return_timing: bool = False
+    frame: np.ndarray, model_name: Optional[str] = None, return_timing: bool = False
 ) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], Dict[str, float]]]:
     """Run YOLO inference on a video frame using separate player and disc models.
 
@@ -350,7 +344,7 @@ def run_inference(
             - class_id: Integer class ID (local to each model)
             - class_name: String class name ('player' or 'disc')
             - model_type: String model type ('player_model' or 'disc_model')
-            
+
         If return_timing=True:
             Tuple of (detections_list, timing_dict) where timing_dict contains:
             - player_time: Player model inference time in seconds
@@ -390,7 +384,7 @@ def run_inference(
     # Collect detections from both models
     all_detections: List[Dict[str, Any]] = []
     total_inference_start = time.perf_counter()
-    
+
     player_timing = {}
     disc_timing = {}
     player_count = 0
@@ -398,7 +392,7 @@ def run_inference(
 
     # Run player detection
     if _player_model is not None:
-        logger.debug(f"[INFERENCE] ┌─ Running player model inference...")
+        logger.debug("[INFERENCE] ┌─ Running player model inference...")
         player_detections, player_timing = _run_single_model_inference(
             frame, _player_model, _player_model_imgsz, "models.player_detection", "player"
         )
@@ -409,7 +403,7 @@ def run_inference(
 
     # Run disc detection
     if _disc_model is not None:
-        logger.debug(f"[INFERENCE] ┌─ Running disc model inference...")
+        logger.debug("[INFERENCE] ┌─ Running disc model inference...")
         disc_detections, disc_timing = _run_single_model_inference(
             frame, _disc_model, _disc_model_imgsz, "models.disc_detection", "disc"
         )
@@ -419,11 +413,11 @@ def run_inference(
         print("[INFERENCE] Disc model not loaded")
 
     total_inference_time = time.perf_counter() - total_inference_start
-    
+
     # Hierarchical timing summary (debug level to avoid spamming)
     logger = get_logger("INFERENCE")
     logger.debug("═══ INFERENCE TIMING SUMMARY ═══")
-    
+
     if player_timing:
         logger.debug(f"Player Model ({player_count} detections):")
         logger.debug(f"  ├─ Preprocessing: {player_timing.get('preprocessing', 0)*1000:5.1f}ms")
@@ -432,7 +426,7 @@ def run_inference(
         logger.debug(f"  └─ Subtotal:      {player_timing.get('total', 0)*1000:5.1f}ms")
     else:
         logger.debug("Player Model: Not loaded")
-    
+
     if disc_timing:
         logger.debug(f"Disc Model ({disc_count} detections):")
         logger.debug(f"  ├─ Preprocessing: {disc_timing.get('preprocessing', 0)*1000:5.1f}ms")
@@ -441,27 +435,27 @@ def run_inference(
         logger.debug(f"  └─ Subtotal:      {disc_timing.get('total', 0)*1000:5.1f}ms")
     else:
         logger.debug("Disc Model: Not loaded")
-    
+
     logger.debug("─────────────────────────────────")
     logger.debug(f"TOTAL TIME:      {total_inference_time*1000:5.1f}ms")
     logger.debug(f"TOTAL DETECTIONS: {len(all_detections)}")
-    
+
     # Performance comparison
-    player_total = player_timing.get('total', 0) if player_timing else 0
-    disc_total = disc_timing.get('total', 0) if disc_timing else 0
-    
+    player_total = player_timing.get("total", 0) if player_timing else 0
+    disc_total = disc_timing.get("total", 0) if disc_timing else 0
+
     if player_total > 0 and disc_total > 0:
         logger.debug(f"MODEL RATIO:     {player_total/disc_total:.2f}x (Player/Disc)")
-        
+
         # Show which phases take the most time
-        player_inference_time = player_timing.get('inference', 0)
-        disc_inference_time = disc_timing.get('inference', 0)
+        player_inference_time = player_timing.get("inference", 0)
+        disc_inference_time = disc_timing.get("inference", 0)
         total_inference_only = player_inference_time + disc_inference_time
-        
+
         if total_inference_only > 0:
             inference_percentage = (total_inference_only / total_inference_time) * 100
             logger.debug(f"INFERENCE %:     {inference_percentage:.1f}% of total time")
-    
+
     logger.debug("═══════════════════════════════════")
 
     # If no models are available, return debug detections
@@ -486,30 +480,30 @@ def run_inference(
                     "model_type": "disc_model",
                 },
             ]
-        
+
         if return_timing:
             timing_info = {
                 "player_time": 0.0,
                 "disc_time": 0.0,
                 "total_time": 0.0,
                 "player_count": 0,
-                "disc_count": 0
+                "disc_count": 0,
             }
             return debug_detections, timing_info
         return debug_detections
 
     logger.debug(f"Found {len(all_detections)} total detections")
-    
+
     if return_timing:
         timing_info = {
             "player_timing": player_timing,
             "disc_timing": disc_timing,
             "total_time": total_inference_time,
             "player_count": player_count,
-            "disc_count": disc_count
+            "disc_count": disc_count,
         }
         return all_detections, timing_info
-    
+
     return all_detections
 
 

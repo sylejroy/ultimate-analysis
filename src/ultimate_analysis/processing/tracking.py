@@ -124,7 +124,9 @@ def run_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) -> List[Tr
     _frame_count += 1
     logger = get_logger("TRACKING")
 
-    logger.debug(f"Processing {len(detections)} detections with DeepSORT tracker (frame {_frame_count})")
+    logger.debug(
+        f"Processing {len(detections)} detections with DeepSORT tracker (frame {_frame_count})"
+    )
 
     if not detections:
         return []
@@ -143,7 +145,7 @@ def _run_deepsort_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) 
         List of Track objects with consistent IDs
     """
     logger = get_logger("TRACKING")
-    
+
     if not _initialize_deepsort_tracker():
         logger.warning("DeepSORT not available, falling back to simple tracking")
         return _run_simple_tracking(detections)
@@ -191,7 +193,9 @@ def _run_deepsort_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) 
                 deepsort_det = ([x, y, width, height], conf, cls)
                 deepsort_detections.append(deepsort_det)
 
-                logger.debug(f"Formatted detection: LTRB {[x1, y1, x2, y2]} -> TLWH {[x, y, width, height]}")
+                logger.debug(
+                    f"Formatted detection: LTRB {[x1, y1, x2, y2]} -> TLWH {[x, y, width, height]}"
+                )
 
             except (ValueError, TypeError) as e:
                 logger.warning(f"Invalid detection values, skipping: {e}")
@@ -221,7 +225,7 @@ def _run_deepsort_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) 
 
             # Map class_id to class_name
             class_name = _get_class_name_from_id(class_id)
-            
+
             # Determine model type from class name (this works since each model specializes in its class)
             model_type = "player_model" if class_name == "player" else "disc_model"
 

@@ -116,6 +116,11 @@ models:
     ocr_languages: ["en"]
     ocr_confidence_threshold: 0.7
     cache_player_ids: true
+    # Performance optimization: only run OCR on a subset of frames per track
+    ocr_frame_interval: 5          # Run OCR for a given track every N frames (>=1)
+    ocr_frame_interval_stagger: true # Stagger per track using track_id % interval to spread load
+    finalized_certainty_threshold: 0.999 # Probability at which jersey number is considered final (skip future OCR)
+    verbose_debug: false           # Enable extra per-crop debug logging when troubleshooting
     
     # Jersey number tracking settings
     tracking:

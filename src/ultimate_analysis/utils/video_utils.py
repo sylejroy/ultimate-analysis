@@ -69,7 +69,7 @@ def get_video_info(video_path: str) -> Optional[dict]:
             }
 
     except Exception as e:
-        logger = get_logger("VIDEO_UTILS") 
+        logger = get_logger("VIDEO_UTILS")
         logger.error(f"Error getting video info for {video_path}: {e}")
 
     return None

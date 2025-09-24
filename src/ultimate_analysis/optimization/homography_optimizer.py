@@ -5,7 +5,6 @@ of a homography matrix for improved field perspective transformation in Ultimate
 """
 
 import random
-import time
 from typing import Dict, List, Optional, Tuple
 
 import cv2
@@ -16,7 +15,7 @@ from ..config.settings import get_setting
 
 class HomographyIndividual:
     """Represents a single homography matrix solution in the genetic algorithm.
-    
+
     This class encapsulates the 8 homography parameters and provides methods for
     mutation, matrix generation, and parameter management.
     """
@@ -107,7 +106,7 @@ class HomographyIndividual:
 
 class HomographyOptimizer:
     """Genetic algorithm optimizer for homography parameters.
-    
+
     This class manages a population of HomographyIndividual instances and
     evolves them over generations to find optimal homography transformations.
     """
@@ -140,9 +139,7 @@ class HomographyOptimizer:
 
         # Initialize population with variations of initial parameters
         # Add original unchanged as first individual
-        self.population.append(
-            HomographyIndividual(initial_params, mutation_rate=0)
-        )
+        self.population.append(HomographyIndividual(initial_params, mutation_rate=0))
 
         # Add random variations for the rest of the population
         for _ in range(population_size - 1):
@@ -321,7 +318,9 @@ class HomographyOptimizer:
                         alignment_score = max(0.0, 1.0 - vertical_deviation / vertical_tolerance)
                     else:
                         # This line is more horizontal
-                        alignment_score = max(0.0, 1.0 - horizontal_deviation / horizontal_tolerance)
+                        alignment_score = max(
+                            0.0, 1.0 - horizontal_deviation / horizontal_tolerance
+                        )
 
                     # Weight by confidence and line length
                     weight = confidence * (length / 100.0)  # Normalize length
@@ -340,7 +339,9 @@ class HomographyOptimizer:
             Coverage score (0.0 to 1.0), higher when more original content is visible
         """
         black_threshold = get_setting("optimization.ga_field_coverage.black_pixel_threshold", 10)
-        optimal_coverage = get_setting("optimization.ga_field_coverage.optimal_coverage_ratio", 0.75)
+        optimal_coverage = get_setting(
+            "optimization.ga_field_coverage.optimal_coverage_ratio", 0.75
+        )
 
         # Convert to grayscale and count non-black pixels
         gray_warped = cv2.cvtColor(warped_frame, cv2.COLOR_BGR2GRAY)
@@ -348,7 +349,7 @@ class HomographyOptimizer:
         total_pixels = gray_warped.shape[0] * gray_warped.shape[1]
 
         current_coverage = non_black_pixels / total_pixels
-        
+
         # Reward coverage close to optimal ratio (not 100% which means zoomed in too much)
         # This encourages showing maximum original field while maintaining some borders
         if current_coverage <= optimal_coverage:
@@ -360,7 +361,7 @@ class HomographyOptimizer:
             max_excess = 1.0 - optimal_coverage
             penalty = excess / max_excess if max_excess > 0 else 0
             coverage_score = 1.0 - (penalty * 0.5)  # Gentle penalty for over-coverage
-        
+
         return max(0.0, min(1.0, coverage_score))
 
     def _evaluate_line_visibility(
@@ -400,9 +401,8 @@ class HomographyOptimizer:
                 end_2d = end_transformed[:2] / end_transformed[2]
 
                 # Check if any part of the line is within bounds
-                if (
-                    (0 <= start_2d[0] < output_width and 0 <= start_2d[1] < output_height)
-                    or (0 <= end_2d[0] < output_width and 0 <= end_2d[1] < output_height)
+                if (0 <= start_2d[0] < output_width and 0 <= start_2d[1] < output_height) or (
+                    0 <= end_2d[0] < output_width and 0 <= end_2d[1] < output_height
                 ):
                     visible_lines += 1
 
@@ -619,10 +619,14 @@ class HomographyOptimizer:
             return 0.0
 
         output_width, output_height = output_size
-        vertical_tolerance = get_setting("optimization.ga_line_orientation.vertical_tolerance", 15.0)
-        horizontal_tolerance = get_setting("optimization.ga_line_orientation.horizontal_tolerance", 15.0)
+        vertical_tolerance = get_setting(
+            "optimization.ga_line_orientation.vertical_tolerance", 15.0
+        )
+        horizontal_tolerance = get_setting(
+            "optimization.ga_line_orientation.horizontal_tolerance", 15.0
+        )
         min_line_length = get_setting("optimization.ga_line_orientation.min_line_length", 20)
-        
+
         vertical_lines = 0
         horizontal_lines = 0
 
@@ -643,12 +647,16 @@ class HomographyOptimizer:
                 # Check if line is within bounds and long enough
                 x1, y1 = start_2d
                 x2, y2 = end_2d
-                
+
                 # Skip lines that are completely outside bounds
-                if (min(x1, x2) > output_width or max(x1, x2) < 0 or 
-                    min(y1, y2) > output_height or max(y1, y2) < 0):
+                if (
+                    min(x1, x2) > output_width
+                    or max(x1, x2) < 0
+                    or min(y1, y2) > output_height
+                    or max(y1, y2) < 0
+                ):
                     continue
-                
+
                 # Calculate line length and angle
                 line_length = np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
                 if line_length < min_line_length:
@@ -656,7 +664,7 @@ class HomographyOptimizer:
 
                 # Calculate angle in degrees (0° = horizontal, 90° = vertical)
                 angle = np.abs(np.arctan2(y2 - y1, x2 - x1) * 180.0 / np.pi)
-                
+
                 # Normalize angle to 0-90 degrees
                 if angle > 90:
                     angle = 180 - angle
@@ -669,16 +677,18 @@ class HomographyOptimizer:
 
         # Calculate base score
         base_score = 0.0
-        
+
         # Penalty for missing either orientation
-        missing_penalty = get_setting("optimization.ga_line_orientation.missing_orientation_penalty", 0.5)
+        missing_penalty = get_setting(
+            "optimization.ga_line_orientation.missing_orientation_penalty", 0.5
+        )
         if vertical_lines == 0 or horizontal_lines == 0:
             base_score -= missing_penalty
-        
+
         # Reward for having both orientations
         if vertical_lines > 0 and horizontal_lines > 0:
             base_score += 0.6  # Base reward for having both
-            
+
             # Bonus for more lines (diminishing returns)
             vertical_bonus = min(vertical_lines * 0.1, 0.2)  # Max 0.2 bonus for verticals
             horizontal_bonus = min(horizontal_lines * 0.1, 0.2)  # Max 0.2 bonus for horizontals
