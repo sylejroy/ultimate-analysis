@@ -31,7 +31,9 @@ class VideoPlayer:
         self.frame_buffer: Queue = Queue(maxsize=10)  # Buffer up to 10 frames
         self.buffer_thread: Optional[Thread] = None
         self.buffer_stop_event: Event = Event()
-        self.buffer_enabled: bool = False  # Disable async buffering due to OpenCV thread safety issues
+        self.buffer_enabled: bool = (
+            False  # Disable async buffering due to OpenCV thread safety issues
+        )
         self.cap_lock: Lock = Lock()  # Synchronize access to VideoCapture
 
     def _start_frame_buffer(self):
@@ -57,7 +59,7 @@ class VideoPlayer:
         while not self.frame_buffer.empty():
             try:
                 self.frame_buffer.get_nowait()
-            except:
+            except Exception:
                 break
 
     def _frame_buffer_worker(self):
@@ -80,7 +82,7 @@ class VideoPlayer:
                             frame_data = (int(current_pos), frame)
                             try:
                                 self.frame_buffer.put(frame_data, timeout=0.1)
-                            except:
+                            except Exception:
                                 # Buffer full, skip this frame
                                 pass
                         else:
@@ -230,9 +232,9 @@ class VideoPlayer:
                     # Wrong frame, put it back and fall through to direct read
                     try:
                         self.frame_buffer.put_nowait((frame_idx, frame))
-                    except:
+                    except Exception:
                         pass  # Buffer might be full
-            except:
+            except Exception:
                 pass  # Buffer empty or error
 
         # Fall back to direct reading (synchronous) with lock

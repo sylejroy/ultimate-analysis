@@ -13,8 +13,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 import yaml
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QWheelEvent
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtGui import QImage, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,

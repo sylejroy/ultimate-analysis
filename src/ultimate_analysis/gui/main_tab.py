@@ -1062,8 +1062,8 @@ class MainTab(QWidget):
         field_start = None
 
         if self.inference_checkbox.isChecked():
-            from concurrent.futures import ThreadPoolExecutor
             import concurrent.futures
+            from concurrent.futures import ThreadPoolExecutor
 
             with ThreadPoolExecutor(max_workers=2) as executor:
                 # Submit inference task
@@ -1079,9 +1079,13 @@ class MainTab(QWidget):
 
                 # Get inference results
                 try:
-                    self.current_detections = inference_future.result(timeout=30.0)  # 30 second timeout
+                    self.current_detections = inference_future.result(
+                        timeout=30.0
+                    )  # 30 second timeout
                     inference_duration_ms = (time.time() - inference_start) * 1000
-                    self.performance_widget.add_processing_measurement("Inference", inference_duration_ms)
+                    self.performance_widget.add_processing_measurement(
+                        "Inference", inference_duration_ms
+                    )
                 except concurrent.futures.TimeoutError:
                     self.logger.error("[MAIN_TAB] Inference timed out after 30 seconds")
                     self.current_detections = []
@@ -1092,11 +1096,17 @@ class MainTab(QWidget):
                 # Get field segmentation results
                 if field_future is not None:
                     try:
-                        self.current_field_results = field_future.result(timeout=30.0)  # 30 second timeout
+                        self.current_field_results = field_future.result(
+                            timeout=30.0
+                        )  # 30 second timeout
                         field_duration_ms = (time.time() - field_start) * 1000
-                        self.performance_widget.add_processing_measurement("Field Segmentation", field_duration_ms)
+                        self.performance_widget.add_processing_measurement(
+                            "Field Segmentation", field_duration_ms
+                        )
                     except concurrent.futures.TimeoutError:
-                        self.logger.error("[MAIN_TAB] Field segmentation timed out after 30 seconds")
+                        self.logger.error(
+                            "[MAIN_TAB] Field segmentation timed out after 30 seconds"
+                        )
                         self.current_field_results = []
                     except Exception as e:
                         self.logger.error(f"[MAIN_TAB] Field segmentation failed: {e}")
@@ -1114,13 +1124,44 @@ class MainTab(QWidget):
                 start_time = time.time()
                 self.current_field_results = run_field_segmentation(frame)
                 duration_ms = (time.time() - start_time) * 1000
-                self.performance_widget.add_processing_measurement("Field Segmentation", duration_ms)
+                self.performance_widget.add_processing_measurement(
+                    "Field Segmentation", duration_ms
+                )
             else:
                 # Clear field results when disabled
                 self.current_field_results = []
                 self.ransac_lines = []
                 self.ransac_confidences = []
                 self.all_lines_for_display = {}
+
+        # ------------------------------------------------------------------
+        # Tracking (requires detections). Run AFTER detections are available
+        # and BEFORE player ID so that jersey OCR can use stable track IDs.
+        # ------------------------------------------------------------------
+        if self.tracking_checkbox.isChecked() and self.current_detections:
+            import concurrent.futures
+
+            tracking_start = time.time()
+            try:
+                # Run tracking directly (DeepSORT or fallback inside run_tracking)
+                self.current_tracks = run_tracking(frame, self.current_detections)
+                tracking_duration_ms = (time.time() - tracking_start) * 1000
+                self.performance_widget.add_processing_measurement(
+                    "Tracking", tracking_duration_ms
+                )
+                self.logger.debug(
+                    f"[MAIN_TAB] Tracking produced {len(self.current_tracks)} tracks in {tracking_duration_ms:.1f}ms"
+                )
+            except concurrent.futures.TimeoutError:
+                # (Defensive — run_tracking currently synchronous; keep for future async refactor)
+                self.logger.error("[MAIN_TAB] Tracking timed out")
+                self.current_tracks = []
+            except Exception as e:
+                self.logger.error(f"[MAIN_TAB] Tracking failed: {e}")
+                self.current_tracks = []
+        else:
+            # Ensure no stale tracks if tracking disabled or no detections this frame
+            self.current_tracks = []
 
         # Run player ID if enabled (requires tracking to be active)
         if self.player_id_checkbox.isChecked() and self.current_tracks:

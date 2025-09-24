@@ -327,7 +327,7 @@ def run_inference(
 
     # Run player detection
     if _player_model is not None:
-        logger.debug(f"[INFERENCE] ┌─ Running player model inference...")
+        logger.debug("[INFERENCE] ┌─ Running player model inference...")
         player_detections, player_timing = _run_single_model_inference(
             frame, _player_model, _player_model_imgsz, "models.player_detection", "player"
         )
@@ -338,7 +338,7 @@ def run_inference(
 
     # Run disc detection
     if _disc_model is not None:
-        logger.debug(f"[INFERENCE] ┌─ Running disc model inference...")
+        logger.debug("[INFERENCE] ┌─ Running disc model inference...")
         disc_detections, disc_timing = _run_single_model_inference(
             frame, _disc_model, _disc_model_imgsz, "models.disc_detection", "disc"
         )

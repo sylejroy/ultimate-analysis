@@ -6,7 +6,10 @@ Includes probabilistic tracking for reliable jersey number identification.
 """
 
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import (  # Deprecated usage (kept for fallback)  # noqa: F401
+    ProcessPoolExecutor,
+    as_completed,
+)
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -33,41 +36,26 @@ from .jersey_tracker import (
     get_jersey_probabilities,
     get_jersey_tracker,
 )
+from .ocr_pool import get_pool_info, submit_ocr_tasks
 
 # Global player ID state - only EasyOCR is supported
-_easyocr_reader = None
+_easyocr_reader = None  # Main-process reader (for sequential / small batches)
+
+# Thresholds / performance knobs (could be externalized later)
+_PARALLEL_MIN_CROPS = 3  # Require at least this many crops to justify process overhead
+_DETAIL_LIMIT = 6  # Max OCR result items per crop to retain from workers
+_PARALLEL_TIMEOUT_SEC = 3.0  # Global timeout for collecting parallel OCR results
+
+# NOTE: We retain old per-crop parallel fallback code for reference but new path uses ocr_pool.
 
 
-def _process_single_crop_parallel(crop_data, ocr_params, readtext_params):
-    """Process a single crop with OCR in a separate process.
-    
-    This function is at module level so it can be pickled for multiprocessing.
-    
-    Args:
-        crop_data: Tuple of (crop_index, crop_image)
-        ocr_params: OCR configuration parameters
-        readtext_params: EasyOCR readtext parameters
-        
-    Returns:
-        Tuple of (crop_index, ocr_results)
+def _process_single_crop_parallel(crop_data, ocr_params, readtext_params):  # pragma: no cover
+    """Deprecated: legacy per-task process creation (retained for debugging).
+
+    New implementation uses persistent pool in `ocr_pool.submit_ocr_tasks`.
     """
-    crop_index, crop = crop_data
-    try:
-        # Initialize EasyOCR in this process if needed
-        if not EASYOCR_AVAILABLE:
-            return crop_index, []
-        
-        # Create a new EasyOCR reader for this process
-        # Use same config as main process
-        languages = ["en"]
-        gpu = ocr_params.get("gpu", True)
-        reader = easyocr.Reader(languages, gpu=gpu, verbose=False)
-        
-        ocr_results = reader.readtext(crop, **readtext_params)
-        return crop_index, ocr_results
-    except Exception as e:
-        print(f"Error processing crop {crop_index} in parallel: {e}")
-        return crop_index, []
+    crop_index, _ = crop_data
+    return crop_index, []
 
 
 def run_player_id_on_tracks(
@@ -461,7 +449,9 @@ def _run_batch_easyocr_detection(
         return batch_results, batch_timing
 
     try:
-        logger.debug(f"Starting batch OCR processing for {len(crop_images)} crops")
+        logger.debug(
+            f"Starting batch OCR processing for {len(crop_images)} crops (pool info: {get_pool_info()})"
+        )
 
         # Start preprocessing timer for batch
         prep_start_time = time.time()
@@ -547,56 +537,58 @@ def _run_batch_easyocr_detection(
 
         # Process valid crops with parallel OCR
         valid_crops = [crop for crop in processed_crops if crop is not None]
-        batch_ocr_results = []
+        batch_ocr_results: List[List] = []
 
-        if valid_crops:
-            logger.debug(f"Running parallel batch OCR on {len(valid_crops)} valid crops")
+        if not valid_crops:
+            logger.debug("No valid crops after preprocessing; skipping OCR phase")
+        else:
+            logger.debug(f"Evaluating parallelization strategy: {len(valid_crops)} valid crops")
 
-            # Determine optimal number of workers from config or default
             config_workers = ocr_params.get("parallel_workers", 0)  # 0 = auto
             if config_workers > 0:
-                max_workers = min(len(valid_crops), config_workers)
+                desired_workers = config_workers
             else:
-                # Auto-determine: cap at 4 workers to avoid overwhelming the system
-                max_workers = min(len(valid_crops), 4)
+                desired_workers = 4  # default ceiling for CPU scenario
 
-            if len(valid_crops) == 1 or max_workers == 1:
-                # Single crop or forced single worker - process sequentially
-                logger.debug(f"Using sequential processing for {len(valid_crops)} crop(s)")
+            use_parallel = len(valid_crops) >= _PARALLEL_MIN_CROPS
+
+            if not use_parallel:
+                logger.debug(
+                    f"Using sequential (in-process) OCR: valid_crops={len(valid_crops)} < threshold={_PARALLEL_MIN_CROPS}"
+                )
                 for crop in valid_crops:
-                    ocr_results = _easyocr_reader.readtext(crop, **readtext_params)
+                    ocr_results = (
+                        _easyocr_reader.readtext(crop, **readtext_params) if _easyocr_reader else []
+                    )
                     batch_ocr_results.append(ocr_results)
             else:
-                # Multiple crops - use parallel processing
-                # Create indexed crop data for parallel processing
-                indexed_crops = [(i, crop) for i, crop in enumerate(valid_crops)]
+                # Submit to persistent pool
+                logger.debug(
+                    f"Submitting {len(valid_crops)} crops to persistent OCR pool (workers~{desired_workers})"
+                )
+                # We pass original (unfiltered) valid_crops; worker will filter & condense
+                condensed_results = submit_ocr_tasks(
+                    valid_crops,
+                    ocr_params=ocr_params,
+                    readtext_params=readtext_params,
+                    max_workers=desired_workers,
+                    timeout=_PARALLEL_TIMEOUT_SEC,
+                    detail_limit=_DETAIL_LIMIT,
+                )
 
-                # Process crops in parallel using processes
-                parallel_results = {}
-                with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                    logger.debug(f"Using {max_workers} parallel processes for OCR processing")
-
-                    # Submit all tasks with parameters
-                    future_to_index = {
-                        executor.submit(_process_single_crop_parallel, crop_data, ocr_params, readtext_params): crop_data[0]
-                        for crop_data in indexed_crops
-                    }
-
-                    # Collect results as they complete
-                    for future in as_completed(future_to_index):
-                        try:
-                            crop_index, ocr_results = future.result()
-                            parallel_results[crop_index] = ocr_results
-                        except Exception as e:
-                            crop_index = future_to_index[future]
-                            print(
-                                f"[PLAYER_ID] Parallel processing failed for crop {crop_index}: {e}"
-                            )
-                            parallel_results[crop_index] = []
-
-                # Reconstruct results in original order
+                # Expand condensed format to pseudo EasyOCR output for downstream compatibility
+                # condensed: (index, best_text, best_conf, filtered_list[ (bbox, digits, conf) ])
+                # We reconstruct as list[(bbox, text, conf)]
+                reconstructed: Dict[int, List] = {}
+                for idx, best_text, best_conf, filtered in condensed_results:
+                    # Already filtered entries are (bbox, digits, conf)
+                    pseudo_results = [(bbox, text, conf) for (bbox, text, conf) in filtered]
+                    # If best_text not in filtered (edge case), optionally inject synthetic entry
+                    if best_text and all(entry[1] != best_text for entry in pseudo_results):
+                        pseudo_results.append(((0, 0, 0, 0), best_text, best_conf))
+                    reconstructed[idx] = pseudo_results
                 for i in range(len(valid_crops)):
-                    batch_ocr_results.append(parallel_results.get(i, []))
+                    batch_ocr_results.append(reconstructed.get(i, []))
 
         # End OCR timer
         batch_timing["ocr_ms"] = (time.time() - ocr_start_time) * 1000

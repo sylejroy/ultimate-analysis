@@ -12,8 +12,8 @@ Performance optimizations:
 - Efficient array operations with minimal reshaping
 """
 
-from typing import Any, Dict, List, Optional, Tuple
 import concurrent.futures
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -287,7 +287,9 @@ except ImportError:
     # Fallback implementation will be used automatically when needed
 
 
-def _ransac_trial_parallel(points: np.ndarray, min_samples: int, threshold_sq: float) -> Optional[Tuple[np.ndarray, int, np.ndarray]]:
+def _ransac_trial_parallel(
+    points: np.ndarray, min_samples: int, threshold_sq: float
+) -> Optional[Tuple[np.ndarray, int, np.ndarray]]:
     """Perform a single RANSAC trial for parallel execution.
 
     Args:
