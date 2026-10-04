@@ -272,3 +272,8 @@ secrets.json
 /cache/
 /tmp/
 /temp/
+
+# Local quality-check and profiling artifacts
+.ruff_cache/
+*.prof
+bandit-report.json

@@ -51,6 +51,54 @@ except ImportError:
     easyocr = None
 
 
+# Parameter name -> attribute of the control that edits it
+PREPROCESS_CONTROLS = {
+    "crop_top_fraction": "crop_fraction_spin",
+    "contrast_alpha": "contrast_spin",
+    "brightness_beta": "brightness_spin",
+    "gaussian_blur": "blur_spin",
+    "min_crop_width": "min_crop_width_spin",
+    "min_crop_height": "min_crop_height_spin",
+    "enhance_contrast": "enhance_check",
+    "clahe_clip_limit": "clahe_clip_spin",
+    "clahe_grid_size": "clahe_grid_spin",
+    "sharpen": "sharpen_check",
+    "sharpen_strength": "sharpen_strength_spin",
+    "upscale": "upscale_check",
+    "upscale_factor": "upscale_factor_spin",
+    "upscale_to_size": "upscale_to_size_check",
+    "upscale_target_size": "upscale_target_spin",
+    "colour_mode": "colour_mode_check",
+    "bw_mode": "bw_mode_check",
+    "resize_factor": "resize_spin",
+    "resize_absolute_width": "resize_width_spin",
+    "resize_absolute_height": "resize_height_spin",
+    "denoise": "denoise_check",
+}
+OCR_CONTROLS = {
+    "text_threshold": "text_threshold_spin",
+    "low_text": "low_text_spin",
+    "link_threshold": "link_threshold_spin",
+    "width_ths": "width_ths_spin",
+    "height_ths": "height_ths_spin",
+    "x_ths": "x_ths_spin",
+    "y_ths": "y_ths_spin",
+    "ycenter_ths": "ycenter_ths_spin",
+    "slope_ths": "slope_ths_spin",
+    "canvas_size": "canvas_size_spin",
+    "mag_ratio": "mag_ratio_spin",
+    "adjust_contrast": "adjust_contrast_spin",
+    "filter_ths": "filter_ths_spin",
+    "workers": "workers_spin",
+    "batch_size": "batch_size_spin",
+    "beamWidth": "beam_width_spin",
+    "gpu": "gpu_check",
+    "paragraph": "paragraph_check",
+    "detail": "detail_spin",
+    "allowlist": "allowlist_edit",
+}
+
+
 class EasyOCRTuningTab(QWidget):
     """EasyOCR parameter tuning tab for optimizing jersey number detection."""
 
@@ -64,11 +112,6 @@ class EasyOCRTuningTab(QWidget):
         self.current_frame: Optional[np.ndarray] = None
         self.current_detections: List[Dict] = []
         self.current_crops: List[Tuple[np.ndarray, Dict]] = []  # (crop_image, detection_info)
-
-        # Runtime tracking and parallel processing
-        self.runtime_data: Dict[str, float] = {}
-        self.use_parallel_processing: bool = True  # Enable parallel processing by default
-        self.max_workers: int = 4  # Number of parallel workers
 
         # EasyOCR parameters (with optimized defaults)
         self.ocr_params = {
@@ -895,107 +938,37 @@ class EasyOCRTuningTab(QWidget):
 
     def _on_preprocess_param_changed(self):
         """Handle preprocessing parameter change."""
-        # Update parameters
-        self.preprocess_params["crop_top_fraction"] = self.crop_fraction_spin.value()
-        self.preprocess_params["contrast_alpha"] = self.contrast_spin.value()
-        self.preprocess_params["brightness_beta"] = self.brightness_spin.value()
-        self.preprocess_params["gaussian_blur"] = self.blur_spin.value()
-        self.preprocess_params["min_crop_width"] = self.min_crop_width_spin.value()
-        self.preprocess_params["min_crop_height"] = self.min_crop_height_spin.value()
-        self.preprocess_params["enhance_contrast"] = self.enhance_check.isChecked()
-        self.preprocess_params["clahe_clip_limit"] = self.clahe_clip_spin.value()
-        self.preprocess_params["clahe_grid_size"] = self.clahe_grid_spin.value()
-        self.preprocess_params["sharpen"] = self.sharpen_check.isChecked()
-        self.preprocess_params["sharpen_strength"] = self.sharpen_strength_spin.value()
-        self.preprocess_params["upscale"] = self.upscale_check.isChecked()
-        self.preprocess_params["upscale_factor"] = self.upscale_factor_spin.value()
-        self.preprocess_params["upscale_to_size"] = self.upscale_to_size_check.isChecked()
-        self.preprocess_params["upscale_target_size"] = self.upscale_target_spin.value()
-        self.preprocess_params["colour_mode"] = self.colour_mode_check.isChecked()
-        self.preprocess_params["bw_mode"] = self.bw_mode_check.isChecked()
-        self.preprocess_params["resize_factor"] = self.resize_spin.value()
-        self.preprocess_params["resize_absolute_width"] = self.resize_width_spin.value()
-        self.preprocess_params["resize_absolute_height"] = self.resize_height_spin.value()
-        self.preprocess_params["denoise"] = self.denoise_check.isChecked()
-
-        print("[EASYOCR_TUNING] Preprocessing parameters updated")
+        for key, control in PREPROCESS_CONTROLS.items():
+            self.preprocess_params[key] = self._get_control_value(getattr(self, control))
 
     def _on_ocr_param_changed(self):
         """Handle EasyOCR parameter change."""
         if not EASYOCR_AVAILABLE:
             return
 
-        # Update parameters
-        self.ocr_params["text_threshold"] = self.text_threshold_spin.value()
-        self.ocr_params["low_text"] = self.low_text_spin.value()
-        self.ocr_params["link_threshold"] = self.link_threshold_spin.value()
-        self.ocr_params["width_ths"] = self.width_ths_spin.value()
-        self.ocr_params["height_ths"] = self.height_ths_spin.value()
-        self.ocr_params["x_ths"] = (
-            getattr(self, "x_ths_spin", self).value()
-            if hasattr(self, "x_ths_spin")
-            else self.ocr_params["x_ths"]
-        )
-        self.ocr_params["y_ths"] = (
-            getattr(self, "y_ths_spin", self).value()
-            if hasattr(self, "y_ths_spin")
-            else self.ocr_params["y_ths"]
-        )
-        self.ocr_params["ycenter_ths"] = (
-            getattr(self, "ycenter_ths_spin", self).value()
-            if hasattr(self, "ycenter_ths_spin")
-            else self.ocr_params["ycenter_ths"]
-        )
-        self.ocr_params["slope_ths"] = (
-            getattr(self, "slope_ths_spin", self).value()
-            if hasattr(self, "slope_ths_spin")
-            else self.ocr_params["slope_ths"]
-        )
-        self.ocr_params["canvas_size"] = self.canvas_size_spin.value()
-        self.ocr_params["mag_ratio"] = self.mag_ratio_spin.value()
-        self.ocr_params["adjust_contrast"] = (
-            getattr(self, "adjust_contrast_spin", self).value()
-            if hasattr(self, "adjust_contrast_spin")
-            else self.ocr_params["adjust_contrast"]
-        )
-        self.ocr_params["filter_ths"] = (
-            getattr(self, "filter_ths_spin", self).value()
-            if hasattr(self, "filter_ths_spin")
-            else self.ocr_params["filter_ths"]
-        )
-        self.ocr_params["workers"] = (
-            getattr(self, "workers_spin", self).value()
-            if hasattr(self, "workers_spin")
-            else self.ocr_params["workers"]
-        )
-        self.ocr_params["batch_size"] = (
-            getattr(self, "batch_size_spin", self).value()
-            if hasattr(self, "batch_size_spin")
-            else self.ocr_params["batch_size"]
-        )
-        self.ocr_params["beamWidth"] = (
-            getattr(self, "beam_width_spin", self).value()
-            if hasattr(self, "beam_width_spin")
-            else self.ocr_params["beamWidth"]
-        )
-        self.ocr_params["gpu"] = self.gpu_check.isChecked()
-        self.ocr_params["paragraph"] = (
-            getattr(self, "paragraph_check", self).isChecked()
-            if hasattr(self, "paragraph_check")
-            else self.ocr_params["paragraph"]
-        )
-        self.ocr_params["detail"] = (
-            getattr(self, "detail_spin", self).value()
-            if hasattr(self, "detail_spin")
-            else self.ocr_params["detail"]
-        )
+        for key, control in OCR_CONTROLS.items():
+            self.ocr_params[key] = self._get_control_value(getattr(self, control))
+        # An empty allowlist means no character restriction
+        self.ocr_params["allowlist"] = self.ocr_params["allowlist"].strip() or None
 
-        # Handle text inputs
-        if hasattr(self, "allowlist_edit"):
-            allowlist_text = self.allowlist_edit.text().strip()
-            self.ocr_params["allowlist"] = allowlist_text if allowlist_text else None
+    @staticmethod
+    def _get_control_value(control: QWidget) -> Any:
+        """Read the value of a parameter control."""
+        if isinstance(control, QCheckBox):
+            return control.isChecked()
+        if isinstance(control, QLineEdit):
+            return control.text()
+        return control.value()
 
-        print("[EASYOCR_TUNING] EasyOCR parameters updated")
+    @staticmethod
+    def _set_control_value(control: QWidget, value: Any):
+        """Show a parameter value in its control."""
+        if isinstance(control, QCheckBox):
+            control.setChecked(value)
+        elif isinstance(control, QLineEdit):
+            control.setText(str(value) if value else "")
+        else:
+            control.setValue(value)
 
     def _update_clahe_controls(self):
         """Enable/disable CLAHE controls based on enhance_contrast checkbox."""
@@ -1339,7 +1312,7 @@ class EasyOCRTuningTab(QWidget):
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
         # Convert to QImage
-        height, width, channel = rgb_frame.shape
+        height, width = rgb_frame.shape[:2]
         bytes_per_line = 3 * width
         q_image = QImage(rgb_frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
 
@@ -1423,7 +1396,7 @@ class EasyOCRTuningTab(QWidget):
 
             # Convert BGR to RGB
             rgb_crop = cv2.cvtColor(annotated_crop, cv2.COLOR_BGR2RGB)
-            height, width, channel = rgb_crop.shape
+            height, width = rgb_crop.shape[:2]
             bytes_per_line = 3 * width
             q_image = QImage(rgb_crop.data, width, height, bytes_per_line, QImage.Format_RGB888)
 
@@ -1656,210 +1629,23 @@ class EasyOCRTuningTab(QWidget):
 
     # ========== CONFIGURATION METHODS ==========
     def _load_parameters_from_config(self):
-        """Load parameters from configuration."""
+        """Load parameters saved in easyocr_params.yaml, keeping defaults for the rest."""
         try:
-            # Load easyocr_params.yaml overrides if they exist
-            user_config = self._load_user_config()
+            user_config = self._load_user_config().get("player_id", {})
 
-            print("[EASYOCR_TUNING] Loading parameters from config...")
-            print(f"[EASYOCR_TUNING] User config found: {bool(user_config)}")
-            if user_config:
-                print(f"[EASYOCR_TUNING] User config keys: {list(user_config.keys())}")
-                if "player_id" in user_config:
-                    print(
-                        f"[EASYOCR_TUNING] Player ID config keys: {list(user_config['player_id'].keys())}"
-                    )
+            saved_preprocess = user_config.get("preprocessing", {})
+            for key in PREPROCESS_CONTROLS:
+                if key in saved_preprocess:
+                    self.preprocess_params[key] = saved_preprocess[key]
 
-            # Load preprocessing parameters (using user overrides if available)
-            user_preprocess = user_config.get("player_id", {}).get("preprocessing", {})
-            print(f"[EASYOCR_TUNING] User preprocessing config: {user_preprocess}")
-
-            self.preprocess_params["crop_top_fraction"] = user_preprocess.get(
-                "crop_top_fraction", get_setting("player_id.preprocessing.crop_top_fraction", 0.33)
-            )
-            self.preprocess_params["contrast_alpha"] = user_preprocess.get(
-                "contrast_alpha", get_setting("player_id.preprocessing.contrast_alpha", 1.0)
-            )
-            self.preprocess_params["brightness_beta"] = user_preprocess.get(
-                "brightness_beta", get_setting("player_id.preprocessing.brightness_beta", 0)
-            )
-            self.preprocess_params["gaussian_blur"] = user_preprocess.get(
-                "gaussian_blur", get_setting("player_id.preprocessing.gaussian_blur", 13)
-            )
-            self.preprocess_params["enhance_contrast"] = user_preprocess.get(
-                "enhance_contrast", get_setting("player_id.preprocessing.enhance_contrast", True)
-            )
-            self.preprocess_params["clahe_clip_limit"] = user_preprocess.get(
-                "clahe_clip_limit", get_setting("player_id.preprocessing.clahe_clip_limit", 2.0)
-            )
-            self.preprocess_params["clahe_grid_size"] = (
-                user_config.get("player_id", {})
-                .get("preprocessing", {})
-                .get("clahe_grid_size", get_setting("player_id.preprocessing.clahe_grid_size", 8))
-            )
-            self.preprocess_params["sharpen"] = (
-                user_config.get("player_id", {})
-                .get("preprocessing", {})
-                .get("sharpen", get_setting("player_id.preprocessing.sharpen", True))
-            )
-            self.preprocess_params["sharpen_strength"] = (
-                user_config.get("player_id", {})
-                .get("preprocessing", {})
-                .get(
-                    "sharpen_strength",
-                    get_setting("player_id.preprocessing.sharpen_strength", 0.05),
-                )
-            )
-            self.preprocess_params["upscale"] = (
-                user_config.get("player_id", {})
-                .get("preprocessing", {})
-                .get("upscale", get_setting("player_id.preprocessing.upscale", True))
-            )
-            self.preprocess_params["upscale_factor"] = (
-                user_config.get("player_id", {})
-                .get("preprocessing", {})
-                .get("upscale_factor", get_setting("player_id.preprocessing.upscale_factor", 3.0))
-            )
-            self.preprocess_params["upscale_to_size"] = (
-                user_config.get("player_id", {})
-                .get("preprocessing", {})
-                .get(
-                    "upscale_to_size", get_setting("player_id.preprocessing.upscale_to_size", True)
-                )
-            )
-            self.preprocess_params["upscale_target_size"] = (
-                user_config.get("player_id", {})
-                .get("preprocessing", {})
-                .get(
-                    "upscale_target_size",
-                    get_setting("player_id.preprocessing.upscale_target_size", 256),
-                )
-            )
-            self.preprocess_params["colour_mode"] = (
-                user_config.get("player_id", {})
-                .get("preprocessing", {})
-                .get("colour_mode", get_setting("player_id.preprocessing.colour_mode", False))
-            )
-            self.preprocess_params["bw_mode"] = (
-                user_config.get("player_id", {})
-                .get("preprocessing", {})
-                .get("bw_mode", get_setting("player_id.preprocessing.bw_mode", True))
-            )
-            self.preprocess_params["resize_factor"] = (
-                user_config.get("player_id", {})
-                .get("preprocessing", {})
-                .get("resize_factor", get_setting("player_id.preprocessing.resize_factor", 1.0))
-            )
-            self.preprocess_params["resize_absolute_width"] = (
-                user_config.get("player_id", {})
-                .get("preprocessing", {})
-                .get(
-                    "resize_absolute_width",
-                    get_setting("player_id.preprocessing.resize_absolute_width", 0),
-                )
-            )
-            self.preprocess_params["resize_absolute_height"] = (
-                user_config.get("player_id", {})
-                .get("preprocessing", {})
-                .get(
-                    "resize_absolute_height",
-                    get_setting("player_id.preprocessing.resize_absolute_height", 0),
-                )
-            )
-            self.preprocess_params["denoise"] = (
-                user_config.get("player_id", {})
-                .get("preprocessing", {})
-                .get("denoise", get_setting("player_id.preprocessing.denoise", False))
-            )
-            # Load minimum crop size parameters
-            self.preprocess_params["min_crop_width"] = (
-                user_config.get("player_id", {})
-                .get("preprocessing", {})
-                .get("min_crop_width", get_setting("player_id.preprocessing.min_crop_width", 20))
-            )
-            self.preprocess_params["min_crop_height"] = (
-                user_config.get("player_id", {})
-                .get("preprocessing", {})
-                .get("min_crop_height", get_setting("player_id.preprocessing.min_crop_height", 30))
-            )
-
-            # Load OCR parameters (using user overrides if available)
             if EASYOCR_AVAILABLE:
-                ocr_config = user_config.get("player_id", {}).get("easyocr", {})
-                print(f"[EASYOCR_TUNING] User OCR config: {ocr_config}")
-
-                self.ocr_params["text_threshold"] = ocr_config.get(
-                    "text_threshold", get_setting("player_id.easyocr.text_threshold", 0.7)
-                )
-                self.ocr_params["low_text"] = ocr_config.get(
-                    "low_text", get_setting("player_id.easyocr.low_text", 0.6)
-                )
-                self.ocr_params["link_threshold"] = ocr_config.get(
-                    "link_threshold", get_setting("player_id.easyocr.link_threshold", 0.4)
-                )
-                self.ocr_params["width_ths"] = ocr_config.get(
-                    "width_ths", get_setting("player_id.easyocr.width_ths", 0.4)
-                )
-                self.ocr_params["height_ths"] = ocr_config.get(
-                    "height_ths", get_setting("player_id.easyocr.height_ths", 0.7)
-                )
-                self.ocr_params["x_ths"] = ocr_config.get(
-                    "x_ths", get_setting("player_id.easyocr.x_ths", 1.0)
-                )
-                self.ocr_params["y_ths"] = ocr_config.get(
-                    "y_ths", get_setting("player_id.easyocr.y_ths", 0.5)
-                )
-                self.ocr_params["ycenter_ths"] = ocr_config.get(
-                    "ycenter_ths", get_setting("player_id.easyocr.ycenter_ths", 0.5)
-                )
-                self.ocr_params["slope_ths"] = ocr_config.get(
-                    "slope_ths", get_setting("player_id.easyocr.slope_ths", 0.1)
-                )
-                self.ocr_params["canvas_size"] = ocr_config.get(
-                    "canvas_size", get_setting("player_id.easyocr.canvas_size", 2560)
-                )
-                self.ocr_params["mag_ratio"] = ocr_config.get(
-                    "mag_ratio", get_setting("player_id.easyocr.mag_ratio", 2.0)
-                )
-                self.ocr_params["adjust_contrast"] = ocr_config.get(
-                    "adjust_contrast", get_setting("player_id.easyocr.adjust_contrast", 0.5)
-                )
-                self.ocr_params["filter_ths"] = ocr_config.get(
-                    "filter_ths", get_setting("player_id.easyocr.filter_ths", 0.003)
-                )
-                self.ocr_params["workers"] = ocr_config.get(
-                    "workers", get_setting("player_id.easyocr.workers", 0)
-                )
-                self.ocr_params["batch_size"] = ocr_config.get(
-                    "batch_size", get_setting("player_id.easyocr.batch_size", 1)
-                )
-                self.ocr_params["beamWidth"] = ocr_config.get(
-                    "beamWidth", get_setting("player_id.easyocr.beamWidth", 5)
-                )
-                self.ocr_params["gpu"] = ocr_config.get(
-                    "gpu", get_setting("player_id.easyocr.gpu", True)
-                )
-                self.ocr_params["paragraph"] = ocr_config.get(
-                    "paragraph", get_setting("player_id.easyocr.paragraph", False)
-                )
-                self.ocr_params["detail"] = ocr_config.get(
-                    "detail", get_setting("player_id.easyocr.detail", 1)
-                )
-                self.ocr_params["allowlist"] = ocr_config.get(
-                    "allowlist", get_setting("player_id.easyocr.allowlist", "0123456789")
-                )
+                saved_ocr = user_config.get("easyocr", {})
+                for key in OCR_CONTROLS:
+                    if key in saved_ocr:
+                        self.ocr_params[key] = saved_ocr[key]
 
             # Update UI controls with loaded values
             self._update_controls_from_params()
-
-            # Debug output to verify parameter loading
-            print("[EASYOCR_TUNING] Final parameter values:")
-            print(f"  crop_top_fraction: {self.preprocess_params['crop_top_fraction']}")
-            print(f"  contrast_alpha: {self.preprocess_params['contrast_alpha']}")
-            print(f"  gaussian_blur: {self.preprocess_params['gaussian_blur']}")
-            if EASYOCR_AVAILABLE:
-                print(f"  text_threshold: {self.ocr_params['text_threshold']}")
-                print(f"  low_text: {self.ocr_params['low_text']}")
 
             print("[EASYOCR_TUNING] Parameters loaded from configuration")
         except Exception as e:
@@ -1906,249 +1692,24 @@ class EasyOCRTuningTab(QWidget):
 
     def _update_controls_from_params(self):
         """Update UI controls with current parameter values."""
-        # Temporarily disconnect signals to prevent triggering parameter updates
-        self._disconnect_param_signals()
-
-        try:
-            # Preprocessing controls
-            self.crop_fraction_spin.setValue(self.preprocess_params["crop_top_fraction"])
-            self.contrast_spin.setValue(self.preprocess_params["contrast_alpha"])
-            self.brightness_spin.setValue(self.preprocess_params["brightness_beta"])
-            self.blur_spin.setValue(self.preprocess_params["gaussian_blur"])
-            # Update minimum crop size controls
-            if hasattr(self, "min_crop_width_spin"):
-                self.min_crop_width_spin.setValue(self.preprocess_params["min_crop_width"])
-            if hasattr(self, "min_crop_height_spin"):
-                self.min_crop_height_spin.setValue(self.preprocess_params["min_crop_height"])
-            if hasattr(self, "enhance_check"):
-                self.enhance_check.setChecked(self.preprocess_params["enhance_contrast"])
-            if hasattr(self, "clahe_clip_spin"):
-                self.clahe_clip_spin.setValue(self.preprocess_params["clahe_clip_limit"])
-            if hasattr(self, "clahe_grid_spin"):
-                self.clahe_grid_spin.setValue(self.preprocess_params["clahe_grid_size"])
-            if hasattr(self, "sharpen_check"):
-                self.sharpen_check.setChecked(self.preprocess_params["sharpen"])
-            if hasattr(self, "sharpen_strength_spin"):
-                self.sharpen_strength_spin.setValue(self.preprocess_params["sharpen_strength"])
-            if hasattr(self, "upscale_check"):
-                self.upscale_check.setChecked(self.preprocess_params["upscale"])
-            if hasattr(self, "upscale_factor_spin"):
-                self.upscale_factor_spin.setValue(self.preprocess_params["upscale_factor"])
-            if hasattr(self, "upscale_to_size_check"):
-                self.upscale_to_size_check.setChecked(self.preprocess_params["upscale_to_size"])
-            if hasattr(self, "upscale_target_spin"):
-                self.upscale_target_spin.setValue(self.preprocess_params["upscale_target_size"])
-            if hasattr(self, "colour_mode_check"):
-                self.colour_mode_check.setChecked(self.preprocess_params["colour_mode"])
-            if hasattr(self, "bw_mode_check"):
-                self.bw_mode_check.setChecked(self.preprocess_params["bw_mode"])
-            self.resize_spin.setValue(self.preprocess_params["resize_factor"])
-            self.resize_width_spin.setValue(self.preprocess_params["resize_absolute_width"])
-            self.resize_height_spin.setValue(self.preprocess_params["resize_absolute_height"])
-            self.denoise_check.setChecked(self.preprocess_params["denoise"])
-
-            # OCR controls
-            if EASYOCR_AVAILABLE:
-                self.text_threshold_spin.setValue(self.ocr_params["text_threshold"])
-                self.low_text_spin.setValue(self.ocr_params["low_text"])
-                self.link_threshold_spin.setValue(self.ocr_params["link_threshold"])
-                self.width_ths_spin.setValue(self.ocr_params["width_ths"])
-                self.height_ths_spin.setValue(self.ocr_params["height_ths"])
-                self.canvas_size_spin.setValue(self.ocr_params["canvas_size"])
-                self.mag_ratio_spin.setValue(self.ocr_params["mag_ratio"])
-                self.gpu_check.setChecked(self.ocr_params["gpu"])
-
-                # Extended controls (check if they exist)
-                if hasattr(self, "x_ths_spin"):
-                    self.x_ths_spin.setValue(self.ocr_params["x_ths"])
-                if hasattr(self, "y_ths_spin"):
-                    self.y_ths_spin.setValue(self.ocr_params["y_ths"])
-                if hasattr(self, "ycenter_ths_spin"):
-                    self.ycenter_ths_spin.setValue(self.ocr_params["ycenter_ths"])
-                if hasattr(self, "slope_ths_spin"):
-                    self.slope_ths_spin.setValue(self.ocr_params["slope_ths"])
-                if hasattr(self, "adjust_contrast_spin"):
-                    self.adjust_contrast_spin.setValue(self.ocr_params["adjust_contrast"])
-                if hasattr(self, "filter_ths_spin"):
-                    self.filter_ths_spin.setValue(self.ocr_params["filter_ths"])
-                if hasattr(self, "workers_spin"):
-                    self.workers_spin.setValue(self.ocr_params["workers"])
-                if hasattr(self, "batch_size_spin"):
-                    self.batch_size_spin.setValue(self.ocr_params["batch_size"])
-                if hasattr(self, "beam_width_spin"):
-                    self.beam_width_spin.setValue(self.ocr_params["beamWidth"])
-                if hasattr(self, "paragraph_check"):
-                    self.paragraph_check.setChecked(self.ocr_params["paragraph"])
-                if hasattr(self, "detail_spin"):
-                    self.detail_spin.setValue(self.ocr_params["detail"])
-                if hasattr(self, "allowlist_edit"):
-                    self.allowlist_edit.setText(self.ocr_params["allowlist"] or "")
-
-        finally:
-            # Reconnect signals
-            self._connect_param_signals()
-
-    def _disconnect_param_signals(self):
-        """Temporarily disconnect parameter change signals."""
-        # Disconnect preprocessing signals - spinboxes
-        self.crop_fraction_spin.valueChanged.disconnect()
-        self.contrast_spin.valueChanged.disconnect()
-        self.brightness_spin.valueChanged.disconnect()
-        self.blur_spin.valueChanged.disconnect()
-        self.resize_spin.valueChanged.disconnect()
-        self.resize_width_spin.valueChanged.disconnect()
-        self.resize_height_spin.valueChanged.disconnect()
-
-        # Disconnect minimum crop size signals
-        if hasattr(self, "min_crop_width_spin"):
-            self.min_crop_width_spin.valueChanged.disconnect()
-        if hasattr(self, "min_crop_height_spin"):
-            self.min_crop_height_spin.valueChanged.disconnect()
-
-        # Disconnect preprocessing signals - checkboxes
-        self.denoise_check.stateChanged.disconnect()
-
-        # Disconnect optional preprocessing controls
-        if hasattr(self, "enhance_check"):
-            self.enhance_check.stateChanged.disconnect()
-        if hasattr(self, "clahe_clip_spin"):
-            self.clahe_clip_spin.valueChanged.disconnect()
-        if hasattr(self, "clahe_grid_spin"):
-            self.clahe_grid_spin.valueChanged.disconnect()
-        if hasattr(self, "sharpen_check"):
-            self.sharpen_check.stateChanged.disconnect()
-        if hasattr(self, "sharpen_strength_spin"):
-            self.sharpen_strength_spin.valueChanged.disconnect()
-        if hasattr(self, "upscale_check"):
-            self.upscale_check.stateChanged.disconnect()
-        if hasattr(self, "upscale_factor_spin"):
-            self.upscale_factor_spin.valueChanged.disconnect()
-        if hasattr(self, "upscale_to_size_check"):
-            self.upscale_to_size_check.stateChanged.disconnect()
-        if hasattr(self, "upscale_target_spin"):
-            self.upscale_target_spin.valueChanged.disconnect()
-        if hasattr(self, "colour_mode_check"):
-            self.colour_mode_check.stateChanged.disconnect()
-        if hasattr(self, "bw_mode_check"):
-            self.bw_mode_check.stateChanged.disconnect()
-
-        # Disconnect OCR signals if available
+        bindings = [(self.preprocess_params, PREPROCESS_CONTROLS)]
         if EASYOCR_AVAILABLE:
-            self.text_threshold_spin.valueChanged.disconnect()
-            self.low_text_spin.valueChanged.disconnect()
-            self.link_threshold_spin.valueChanged.disconnect()
-            self.width_ths_spin.valueChanged.disconnect()
-            self.height_ths_spin.valueChanged.disconnect()
-            self.canvas_size_spin.valueChanged.disconnect()
-            self.mag_ratio_spin.valueChanged.disconnect()
-            self.gpu_check.stateChanged.disconnect()
+            bindings.append((self.ocr_params, OCR_CONTROLS))
 
-            # Disconnect optional OCR controls
-            if hasattr(self, "x_ths_spin"):
-                self.x_ths_spin.valueChanged.disconnect()
-            if hasattr(self, "y_ths_spin"):
-                self.y_ths_spin.valueChanged.disconnect()
-            if hasattr(self, "ycenter_ths_spin"):
-                self.ycenter_ths_spin.valueChanged.disconnect()
-            if hasattr(self, "slope_ths_spin"):
-                self.slope_ths_spin.valueChanged.disconnect()
-            if hasattr(self, "adjust_contrast_spin"):
-                self.adjust_contrast_spin.valueChanged.disconnect()
-            if hasattr(self, "filter_ths_spin"):
-                self.filter_ths_spin.valueChanged.disconnect()
-            if hasattr(self, "workers_spin"):
-                self.workers_spin.valueChanged.disconnect()
-            if hasattr(self, "batch_size_spin"):
-                self.batch_size_spin.valueChanged.disconnect()
-            if hasattr(self, "beam_width_spin"):
-                self.beam_width_spin.valueChanged.disconnect()
-            if hasattr(self, "paragraph_check"):
-                self.paragraph_check.stateChanged.disconnect()
-            if hasattr(self, "detail_spin"):
-                self.detail_spin.valueChanged.disconnect()
-            if hasattr(self, "allowlist_edit"):
-                self.allowlist_edit.textChanged.disconnect()
+        for params, controls in bindings:
+            for key, control_name in controls.items():
+                control = getattr(self, control_name)
+                # Blocked so a control does not write the other, not yet updated, controls
+                # back into the parameters
+                control.blockSignals(True)
+                try:
+                    self._set_control_value(control, params[key])
+                finally:
+                    control.blockSignals(False)
 
-    def _connect_param_signals(self):
-        """Reconnect parameter change signals."""
-        # Reconnect preprocessing signals - spinboxes
-        self.crop_fraction_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        self.contrast_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        self.brightness_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        self.blur_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        self.resize_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        self.resize_width_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        self.resize_height_spin.valueChanged.connect(self._on_preprocess_param_changed)
-
-        # Reconnect minimum crop size signals
-        if hasattr(self, "min_crop_width_spin"):
-            self.min_crop_width_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        if hasattr(self, "min_crop_height_spin"):
-            self.min_crop_height_spin.valueChanged.connect(self._on_preprocess_param_changed)
-
-        # Reconnect preprocessing signals - checkboxes
-        self.denoise_check.stateChanged.connect(self._on_preprocess_param_changed)
-
-        # Reconnect optional preprocessing controls
-        if hasattr(self, "enhance_check"):
-            self.enhance_check.stateChanged.connect(self._on_preprocess_param_changed)
-        if hasattr(self, "clahe_clip_spin"):
-            self.clahe_clip_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        if hasattr(self, "clahe_grid_spin"):
-            self.clahe_grid_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        if hasattr(self, "sharpen_check"):
-            self.sharpen_check.stateChanged.connect(self._on_preprocess_param_changed)
-        if hasattr(self, "sharpen_strength_spin"):
-            self.sharpen_strength_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        if hasattr(self, "upscale_check"):
-            self.upscale_check.stateChanged.connect(self._on_preprocess_param_changed)
-        if hasattr(self, "upscale_factor_spin"):
-            self.upscale_factor_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        if hasattr(self, "upscale_to_size_check"):
-            self.upscale_to_size_check.stateChanged.connect(self._on_preprocess_param_changed)
-        if hasattr(self, "upscale_target_spin"):
-            self.upscale_target_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        if hasattr(self, "colour_mode_check"):
-            self.colour_mode_check.stateChanged.connect(self._on_preprocess_param_changed)
-        if hasattr(self, "bw_mode_check"):
-            self.bw_mode_check.stateChanged.connect(self._on_preprocess_param_changed)
-
-        # Reconnect OCR signals if available
-        if EASYOCR_AVAILABLE:
-            self.text_threshold_spin.valueChanged.connect(self._on_ocr_param_changed)
-            self.low_text_spin.valueChanged.connect(self._on_ocr_param_changed)
-            self.link_threshold_spin.valueChanged.connect(self._on_ocr_param_changed)
-            self.width_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
-            self.height_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
-            self.canvas_size_spin.valueChanged.connect(self._on_ocr_param_changed)
-            self.mag_ratio_spin.valueChanged.connect(self._on_ocr_param_changed)
-            self.gpu_check.stateChanged.connect(self._on_ocr_param_changed)
-
-            # Reconnect optional OCR controls
-            if hasattr(self, "x_ths_spin"):
-                self.x_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
-            if hasattr(self, "y_ths_spin"):
-                self.y_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
-            if hasattr(self, "ycenter_ths_spin"):
-                self.ycenter_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
-            if hasattr(self, "slope_ths_spin"):
-                self.slope_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
-            if hasattr(self, "adjust_contrast_spin"):
-                self.adjust_contrast_spin.valueChanged.connect(self._on_ocr_param_changed)
-            if hasattr(self, "filter_ths_spin"):
-                self.filter_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
-            if hasattr(self, "workers_spin"):
-                self.workers_spin.valueChanged.connect(self._on_ocr_param_changed)
-            if hasattr(self, "batch_size_spin"):
-                self.batch_size_spin.valueChanged.connect(self._on_ocr_param_changed)
-            if hasattr(self, "beam_width_spin"):
-                self.beam_width_spin.valueChanged.connect(self._on_ocr_param_changed)
-            if hasattr(self, "paragraph_check"):
-                self.paragraph_check.stateChanged.connect(self._on_ocr_param_changed)
-            if hasattr(self, "detail_spin"):
-                self.detail_spin.valueChanged.connect(self._on_ocr_param_changed)
-            if hasattr(self, "allowlist_edit"):
-                self.allowlist_edit.textChanged.connect(self._on_ocr_param_changed)
+        self._update_clahe_controls()
+        self._update_sharpen_controls()
+        self._update_upscale_controls()
 
     def _save_parameters_to_config(self):
         """Save current parameters to configuration file."""
@@ -2172,54 +1733,14 @@ class EasyOCRTuningTab(QWidget):
             config_updates = {
                 "player_id": {
                     "preprocessing": {
-                        "crop_top_fraction": self.preprocess_params["crop_top_fraction"],
-                        "contrast_alpha": self.preprocess_params["contrast_alpha"],
-                        "brightness_beta": self.preprocess_params["brightness_beta"],
-                        "gaussian_blur": self.preprocess_params["gaussian_blur"],
-                        "resize_factor": self.preprocess_params["resize_factor"],
-                        "resize_absolute_width": self.preprocess_params["resize_absolute_width"],
-                        "resize_absolute_height": self.preprocess_params["resize_absolute_height"],
-                        "enhance_contrast": self.preprocess_params["enhance_contrast"],
-                        "clahe_clip_limit": self.preprocess_params["clahe_clip_limit"],
-                        "clahe_grid_size": self.preprocess_params["clahe_grid_size"],
-                        "denoise": self.preprocess_params["denoise"],
-                        "sharpen": self.preprocess_params["sharpen"],
-                        "sharpen_strength": self.preprocess_params["sharpen_strength"],
-                        "upscale": self.preprocess_params["upscale"],
-                        "upscale_factor": self.preprocess_params["upscale_factor"],
-                        "upscale_to_size": self.preprocess_params["upscale_to_size"],
-                        "upscale_target_size": self.preprocess_params["upscale_target_size"],
-                        "colour_mode": self.preprocess_params["colour_mode"],
-                        "bw_mode": self.preprocess_params["bw_mode"],
-                        # Minimum crop size filtering parameters
-                        "min_crop_width": self.preprocess_params["min_crop_width"],
-                        "min_crop_height": self.preprocess_params["min_crop_height"],
+                        key: self.preprocess_params[key] for key in PREPROCESS_CONTROLS
                     }
                 }
             }
 
             if EASYOCR_AVAILABLE:
                 config_updates["player_id"]["easyocr"] = {
-                    "text_threshold": self.ocr_params["text_threshold"],
-                    "low_text": self.ocr_params["low_text"],
-                    "link_threshold": self.ocr_params["link_threshold"],
-                    "width_ths": self.ocr_params["width_ths"],
-                    "height_ths": self.ocr_params["height_ths"],
-                    "x_ths": self.ocr_params["x_ths"],
-                    "y_ths": self.ocr_params["y_ths"],
-                    "ycenter_ths": self.ocr_params["ycenter_ths"],
-                    "slope_ths": self.ocr_params["slope_ths"],
-                    "canvas_size": self.ocr_params["canvas_size"],
-                    "mag_ratio": self.ocr_params["mag_ratio"],
-                    "adjust_contrast": self.ocr_params["adjust_contrast"],
-                    "filter_ths": self.ocr_params["filter_ths"],
-                    "workers": self.ocr_params["workers"],
-                    "batch_size": self.ocr_params["batch_size"],
-                    "beamWidth": self.ocr_params["beamWidth"],
-                    "gpu": self.ocr_params["gpu"],
-                    "paragraph": self.ocr_params["paragraph"],
-                    "detail": self.ocr_params["detail"],
-                    "allowlist": self.ocr_params["allowlist"],
+                    key: self.ocr_params[key] for key in OCR_CONTROLS
                 }
 
             # Ensure configs directory exists
@@ -2250,9 +1771,6 @@ class EasyOCRTuningTab(QWidget):
                 print(
                     f"[EASYOCR_TUNING]   - EasyOCR parameters: {len(config_updates['player_id']['easyocr'])} saved"
                 )
-
-            # Optional: Add visual feedback to user (you could replace this with a status bar message)
-            # For now, console output should be sufficient for debugging
 
         except Exception as e:
             print(f"[EASYOCR_TUNING] Error saving parameters to config: {e}")

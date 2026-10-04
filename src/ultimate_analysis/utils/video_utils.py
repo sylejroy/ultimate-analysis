@@ -19,24 +19,8 @@ def get_video_duration(video_path: str) -> str:
     Returns:
         Duration string in format "MM:SS" or "Unknown"
     """
-    try:
-        cap = cv2.VideoCapture(video_path)
-        if cap.isOpened():
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-            cap.release()
-
-            if fps > 0:
-                duration_seconds = frame_count / fps
-                minutes = int(duration_seconds // 60)
-                seconds = int(duration_seconds % 60)
-                return f"{minutes:02d}:{seconds:02d}"
-
-    except Exception as e:
-        logger = get_logger("VIDEO_UTILS")
-        logger.error(f"Error getting duration for {video_path}: {e}")
-
-    return "Unknown"
+    info = get_video_info(video_path)
+    return info["duration_formatted"] if info is not None else "Unknown"
 
 
 def get_video_info(video_path: str) -> Optional[dict]:
@@ -48,6 +32,7 @@ def get_video_info(video_path: str) -> Optional[dict]:
     Returns:
         Dictionary with video properties or None if failed
     """
+    cap = None
     try:
         cap = cv2.VideoCapture(video_path)
         if cap.isOpened():
@@ -55,9 +40,9 @@ def get_video_info(video_path: str) -> Optional[dict]:
             frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            cap.release()
-
             duration_seconds = frame_count / fps if fps > 0 else 0
+            minutes = int(duration_seconds // 60)
+            seconds = int(duration_seconds % 60)
 
             return {
                 "fps": fps,
@@ -65,11 +50,14 @@ def get_video_info(video_path: str) -> Optional[dict]:
                 "width": width,
                 "height": height,
                 "duration_seconds": duration_seconds,
-                "duration_formatted": get_video_duration(video_path),
+                "duration_formatted": f"{minutes:02d}:{seconds:02d}" if fps > 0 else "Unknown",
             }
 
     except Exception as e:
         logger = get_logger("VIDEO_UTILS")
         logger.error(f"Error getting video info for {video_path}: {e}")
+    finally:
+        if cap is not None:
+            cap.release()
 
     return None

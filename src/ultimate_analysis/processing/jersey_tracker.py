@@ -51,24 +51,24 @@ class JerseyNumberTracker:
 
     def _load_config(self) -> None:
         """Load configuration parameters."""
-        self.max_history_length = get_setting("player_id.tracking.max_history_length", 30)
+        self.max_history_length = get_setting("models.player_id.tracking.max_history_length", 30)
         self.confidence_decay_factor = get_setting(
-            "player_id.tracking.confidence_decay_factor", 0.95
+            "models.player_id.tracking.confidence_decay_factor", 0.95
         )
         self.spatial_weight_center_bonus = get_setting(
-            "player_id.tracking.spatial_weight_center_bonus", 0.3
+            "models.player_id.tracking.spatial_weight_center_bonus", 0.3
         )
         self.min_confidence_threshold = get_setting(
-            "player_id.tracking.min_confidence_threshold", 0.1
+            "models.player_id.tracking.min_confidence_threshold", 0.1
         )
         self.center_region_width = get_setting(
-            "player_id.tracking.center_region_width", 0.4
+            "models.player_id.tracking.center_region_width", 0.4
         )  # 40% of width is "center"
         self.measurement_weight_recent = get_setting(
-            "player_id.tracking.measurement_weight_recent", 1.0
+            "models.player_id.tracking.measurement_weight_recent", 1.0
         )
-        self.measurement_weight_old = get_setting("player_id.tracking.measurement_weight_old", 0.5)
-        self.probability_smoothing = get_setting("player_id.tracking.probability_smoothing", 0.1)
+        self.measurement_weight_old = get_setting("models.player_id.tracking.measurement_weight_old", 0.5)
+        self.probability_smoothing = get_setting("models.player_id.tracking.probability_smoothing", 0.1)
 
     def _calculate_spatial_weight(self, bbox_center_x: float) -> float:
         """Calculate spatial weight based on digit position within bounding box.
@@ -255,48 +255,6 @@ class JerseyNumberTracker:
         if top_probs:
             return top_probs[0][0], top_probs[0][1]
         return None, 0.0
-
-    def get_measurement_count(self, track_id: int) -> int:
-        """Get total number of measurements for a track.
-
-        Args:
-            track_id: Track to get measurement count for
-
-        Returns:
-            Total number of measurements
-        """
-        return len(self._track_measurements[track_id])
-
-    def clear_track(self, track_id: int) -> None:
-        """Clear all data for a specific track.
-
-        Args:
-            track_id: Track to clear
-        """
-        if track_id in self._track_measurements:
-            del self._track_measurements[track_id]
-        if track_id in self._track_probabilities:
-            del self._track_probabilities[track_id]
-
-    def get_statistics(self) -> Dict[str, Any]:
-        """Get tracking statistics for debugging.
-
-        Returns:
-            Dictionary with tracking statistics
-        """
-        total_tracks = len(self._track_measurements)
-        total_measurements = sum(
-            len(measurements) for measurements in self._track_measurements.values()
-        )
-        total_probabilities = sum(len(probs) for probs in self._track_probabilities.values())
-
-        return {
-            "total_tracks": total_tracks,
-            "total_measurements": total_measurements,
-            "total_probabilities": total_probabilities,
-            "avg_measurements_per_track": total_measurements / max(1, total_tracks),
-            "avg_probabilities_per_track": total_probabilities / max(1, total_tracks),
-        }
 
 
 # Global tracker instance

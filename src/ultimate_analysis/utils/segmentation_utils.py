@@ -58,6 +58,9 @@ def apply_segmentation_to_warped_frame(
     homography_matrix: np.ndarray,
     original_frame_shape: Tuple[int, int],
     tab_name: str = "MAIN_TAB",
+    field_contour: Optional[np.ndarray] = None,
+    draw_scale: float = 1.0,
+    in_place: bool = False,
 ) -> np.ndarray:
     """Apply segmentation overlay to warped frame by transforming contour points from original image.
 
@@ -67,6 +70,11 @@ def apply_segmentation_to_warped_frame(
         homography_matrix: 3x3 homography transformation matrix
         original_frame_shape: Shape of original frame (height, width)
         tab_name: Name of calling tab for logging
+        field_contour: Precomputed field contour in original image coordinates. When given,
+            the mask and contour are not rebuilt from segmentation_results.
+        draw_scale: Scale of warped_frame relative to the full-size canvas, applied to the
+            contour line and point sizes so they keep their apparent size
+        in_place: Draw directly on warped_frame instead of a copy (caller must own the frame)
 
     Returns:
         Warped frame with segmentation overlay applied
@@ -75,21 +83,23 @@ def apply_segmentation_to_warped_frame(
         return warped_frame
 
     try:
-        # Create unified mask from segmentation results on original frame
-        unified_mask = create_unified_field_mask(segmentation_results, original_frame_shape)
+        original_contour = field_contour
+        if original_contour is None:
+            # Create unified mask from segmentation results on original frame
+            unified_mask = create_unified_field_mask(segmentation_results, original_frame_shape)
 
-        if unified_mask is None:
+            if unified_mask is None:
+                logger = get_logger("SEGMENTATION_UTILS")
+                logger.debug(f"[{tab_name}] No unified mask could be created")
+                return warped_frame
+
             logger = get_logger("SEGMENTATION_UTILS")
-            logger.debug(f"[{tab_name}] No unified mask could be created")
-            return warped_frame
+            logger.debug(
+                f"[{tab_name}] Created unified mask with shape {unified_mask.shape}, {np.sum(unified_mask)} pixels"
+            )
 
-        logger = get_logger("SEGMENTATION_UTILS")
-        logger.debug(
-            f"[{tab_name}] Created unified mask with shape {unified_mask.shape}, {np.sum(unified_mask)} pixels"
-        )
-
-        # Calculate contour on the original image
-        original_contour = calculate_field_contour(unified_mask)
+            # Calculate contour on the original image
+            original_contour = calculate_field_contour(unified_mask)
 
         if original_contour is None or len(original_contour) == 0:
             print(f"[{tab_name}] No contour found in original unified mask")
@@ -109,11 +119,34 @@ def apply_segmentation_to_warped_frame(
         # Apply overlay and draw contour on warped frame - contour only for consistency
         field_color = get_primary_field_color()  # Bright cyan (BGR) - same as segmentation
         result_frame, _, _ = draw_unified_field_mask(
-            warped_frame, warped_mask, field_color, alpha=0.4, draw_contour=False, fill_mask=False
+            warped_frame,
+            warped_mask,
+            field_color,
+            alpha=0.4,
+            draw_contour=False,
+            fill_mask=False,
+            in_place=in_place,
         )
 
-        # Draw the transformed contour directly
-        result_frame = draw_field_contour(result_frame, transformed_contour)
+        # Draw the transformed contour directly; when the mask was empty the frame
+        # above came back untouched, so it is only private if the caller said so.
+        contour_sizes = {}
+        if draw_scale != 1.0:
+            contour_sizes = {
+                "line_thickness": max(
+                    1,
+                    round(get_setting("models.segmentation.contour.line_thickness", 3) * draw_scale),
+                ),
+                "point_radius": max(
+                    1, round(get_setting("models.segmentation.contour.point_radius", 5) * draw_scale)
+                ),
+            }
+        result_frame = draw_field_contour(
+            result_frame,
+            transformed_contour,
+            in_place=in_place or result_frame is not warped_frame,
+            **contour_sizes,
+        )
 
         logger = get_logger("SEGMENTATION_UTILS")
         logger.debug(
@@ -213,7 +246,8 @@ def populate_segmentation_model_combo(
     if default_model_path and combo_box.count() > 0:
         for i in range(combo_box.count()):
             item_path = combo_box.itemData(i)
-            if item_path and default_model_path in str(item_path):
+            # Compared as paths: the setting uses forward slashes, Windows paths do not
+            if item_path and Path(item_path) == Path(default_model_path):
                 combo_box.setCurrentIndex(i)
                 print(
                     f"[SEGMENTATION_UTILS] Auto-selected default segmentation model: {combo_box.itemText(i)}"

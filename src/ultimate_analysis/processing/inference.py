@@ -14,14 +14,19 @@ import yaml
 from ..config.settings import get_setting
 from ..constants import FALLBACK_DEFAULTS
 from ..utils.logger import get_logger
+from .tensorrt_engines import get_engine
 
 try:
     from ultralytics import YOLO
+    from ultralytics.cfg import DEFAULT_CFG_DICT
 
     YOLO_AVAILABLE = True
+    # Newer Ultralytics replaced `half` with `quantize` and warns on every call otherwise
+    FP16_KWARGS = {"quantize": 16} if "quantize" in DEFAULT_CFG_DICT else {"half": True}
 except ImportError:
     print("[INFERENCE] Warning: ultralytics not available, inference will be disabled")
     YOLO_AVAILABLE = False
+    FP16_KWARGS = {}
 
 
 # Global model cache - separate models for players and discs
@@ -33,10 +38,14 @@ _disc_model = None
 _disc_model_path = None
 _disc_model_imgsz = None
 
-# Backward compatibility
-_detection_model = None
-_current_model_path = None
-_model_imgsz = None
+# Performance optimization: disc detection skipping
+_frames_since_last_disc = 0
+
+
+def reset_inference_state() -> None:
+    """Resume disc detection when the video or playback position changes."""
+    global _frames_since_last_disc
+    _frames_since_last_disc = 0
 
 
 def _get_model_training_params(model_path: str) -> Dict[str, Any]:
@@ -51,8 +60,10 @@ def _get_model_training_params(model_path: str) -> Dict[str, Any]:
     try:
         model_path = Path(model_path)
 
-        # Look for args.yaml in the same directory as the model
-        args_yaml_path = model_path.parent / "args.yaml"
+        # Ultralytics writes args.yaml to the run folder, one level above weights/
+        args_yaml_path = model_path.parent.parent / "args.yaml"
+        if not args_yaml_path.exists():
+            args_yaml_path = model_path.parent / "args.yaml"
 
         if args_yaml_path.exists():
             with open(args_yaml_path, "r") as f:
@@ -68,6 +79,13 @@ def _get_model_training_params(model_path: str) -> Dict[str, Any]:
     return {}
 
 
+# Detected class -> (settings prefix, model type shown by the visualization)
+_MODEL_ROLES = {
+    "player": ("models.player_detection", "player_model"),
+    "disc": ("models.disc_detection", "disc_model"),
+}
+
+
 def _run_single_model_inference(
     frame: np.ndarray, model: Any, model_imgsz: Optional[int], config_prefix: str, target_class: str
 ) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
@@ -78,7 +96,30 @@ def _run_single_model_inference(
         model: Loaded YOLO model
         model_imgsz: Model's training image size
         config_prefix: Configuration prefix for thresholds (e.g., "models.player_detection")
-        target_class: Target class name to assign to all detections
+        target_class: Class this model is used for ("player" or "disc")
+
+    Returns:
+        Tuple of (List of detection dictionaries, timing_breakdown dict)
+    """
+    model_type = _MODEL_ROLES.get(target_class, (config_prefix, "disc_model"))[1]
+    return _predict_detections(
+        frame, model, model_imgsz, {target_class: (config_prefix, model_type)}
+    )
+
+
+def _predict_detections(
+    frame: np.ndarray,
+    model: Any,
+    model_imgsz: Optional[int],
+    roles: Dict[str, Tuple[str, str]],
+) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
+    """Run one model and return the detections of the requested classes.
+
+    Args:
+        frame: Input video frame
+        model: Loaded YOLO model
+        model_imgsz: Model's training image size
+        roles: Class name -> (settings prefix for its thresholds, model type label)
 
     Returns:
         Tuple of (List of detection dictionaries, timing_breakdown dict)
@@ -94,28 +135,46 @@ def _run_single_model_inference(
         # === PREPROCESSING PHASE ===
         preprocess_start = time.perf_counter()
 
-        # Get inference parameters from config
-        confidence_threshold = get_setting(f"{config_prefix}.confidence_threshold", 0.5)
-        nms_threshold = get_setting(f"{config_prefix}.nms_threshold", 0.45)
+        thresholds = {
+            name: get_setting(f"{prefix}.confidence_threshold", 0.5)
+            for name, (prefix, _) in roles.items()
+        }
+        first_prefix = next(iter(roles.values()))[0]
+        nms_threshold = get_setting(f"{first_prefix}.nms_threshold", 0.45)
+
+        # Only the classes this model is used for. A model trained on players and discs
+        # would otherwise report its discs as players. Models that do not name their
+        # classes this way (single role only) keep every detection, labelled with the role.
+        model_names = getattr(model, "names", None)
+        model_names = dict(model_names) if isinstance(model_names, dict) else {}
+        class_ids = [cls for cls, name in model_names.items() if name in roles]
+        fallback_class = None if class_ids else next(iter(roles))
 
         # Determine image size to use - prefer model's training size
         imgsz = model_imgsz if model_imgsz else 640
 
-        # Determine model type from config prefix
-        model_type = "player_model" if "player_detection" in config_prefix else "disc_model"
+        # FP16 for ~2x speedup on compatible GPUs
+        precision = FP16_KWARGS if get_setting("models.inference.half_precision", False) else {}
+
+        # A TensorRT engine built for this model and frame size replaces the PyTorch model
+        runtime_model, runtime_kwargs = model, {"imgsz": imgsz, **precision}
+        engine = get_engine(model, frame.shape, imgsz, half=bool(precision))
+        if engine is not None:
+            runtime_model, runtime_kwargs = engine[0], {"imgsz": engine[1]}
 
         timing["preprocessing"] = time.perf_counter() - preprocess_start
 
         # === INFERENCE PHASE ===
         inference_start = time.perf_counter()
-        results = model.predict(
+        results = runtime_model.predict(
             frame,
-            conf=confidence_threshold,
+            conf=min(thresholds.values()),
             iou=nms_threshold,
-            imgsz=imgsz,
+            classes=class_ids or None,
             verbose=False,
             save=False,
             show=False,
+            **runtime_kwargs,
         )
         timing["inference"] = time.perf_counter() - inference_start
 
@@ -133,9 +192,10 @@ def _run_single_model_inference(
                     x1, y1, x2, y2 = boxes[i]
                     conf = float(confidences[i])
                     cls = int(classes[i])
+                    class_name = fallback_class or model_names[cls]
 
-                    # Skip detections below confidence threshold
-                    if conf < confidence_threshold:
+                    # Skip detections below this class's confidence threshold
+                    if conf < thresholds[class_name]:
                         continue
 
                     detections.append(
@@ -143,30 +203,20 @@ def _run_single_model_inference(
                             "bbox": [int(x1), int(y1), int(x2), int(y2)],
                             "confidence": conf,
                             "class_id": cls,
-                            "class_name": target_class,  # Explicitly set target class
-                            "model_type": model_type,  # Add model type for visualization differentiation
+                            "class_name": class_name,
+                            "model_type": roles[class_name][1],  # For visualization
                         }
                     )
 
         timing["postprocessing"] = time.perf_counter() - postprocess_start
 
     except Exception as e:
-        print(f"[INFERENCE] Error during {target_class} model inference: {e}")
+        print(f"[INFERENCE] Error during {'/'.join(roles)} model inference: {e}")
         import traceback
 
         traceback.print_exc()
 
     timing["total"] = time.perf_counter() - total_start
-
-    # Enhanced logging with subcategories (debug level to avoid spamming)
-    logger = get_logger("INFERENCE")
-    logger.debug(f"{target_class.title()} model breakdown:")
-    logger.debug(f"  ├─ Preprocessing: {timing['preprocessing']*1000:5.1f}ms")
-    logger.debug(f"  ├─ Inference:     {timing['inference']*1000:5.1f}ms")
-    logger.debug(f"  ├─ Postprocessing:{timing['postprocessing']*1000:5.1f}ms")
-    logger.debug(
-        f"  └─ Total:         {timing['total']*1000:5.1f}ms ({len(detections)} detections)"
-    )
 
     return detections, timing
 
@@ -212,6 +262,47 @@ def _resolve_model_path(model_path: str) -> Optional[str]:
     return model_file_path
 
 
+def warmup_models() -> None:
+    """Warmup YOLO models with a dummy inference to avoid cold-start penalty.
+
+    Should be called after loading models and before first actual inference.
+    This reduces first-frame latency by pre-allocating GPU memory and
+    initializing CUDA kernels.
+    """
+    logger = get_logger("INFERENCE")
+
+    if not YOLO_AVAILABLE:
+        return
+
+    # Ensure models are loaded
+    if _player_model is None or _disc_model is None:
+        _load_default_models()
+
+    try:
+        # Create dummy frame matching model input size
+        player_size = _player_model_imgsz if _player_model_imgsz else 640
+        disc_size = _disc_model_imgsz if _disc_model_imgsz else 640
+
+        logger.info("Warming up inference models...")
+
+        # Warmup player model
+        if _player_model is not None:
+            dummy_frame = np.zeros((player_size, player_size, 3), dtype=np.uint8)
+            _ = _player_model.predict(dummy_frame, verbose=False, imgsz=player_size)
+            logger.info("Player model warmed up")
+
+        # Warmup disc model
+        if _disc_model is not None:
+            dummy_frame = np.zeros((disc_size, disc_size, 3), dtype=np.uint8)
+            _ = _disc_model.predict(dummy_frame, verbose=False, imgsz=disc_size)
+            logger.info("Disc model warmed up")
+
+        logger.info("Model warmup complete")
+
+    except Exception as e:
+        logger.warning(f"Model warmup failed (non-critical): {e}")
+
+
 def _load_default_models() -> None:
     """Load the default player and disc detection models if none are loaded."""
     global _player_model, _disc_model
@@ -247,6 +338,9 @@ def set_player_model(model_path: str) -> bool:
     """
     global _player_model, _player_model_path, _player_model_imgsz
 
+    if _player_model is not None and model_path == _player_model_path:
+        return True
+
     if not YOLO_AVAILABLE:
         print("[INFERENCE] YOLO not available, cannot load player model")
         return False
@@ -259,7 +353,8 @@ def set_player_model(model_path: str) -> bool:
 
     try:
         print(f"[INFERENCE] Loading player YOLO model from: {model_file_path}")
-        _player_model = YOLO(model_file_path)
+        # The same weights in both roles are loaded once and run in a single pass
+        _player_model = _disc_model if model_path == _disc_model_path else YOLO(model_file_path)
         _player_model_path = model_path
 
         # Load training parameters to get the image size used during training
@@ -292,6 +387,9 @@ def set_disc_model(model_path: str) -> bool:
     """
     global _disc_model, _disc_model_path, _disc_model_imgsz
 
+    if _disc_model is not None and model_path == _disc_model_path:
+        return True
+
     if not YOLO_AVAILABLE:
         print("[INFERENCE] YOLO not available, cannot load disc model")
         return False
@@ -304,8 +402,10 @@ def set_disc_model(model_path: str) -> bool:
 
     try:
         print(f"[INFERENCE] Loading disc YOLO model from: {model_file_path}")
-        _disc_model = YOLO(model_file_path)
+        # The same weights in both roles are loaded once and run in a single pass
+        _disc_model = _player_model if model_path == _player_model_path else YOLO(model_file_path)
         _disc_model_path = model_path
+        reset_inference_state()
 
         # Load training parameters to get the image size used during training
         training_params = _get_model_training_params(model_file_path)
@@ -327,13 +427,14 @@ def set_disc_model(model_path: str) -> bool:
 
 
 def run_inference(
-    frame: np.ndarray, model_name: Optional[str] = None, return_timing: bool = False
+    frame: np.ndarray, return_timing: bool = False
 ) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], Dict[str, float]]]:
-    """Run YOLO inference on a video frame using separate player and disc models.
+    """Run YOLO inference on a video frame using the player and disc models.
+
+    When both roles use the same model it runs once and its detections are split by class.
 
     Args:
         frame: Input video frame as numpy array (H, W, C) in BGR format
-        model_name: Optional model name for backward compatibility (will set as player model)
         return_timing: If True, return tuple of (detections, timing_info)
 
     Returns:
@@ -347,8 +448,8 @@ def run_inference(
 
         If return_timing=True:
             Tuple of (detections_list, timing_dict) where timing_dict contains:
-            - player_time: Player model inference time in seconds
-            - disc_time: Disc model inference time in seconds
+            - player_timing: Player model timing breakdown in seconds
+            - disc_timing: Disc model timing breakdown in seconds
             - total_time: Total inference time in seconds
             - player_count: Number of player detections
             - disc_count: Number of disc detections
@@ -357,24 +458,23 @@ def run_inference(
         detections = run_inference(frame)
         # Or with timing:
         detections, timing = run_inference(frame, return_timing=True)
-        print(f"Player model took {timing['player_time']*1000:.1f}ms")
+        print(f"Inference took {timing['total_time']*1000:.1f}ms")
     """
-    global _player_model, _disc_model, _detection_model, _current_model_path
     logger = get_logger("INFERENCE")
 
     logger.debug(f"Processing frame with shape {frame.shape}")
 
     if not YOLO_AVAILABLE:
         logger.warning("YOLO not available, returning empty detections")
+        if return_timing:
+            return [], {
+                "player_timing": {},
+                "disc_timing": {},
+                "total_time": 0.0,
+                "player_count": 0,
+                "disc_count": 0,
+            }
         return []
-
-    # Handle backward compatibility
-    if model_name and model_name != _current_model_path:
-        print(
-            "[INFERENCE] Warning: set_detection_model is deprecated, use set_player_model and set_disc_model"
-        )
-        if not set_player_model(model_name):
-            print(f"[INFERENCE] Failed to load model {model_name} as player model")
 
     # Ensure we have models (lazy loading optimization)
     if _player_model is None or _disc_model is None:
@@ -390,8 +490,17 @@ def run_inference(
     player_count = 0
     disc_count = 0
 
+    # One model in both roles: a single pass finds players and discs
+    shared_model = _player_model is not None and _player_model is _disc_model
+
     # Run player detection
-    if _player_model is not None:
+    if shared_model:
+        all_detections, player_timing = _predict_detections(
+            frame, _player_model, _player_model_imgsz, dict(_MODEL_ROLES)
+        )
+        disc_count = sum(1 for det in all_detections if det["class_name"] == "disc")
+        player_count = len(all_detections) - disc_count
+    elif _player_model is not None:
         logger.debug("[INFERENCE] ┌─ Running player model inference...")
         player_detections, player_timing = _run_single_model_inference(
             frame, _player_model, _player_model_imgsz, "models.player_detection", "player"
@@ -401,96 +510,46 @@ def run_inference(
     else:
         print("[INFERENCE] Player model not loaded")
 
-    # Run disc detection
-    if _disc_model is not None:
+    # Run disc detection with adaptive skipping
+    # Skip disc model if no disc detected in recent frames (optimization)
+    global _frames_since_last_disc
+    skip_disc = (
+        get_setting("models.disc_detection.adaptive_skip", True)
+        and _frames_since_last_disc > get_setting("models.disc_detection.skip_threshold", 30)
+        # Periodically probe so a disc entering the frame can be detected again.
+        and _frames_since_last_disc
+        % max(1, int(get_setting("models.disc_detection.retry_interval", 30)))
+        != 0
+    )
+
+    if shared_model:
+        disc_timing = {"preprocessing": 0.0, "inference": 0.0, "postprocessing": 0.0, "total": 0.0}
+    elif _disc_model is not None and not skip_disc:
         logger.debug("[INFERENCE] ┌─ Running disc model inference...")
         disc_detections, disc_timing = _run_single_model_inference(
             frame, _disc_model, _disc_model_imgsz, "models.disc_detection", "disc"
         )
         disc_count = len(disc_detections)
         all_detections.extend(disc_detections)
+
+        # Update disc detection history
+        if disc_count > 0:
+            _frames_since_last_disc = 0
+        else:
+            _frames_since_last_disc += 1
+    elif skip_disc:
+        logger.debug(
+            f"[INFERENCE] Skipping disc model (no disc for {_frames_since_last_disc} frames)"
+        )
+        _frames_since_last_disc += 1
+        disc_timing = {"preprocessing": 0.0, "inference": 0.0, "postprocessing": 0.0, "total": 0.0}
     else:
         print("[INFERENCE] Disc model not loaded")
 
     total_inference_time = time.perf_counter() - total_inference_start
 
-    # Hierarchical timing summary (debug level to avoid spamming)
-    logger = get_logger("INFERENCE")
-    logger.debug("═══ INFERENCE TIMING SUMMARY ═══")
-
-    if player_timing:
-        logger.debug(f"Player Model ({player_count} detections):")
-        logger.debug(f"  ├─ Preprocessing: {player_timing.get('preprocessing', 0)*1000:5.1f}ms")
-        logger.debug(f"  ├─ Inference:     {player_timing.get('inference', 0)*1000:5.1f}ms")
-        logger.debug(f"  ├─ Postprocessing:{player_timing.get('postprocessing', 0)*1000:5.1f}ms")
-        logger.debug(f"  └─ Subtotal:      {player_timing.get('total', 0)*1000:5.1f}ms")
-    else:
-        logger.debug("Player Model: Not loaded")
-
-    if disc_timing:
-        logger.debug(f"Disc Model ({disc_count} detections):")
-        logger.debug(f"  ├─ Preprocessing: {disc_timing.get('preprocessing', 0)*1000:5.1f}ms")
-        logger.debug(f"  ├─ Inference:     {disc_timing.get('inference', 0)*1000:5.1f}ms")
-        logger.debug(f"  ├─ Postprocessing:{disc_timing.get('postprocessing', 0)*1000:5.1f}ms")
-        logger.debug(f"  └─ Subtotal:      {disc_timing.get('total', 0)*1000:5.1f}ms")
-    else:
-        logger.debug("Disc Model: Not loaded")
-
-    logger.debug("─────────────────────────────────")
-    logger.debug(f"TOTAL TIME:      {total_inference_time*1000:5.1f}ms")
-    logger.debug(f"TOTAL DETECTIONS: {len(all_detections)}")
-
-    # Performance comparison
-    player_total = player_timing.get("total", 0) if player_timing else 0
-    disc_total = disc_timing.get("total", 0) if disc_timing else 0
-
-    if player_total > 0 and disc_total > 0:
-        logger.debug(f"MODEL RATIO:     {player_total/disc_total:.2f}x (Player/Disc)")
-
-        # Show which phases take the most time
-        player_inference_time = player_timing.get("inference", 0)
-        disc_inference_time = disc_timing.get("inference", 0)
-        total_inference_only = player_inference_time + disc_inference_time
-
-        if total_inference_only > 0:
-            inference_percentage = (total_inference_only / total_inference_time) * 100
-            logger.debug(f"INFERENCE %:     {inference_percentage:.1f}% of total time")
-
-    logger.debug("═══════════════════════════════════")
-
-    # If no models are available, return debug detections
     if _player_model is None and _disc_model is None:
         print("[INFERENCE] No detection models available")
-        debug_detections = []
-        if get_setting("app.debug", False):
-            h, w = frame.shape[:2]
-            debug_detections = [
-                {
-                    "bbox": [w // 4, h // 4, 3 * w // 4, 3 * h // 4],
-                    "confidence": 0.85,
-                    "class_id": 0,
-                    "class_name": "player",
-                    "model_type": "player_model",
-                },
-                {
-                    "bbox": [w // 2 - 20, h // 2 - 20, w // 2 + 20, h // 2 + 20],
-                    "confidence": 0.75,
-                    "class_id": 0,
-                    "class_name": "disc",
-                    "model_type": "disc_model",
-                },
-            ]
-
-        if return_timing:
-            timing_info = {
-                "player_time": 0.0,
-                "disc_time": 0.0,
-                "total_time": 0.0,
-                "player_count": 0,
-                "disc_count": 0,
-            }
-            return debug_detections, timing_info
-        return debug_detections
 
     logger.debug(f"Found {len(all_detections)} total detections")
 
@@ -505,91 +564,3 @@ def run_inference(
         return all_detections, timing_info
 
     return all_detections
-
-
-def set_detection_model(model_path: str) -> bool:
-    """Set the detection model to use for inference (DEPRECATED).
-
-    Args:
-        model_path: Path to the YOLO model file (.pt) or model name
-
-    Returns:
-        True if model loaded successfully, False otherwise
-
-    Note:
-        This function is deprecated. Use set_player_model() and set_disc_model() instead.
-        For backward compatibility, this will set the player model.
-    """
-    print(
-        "[INFERENCE] Warning: set_detection_model is deprecated. Use set_player_model and set_disc_model instead."
-    )
-    return set_player_model(model_path)
-
-
-def get_current_model_path() -> Optional[str]:
-    """Get the path of the currently loaded detection model (DEPRECATED).
-
-    Returns:
-        Path to current model or None if no model loaded
-
-    Note:
-        This function is deprecated. Use get_current_model_paths() for both models.
-    """
-    return _player_model_path
-
-
-def get_current_model_paths() -> Dict[str, Optional[str]]:
-    """Get the paths of the currently loaded models.
-
-    Returns:
-        Dictionary with 'player' and 'disc' model paths
-    """
-    return {"player": _player_model_path, "disc": _disc_model_path}
-
-
-def get_model_info() -> Dict[str, Any]:
-    """Get information about the current detection models.
-
-    Returns:
-        Dictionary with combined model information:
-        - player_model: Player model information
-        - disc_model: Disc model information
-        - loaded: Whether any models are loaded
-    """
-    player_classes = []
-    disc_classes = []
-
-    if _player_model is not None and hasattr(_player_model, "names"):
-        player_classes = list(_player_model.names.values())
-
-    if _disc_model is not None and hasattr(_disc_model, "names"):
-        disc_classes = list(_disc_model.names.values())
-
-    return {
-        "player_model": {
-            "path": _player_model_path,
-            "classes": player_classes,
-            "input_size": [_player_model_imgsz or 640, _player_model_imgsz or 640],
-            "loaded": _player_model is not None,
-        },
-        "disc_model": {
-            "path": _disc_model_path,
-            "classes": disc_classes,
-            "input_size": [_disc_model_imgsz or 640, _disc_model_imgsz or 640],
-            "loaded": _disc_model is not None,
-        },
-        "loaded": _player_model is not None or _disc_model is not None,
-    }
-
-
-def _load_default_model() -> None:
-    """Load the default detection model if none is loaded (DEPRECATED)."""
-    print(
-        "[INFERENCE] Warning: _load_default_model is deprecated. Use _load_default_models instead."
-    )
-    _load_default_models()
-
-
-# Initialize with default model when first needed (lazy loading)
-# This optimization prevents slow startup by deferring model loading until actually used
-# _load_default_model()  # Commented out for performance optimization

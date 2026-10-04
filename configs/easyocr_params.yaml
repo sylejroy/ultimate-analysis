@@ -4,14 +4,14 @@ player_id:
     allowlist: 0123456789
     batch_size: 16
     beamWidth: 5
-    canvas_size: 2560
+    canvas_size: 1280  # Reduced from 2560 for faster OCR
     detail: 1
     filter_ths: 0.003
     gpu: true
     height_ths: 0.7
     link_threshold: 0.2
     low_text: 0.3
-    mag_ratio: 3.0
+    mag_ratio: 2.0  # Reduced from 3.0 for faster processing
     paragraph: false
     slope_ths: 0.1
     text_threshold: 0.4
@@ -27,12 +27,12 @@ player_id:
     clahe_grid_size: 8
     colour_mode: true
     contrast_alpha: 1.5
-    crop_top_fraction: 0.45
+    crop_top_fraction: 0.5  # Increased from 0.45 to focus more on jersey area
     denoise: false
     enhance_contrast: false
     gaussian_blur: 0
-    min_crop_height: 25
-    min_crop_width: 25
+    min_crop_height: 30  # Increased from 25 to skip tiny detections earlier
+    min_crop_width: 30  # Increased from 25 to skip tiny detections earlier
     resize_absolute_height: 0
     resize_absolute_width: 0
     resize_factor: 2.0

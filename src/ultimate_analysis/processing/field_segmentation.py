@@ -5,7 +5,7 @@ identifying important field features like end zones and sidelines.
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import cv2
 import numpy as np
@@ -20,11 +20,22 @@ except ImportError:
     print("[FIELD_SEG] Warning: ultralytics not available, using mock results")
 
 from ..config.settings import get_setting
+from .tensorrt_engines import get_engine
 
 # Global field segmentation state
 _field_model = None
-_current_model_path = None
 _model_imgsz = None  # Store the model's training image size
+_last_segmentation_frame = -1  # Track when we last ran segmentation
+_last_segmentation_results = []  # Cache last segmentation results
+_last_segmentation_shape = None
+
+
+def reset_segmentation_cache() -> None:
+    """Discard results after a model, video, or playback-position change."""
+    global _last_segmentation_frame, _last_segmentation_results, _last_segmentation_shape
+    _last_segmentation_frame = -1
+    _last_segmentation_results = []
+    _last_segmentation_shape = None
 
 
 def _preprocess_frame_for_segmentation(
@@ -43,33 +54,27 @@ def _preprocess_frame_for_segmentation(
     """
     original_h, original_w = frame.shape[:2]
 
-    # Create square canvas by padding to the larger dimension
-    max_dim = max(original_h, original_w)
+    # Scale the frame to the model size first, then pad it to a square (letterboxing).
+    # Padding the full-resolution frame first would resize mostly black pixels.
+    scale_factor = target_size / max(original_h, original_w)
+    content_h = max(1, round(original_h * scale_factor))
+    content_w = max(1, round(original_w * scale_factor))
+    pad_h = (target_size - content_h) // 2
+    pad_w = (target_size - content_w) // 2
 
-    # Calculate padding needed
-    pad_h = (max_dim - original_h) // 2
-    pad_w = (max_dim - original_w) // 2
+    square_frame = np.zeros((target_size, target_size, 3), dtype=frame.dtype)
+    content = frame
+    if (content_h, content_w) != (original_h, original_w):
+        content = cv2.resize(frame, (content_w, content_h))
+    square_frame[pad_h : pad_h + content_h, pad_w : pad_w + content_w] = content
 
-    # Create square frame with padding (letterboxing)
-    square_frame = np.zeros((max_dim, max_dim, 3), dtype=frame.dtype)
-    square_frame[pad_h : pad_h + original_h, pad_w : pad_w + original_w] = frame
-
-    # Resize to target size if needed
-    if max_dim != target_size:
-        square_frame = cv2.resize(square_frame, (target_size, target_size))
-        scale_factor = target_size / max_dim
-    else:
-        scale_factor = 1.0
-
-    # Store transform information for converting results back
+    # Where the frame sits inside the square model input
     transform_info = {
-        "original_h": original_h,
-        "original_w": original_w,
+        "target_size": target_size,
         "pad_h": pad_h,
         "pad_w": pad_w,
-        "max_dim": max_dim,
-        "scale_factor": scale_factor,
-        "target_size": target_size,
+        "content_h": content_h,
+        "content_w": content_w,
     }
 
     return square_frame, transform_info
@@ -78,24 +83,23 @@ def _preprocess_frame_for_segmentation(
 def _postprocess_segmentation_results(
     results: List[Any], transform_info: Dict[str, Any]
 ) -> List[Any]:
-    """Transform segmentation results back to original frame coordinates.
+    """Remove the letterbox padding from the segmentation masks.
+
+    The masks stay at model resolution; they are scaled to the frame once, after being
+    combined, when the unified field mask is built.
 
     Args:
         results: Segmentation results from YOLO model
         transform_info: Transform information from preprocessing
 
     Returns:
-        Segmentation results adjusted to original frame coordinates
+        Segmentation results whose masks cover exactly the original frame
     """
     if not results:
         return results
 
     try:
-        original_h = transform_info["original_h"]
-        original_w = transform_info["original_w"]
-        pad_h = transform_info["pad_h"]
-        pad_w = transform_info["pad_w"]
-        scale_factor = transform_info["scale_factor"]
+        target_size = transform_info["target_size"]
 
         for result in results:
             if hasattr(result, "masks") and result.masks is not None:
@@ -106,59 +110,15 @@ def _postprocess_segmentation_results(
                 elif hasattr(masks_data, "numpy"):
                     masks_data = masks_data.numpy()
 
-                # Transform each mask back to original coordinates
-                transformed_masks = []
-                for mask in masks_data:
-                    # Scale back from target size to max_dim
-                    if scale_factor != 1.0:
-                        scaled_size = int(transform_info["target_size"] / scale_factor)
-                        mask_scaled = cv2.resize(
-                            mask.astype(np.float32), (scaled_size, scaled_size)
-                        )
-                    else:
-                        mask_scaled = mask
+                # The masks may be at a different resolution than the model input
+                scale_y = masks_data.shape[1] / target_size
+                scale_x = masks_data.shape[2] / target_size
+                top = round(transform_info["pad_h"] * scale_y)
+                left = round(transform_info["pad_w"] * scale_x)
+                bottom = top + round(transform_info["content_h"] * scale_y)
+                right = left + round(transform_info["content_w"] * scale_x)
 
-                    # Remove padding to get back to original frame size
-                    mask_original = mask_scaled[
-                        pad_h : pad_h + original_h, pad_w : pad_w + original_w
-                    ]
-
-                    # Ensure correct size
-                    if mask_original.shape != (original_h, original_w):
-                        mask_original = cv2.resize(mask_original, (original_w, original_h))
-
-                    transformed_masks.append(mask_original)
-
-                # Update the result with transformed masks
-                result.masks.data = np.array(transformed_masks)
-
-            # Transform bounding boxes if present
-            if hasattr(result, "boxes") and result.boxes is not None:
-                boxes_data = result.boxes.xyxy
-                if hasattr(boxes_data, "cpu"):
-                    boxes_data = boxes_data.cpu().numpy()
-                elif hasattr(boxes_data, "numpy"):
-                    boxes_data = boxes_data.numpy()
-
-                # Scale and translate boxes back to original coordinates
-                transformed_boxes = []
-                for box in boxes_data:
-                    # Scale back from target size
-                    box = box / scale_factor
-                    # Remove padding offset
-                    box[0] -= pad_w  # x1
-                    box[1] -= pad_h  # y1
-                    box[2] -= pad_w  # x2
-                    box[3] -= pad_h  # y2
-                    # Clamp to original frame bounds
-                    box[0] = max(0, min(box[0], original_w))
-                    box[1] = max(0, min(box[1], original_h))
-                    box[2] = max(0, min(box[2], original_w))
-                    box[3] = max(0, min(box[3], original_h))
-                    transformed_boxes.append(box)
-
-                # Note: We don't modify the original boxes data as it may be read-only
-                # The calling code should handle coordinate transformation if needed
+                result.masks.data = np.ascontiguousarray(masks_data[:, top:bottom, left:right])
 
         return results
 
@@ -167,20 +127,35 @@ def _postprocess_segmentation_results(
         return results
 
 
-def run_field_segmentation(frame: np.ndarray) -> List[Any]:
-    """Run field segmentation on a single frame.
+def run_field_segmentation(frame: np.ndarray, frame_index: int = 0) -> List[Any]:
+    """Run field segmentation on a single frame with frame interval optimization.
 
     Args:
         frame: Input video frame as numpy array (H, W, C) in BGR format
+        frame_index: Current frame index for interval logic (optional)
 
     Returns:
         List of segmentation results with masks and field boundaries
     """
-    global _field_model, _current_model_path, _model_imgsz
+    global _field_model, _model_imgsz
+    global _last_segmentation_frame, _last_segmentation_results
+    global _last_segmentation_shape
 
     if not ULTRALYTICS_AVAILABLE:
         print("[FIELD_SEG] YOLO not available, returning mock results")
         return _create_mock_results(frame)
+
+    # Check frame interval optimization
+    frame_interval = get_setting("models.segmentation.frame_interval", 5)
+    if frame_interval > 1 and frame_index > 0:
+        frames_since_last = frame_index - _last_segmentation_frame
+        if (
+            _last_segmentation_frame >= 0
+            and 0 <= frames_since_last < frame_interval
+            and _last_segmentation_shape == frame.shape
+        ):
+            # Empty results are also valid; do not re-run an empty scene every frame.
+            return _last_segmentation_results
 
     # Load default model if none is loaded (lazy loading optimization)
     if _field_model is None:
@@ -202,12 +177,18 @@ def run_field_segmentation(frame: np.ndarray) -> List[Any]:
         # Preprocess frame to square format without stretching
         preprocessed_frame, transform_info = _preprocess_frame_for_segmentation(frame, imgsz)
 
+        # A TensorRT engine built for this model replaces the PyTorch model
+        runtime_model, runtime_imgsz = _field_model, imgsz
+        engine = get_engine(_field_model, preprocessed_frame.shape, imgsz, half=False)
+        if engine is not None:
+            runtime_model, runtime_imgsz = engine
+
         # Run YOLO segmentation on square image
-        results = _field_model.predict(
+        results = runtime_model.predict(
             preprocessed_frame,
             conf=confidence_threshold,
             iou=iou_threshold,
-            imgsz=imgsz,
+            imgsz=runtime_imgsz,
             verbose=False,
             save=False,
             show=False,
@@ -215,6 +196,11 @@ def run_field_segmentation(frame: np.ndarray) -> List[Any]:
 
         # Transform results back to original frame coordinates
         results = _postprocess_segmentation_results(list(results), transform_info)
+
+        # Cache results for frame interval optimization
+        _last_segmentation_results = results
+        _last_segmentation_frame = frame_index
+        _last_segmentation_shape = frame.shape
 
         return results
 
@@ -238,8 +224,10 @@ def _get_model_training_params(model_path: str) -> Dict[str, Any]:
     try:
         model_path = Path(model_path)
 
-        # Look for args.yaml in the same directory as the model
-        args_yaml_path = model_path.parent / "args.yaml"
+        # Ultralytics writes args.yaml to the run folder, one level above weights/
+        args_yaml_path = model_path.parent.parent / "args.yaml"
+        if not args_yaml_path.exists():
+            args_yaml_path = model_path.parent / "args.yaml"
 
         if args_yaml_path.exists():
             with open(args_yaml_path, "r") as f:
@@ -294,7 +282,7 @@ def set_field_model(model_path: str) -> bool:
     Example:
         success = set_field_model("data/models/segmentation/field_finder_best.pt")
     """
-    global _field_model, _current_model_path, _model_imgsz
+    global _field_model, _model_imgsz
 
     print(f"[FIELD_SEG] Setting field segmentation model: {model_path}")
 
@@ -318,21 +306,12 @@ def set_field_model(model_path: str) -> bool:
                 f"[FIELD_SEG] Ultralytics not available, model path stored for mock mode: {model_path}"
             )
 
-        _current_model_path = model_path
+        reset_segmentation_cache()
         return True
 
     except Exception as e:
         print(f"[FIELD_SEG] Failed to load field model {model_path}: {e}")
         return False
-
-
-def get_current_field_model_path() -> Optional[str]:
-    """Get the path of the currently loaded field segmentation model.
-
-    Returns:
-        Path to current model or None if no model loaded
-    """
-    return _current_model_path
 
 
 def _load_default_model() -> None:
@@ -373,68 +352,3 @@ def _load_default_model() -> None:
 
         print("[FIELD_SEG] No field segmentation models found, will use mock results")
 
-
-# Initialize with default model when first needed (lazy loading)
-# This optimization prevents slow startup by deferring model loading until actually used
-# _load_default_model()  # Commented out for performance optimization
-
-
-def visualize_segmentation(frame: np.ndarray, results: List[Any], alpha: float = 0.5) -> np.ndarray:
-    """Visualize field segmentation results on a frame.
-
-    Args:
-        frame: Original frame to overlay segmentation on
-        results: Segmentation results from run_field_segmentation()
-        alpha: Transparency for overlay (0.0 = transparent, 1.0 = opaque)
-
-    Returns:
-        Frame with segmentation overlay applied
-    """
-    if not results:
-        return frame
-
-    viz_frame = frame.copy()
-
-    # Define colors for different field regions
-    colors = [
-        (0, 255, 0),  # Green for field
-        (255, 0, 0),  # Red for end zone
-        (0, 0, 255),  # Blue for sideline
-        (255, 255, 0),  # Yellow for goal line
-    ]
-
-    for result in results:
-        if hasattr(result, "masks") and result.masks is not None:
-            # Get masks data
-            masks = (
-                result.masks.data.cpu().numpy()
-                if hasattr(result.masks.data, "cpu")
-                else result.masks.data
-            )
-
-            for idx, mask in enumerate(masks):
-                # Ensure mask is right shape
-                if mask.shape != frame.shape[:2]:
-                    mask_resized = cv2.resize(
-                        mask.astype(np.float32), (frame.shape[1], frame.shape[0])
-                    )
-                else:
-                    mask_resized = mask
-
-                # Create colored overlay
-                color = colors[idx % len(colors)]
-                overlay = np.zeros_like(frame)
-                overlay[mask_resized > 0.5] = color
-
-                # Blend with original frame
-                viz_frame = cv2.addWeighted(viz_frame, 1.0, overlay, alpha, 0)
-
-                # Draw contours for better visibility
-                contours, _ = cv2.findContours(
-                    (mask_resized > 0.5).astype(np.uint8),
-                    cv2.RETR_EXTERNAL,
-                    cv2.CHAIN_APPROX_SIMPLE,
-                )
-                cv2.drawContours(viz_frame, contours, -1, color, 2)
-
-    return viz_frame

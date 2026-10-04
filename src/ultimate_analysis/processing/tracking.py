@@ -5,8 +5,9 @@ Maintains consistent identities for players and discs throughout the game.
 """
 
 from collections import defaultdict
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+import cv2
 import numpy as np
 
 from ..config.settings import get_setting
@@ -15,7 +16,9 @@ from ..utils.logger import get_logger
 
 # Try to import DeepSORT
 try:
+    import torch
     from deep_sort_realtime.deepsort_tracker import DeepSort
+    from deep_sort_realtime.embedder.embedder_pytorch import INPUT_WIDTH, MobileNetv2_Embedder
 
     DEEPSORT_AVAILABLE = True
 except ImportError:
@@ -26,8 +29,10 @@ except ImportError:
 
 
 # Global tracking state
-_tracker_type = "deepsort"
 _deepsort_tracker = None
+# (embedder, network) - the embedder's network compiled for inference, or the network
+# itself when compiling is not possible
+_compiled_embedder: Tuple[Any, Any] = (None, None)
 _track_histories = defaultdict(list)
 _frame_count = 0
 
@@ -56,11 +61,6 @@ class Track:
         """Return bounding box in [x1, y1, x2, y2] format."""
         return self.bbox
 
-    def to_tlwh(self) -> List[float]:
-        """Return bounding box in [x, y, width, height] format."""
-        x1, y1, x2, y2 = self.bbox
-        return [x1, y1, x2 - x1, y2 - y1]
-
 
 def _initialize_deepsort_tracker():
     """Initialize DeepSORT tracker with optimal settings."""
@@ -77,13 +77,15 @@ def _initialize_deepsort_tracker():
     try:
         # DeepSORT configuration optimized for Ultimate Frisbee
         _deepsort_tracker = DeepSort(
-            max_age=get_setting("models.tracking.max_age", 50),  # Frames to keep lost tracks
+            max_age=get_setting(
+                "models.tracking.max_age", 30
+            ),  # Reduced from 50 for faster cleanup
             n_init=get_setting("models.tracking.n_init", 3),  # Frames needed to confirm track
             nms_max_overlap=get_setting("models.tracking.nms_overlap", 0.7),  # Non-max suppression
             max_cosine_distance=get_setting(
-                "models.tracking.max_cosine_distance", 0.7
-            ),  # Feature similarity
-            nn_budget=get_setting("models.tracking.nn_budget", 100),  # Feature budget per class
+                "models.tracking.max_cosine_distance", 0.5
+            ),  # Tighter for faster matching (was 0.7)
+            nn_budget=get_setting("models.tracking.nn_budget", 50),  # Reduced from 100 for speed
             override_track_class=None,  # Don't override class predictions
             embedder="mobilenet",  # Feature extractor model
             half=True,  # Use half precision for speed
@@ -102,6 +104,73 @@ def _initialize_deepsort_tracker():
         logger.error(f"Failed to initialize DeepSORT: {e}")
         _deepsort_tracker = None
         return False
+
+
+def _get_embedder_network(embedder: Any) -> Any:
+    """The embedder's network, traced once so it runs without Python overhead.
+
+    Tracing keeps the arithmetic identical. Freezing the trace would be faster still, but
+    it folds batch normalization into half-precision weights and shifts the embeddings.
+
+    The compiled network is only used when it reproduces the original's embeddings; any
+    failure or mismatch keeps the original network.
+    """
+    global _compiled_embedder
+    if _compiled_embedder[0] is embedder:
+        return _compiled_embedder[1]
+
+    network = embedder.model
+    try:
+        dtype = torch.half if embedder.half else torch.float
+        shape = (embedder.max_batch_size, 3, INPUT_WIDTH, INPUT_WIDTH)
+        example = torch.rand(shape, device="cuda", dtype=dtype)
+        with torch.inference_mode():
+            compiled = torch.jit.trace(network, example, check_trace=False)
+            # A different batch size than the traced one, as during tracking
+            check = torch.rand((3, *shape[1:]), device="cuda", dtype=dtype)
+            expected = network(check).float()
+            actual = compiled(check).float()
+            similarity = torch.nn.functional.cosine_similarity(expected, actual).min().item()
+        if actual.shape == expected.shape and similarity > 0.99999:
+            network = compiled
+        else:
+            get_logger("TRACKING").warning("Compiled embedder differs; using the original")
+    except Exception as e:
+        get_logger("TRACKING").warning(f"Could not compile embedder, using the original: {e}")
+
+    _compiled_embedder = (embedder, network)
+    return network
+
+
+def _embed_detections(frame: np.ndarray, deepsort_detections: List[tuple]) -> Optional[list]:
+    """Appearance embeddings for the detections, as DeepSORT's embedder computes them.
+
+    The library converts and normalizes every crop separately on the CPU and runs the
+    network with gradient tracking. This does the same arithmetic for the whole batch on
+    the GPU without gradients. Returns None to let the library compute them instead.
+    """
+    embedder = _deepsort_tracker.embedder
+    if not isinstance(embedder, MobileNetv2_Embedder) or not embedder.gpu or not embedder.bgr:
+        return None
+
+    crops, _ = _deepsort_tracker.crop_bb(frame, deepsort_detections)
+    if any(crop.size == 0 for crop in crops):
+        return None
+
+    resized = np.stack([cv2.resize(crop[..., ::-1], (INPUT_WIDTH, INPUT_WIDTH)) for crop in crops])
+
+    network = _get_embedder_network(embedder)
+    embeds = []
+    with torch.inference_mode():
+        mean = torch.tensor([0.485, 0.456, 0.406], device="cuda").view(1, 3, 1, 1)
+        std = torch.tensor([0.229, 0.224, 0.225], device="cuda").view(1, 3, 1, 1)
+        for start in range(0, len(resized), embedder.max_batch_size):
+            batch = torch.from_numpy(resized[start : start + embedder.max_batch_size]).cuda()
+            batch = (batch.permute(0, 3, 1, 2).float().div_(255.0) - mean) / std
+            if embedder.half:
+                batch = batch.half()
+            embeds.extend(network(batch).cpu().numpy())
+    return embeds
 
 
 def run_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) -> List[Track]:
@@ -128,7 +197,7 @@ def run_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) -> List[Tr
         f"Processing {len(detections)} detections with DeepSORT tracker (frame {_frame_count})"
     )
 
-    if not detections:
+    if not detections and _deepsort_tracker is None:
         return []
 
     return _run_deepsort_tracking(frame, detections)
@@ -187,7 +256,14 @@ def _run_deepsort_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) 
                 height = y2 - y1
 
                 conf = float(confidence)
-                cls = int(class_id)
+                # IDs are local to each YOLO model: both may use class zero.
+                class_name = det.get("class_name")
+                cls = {"disc": 0, "player": 1}.get(class_name)
+                if cls is None:
+                    cls = int(class_id)
+
+                if width <= 0 or height <= 0:
+                    continue
 
                 # DeepSORT expects ([x, y, width, height], confidence, class_id) format
                 deepsort_det = ([x, y, width, height], conf, cls)
@@ -201,19 +277,25 @@ def _run_deepsort_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) 
                 logger.warning(f"Invalid detection values, skipping: {e}")
                 continue
 
-        if not deepsort_detections:
-            logger.debug("No valid detections for DeepSORT")
-            return []
-
         logger.debug(f"Formatted {len(deepsort_detections)} detections for DeepSORT")
 
         # Update tracker with current frame and detections
-        tracks_deepsort = _deepsort_tracker.update_tracks(deepsort_detections, frame=frame)
+        embeds = _embed_detections(frame, deepsort_detections) if deepsort_detections else None
+        with torch.inference_mode():
+            tracks_deepsort = _deepsort_tracker.update_tracks(
+                deepsort_detections, embeds=embeds, frame=frame
+            )
+
+        # Retired tracks no longer need trajectory storage.
+        active_ids = {int(track.track_id) for track in tracks_deepsort}
+        for track_id in list(_track_histories):
+            if track_id not in active_ids:
+                del _track_histories[track_id]
 
         # Convert DeepSORT tracks to our Track format
         tracks = []
         for track in tracks_deepsort:
-            if not track.is_confirmed():
+            if not track.is_confirmed() or track.time_since_update > 0:
                 continue  # Skip unconfirmed tracks
 
             # Get track bounding box
@@ -267,6 +349,8 @@ def _run_simple_tracking(detections: List[Dict[str, Any]]) -> List[Track]:
         List of Track objects with new IDs
     """
     tracks = []
+    # Fallback IDs are new each frame, so old histories can never be reused.
+    _track_histories.clear()
 
     for i, detection in enumerate(detections):
         # Create a simple track with frame-based ID
@@ -317,7 +401,7 @@ def set_tracker_type(tracker_type: str) -> bool:
     Example:
         set_tracker_type("deepsort")
     """
-    global _tracker_type, _deepsort_tracker
+    global _deepsort_tracker
     logger = get_logger("TRACKING")
 
     tracker_type = tracker_type.lower()
@@ -327,7 +411,6 @@ def set_tracker_type(tracker_type: str) -> bool:
         return False
 
     logger.info(f"Setting tracker type to: {tracker_type}")
-    _tracker_type = tracker_type
 
     # Reset tracker instance to force reinitialization
     _deepsort_tracker = None
@@ -349,7 +432,9 @@ def reset_tracker() -> None:
 
     # Reset DeepSORT tracker
     if _deepsort_tracker is not None:
-        _deepsort_tracker = None
+        # Keep the loaded appearance model, but discard identities and old embeddings.
+        _deepsort_tracker.delete_all_tracks()
+        _deepsort_tracker.tracker.metric.samples.clear()
 
     # Clear track histories and reset frame count
     _track_histories.clear()
@@ -364,15 +449,6 @@ def reset_tracker() -> None:
         logger.debug("Jersey tracker not available for reset")
 
     logger.info("Tracker reset complete")
-
-
-def get_tracker_type() -> str:
-    """Get the current tracker type.
-
-    Returns:
-        Current tracker type string
-    """
-    return _tracker_type
 
 
 def get_track_histories() -> Dict[int, List[Tuple[int, int]]]:
@@ -400,7 +476,6 @@ def _update_track_history(track_id: int, center_point: Tuple[int, int]) -> None:
         _track_histories[track_id] = _track_histories[track_id][-max_length:]
 
 
-# Remove the old initialization functions and add proper initialization
 def _load_default_tracker():
     """Load the default tracker type."""
     default_tracker = get_setting("models.tracking.default_tracker", "deepsort")

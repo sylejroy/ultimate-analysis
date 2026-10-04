@@ -16,6 +16,8 @@ def draw_ransac_field_lines(
     confidences: List[float],
     transformation_matrix: Optional[np.ndarray] = None,
     scale_factor: float = 1.0,
+    in_place: bool = False,
+    show_confidence: Optional[bool] = None,
 ) -> np.ndarray:
     """Draw RANSAC-calculated field lines with clean visualization.
 
@@ -25,6 +27,8 @@ def draw_ransac_field_lines(
         confidences: List of confidence scores for each line
         transformation_matrix: Optional homography matrix to transform lines to warped view
         scale_factor: Scale factor for text and line thickness (useful for top-down view)
+        in_place: Draw directly on frame instead of a copy (caller must own the frame)
+        show_confidence: Label each line with its confidence (default: only at scale >= 1.5)
 
     Returns:
         Frame with RANSAC lines drawn
@@ -32,7 +36,9 @@ def draw_ransac_field_lines(
     if not ransac_lines:
         return frame
 
-    result = frame.copy()
+    result = frame if in_place else frame.copy()
+    if show_confidence is None:
+        show_confidence = scale_factor >= 1.5  # Only show text at larger scales
 
     try:
         # Color scheme based on confidence
@@ -81,7 +87,7 @@ def draw_ransac_field_lines(
             cv2.line(result, tuple(start_2d), tuple(end_2d), color, base_thickness)
 
             # Optionally add confidence text near the line (for debugging)
-            if scale_factor >= 1.5:  # Only show text at larger scales
+            if show_confidence:
                 mid_point = ((start_2d + end_2d) // 2).astype(int)
                 font_scale = 0.4 * scale_factor
                 cv2.putText(

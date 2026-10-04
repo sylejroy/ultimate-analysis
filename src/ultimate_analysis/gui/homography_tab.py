@@ -310,11 +310,6 @@ class ZoomableImageLabel(QLabel):
         self.grid_spacing = spacing
         self.update()  # Trigger a repaint
 
-    def set_grid_color(self, color: QColor):
-        """Set grid color."""
-        self.grid_color = color
-        self.update()  # Trigger a repaint
-
 
 class HomographyTab(QWidget):
     """Interactive homography estimation tab with real-time transformation preview."""
@@ -400,7 +395,6 @@ class HomographyTab(QWidget):
         # Lazy loading flags
         self._videos_loaded = False
         self._segmentation_models_loaded = False
-        self._ui_initialized = False
 
         # Genetic algorithm state
         self.ga_optimizer = None
@@ -1360,7 +1354,7 @@ class HomographyTab(QWidget):
                     self.ransac_confidences = []
 
                 # Draw unified mask for visualization (lightweight version without RANSAC re-computation)
-                original_frame, raw_lines_dict, self.all_lines_for_display = (
+                original_frame, _, self.all_lines_for_display = (
                     draw_unified_field_mask(
                         original_frame, unified_mask, field_color, alpha=0.4, fill_mask=False
                     )
@@ -1498,7 +1492,7 @@ class HomographyTab(QWidget):
             return
 
         # Convert to Qt format
-        height, width, channel = frame.shape
+        height, width = frame.shape[:2]
         bytes_per_line = 3 * width
 
         q_image = QImage(

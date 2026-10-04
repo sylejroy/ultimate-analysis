@@ -1,102 +1,121 @@
-
 # Ultimate Analysis
 
-A PyQt5-based video analysis application for Ultimate Frisbee, featuring real-time computer vision using YOLO models, DeepSORT tracking, and OCR-based player identification.
+A PyQt5 desktop application for analysing Ultimate Frisbee video with YOLO detection,
+DeepSORT tracking, OCR-based player identification, and a top-down field view.
 
-![Main Analysis Interface](docs/gui_example_main_analysis.png)
+## Features
 
-## Implemented Features
-
-- **Real-time Object Detection**: Detects players and discs in video frames using YOLO models. Supports separate models for player and disc detection.
-- **Multi-object Tracking**: Maintains consistent player and disc identities across frames using DeepSORT. Visualizes track histories and foot-level positions.
-- **Player Identification (OCR)**: Recognizes jersey numbers using EasyOCR, with a dedicated tab for parameter tuning and crop extraction.
-- **Field Segmentation**: Detects field boundaries and regions using YOLO-based segmentation models. Visualizes overlays and supports perspective correction.
-- **Homography Estimation**: Interactive tab for perspective correction, field mapping, and overlaying segmentation results. Includes parameter sliders, real-time preview, and genetic algorithm optimization.
-- **Model Training Interface**: GUI for training custom YOLO detection and segmentation models. Supports dataset selection, parameter tuning, live progress monitoring, and baseline comparison.
-- **Performance Monitoring**: Built-in timing and memory analysis widgets for runtime profiling.
-
-## Screenshots
-
-### Main Analysis Interface
-![Main Analysis](docs/gui_example_main_analysis.png)
-*Real-time video analysis with object detection, tracking, and player ID*
-
-### Homography Estimation Interface
-![Homography Estimation](docs/gui_example_homography.png)
-*Interactive perspective correction and field mapping*
-
-### Model Training Interface
-![Model Training](docs/gui_example_model_training.png)
-*Train custom YOLO models with live progress graphs and baseline comparison*
-
-### OCR Tuning Interface
-![OCR Tuning](docs/gui_example_ocr_tuning.png)
-*Fine-tune OCR parameters for jersey number recognition*
+- **Object detection**: players and discs, with separately selectable models.
+- **Tracking**: consistent player and disc identities across frames (DeepSORT), with
+  trails and foot-level positions.
+- **Player identification**: jersey numbers read with EasyOCR and aggregated over time,
+  plus a tuning tab for the OCR and crop-preprocessing parameters.
+- **Field segmentation**: field mask, contour, and RANSAC boundary lines.
+- **Homography**: interactive perspective correction with a genetic-algorithm
+  assistant; the result drives the top-down view in the main tab.
+- **Model training**: train YOLO11/YOLO26 detection and segmentation models from the
+  GUI with live output, progress, and metric plots against a baseline.
+- **Performance monitoring**: per-stage timings while analysis runs.
 
 ## Quick Start
 
-### Requirements
-- Python 3.8+
-- CUDA-compatible GPU (recommended)
-- 8GB RAM minimum
+Requirements: Python 3.12 (the version it is developed on), a CUDA-capable GPU
+(recommended), 8 GB RAM.
 
-### Installation
+```bash
+git clone <repository-url>
+cd ultimate-analysis
+python -m venv .venv
+.venv\Scripts\activate  # Windows
+python -m pip install -r requirements.txt
+python main.py
+```
 
-1. **Clone and setup**:
-   ```bash
-   git clone <repository-url>
-   cd ultimate-analysis
-   python -m venv .venv
-   .venv\Scripts\activate  # Windows
-   pip install -r requirements.txt
-   ```
-
-2. **Run the application**:
-   ```bash
-   python main.py
-   ```
-
-### Basic Usage
-
-1. Load a video file through the Main Analysis tab
-2. Select YOLO models for player/disc detection and field segmentation
-3. Click play to start real-time analysis
-4. Use the Homography tab for perspective correction and field mapping
-5. Access Model Training and OCR Tuning tabs for advanced features
+1. Put videos in `data/raw/videos` and select one in the Main Analysis tab.
+2. Choose the player, disc, and field-segmentation models.
+3. Press play. Toggle detection, tracking, player ID, segmentation, and the top-down
+   view independently.
+4. Use the Homography tab to calibrate the top-down view, and the EasyOCR Tuning and
+   Model Training tabs for the specialist workflows.
 
 ## Configuration
 
 Configuration files are in `configs/`:
-- `default.yaml` - Base settings
-- `easyocr_params.yaml` - EasyOCR parameters and preprocessing settings
-- `training.yaml` - Model training parameters
-- `homography_params.yaml` - Saved homography transformations
+
+- `default.yaml` — application, model, tracking, segmentation, and homography settings
+- `easyocr_params.yaml` — EasyOCR and crop-preprocessing parameters
+- `training.yaml` — training defaults (model, dataset, epochs, image size, ...)
+- `homography_params.yaml` — the saved default perspective transform
+
+## Models and Data
+
+Everything under `data/` is local and not tracked by Git.
+
+- `data/models/pretrained/` — base weights; missing YOLO11/YOLO26 weights download
+  automatically when selected for training.
+- `data/models/detection/`, `data/models/segmentation/` — one folder per training run.
+  The model dropdowns list each run's `weights/best.pt`.
+- `data/raw/training_data/` — datasets in YOLO format.
+  `scripts/build_merged_detection_dataset.py` builds the merged player + disc dataset
+  at 1280×720 from the Roboflow exports.
 
 ## Development
 
-Project follows the KISS principle (max 500 lines per file). Key directories:
+See `docs/DEVELOPMENT_GUIDELINES.md` for layout and conventions, and
+`docs/REBUILD_DESIGN_DOCUMENT.md` for a description of what each tab does.
 
-- `src/ultimate_analysis/gui/` - PyQt5 interface and tabs
-- `src/ultimate_analysis/processing/` - ML inference, tracking, segmentation
-- `src/ultimate_analysis/config/` - YAML configuration management
-- `data/models/` - YOLO models (detection, segmentation, pose)
+```bash
+python -m pip install -r requirements-dev.txt
+python -m ruff check src tests
+python -m unittest discover -s tests -v
+```
 
-See `docs/DEVELOPMENT_GUIDELINES.md` for coding standards.
+The tests use synthetic frames and mocked models, so they need no videos or weights.
 
-## Models
+Behaviour worth knowing when changing the pipeline:
 
-Custom-trained YOLO models:
-- **Detection**: Player and disc detection (`yolo11l.pt`, `yolo11s.pt`, etc.)
-- **Segmentation**: Field boundary detection (`yolo11l-seg.pt`, etc.)
-- **Player ID**: EasyOCR for jersey number recognition
+- Redraws of the current frame reuse its processing results. Seeking or switching
+  videos clears tracking, OCR identities, and cached segmentation.
+- Field segmentation runs every few frames; the mask, contour, and line fit are
+  cached until the next run.
+- Selecting the same model for players and discs runs it once per frame and splits its
+  detections by class. A model only reports the classes it is selected for.
+- The disc model is skipped after a stretch with no disc and retried periodically
+  (`models.disc_detection.skip_threshold` and `retry_interval`, 30 frames each).
 
-Models are cached for performance and organized by training runs in `data/models/`.
+### TensorRT engines (optional)
+
+The detection and field segmentation models run about three times faster as TensorRT
+engines. An engine is tied to one model, the video frame size, and this GPU and driver.
+
+```bash
+python scripts/export_tensorrt.py                 # default models, 1920x1080 video
+python scripts/export_tensorrt.py path/to/weights/best.pt
+```
+
+Engines are stored next to the weights (`best.384x640.fp16.engine`). On the next start
+the app uses an engine when one matches the model and frame size, and PyTorch otherwise;
+`models.inference.tensorrt: false` switches engines off. Rebuild after a GPU driver or
+TensorRT update.
+
+Setting up a new environment for exporting needs care. The export uses `tensorrt-cu12`,
+`onnx`, `onnxslim`, and `nvidia-modelopt`. Installing `nvidia-modelopt` with its
+dependencies replaces the CUDA build of PyTorch and upgrades setuptools past the version
+DeepSORT works with, after which the app silently falls back to the simple tracker.
+Restore both afterwards:
+
+```bash
+python -m pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cu128 --no-deps
+python -m pip install setuptools==70.2.0
+```
+
+The export script disables Ultralytics' automatic package installation for this reason.
+
+To profile a GUI session, run `python profile_main.py`, close the application, then
+run `python visualize_profile.py`. Both use `profile_output.prof` in the repository
+root.
 
 ## License
 
-GNU General Public License v3.0 - see LICENSE file for details.
-
-## Notes
-
-- All features listed above are confirmed as implemented in the codebase.
-- Upcoming features and experimental ideas are tracked in project documentation, not in this README.
+This project declares GNU General Public License v3.0. A LICENSE file is not
+currently included in the repository.

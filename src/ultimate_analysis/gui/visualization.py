@@ -17,6 +17,20 @@ from ..utils.logger import get_logger
 logger = get_logger("VISUALIZATION")
 
 
+# Outline of the most recently drawn field mask: (mask, contours). The mask only changes
+# when segmentation runs again, so the frames in between reuse its outline.
+_mask_outline_cache: Tuple[Optional[np.ndarray], tuple] = (None, ())
+
+
+def _get_mask_outline(unified_mask: np.ndarray) -> tuple:
+    """External contours of a field mask, computed once per mask object."""
+    global _mask_outline_cache
+    if _mask_outline_cache[0] is not unified_mask:
+        contours, _ = cv2.findContours(unified_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        _mask_outline_cache = (unified_mask, contours)
+    return _mask_outline_cache[1]
+
+
 def get_segmentation_colors() -> Dict[int, Tuple[int, int, int]]:
     """Get the standard segmentation colors used throughout the application.
 
@@ -39,132 +53,15 @@ def get_primary_field_color() -> Tuple[int, int, int]:
     return colors[0]  # Return central field color (cyan)
 
 
-def filter_edge_points(
-    contour: np.ndarray, frame_shape: tuple, edge_margin: int = 20
-) -> tuple[np.ndarray, np.ndarray]:
-    """Filter out contour points that are too close to image edges.
-
-    Points near the edge are often artifacts from segmentation models
-    and should not be considered for field boundary fitting.
-
-    Args:
-        contour: Contour points as numpy array of shape (N, 1, 2) or (N, 2)
-        frame_shape: Shape of the frame (height, width) or (height, width, channels)
-        edge_margin: Distance from edge in pixels to filter out
-
-    Returns:
-        Tuple of (filtered_contour, edge_points):
-        - filtered_contour: Points away from edges
-        - edge_points: Points near edges that were filtered out
-    """
-    if contour is None or len(contour) == 0:
-        return contour, np.array([]).reshape(0, 1, 2)
-
-    # Ensure contour is in shape (N, 2)
-    if contour.ndim == 3 and contour.shape[1] == 1:
-        points = contour.reshape(-1, 2)
-    else:
-        points = contour.reshape(-1, 2)
-
-    # Get frame dimensions
-    height, width = frame_shape[:2]
-
-    # Create mask for points away from edges
-    x_coords = points[:, 0]
-    y_coords = points[:, 1]
-
-    # Points are kept if they are sufficiently far from all edges
-    valid_mask = (
-        (x_coords >= edge_margin)  # Not too close to left edge
-        & (x_coords <= width - edge_margin)  # Not too close to right edge
-        & (y_coords >= edge_margin)  # Not too close to top edge
-        & (y_coords <= height - edge_margin)  # Not too close to bottom edge
-    )
-
-    # Split points into valid and edge points
-    valid_points = points[valid_mask]
-    edge_points = points[~valid_mask]
-
-    # Convert back to original format (N, 1, 2)
-    valid_contour = (
-        valid_points.reshape(-1, 1, 2) if len(valid_points) > 0 else np.array([]).reshape(0, 1, 2)
-    )
-    edge_contour = (
-        edge_points.reshape(-1, 1, 2) if len(edge_points) > 0 else np.array([]).reshape(0, 1, 2)
-    )
-
-    return valid_contour, edge_contour
-
-
-def interpolate_contour_points(
-    contour: np.ndarray, max_distance: float = 10.0, min_distance: float = 3.0
+def draw_detections(
+    frame: np.ndarray, detections: List[Dict[str, Any]], in_place: bool = False
 ) -> np.ndarray:
-    """Interpolate contour points to ensure even spacing.
-
-    This function adds points between existing contour points to ensure
-    that no two consecutive points are more than max_distance apart,
-    while avoiding over-densification with min_distance constraint.
-
-    Args:
-        contour: Contour points as numpy array of shape (N, 1, 2) or (N, 2)
-        max_distance: Maximum allowed distance between consecutive points
-        min_distance: Minimum distance to maintain between points
-
-    Returns:
-        Interpolated contour points as numpy array of shape (M, 1, 2)
-    """
-    if contour is None or len(contour) < 2:
-        return contour
-
-    # Ensure contour is in shape (N, 2)
-    if contour.ndim == 3 and contour.shape[1] == 1:
-        points = contour.reshape(-1, 2)
-    else:
-        points = contour.reshape(-1, 2)
-
-    interpolated_points = []
-
-    for i in range(len(points)):
-        current_point = points[i]
-        next_point = points[(i + 1) % len(points)]  # Wrap around for closed contour
-
-        # Always add the current point
-        interpolated_points.append(current_point)
-
-        # Calculate distance to next point
-        distance = np.linalg.norm(next_point - current_point)
-
-        # If distance is too large, add interpolated points
-        if distance > max_distance:
-            # Calculate number of points needed
-            num_intermediate = int(np.ceil(distance / max_distance)) - 1
-
-            # Add intermediate points
-            for j in range(1, num_intermediate + 1):
-                alpha = j / (num_intermediate + 1)
-                intermediate_point = current_point + alpha * (next_point - current_point)
-
-                # Check minimum distance constraint with the last added point
-                if (
-                    len(interpolated_points) == 0
-                    or np.linalg.norm(intermediate_point - interpolated_points[-1]) >= min_distance
-                ):
-                    interpolated_points.append(intermediate_point)
-
-    # Convert back to original format (N, 1, 2)
-    if len(interpolated_points) > 0:
-        interpolated_array = np.array(interpolated_points, dtype=np.float32)
-        return interpolated_array.reshape(-1, 1, 2)
-    else:
-        return contour
-
-
-def draw_detections(frame: np.ndarray, detections: List[Dict[str, Any]]) -> np.ndarray:
     """Draw detection bounding boxes and labels on frame.
 
     Args:
         frame: Input frame to draw on
         detections: List of detection dictionaries
+        in_place: Draw directly on frame instead of a copy (caller must own the frame)
 
     Returns:
         Frame with detection overlays
@@ -173,7 +70,7 @@ def draw_detections(frame: np.ndarray, detections: List[Dict[str, Any]]) -> np.n
         return frame
 
     # Create a copy to avoid modifying original
-    vis_frame = frame.copy()
+    vis_frame = frame if in_place else frame.copy()
 
     for detection in detections:
         bbox = detection.get("bbox", [])
@@ -232,6 +129,7 @@ def draw_tracks_with_player_ids(
     tracks: List[Any],
     track_histories: Optional[Dict[int, List[Tuple[int, int]]]] = None,
     player_ids: Optional[Dict[int, Tuple[str, Any]]] = None,
+    in_place: bool = False,
 ) -> np.ndarray:
     """Draw tracking bounding boxes with player jersey numbers and confidence.
 
@@ -240,6 +138,7 @@ def draw_tracks_with_player_ids(
         tracks: List of track objects
         track_histories: Optional dictionary of track histories
         player_ids: Optional dictionary mapping track_id -> (jersey_number, details)
+        in_place: Draw directly on frame instead of a copy (caller must own the frame)
 
     Returns:
         Frame with tracking and player ID overlays
@@ -247,7 +146,7 @@ def draw_tracks_with_player_ids(
     if not tracks:
         return frame
 
-    vis_frame = frame.copy()
+    vis_frame = frame if in_place else frame.copy()
 
     for track in tracks:
         # Get track properties
@@ -433,6 +332,7 @@ def draw_tracks(
     frame: np.ndarray,
     tracks: List[Any],
     track_histories: Optional[Dict[int, List[Tuple[int, int]]]] = None,
+    in_place: bool = False,
 ) -> np.ndarray:
     """Draw tracking bounding boxes, IDs, and history trails.
 
@@ -440,6 +340,7 @@ def draw_tracks(
         frame: Input frame to draw on
         tracks: List of track objects
         track_histories: Optional dictionary of track histories
+        in_place: Draw directly on frame instead of a copy (caller must own the frame)
 
     Returns:
         Frame with tracking overlays
@@ -447,7 +348,7 @@ def draw_tracks(
     if not tracks:
         return frame
 
-    vis_frame = frame.copy()
+    vis_frame = frame if in_place else frame.copy()
 
     for track in tracks:
         # Get track properties
@@ -577,179 +478,6 @@ def draw_tracks(
     return vis_frame
 
 
-def draw_player_ids(
-    frame: np.ndarray, tracks: List[Any], player_id_results: Dict[int, Tuple[str, Any]]
-) -> np.ndarray:
-    """Draw player ID information on tracked players with both single-frame and historical results.
-
-    Args:
-        frame: Input frame to draw on
-        tracks: List of track objects
-        player_id_results: Dictionary mapping track_id to (jersey_number, details)
-
-    Returns:
-        Frame with player ID overlays
-    """
-    if not tracks or not player_id_results:
-        return frame
-
-    vis_frame = frame.copy()
-
-    for track in tracks:
-        track_id = getattr(track, "track_id", None)
-        if track_id is None or track_id not in player_id_results:
-            continue
-
-        # Get bounding box
-        bbox = None
-        if hasattr(track, "to_ltrb"):
-            bbox = track.to_ltrb()
-        elif hasattr(track, "bbox"):
-            bbox = track.bbox
-
-        if bbox is None or len(bbox) != 4:
-            continue
-
-        x1, y1, x2, y2 = map(int, bbox)
-
-        # Get player ID result
-        jersey_number, details = player_id_results[track_id]
-
-        if jersey_number and jersey_number != "Unknown":
-            # Extract tracking details if available
-            single_frame_result = None
-            tracking_history = []
-            best_tracked = None
-
-            if details and isinstance(details, dict):
-                single_frame_result = details.get("single_frame")
-                tracking_history = details.get("tracking_history", [])
-                best_tracked = details.get("best_tracked")
-
-            # Main jersey number display (using primary result)
-            main_color = VISUALIZATION_COLORS["PLAYER_ID_BOX"]
-
-            # Distinguish colors for single-frame vs tracked
-            if best_tracked and best_tracked.get("probability", 0) > 0.5:
-                # High confidence tracked result - use green
-                main_color = (0, 200, 0)  # Green for reliable tracked result
-            else:
-                # Single-frame or low confidence - use orange
-                main_color = (0, 165, 255)  # Orange for single-frame
-
-            # Draw background for main jersey number
-            main_label = f"#{jersey_number}"
-            main_label_size = cv2.getTextSize(main_label, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)[0]
-
-            cv2.rectangle(
-                vis_frame,
-                (x2 + 5, y1),
-                (x2 + 15 + main_label_size[0], y1 + main_label_size[1] + 10),
-                main_color,
-                -1,
-            )
-
-            cv2.putText(
-                vis_frame,
-                main_label,
-                (x2 + 10, y1 + main_label_size[1] + 5),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.0,
-                (255, 255, 255),  # White text for better contrast
-                2,
-            )
-
-            # Draw tracking history (top 3 probabilities) below main label
-            if tracking_history:
-                y_offset = y1 + main_label_size[1] + 20
-
-                for i, (hist_number, probability, count) in enumerate(tracking_history[:3]):
-                    # Color coding: highest probability in bright green, others in muted colors
-                    if i == 0:  # Highest probability
-                        hist_color = (0, 255, 0) if probability > 0.5 else (0, 200, 200)
-                    elif i == 1:  # Second highest
-                        hist_color = (0, 150, 255)  # Orange
-                    else:  # Third highest
-                        hist_color = (100, 100, 255)  # Light red
-
-                    # Create probability label
-                    prob_label = f"#{hist_number}: {probability:.1%}"
-                    if count > 1:
-                        prob_label += f" ({count})"
-
-                    prob_label_size = cv2.getTextSize(prob_label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[
-                        0
-                    ]
-
-                    # Draw probability background
-                    cv2.rectangle(
-                        vis_frame,
-                        (x2 + 5, y_offset),
-                        (x2 + 10 + prob_label_size[0], y_offset + prob_label_size[1] + 6),
-                        hist_color,
-                        -1,
-                    )
-
-                    # Draw probability text
-                    cv2.putText(
-                        vis_frame,
-                        prob_label,
-                        (x2 + 7, y_offset + prob_label_size[1] + 3),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.5,
-                        (255, 255, 255),  # White text
-                        1,
-                    )
-
-                    y_offset += prob_label_size[1] + 10
-
-            # Draw single-frame confidence if different from tracked result
-            if single_frame_result and single_frame_result.get("jersey_number") != jersey_number:
-                sf_number = single_frame_result.get("jersey_number", "Unknown")
-                sf_confidence = single_frame_result.get("confidence", 0.0)
-
-                if sf_number != "Unknown":
-                    sf_label = f"SF: #{sf_number} ({sf_confidence:.2f})"
-                    sf_label_size = cv2.getTextSize(sf_label, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)[0]
-
-                    # Use different position (top left)
-                    cv2.rectangle(
-                        vis_frame,
-                        (x1 - sf_label_size[0] - 10, y1 - sf_label_size[1] - 8),
-                        (x1 - 2, y1 - 2),
-                        (128, 128, 128),  # Gray for single-frame
-                        -1,
-                    )
-
-                    cv2.putText(
-                        vis_frame,
-                        sf_label,
-                        (x1 - sf_label_size[0] - 7, y1 - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.4,
-                        (255, 255, 255),
-                        1,
-                    )
-
-            # Draw digit detection boxes if available (legacy support)
-            if details and isinstance(details, list):
-                for item in details:
-                    if isinstance(item, tuple) and len(item) == 2:
-                        digit_bbox, digit_class = item
-                        if len(digit_bbox) == 4:
-                            dx1, dy1, dx2, dy2 = map(int, digit_bbox)
-                            # Offset by track bbox position
-                            cv2.rectangle(
-                                vis_frame,
-                                (x1 + dx1, y1 + dy1),
-                                (x1 + dx2, y1 + dy2),
-                                (0, 255, 0),  # Green for digit boxes
-                                1,
-                            )
-
-    return vis_frame
-
-
 def draw_field_segmentation(frame: np.ndarray, segmentation_results: List[Any]) -> np.ndarray:
     """Draw field segmentation masks and boundaries.
 
@@ -823,10 +551,12 @@ def _draw_segmentation_masks(frame: np.ndarray, masks: np.ndarray) -> np.ndarray
         if np.sum(class_mask) == 0:
             continue
 
+        # Masks arrive at model resolution; scale smoothly so the edge is not blocky
         class_mask_resized = cv2.resize(
-            class_mask.astype(np.uint8), (frame_w, frame_h), interpolation=cv2.INTER_NEAREST
+            class_mask.astype(np.float32), (frame_w, frame_h), interpolation=cv2.INTER_LINEAR
         )
         mask_bool = class_mask_resized > 0.5
+        class_mask_resized = mask_bool.view(np.uint8)
 
         # Skip if no pixels in mask
         if not np.any(mask_bool):
@@ -894,6 +624,7 @@ def draw_field_contour(
     line_thickness: int = None,
     point_radius: int = None,
     draw_points: bool = None,
+    in_place: bool = False,
 ) -> np.ndarray:
     """Draw field contour lines and points on the frame.
 
@@ -905,6 +636,7 @@ def draw_field_contour(
         line_thickness: Thickness of contour lines
         point_radius: Radius of contour points
         draw_points: Whether to draw individual contour points
+        in_place: Draw directly on frame instead of a copy (caller must own the frame)
 
     Returns:
         Frame with contour overlay
@@ -930,7 +662,7 @@ def draw_field_contour(
     if draw_points is None:
         draw_points = get_setting("models.segmentation.contour.draw_points", True)
 
-    result = frame.copy()
+    result = frame if in_place else frame.copy()
 
     try:
         # Draw contour lines
@@ -952,38 +684,12 @@ def draw_field_contour(
     return result
 
 
-def _segment_contour_points(points: np.ndarray, num_segments: int) -> List[np.ndarray]:
-    """Divide contour points into segments for line fitting.
-
-    Args:
-        points: Array of 2D points (N, 2)
-        num_segments: Number of segments to create
-
-    Returns:
-        List of point arrays, one for each segment
-    """
-    n_points = len(points)
-    segment_size = n_points // num_segments
-    segments = []
-
-    for i in range(num_segments):
-        start_idx = i * segment_size
-        if i == num_segments - 1:  # Last segment gets remaining points
-            end_idx = n_points
-        else:
-            end_idx = (i + 1) * segment_size
-
-        segment_points = points[start_idx:end_idx]
-        segments.append(segment_points)
-
-    return segments
-
-
 def draw_field_lines_ransac(
     frame: np.ndarray,
     fitted_lines: List[Tuple[np.ndarray, np.ndarray]],
     line_color: Tuple[int, int, int] = None,
     line_thickness: int = None,
+    in_place: bool = False,
 ) -> np.ndarray:
     """Draw RANSAC-fitted field lines on the frame.
 
@@ -992,6 +698,7 @@ def draw_field_lines_ransac(
         fitted_lines: List of (start_point, end_point) tuples for each line
         line_color: BGR color for the lines
         line_thickness: Thickness of the lines
+        in_place: Draw directly on frame instead of a copy (caller must own the frame)
 
     Returns:
         Frame with fitted lines drawn
@@ -1009,7 +716,7 @@ def draw_field_lines_ransac(
     if line_thickness is None:
         line_thickness = get_setting("models.segmentation.contour.line_thickness", 3)
 
-    result = frame.copy()
+    result = frame if in_place else frame.copy()
 
     try:
         for i, (start_point, end_point) in enumerate(fitted_lines):
@@ -1041,6 +748,7 @@ def draw_field_lines_ransac_with_outliers(
     outlier_color: Tuple[int, int, int] = None,
     outlier_radius: int = None,
     show_outliers: bool = None,
+    in_place: bool = False,
 ) -> np.ndarray:
     """Draw RANSAC-fitted field lines and outlier points on the frame.
 
@@ -1053,6 +761,7 @@ def draw_field_lines_ransac_with_outliers(
         outlier_color: BGR color for outlier points
         outlier_radius: Radius for outlier points
         show_outliers: Whether to draw outlier points
+        in_place: Draw directly on frame instead of a copy (caller must own the frame)
 
     Returns:
         Frame with fitted lines and outliers drawn
@@ -1060,12 +769,14 @@ def draw_field_lines_ransac_with_outliers(
     if not fitted_lines and not outlier_points:
         return frame
 
-    try:
-        result = frame.copy()
+    result = frame if in_place else frame.copy()
 
+    try:
         # Draw RANSAC lines first
         if fitted_lines:
-            result = draw_field_lines_ransac(result, fitted_lines, line_color, line_thickness)
+            result = draw_field_lines_ransac(
+                result, fitted_lines, line_color, line_thickness, in_place=True
+            )
 
         # Draw outlier points if enabled
         if outlier_points and (
@@ -1103,35 +814,6 @@ def draw_field_lines_ransac_with_outliers(
     return result
 
 
-def _apply_morphological_smoothing(
-    mask: np.ndarray,
-    opening_kernel_size: int = None,
-    closing_kernel_size: int = None,
-    fill_holes: bool = None,
-) -> np.ndarray:
-    """Apply morphological operations to smooth a binary mask.
-
-    This function now delegates to the processing module for consistent algorithm.
-    """
-    # Import here to avoid circular imports
-    from ..processing.field_analysis import apply_morphological_smoothing
-
-    return apply_morphological_smoothing(mask, opening_kernel_size, closing_kernel_size, fill_holes)
-
-
-def _fill_holes_flood_fill(mask: np.ndarray) -> np.ndarray:
-    """Fill holes in a binary mask using flood fill from the borders.
-
-    This function now delegates to the processing module for consistent algorithm.
-    """
-    # Import here to avoid circular imports
-    from ..processing.field_analysis import (
-        _fill_holes_flood_fill as processing_fill_holes,
-    )
-
-    return processing_fill_holes(mask)
-
-
 def create_unified_field_mask(
     segmentation_results: List[Any], frame_shape: Tuple[int, int]
 ) -> Optional[np.ndarray]:
@@ -1159,6 +841,9 @@ def draw_unified_field_mask(
     alpha: float = 0.4,
     draw_contour: bool = True,
     fill_mask: bool = False,
+    ransac_fit: Optional[tuple] = None,
+    field_contour: Optional[np.ndarray] = None,
+    in_place: bool = False,
 ) -> Tuple[np.ndarray, Dict[str, np.ndarray], Dict[str, Tuple[np.ndarray, float, bool]]]:
     """Draw a unified field mask with optional fill and contour.
 
@@ -1169,6 +854,10 @@ def draw_unified_field_mask(
         alpha: Transparency for overlay (0.0 = transparent, 1.0 = opaque)
         draw_contour: Whether to calculate and draw simplified contours
         fill_mask: Whether to fill the mask area (False = contour only)
+        ransac_fit: Precomputed fit_field_lines_ransac result for this mask. RANSAC only
+            runs here when this is None, so per-frame callers should pass a cached fit.
+        field_contour: Precomputed calculate_field_contour result for this mask
+        in_place: Draw directly on frame instead of a copy (caller must own the frame)
 
     Returns:
         Tuple of (frame with unified mask overlay and optional contour, empty dictionary, all_lines_for_display dictionary)
@@ -1179,7 +868,7 @@ def draw_unified_field_mask(
     # Import here to avoid circular imports
     from ..config.settings import get_setting
 
-    result = frame.copy()
+    result = frame if in_place else frame.copy()
     classified_lines = {}  # Always empty since classification removed
     all_lines_for_display = {}  # Initialize empty all lines dictionary
 
@@ -1187,10 +876,10 @@ def draw_unified_field_mask(
     if fill_mask:
         overlay = frame.copy()
         overlay[unified_mask == 1] = color
-        result = cv2.addWeighted(frame, 1 - alpha, overlay, alpha, 0)
+        cv2.addWeighted(frame, 1 - alpha, overlay, alpha, 0, dst=result)
 
     # Always draw contour for field boundary visibility
-    contours, _ = cv2.findContours(unified_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = _get_mask_outline(unified_mask)
     if contours:
         border_color = tuple(int(c * 0.7) for c in color)
         cv2.drawContours(result, contours, -1, border_color, 2)
@@ -1202,8 +891,10 @@ def draw_unified_field_mask(
 
         if ransac_enabled:
             # Use RANSAC line fitting approach
-            simplified_contour = calculate_field_contour(unified_mask)
-            if simplified_contour is not None:
+            simplified_contour = field_contour
+            if ransac_fit is None and simplified_contour is None:
+                simplified_contour = calculate_field_contour(unified_mask)
+            if ransac_fit is None and simplified_contour is not None:
                 # Fit lines using RANSAC
                 num_lines = get_setting("models.segmentation.contour.ransac.num_lines", 4)
                 distance_threshold = get_setting(
@@ -1215,14 +906,7 @@ def draw_unified_field_mask(
                 # Import processing function directly
                 from ..processing.field_analysis import fit_field_lines_ransac
 
-                (
-                    fitted_lines,
-                    outlier_points,
-                    inlier_points,
-                    edge_filtered_points,
-                    classified_lines,
-                    all_lines_for_display,
-                ) = fit_field_lines_ransac(
+                ransac_fit = fit_field_lines_ransac(
                     simplified_contour,
                     frame,
                     num_lines=num_lines,
@@ -1230,6 +914,16 @@ def draw_unified_field_mask(
                     min_samples=min_samples,
                     max_trials=max_trials,
                 )
+
+            if ransac_fit is not None:
+                (
+                    fitted_lines,
+                    outlier_points,
+                    inlier_points,
+                    edge_filtered_points,
+                    classified_lines,
+                    all_lines_for_display,
+                ) = ransac_fit
 
                 if fitted_lines:
                     # Draw RANSAC-fitted lines and outliers
@@ -1240,7 +934,7 @@ def draw_unified_field_mask(
                         tuple(line_color_list) if isinstance(line_color_list, list) else (0, 255, 0)
                     )
                     result = draw_field_lines_ransac_with_outliers(
-                        result, fitted_lines, outlier_points, line_color=line_color
+                        result, fitted_lines, outlier_points, line_color=line_color, in_place=True
                     )
 
                     # Draw edge-filtered points if enabled
@@ -1282,11 +976,11 @@ def draw_unified_field_mask(
 
                     # Draw inlier points if enabled
                     show_inliers = get_setting(
-                        "models.segmentation.contour.ransac.inliers.show_inliers", True
+                        "models.segmentation.contour.ransac.show_inliers", True
                     )
                     if show_inliers and inlier_points and len(inlier_points) > 0:
                         inlier_color_list = get_setting(
-                            "models.segmentation.contour.ransac.inliers.inlier_color", [0, 255, 0]
+                            "models.segmentation.contour.ransac.inlier_color", [0, 255, 0]
                         )
                         inlier_color = (
                             tuple(inlier_color_list)
@@ -1294,7 +988,7 @@ def draw_unified_field_mask(
                             else (0, 255, 0)
                         )
                         inlier_radius = get_setting(
-                            "models.segmentation.contour.ransac.inliers.inlier_radius", 2
+                            "models.segmentation.contour.ransac.inlier_radius", 2
                         )
 
                         # Draw inliers for each segment
@@ -1315,14 +1009,18 @@ def draw_unified_field_mask(
                         logger.debug(f"[VISUALIZATION] Drew {total_inliers} inlier points")
                 else:
                     print("[VISUALIZATION] RANSAC line fitting failed, falling back to contour")
-                    result = draw_field_contour(result, simplified_contour)
+                    if simplified_contour is None:
+                        simplified_contour = calculate_field_contour(unified_mask)
+                    result = draw_field_contour(result, simplified_contour, in_place=True)
             else:
                 print("[VISUALIZATION] No contour found for RANSAC line fitting")
         else:
             # Use traditional contour approach
-            simplified_contour = calculate_field_contour(unified_mask)
+            simplified_contour = field_contour
+            if simplified_contour is None:
+                simplified_contour = calculate_field_contour(unified_mask)
             if simplified_contour is not None:
-                result = draw_field_contour(result, simplified_contour)
+                result = draw_field_contour(result, simplified_contour, in_place=True)
 
     return result, classified_lines, all_lines_for_display
 
@@ -1333,6 +1031,7 @@ def draw_all_field_lines(
     transformation_matrix: Optional[np.ndarray] = None,
     scale_factor: float = 1.0,
     draw_raw_lines_only: bool = False,
+    in_place: bool = False,
 ) -> np.ndarray:
     """Draw all field lines (both classified and unclassified) with appropriate coloring based on confidence.
 
@@ -1342,6 +1041,7 @@ def draw_all_field_lines(
         transformation_matrix: Optional homography matrix to transform lines to warped view
         scale_factor: Scale factor for text and line thickness (useful for top-down view)
         draw_raw_lines_only: If True, only draw simple white lines without any special colors/labels
+        in_place: Draw directly on frame instead of a copy (caller must own the frame)
 
     Returns:
         Frame with all lines drawn
@@ -1349,7 +1049,7 @@ def draw_all_field_lines(
     if not all_lines_for_display:
         return frame
 
-    result = frame.copy()
+    result = frame if in_place else frame.copy()
 
     # Define fallback colors for different line types (kept for compatibility)
     line_colors = {

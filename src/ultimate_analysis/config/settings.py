@@ -84,8 +84,6 @@ def _load_config() -> Dict[str, Any]:
     return config
 
 
-
-
 def reload_config() -> None:
     """Reload configuration from file.
 

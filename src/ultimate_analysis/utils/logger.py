@@ -69,15 +69,6 @@ class DebugLogger:
             logger = cls.get_logger(module_name)
             logger.debug(message)
 
-    @classmethod
-    def conditional_print(
-        cls, message: str, module_name: str = "INFO", level: str = "INFO"
-    ) -> None:
-        """Print a message at the specified level if enabled."""
-        logger = cls.get_logger(module_name)
-        log_level = getattr(logging, level.upper())
-        logger.log(log_level, message)
-
 
 def get_logger(module_name: str) -> logging.Logger:
     """Convenience function to get a logger for a module."""

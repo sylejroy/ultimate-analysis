@@ -42,14 +42,21 @@ if __name__ == "__main__":
     print(f"Loading model: {model_path}")
     model = YOLO(model_path)
 
+    # The GUI sends batch as a float: below 1 it is a GPU memory fraction for
+    # auto-batch, otherwise it is a plain batch size and must be an integer.
+    batch = config["batch_size"]
+    if batch >= 1:
+        batch = int(batch)
+
     # Set up training arguments
     train_args = {
         "data": data_path,
         "epochs": config["epochs"],
         "patience": config["patience"],
-        "batch": config["batch_size"],
+        "batch": batch,
         "lr0": config["learning_rate"],
-        "project": output_dir,
+        # Absolute, otherwise newer Ultralytics nests a relative project under its runs dir
+        "project": str(Path(output_dir).resolve()),
         "name": f"finetune_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
         "exist_ok": True,
         "verbose": True,

@@ -7,17 +7,14 @@ handling the sys.exit() call gracefully.
 """
 
 import cProfile
-import sys
-import os
+from pathlib import Path
 
-# Add src directory to Python path
-project_root = os.path.dirname(os.path.abspath(__file__))
-src_path = os.path.join(project_root, 'src')
-sys.path.insert(0, src_path)
+from main import main
 
-from ultimate_analysis.gui.main_app import main
+PROFILE_PATH = Path(__file__).resolve().parent / "profile_output.prof"
 
-def profile_main():
+
+def profile_main() -> None:
     """Profile the main application function."""
     profiler = cProfile.Profile()
     profiler.enable()
@@ -27,11 +24,12 @@ def profile_main():
     except SystemExit:
         # Handle the sys.exit() from the GUI app gracefully
         pass
+    finally:
+        profiler.disable()
+        profiler.dump_stats(str(PROFILE_PATH))
+        print(f"Profile data saved to '{PROFILE_PATH}'")
+        print("Run 'visualize_profile.py' to view the results with snakeviz.")
 
-    profiler.disable()
-    profiler.dump_stats('profile_output.prof')
-    print("Profiling complete. Profile data saved to 'profile_output.prof'")
-    print("Run 'visualize_profile.py' to view the results with snakeviz.")
 
 if __name__ == "__main__":
     profile_main()

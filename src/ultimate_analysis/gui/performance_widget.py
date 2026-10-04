@@ -11,7 +11,7 @@ Changes:
 from collections import defaultdict, deque
 from typing import Deque, Dict, List, Optional, Set, Tuple
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QGroupBox,
@@ -53,7 +53,6 @@ class PerformanceMetrics:
 class PerformanceWidget(QWidget):
     """Hierarchical runtime table with expandable categories."""
 
-    metrics_updated = pyqtSignal(dict)
 
     def __init__(self):
         super().__init__()

@@ -6,7 +6,6 @@ Includes probabilistic tracking for reliable jersey number identification.
 """
 
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -37,6 +36,11 @@ from .jersey_tracker import (
 
 # Global player ID state - only EasyOCR is supported
 _easyocr_reader = None
+
+# Parsed easyocr_params.yaml, reloaded only when the file changes on disk
+_easyocr_config_path: Optional[Path] = None
+_easyocr_config_mtime_ns: Optional[int] = None
+_easyocr_config_cache: Dict[str, Any] = {}
 
 
 def _get_player_id_setting(key: str, default: Any) -> Any:
@@ -298,179 +302,10 @@ def run_player_id_on_tracks(
     return player_identifications, total_timing, finalized_tracks
 
 
-def _run_easyocr_detection(crop_image: np.ndarray) -> Tuple[str, Optional[List], Dict[str, float]]:
-    """Run EasyOCR text detection on player crop using the same algorithm as tuning tab.
-
-    Args:
-        crop_image: Cropped player image
-
-    Returns:
-        Tuple of (jersey_number, ocr_results, timing_info)
-        timing_info contains 'preprocessing_ms', 'ocr_ms', and 'filtering_ms'
-    """
-    logger = get_logger("PLAYER_ID")
-    timing_info = {"preprocessing_ms": 0.0, "ocr_ms": 0.0, "filtering_ms": 0.0}
-
-    if _easyocr_reader is None:
-        _initialize_easyocr()
-
-    if not EASYOCR_AVAILABLE or _easyocr_reader is None:
-        logger.debug("EasyOCR not available, returning Unknown")
-        return "Unknown", [], timing_info
-
-    try:
-        # Start preprocessing timer
-        prep_start_time = time.time()
-
-        # Load user configuration (same as tuning tab)
-        user_config = _load_easyocr_config()
-
-        # Check minimum crop size before processing
-        crop_config = user_config.get("preprocessing", {})
-        min_crop_width = crop_config.get("min_crop_width", 20)  # Default 20 pixels
-        min_crop_height = crop_config.get("min_crop_height", 30)  # Default 30 pixels
-
-        crop_height, crop_width = crop_image.shape[:2]
-        if crop_width < min_crop_width or crop_height < min_crop_height:
-            timing_info["preprocessing_ms"] = (time.time() - prep_start_time) * 1000
-            timing_info["ocr_ms"] = 0.0
-            timing_info["filtering_ms"] = 0.0
-            if get_setting("player_id.verbose_debug", False):
-                logger.debug(
-                    f"Crop too small ({crop_width}x{crop_height}), skipping OCR (min: {min_crop_width}x{min_crop_height})"
-                )
-            return "Unknown", [], timing_info
-
-        # Apply top crop fraction like tuning tab
-        crop_config = user_config.get("preprocessing", {})
-        processed_crop = _apply_crop_fraction(crop_image, crop_config)
-
-        # Store original and processed dimensions for coordinate mapping
-        original_height, original_width = crop_image.shape[:2]
-        cropped_height, cropped_width = processed_crop.shape[:2]
-
-        # Apply full preprocessing like tuning tab
-        final_processed_crop = _preprocess_crop(processed_crop, crop_config)
-        final_height, final_width = final_processed_crop.shape[:2]
-
-        # Get EasyOCR parameters from config
-        ocr_params = user_config.get(
-            "easyocr", {}
-        )  # Prepare parameters for readtext (same as tuning tab)
-        readtext_params = {
-            "text_threshold": ocr_params.get("text_threshold", 0.7),
-            "low_text": ocr_params.get("low_text", 0.6),
-            "link_threshold": ocr_params.get("link_threshold", 0.4),
-            "width_ths": ocr_params.get("width_ths", 0.4),
-            "height_ths": ocr_params.get("height_ths", 0.7),
-            "canvas_size": ocr_params.get("canvas_size", 2560),
-            "mag_ratio": ocr_params.get("mag_ratio", 2.0),
-            "slope_ths": ocr_params.get("slope_ths", 0.1),
-            "ycenter_ths": ocr_params.get("ycenter_ths", 0.5),
-            "y_ths": ocr_params.get("y_ths", 0.5),
-            "x_ths": ocr_params.get("x_ths", 1.0),
-            "paragraph": ocr_params.get("paragraph", False),
-            "adjust_contrast": ocr_params.get("adjust_contrast", 0.5),
-            "filter_ths": ocr_params.get("filter_ths", 0.003),
-            "batch_size": ocr_params.get("batch_size", 1),
-            "workers": ocr_params.get("workers", 0),
-            "decoder": ocr_params.get("decoder", "greedy"),
-            "beamWidth": ocr_params.get("beamWidth", 5),
-            "detail": ocr_params.get("detail", 1),
-        }
-
-        # Add character filtering if specified
-        if ocr_params.get("allowlist"):
-            readtext_params["allowlist"] = ocr_params["allowlist"]
-
-        # End preprocessing timer
-        timing_info["preprocessing_ms"] = (time.time() - prep_start_time) * 1000
-
-        # Start OCR timer
-        ocr_start_time = time.time()
-
-        # Run EasyOCR with user settings (same as tuning tab)
-        ocr_results = _easyocr_reader.readtext(final_processed_crop, **readtext_params)
-
-        # End OCR timer
-        timing_info["ocr_ms"] = (time.time() - ocr_start_time) * 1000
-
-        # Start filtering/post-processing timer
-        filter_start_time = time.time()
-
-        # Filter out low confidence detections (below 0.5)
-        min_confidence = 0.5
-        filtered_ocr_results = []
-        for bbox, text, confidence in ocr_results:
-            if confidence >= min_confidence:
-                filtered_ocr_results.append((bbox, text, confidence))
-            else:
-                if get_setting("player_id.verbose_debug", False):
-                    logger.debug(
-                        f"Filtered out low confidence detection: '{text}' ({confidence:.3f} < {min_confidence})"
-                    )
-
-        if get_setting("player_id.verbose_debug", False):
-            logger.debug(
-                f"OCR results: {len(ocr_results)} total, {len(filtered_ocr_results)} after confidence filter"
-            )
-
-        # Process filtered results - find best numeric text (same as tuning tab)
-        best_text = ""
-        best_confidence = 0.0
-
-        for bbox, text, confidence in filtered_ocr_results:
-            # Clean text and check if it's a valid jersey number
-            clean_text = "".join(filter(str.isdigit, text))
-            if clean_text and confidence > best_confidence:
-                best_text = clean_text
-                best_confidence = confidence
-
-        # Validate jersey number and prepare result with coordinate mapping info
-        if best_text and _validate_jersey_number(best_text):
-            jersey_number = best_text
-            result_details = {
-                "confidence": best_confidence,
-                "ocr_results": filtered_ocr_results,  # Use filtered results
-                "best_text": best_text,
-                "original_width": original_width,
-                "original_height": original_height,
-                "crop_width": cropped_width,
-                "crop_height": cropped_height,
-                "final_width": final_width,
-                "final_height": final_height,
-                "crop_fraction": crop_config.get("crop_top_fraction", 0.33),
-            }
-        else:
-            jersey_number = "Unknown"
-            result_details = {
-                "confidence": 0.0,
-                "ocr_results": filtered_ocr_results,  # Use filtered results
-                "best_text": None,
-                "original_width": original_width,
-                "original_height": original_height,
-                "crop_width": cropped_width,
-                "crop_height": cropped_height,
-                "final_width": final_width,
-                "final_height": final_height,
-                "crop_fraction": crop_config.get("crop_top_fraction", 0.33),
-            }
-
-        # End filtering timer
-        timing_info["filtering_ms"] = (time.time() - filter_start_time) * 1000
-
-        logger.debug(f"EasyOCR detected: {jersey_number} (confidence: {best_confidence:.3f})")
-        return jersey_number, result_details, timing_info
-
-    except Exception as e:
-        logger.error(f"EasyOCR error: {e}")
-        return "Unknown", [], timing_info
-
-
 def _run_batch_easyocr_detection(
     crop_images: List[np.ndarray],
 ) -> Tuple[List[Tuple[str, Optional[Dict], Dict[str, float]]], Dict[str, float]]:
-    """Run EasyOCR detection on a batch of cropped player images with parallel processing for improved performance.
+    """Run EasyOCR detection on a batch of cropped player images.
 
     Args:
         crop_images: List of cropped player images
@@ -481,13 +316,11 @@ def _run_batch_easyocr_detection(
         - total_timing: Dict with 'preprocessing_ms' and 'ocr_ms' totals for the batch
 
     Performance Features:
-        - Parallel OCR processing using ThreadPoolExecutor (configurable workers)
         - Batch preprocessing to reduce setup overhead
         - Shared EasyOCR parameters across all crops
-        - Graceful fallback to sequential processing for single crops or errors
 
-    Configuration:
-        Set 'parallel_workers' in easyocr_params.yaml OCR config to control worker count (0 = auto, max 4)
+    Crops are read one after another: they all share a single GPU model, so a
+    thread pool measured no faster than this loop and gave identical results.
     """
     logger = get_logger("PLAYER_ID")
     batch_timing = {"preprocessing_ms": 0.0, "ocr_ms": 0.0, "filtering_ms": 0.0}
@@ -594,69 +427,18 @@ def _run_batch_easyocr_detection(
         if ocr_params.get("allowlist"):
             readtext_params["allowlist"] = ocr_params["allowlist"]
 
-        # Process valid crops with parallel OCR
+        # Process valid crops
         valid_crops = [crop for crop in processed_crops if crop is not None]
         batch_ocr_results = []
 
         if valid_crops:
-            logger.debug(f"Running parallel batch OCR on {len(valid_crops)} valid crops")
-
-            # Determine optimal number of workers from config or default
-            config_workers = ocr_params.get("parallel_workers", 0)  # 0 = auto
-            if config_workers > 0:
-                max_workers = min(len(valid_crops), config_workers)
-            else:
-                # Auto-determine: cap at 4 workers to avoid overwhelming the system
-                max_workers = min(len(valid_crops), 4)
-
-            if len(valid_crops) == 1 or max_workers == 1:
-                # Single crop or forced single worker - process sequentially
-                logger.debug(f"Using sequential processing for {len(valid_crops)} crop(s)")
-                for crop in valid_crops:
-                    ocr_results = _easyocr_reader.readtext(crop, **readtext_params)
-                    batch_ocr_results.append(ocr_results)
-            else:
-                # Multiple crops - use parallel processing
-                def process_single_crop(crop_data):
-                    """Process a single crop with OCR."""
-                    crop_index, crop = crop_data
-                    try:
-                        ocr_results = _easyocr_reader.readtext(crop, **readtext_params)
-                        return crop_index, ocr_results
-                    except Exception as e:
-                        logger.error(f"Error processing crop {crop_index} in parallel: {e}")
-                        return crop_index, []
-
-                # Create indexed crop data for parallel processing
-                indexed_crops = [(i, crop) for i, crop in enumerate(valid_crops)]
-
-                # Process crops in parallel
-                parallel_results = {}
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    logger.debug(f"Using {max_workers} parallel workers for OCR processing")
-
-                    # Submit all tasks
-                    future_to_index = {
-                        executor.submit(process_single_crop, crop_data): crop_data[0]
-                        for crop_data in indexed_crops
-                    }
-
-                    # Collect results as they complete
-                    for future in as_completed(future_to_index):
-                        try:
-                            crop_index, ocr_results = future.result()
-                            parallel_results[crop_index] = ocr_results
-                        except Exception as e:
-                            crop_index = future_to_index[future]
-                            if get_setting("player_id.verbose_debug", False):
-                                logger.debug(
-                                    f"Parallel processing failed for crop {crop_index}: {e}"
-                                )
-                            parallel_results[crop_index] = []
-
-                # Reconstruct results in original order
-                for i in range(len(valid_crops)):
-                    batch_ocr_results.append(parallel_results.get(i, []))
+            logger.debug(f"Running batch OCR on {len(valid_crops)} valid crops")
+            for crop_index, crop in enumerate(valid_crops):
+                try:
+                    batch_ocr_results.append(_easyocr_reader.readtext(crop, **readtext_params))
+                except Exception as e:
+                    logger.error(f"Error processing crop {crop_index}: {e}")
+                    batch_ocr_results.append([])
 
         # End OCR timer
         batch_timing["ocr_ms"] = (time.time() - ocr_start_time) * 1000
@@ -749,32 +531,47 @@ def _run_batch_easyocr_detection(
 
 
 def _load_easyocr_config() -> Dict[str, Any]:
-    """Load EasyOCR configuration from easyocr_params.yaml file."""
+    """Load EasyOCR configuration from easyocr_params.yaml file.
+
+    This runs for every OCR batch, so the parsed file is cached and only re-read
+    when its modification time changes (e.g. after saving from the tuning tab).
+    """
+    global _easyocr_config_path, _easyocr_config_mtime_ns, _easyocr_config_cache
+
     try:
-        # Find project root by looking for configs directory
-        current_path = Path(__file__).parent
-        project_root = None
+        if _easyocr_config_path is None:
+            # Find project root by looking for configs directory
+            current_path = Path(__file__).parent
+            project_root = None
 
-        for parent in [current_path] + list(current_path.parents):
-            if (parent / "configs").exists():
-                project_root = parent
-                break
+            for parent in [current_path] + list(current_path.parents):
+                if (parent / "configs").exists():
+                    project_root = parent
+                    break
 
-        if project_root is None:
-            if get_setting("player_id.verbose_debug", False):
-                print("[PLAYER_ID] Could not find configs directory")
-            return {}
+            if project_root is None:
+                if get_setting("player_id.verbose_debug", False):
+                    print("[PLAYER_ID] Could not find configs directory")
+                return {}
 
-        config_path = project_root / "configs" / "easyocr_params.yaml"
+            _easyocr_config_path = project_root / "configs" / "easyocr_params.yaml"
 
-        if config_path.exists():
-            with open(config_path, "r") as f:
-                config = yaml.safe_load(f)
-                return config.get("player_id", {})
-        else:
+        config_path = _easyocr_config_path
+
+        try:
+            mtime_ns = config_path.stat().st_mtime_ns
+        except FileNotFoundError:
             if get_setting("player_id.verbose_debug", False):
                 print(f"[PLAYER_ID] Config file not found: {config_path}")
             return {}
+
+        if mtime_ns != _easyocr_config_mtime_ns:
+            with open(config_path, "r") as f:
+                config = yaml.safe_load(f) or {}
+            _easyocr_config_cache = config.get("player_id", {})
+            _easyocr_config_mtime_ns = mtime_ns
+
+        return _easyocr_config_cache
 
     except Exception as e:
         if get_setting("player_id.verbose_debug", False):
@@ -941,3 +738,21 @@ def _validate_jersey_number(number_str: str) -> bool:
         return JERSEY_NUMBER_MIN <= number <= JERSEY_NUMBER_MAX
     except ValueError:
         return False
+
+
+def initialize_player_id_system() -> None:
+    """Pre-initialize EasyOCR to avoid first-frame delay.
+
+    This function should be called during application startup or video load
+    to avoid the 2-5 second initialization delay that would otherwise occur
+    during the first frame with player ID enabled.
+
+    Safe to call multiple times - initialization only happens once.
+    """
+    logger = get_logger("PLAYER_ID")
+    logger.info("Pre-initializing player ID system...")
+    _initialize_easyocr()
+    if EASYOCR_AVAILABLE and _easyocr_reader is not None:
+        logger.info("Player ID system pre-initialized successfully")
+    else:
+        logger.warning("Player ID system initialization skipped (EasyOCR not available)")

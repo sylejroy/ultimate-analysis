@@ -338,10 +338,39 @@ class TrainingResultsWidget(QWidget):
             self.results_path = direct_path
             print(f"[TRAINING_RESULTS] Found results.csv at: {direct_path}")
 
-    def clear_plots(self):
-        """Clear all plots."""
-        self.figure.clear()
-        self.canvas.draw()
+
+ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+# Output that marks the switch from dataset preparation to training
+TRAINING_START_KEYWORDS = (
+    "starting training",
+    "train:",
+    "optimizer:",
+    "lr0=",
+    "momentum=",
+    "ultralytics yolo",
+    "model summary:",
+    "freezing",
+    "amp:",
+    "image sizes",
+    "tensorboard:",
+)
+# Output printed while the dataset is scanned and cached
+PREPARATION_KEYWORDS = (
+    "scanning",
+    "loading",
+    "cache",
+    "labels",
+    "dataset",
+    "images",
+    "caching",
+    "reading",
+    "found",
+    "missing",
+    "empty",
+    "checking",
+)
 
 
 class ModelTrainingThread(QThread):
@@ -375,6 +404,9 @@ class ModelTrainingThread(QThread):
         self.output_dir = output_dir
         self.training_params = training_params or {}
         self.should_stop = False
+        self._training_started = False
+        self._last_prep_update = 0.0
+        self._fallback_sent = False
 
     def run(self):
         """Run the training process."""
@@ -417,24 +449,20 @@ class ModelTrainingThread(QThread):
             script_path = Path(__file__).parent.parent / "training" / "train_model_subprocess.py"
 
             try:
-                # Reset training state flags
-                if hasattr(self, "_training_started"):
-                    delattr(self, "_training_started")
-                if hasattr(self, "_last_prep_update"):
-                    delattr(self, "_last_prep_update")
-                if hasattr(self, "_fallback_sent"):
-                    delattr(self, "_fallback_sent")
-
                 # Start training process
                 import subprocess
 
+                # Ultralytics prints UTF-8 progress bars; the Windows default pipe
+                # encoding (cp1252) cannot decode them and would abort the run.
                 process = subprocess.Popen(
                     [sys.executable, str(script_path), "--config", config_path],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
-                    universal_newlines=True,
+                    encoding="utf-8",
+                    errors="replace",
                     cwd=os.getcwd(),
+                    env={**os.environ, "PYTHONIOENCODING": "utf-8"},
                 )
 
                 epoch_count = 0
@@ -454,7 +482,8 @@ class ModelTrainingThread(QThread):
                         break
 
                     if line:
-                        line = line.strip()
+                        # Ultralytics prefixes progress lines with terminal control codes
+                        line = ANSI_ESCAPE_PATTERN.sub("", line).strip()
                         current_time = time.time()
 
                         # Emit raw output for display
@@ -498,217 +527,77 @@ class ModelTrainingThread(QThread):
         """Request to stop training."""
         self.should_stop = True
 
-    def _format_elapsed_time(self, elapsed_seconds: float) -> str:
-        """Format elapsed time in a compact, readable format."""
-        if elapsed_seconds > 3600:  # More than 1 hour
-            hours = int(elapsed_seconds // 3600)
-            minutes = int((elapsed_seconds % 3600) // 60)
-            return f"{hours}h {minutes}m"
-        elif elapsed_seconds > 60:  # More than 1 minute
-            minutes = int(elapsed_seconds // 60)
-            seconds = int(elapsed_seconds % 60)
-            return f"{minutes}m {seconds}s"
-        else:
-            seconds = int(elapsed_seconds)
-            return f"{seconds}s"
-
     def _process_training_line(
         self, line: str, current_time: float, start_time: float, epoch_count: int, total_epochs: int
     ):
         """Process a single line of training output and emit progress updates."""
-        # Skip empty lines
-        if not line.strip():
+        if not line:
             return epoch_count
 
-        # Check for training start indicators (transition from preparation to training)
-        training_start_keywords = [
-            "starting training",
-            "train:",
-            "starting epoch",
-            "beginning training",
-            "training started",
-            "optimizer:",
-            "lr0=",  # Learning rate initialization
-            "momentum=",  # Training hyperparameters
-            "ultralytics yolo",  # Ultralytics banner
-            "python train.py",  # Training command
-            "model summary:",  # Model summary output
-            "freezing",  # Layer freezing
-            "amp:",  # Mixed precision
-            "epochs:",  # Epoch configuration
-            "image sizes",  # Image size configuration
-            "starting training for",  # Common ultralytics phrase
-            "training parameters:",  # Parameter listing
-            "wandb:",  # Weights & Biases integration
-            "tensorboard:",  # TensorBoard logging
-        ]
+        lower_line = line.lower()
 
-        # Check for preparation phase - look for common pre-training keywords
-        prep_keywords = [
-            "scanning",
-            "loading",
-            "cache",
-            "labels",
-            "dataset",
-            "images",
-            "caching",
-            "reading",
-            "found",
-            "missing",
-            "empty",
-            "checking",
-        ]
-        is_preparing = any(keyword in line.lower() for keyword in prep_keywords)
-        is_training_starting = any(keyword in line.lower() for keyword in training_start_keywords)
-
-        # Debug logging to help identify patterns
-        if is_training_starting:
-            print(f"[TRAINING_DEBUG] Training start detected: {line}")
-        elif is_preparing:
-            print(f"[TRAINING_DEBUG] Preparation detected: {line}")
-        else:
-            # Check for any number patterns that might be epochs
-            if re.search(r"\b(\d+)/(\d+)\b", line) and epoch_count == 0:
-                print(f"[TRAINING_DEBUG] Unclassified number pattern: {line}")
-
-        # Detect transition from preparation to training
-        if is_training_starting and epoch_count == 0:
-            # Mark that training has started but no epochs detected yet
-            if not hasattr(self, "_training_started"):
-                print("[TRAINING_DEBUG] Setting training started flag")
-                self.progress_update.emit(1, "Training starting • Epoch ??/?? • Batch ??/??")
-                self._training_started = True
-            return epoch_count
-
-        # During preparation, avoid interpreting numbers as epochs/batches
-        if is_preparing and epoch_count == 0 and not hasattr(self, "_training_started"):
-            # Only update every 3 seconds during prep to avoid spam
-            if not hasattr(self, "_last_prep_update") or current_time - self._last_prep_update > 3:
-                self.progress_update.emit(0, "Preparing training • Epoch ??/?? • Batch ??/??")
-                self._last_prep_update = current_time
-            return epoch_count
-
-        # Look for actual epoch training patterns (usually after preparation)
-        # More specific patterns to avoid false positives during preparation
-        epoch_patterns = [
-            r"Epoch\s+(\d+)/(\d+)",  # "Epoch 1/100"
-            r"(\d+)/(\d+).*?epochs?",  # "1/100 epochs"
-            r"^(\d+)/(\d+)\s+[\d.]+[GM]?",  # Ultralytics format: "1/10      4.96G" (start of line)
-            r"^(\d+)/(\d+)\s+",  # Simpler start of line pattern: "1/10 "
-        ]
-
-        for pattern in epoch_patterns:
-            epoch_match = re.search(pattern, line, re.IGNORECASE)
-            if epoch_match:
-                print(
-                    f"[TRAINING_DEBUG] Epoch pattern matched: '{pattern}' -> groups: {epoch_match.groups()} from line: {line[:100]}..."
-                )
-                try:
-                    current_epoch = int(epoch_match.group(1))
-                    detected_total = int(epoch_match.group(2))
-
-                    # Update total epochs if we detect a different value
-                    if detected_total != total_epochs and detected_total > 0:
-                        total_epochs = detected_total
-
-                    # Only update if epoch changed and is reasonable
-                    if current_epoch != epoch_count and 1 <= current_epoch <= total_epochs:
-                        # Set actual training start time on first epoch detection (excluding preprocessing)
-                        if (
-                            not hasattr(self, "actual_training_start_time")
-                            or self.actual_training_start_time is None
-                        ):
-                            self.actual_training_start_time = time.time()
-                            print(
-                                f"[TRAINING_DEBUG] Actual training start time set at epoch {current_epoch}"
-                            )
-
-                        epoch_count = current_epoch
-                        progress_percent = int((current_epoch / total_epochs) * 100)
-                        status = f"Training • Epoch {current_epoch}/{total_epochs}"
-                        print(f"[TRAINING_DEBUG] Epoch detected: {current_epoch}/{total_epochs}")
-                        self.progress_update.emit(progress_percent, status)
-                        # Mark that actual training has started
-                        self._training_started = True
-                        return epoch_count
-                except (ValueError, ZeroDivisionError):
-                    pass
-
-        # Alternative detection: Look for progress bars or percentage indicators
-        # This catches cases where ultralytics uses different output formats
-        progress_indicators = [
-            r"(\d+)%.*?(\d+)/(\d+)",  # Progress percentage with counts
-            r"\|.*?\|.*?(\d+)/(\d+)",  # Progress bar format
-            r"(\d+)/(\d+).*?\[.*?\]",  # Count with time brackets
-        ]
-
-        for pattern in progress_indicators:
-            progress_match = re.search(pattern, line)
-            if progress_match and not is_preparing:
-                # If we see progress indicators and we're not in preparation,
-                # we're likely in training even without explicit epoch markers
-                if not hasattr(self, "_training_started") and epoch_count == 0:
-                    print(
-                        f"[TRAINING_DEBUG] Progress indicator detected, marking training as started: {line}"
-                    )
-                    self.progress_update.emit(2, "Training • Epoch ??/?? • Batch ??/??")
-                    self._training_started = True
-                return epoch_count
-
-        # Look for batch/iteration progress within epochs (with iterations/sec info)
-        # Pattern like: "50%|███████ | 25/50 [00:30<00:15, 1.67it/s]"
-        batch_match = re.search(
-            r"(\d+)%.*?(\d+)/(\d+).*?\[([\d:]+)<([\d:]+),\s*([\d.]+)it/s\]", line
-        )
-        if batch_match and epoch_count > 0:
-            try:
-                batch_percent = int(batch_match.group(1))
-                current_batch = int(batch_match.group(2))
-                total_batches = int(batch_match.group(3))
-                iterations_per_sec = float(batch_match.group(6))
-
-                # Calculate overall progress: completed epochs + current epoch progress
-                epoch_progress = ((epoch_count - 1) / total_epochs) * 100
-                current_epoch_progress = (batch_percent / 100) * (1 / total_epochs) * 100
-                overall_progress = min(100, int(epoch_progress + current_epoch_progress))
-
-                status = f"Training • Epoch {epoch_count}/{total_epochs} • Batch {current_batch}/{total_batches} • {iterations_per_sec:.1f}it/s"
-                self.progress_update.emit(overall_progress, status)
-                return epoch_count
-            except (ValueError, ZeroDivisionError):
-                pass
-
-        # Simpler batch progress without timing info
-        elif re.search(r"(\d+)%.*?(\d+)/(\d+)", line) and epoch_count > 0:
-            batch_match = re.search(r"(\d+)%.*?(\d+)/(\d+)", line)
-            try:
-                batch_percent = int(batch_match.group(1))
-                current_batch = int(batch_match.group(2))
-                total_batches = int(batch_match.group(3))
-
-                # Calculate overall progress
-                epoch_progress = ((epoch_count - 1) / total_epochs) * 100
-                current_epoch_progress = (batch_percent / 100) * (1 / total_epochs) * 100
-                overall_progress = min(100, int(epoch_progress + current_epoch_progress))
-
-                status = f"Training • Epoch {epoch_count}/{total_epochs} • Batch {current_batch}/{total_batches}"
-                self.progress_update.emit(overall_progress, status)
-                return epoch_count
-            except (ValueError, ZeroDivisionError):
-                pass
-
-        # Fallback: if training has been running for a while without clear state detection
-        if current_time - start_time > 30 and epoch_count == 0:
-            if not hasattr(self, "_fallback_sent"):
-                if hasattr(self, "_training_started"):
-                    self.progress_update.emit(2, "Training • Epoch ??/?? • Batch ??/??")
-                else:
+        if epoch_count == 0:
+            # Transition from preparation to training
+            if any(keyword in lower_line for keyword in TRAINING_START_KEYWORDS):
+                if not self._training_started:
                     self.progress_update.emit(1, "Training starting • Epoch ??/?? • Batch ??/??")
                     self._training_started = True
-                self._fallback_sent = True
+                return epoch_count
+
+            # During preparation, avoid interpreting numbers as epochs/batches
+            if not self._training_started and any(
+                keyword in lower_line for keyword in PREPARATION_KEYWORDS
+            ):
+                # Only update every 3 seconds during prep to avoid spam
+                if current_time - self._last_prep_update > 3:
+                    self.progress_update.emit(0, "Preparing training • Epoch ??/?? • Batch ??/??")
+                    self._last_prep_update = current_time
+                return epoch_count
+
+        # Training lines begin with the epoch counter: "1/120  5.2G ... 10% ━── 14/134 1.8it/s"
+        epoch_match = re.match(r"(\d+)/(\d+)\s", line)
+        if epoch_match:
+            current_epoch = int(epoch_match.group(1))
+            total_epochs = int(epoch_match.group(2)) or total_epochs
+
+            if current_epoch != epoch_count and 1 <= current_epoch <= total_epochs:
+                # Epochs completed so far; batch lines fill in the current epoch
+                progress_percent = int(((current_epoch - 1) / total_epochs) * 100)
+                self.progress_update.emit(
+                    progress_percent, f"Training • Epoch {current_epoch}/{total_epochs}"
+                )
+                self._training_started = True
+                return current_epoch
+
+            # Batch progress within the epoch. The validation bar uses the same layout but
+            # does not begin with the epoch counter, so it never moves the progress.
+            batch_match = re.search(r"(\d+)%.*?(\d+)/(\d+)", line)
+            if batch_match and epoch_count > 0:
+                batch_percent = int(batch_match.group(1))
+                overall_progress = min(
+                    100, int((epoch_count - 1 + batch_percent / 100) / total_epochs * 100)
+                )
+
+                status = (
+                    f"Training • Epoch {epoch_count}/{total_epochs}"
+                    f" • Batch {batch_match.group(2)}/{batch_match.group(3)}"
+                )
+                rate_match = re.search(r"([\d.]+)(it/s|s/it)", line)
+                if rate_match:
+                    status += f" • {rate_match.group(1)}{rate_match.group(2)}"
+                self.progress_update.emit(overall_progress, status)
+                return epoch_count
+
+        # Fallback: if training has been running for a while without clear state detection
+        if current_time - start_time > 30 and epoch_count == 0 and not self._fallback_sent:
+            if self._training_started:
+                self.progress_update.emit(2, "Training • Epoch ??/?? • Batch ??/??")
+            else:
+                self.progress_update.emit(1, "Training starting • Epoch ??/?? • Batch ??/??")
+                self._training_started = True
+            self._fallback_sent = True
 
         return epoch_count
-
 
 class ModelTuningTab(QWidget):
     """Tab for tuning YOLO models with custom datasets."""
@@ -722,10 +611,7 @@ class ModelTuningTab(QWidget):
         self.current_data_path = ""
         self.training_thread: Optional[ModelTrainingThread] = None
         self.training_config = {}
-        self.current_results_dir = None
         self.training_start_time = None  # When training subprocess starts (includes preprocessing)
-        self.actual_training_start_time = None  # When actual epoch training begins
-        self.last_epoch = 0
         self.last_status = ""  # Store last status for time updates
 
         # Timer for updating elapsed/remaining time every second
@@ -822,15 +708,6 @@ class ModelTuningTab(QWidget):
         )
         task_layout.addRow("Task Type:", self.task_combo)
 
-        # Target class selection (only for detection)
-        self.target_class_combo = QComboBox()
-        self.target_class_combo.addItems(["all classes", "players", "disc"])
-        self.target_class_combo.setToolTip(
-            "Select which classes to focus training on:\n\n• all classes: Train on all available classes (default)\n• players: Train specialized model for player detection only\n• disc: Train specialized model for disc detection only\n\nSpecialized models often achieve better accuracy for their target class."
-        )
-        self.target_class_label = QLabel("Target Classes:")
-        task_layout.addRow(self.target_class_label, self.target_class_combo)
-
         task_group.setLayout(task_layout)
         layout.addWidget(task_group)
 
@@ -841,7 +718,7 @@ class ModelTuningTab(QWidget):
         self.model_combo = QComboBox()
         self.model_combo.currentTextChanged.connect(self._on_model_changed)
         self.model_combo.setToolTip(
-            "Select the base YOLO model to start training from.\n\n• Model sizes: n (nano), s (small), m (medium), l (large), x (extra-large)\n• Examples: yolo11n.pt (fast, 2.6M params), yolo11s.pt (6.5M params), yolo11l.pt (accurate, 25.3M params)\n• Pretrained models: learned features from COCO dataset (80 classes)\n• Auto-download: Missing YOLO11 models will be downloaded automatically\n• Trade-offs: Larger models = better accuracy but slower training/inference\n• Custom models: .pt files from previous training runs"
+            "Select the base YOLO model to start training from.\n\n• Model sizes: n (nano), s (small), m (medium), l (large), x (extra-large)\n• Examples: yolo11n.pt (fast, 2.6M params), yolo11s.pt (6.5M params), yolo11l.pt (accurate, 25.3M params)\n• Pretrained models: learned features from COCO dataset (80 classes)\n• Auto-download: Missing YOLO26/YOLO11 models will be downloaded automatically\n• Trade-offs: Larger models = better accuracy but slower training/inference\n• Custom models: .pt files from previous training runs"
         )
         model_layout.addRow("Base Model:", self.model_combo)
 
@@ -1219,9 +1096,6 @@ class ModelTuningTab(QWidget):
         """Handle task type change."""
         if task == "detection":
             self.current_task = "detection"
-            # Show target class selection for detection
-            self.target_class_combo.setVisible(True)
-            self.target_class_label.setVisible(True)
             # Set reference path for detection baseline
             detection_reference = Path(
                 "data/models/detection/object_detection_yolo11l/finetune3/results.csv"
@@ -1229,9 +1103,6 @@ class ModelTuningTab(QWidget):
             self.results_widget.set_reference_path(str(detection_reference))
         else:  # field segmentation
             self.current_task = "segmentation"
-            # Hide target class selection for segmentation
-            self.target_class_combo.setVisible(False)
-            self.target_class_label.setVisible(False)
             # Set reference path for segmentation baseline
             segmentation_reference = Path(
                 "data/models/segmentation/field_finder_yolo11x-seg/segmentation_finetune4/results.csv"
@@ -1252,14 +1123,18 @@ class ModelTuningTab(QWidget):
         available_models = []
 
         if self.current_task == "detection":
-            # Add common YOLO11 models (Ultralytics will auto-download if missing)
+            # Add common YOLO models (Ultralytics will auto-download if missing)
             common_detection_models = [
+                "yolo26n.pt",
+                "yolo26s.pt",
+                "yolo26m.pt",
+                "yolo26l.pt",
+                "yolo26x.pt",
                 "yolo11n.pt",
                 "yolo11s.pt",
                 "yolo11m.pt",
                 "yolo11l.pt",
                 "yolo11x.pt",
-                "yolov8l.pt",  # Legacy support
             ]
 
             # Add pretrained detection models (non-seg)
@@ -1296,8 +1171,13 @@ class ModelTuningTab(QWidget):
                                     available_models.append(str(preferred_finetune_model))
 
         else:  # segmentation
-            # Add common YOLO11 segmentation models (Ultralytics will auto-download if missing)
+            # Add common YOLO segmentation models (Ultralytics will auto-download if missing)
             common_seg_models = [
+                "yolo26n-seg.pt",
+                "yolo26s-seg.pt",
+                "yolo26m-seg.pt",
+                "yolo26l-seg.pt",
+                "yolo26x-seg.pt",
                 "yolo11n-seg.pt",
                 "yolo11s-seg.pt",
                 "yolo11m-seg.pt",
@@ -1339,6 +1219,14 @@ class ModelTuningTab(QWidget):
 
         self.model_combo.addItems(available_models)
 
+        # Preselect the configured default model (full path or file name)
+        default_model = self.training_config.get(self.current_task, {}).get("default_model")
+        if default_model:
+            for index, model in enumerate(available_models):
+                if model == default_model or Path(model).name == default_model:
+                    self.model_combo.setCurrentIndex(index)
+                    break
+
     def _update_data_options(self):
         """Update available dataset options based on task."""
         self.data_combo.clear()
@@ -1354,7 +1242,7 @@ class ModelTuningTab(QWidget):
             for dataset_dir in training_data_path.iterdir():
                 if dataset_dir.is_dir():
                     name_lower = dataset_dir.name.lower()
-                    if any(
+                    if "field" not in name_lower and any(
                         keyword in name_lower
                         for keyword in ["object_detection", "player", "disc", "detection"]
                     ):
@@ -1389,10 +1277,18 @@ class ModelTuningTab(QWidget):
 
         self.data_combo.addItems(available_datasets)
 
-        # Select the first (newest) dataset by default if available
+        # Select the configured default dataset, otherwise the first (newest) one
         if available_datasets:
-            self.data_combo.setCurrentIndex(0)
-            self._on_data_changed(available_datasets[0])
+            default_index = 0
+            default_dataset = self.training_config.get(self.current_task, {}).get(
+                "default_dataset"
+            )
+            for index, dataset in enumerate(available_datasets):
+                if Path(dataset).parent.name == default_dataset:
+                    default_index = index
+                    break
+            self.data_combo.setCurrentIndex(default_index)
+            self._on_data_changed(available_datasets[default_index])
 
     def _on_model_changed(self, model_path: str):
         """Handle model selection change."""
@@ -1504,6 +1400,14 @@ class ModelTuningTab(QWidget):
             "hsv_s": self.hsv_s_spin.value(),
             "hsv_v": self.hsv_v_spin.value(),
         }
+        # The selected model and dataset become the defaults for this task
+        if self.current_model_path:
+            model_path = Path(self.current_model_path)
+            task_config["default_model"] = (
+                model_path.name if model_path.parent.name == "pretrained" else str(model_path)
+            )
+        if self.current_data_path:
+            task_config["default_dataset"] = Path(self.current_data_path).parent.name
 
         self.training_config[self.current_task] = task_config
 
@@ -1538,16 +1442,9 @@ class ModelTuningTab(QWidget):
         # Extract dataset name
         dataset_name = Path(self.current_data_path).parent.name
 
-        # Add target class to the name for detection tasks
-        target_suffix = ""
-        if self.current_task == "detection":
-            target_class = self.target_class_combo.currentText()
-            if target_class != "all classes":
-                target_suffix = f"_{target_class}"
-
         # Create date prefix and find unique number
         date_prefix = datetime.now().strftime("%Y%m%d")
-        base_name = f"{self.current_task}{target_suffix}_{model_name}_{dataset_name}"
+        base_name = f"{self.current_task}_{model_name}_{dataset_name}"
 
         # Determine output directory
         models_base = Path("data/models")
@@ -1586,17 +1483,6 @@ class ModelTuningTab(QWidget):
             "hsv_v": self.hsv_v_spin.value(),
         }
 
-        # Add class filtering for detection tasks
-        if self.current_task == "detection":
-            target_class = self.target_class_combo.currentText()
-            if target_class == "players":
-                # Assuming class 1 is players (common in Ultimate Frisbee datasets)
-                training_params["classes"] = [1]
-            elif target_class == "disc":
-                # Assuming class 0 is disc (common in Ultimate Frisbee datasets)
-                training_params["classes"] = [0]
-            # For "all classes", don't add the classes parameter (trains on all)
-
         # Create training thread
         self.training_thread = ModelTrainingThread(
             task_type=self.current_task,
@@ -1629,14 +1515,11 @@ class ModelTuningTab(QWidget):
 
         # Initialize timing for progress estimation
         self.training_start_time = time.time()
-        self.last_epoch = 0
 
         # Start timer for updating time display every second
         self.time_update_timer.start(1000)  # Update every 1000ms (1 second)
 
-        # Set results directory for live monitoring
-        # The training will create a timestamped subdirectory, so we need to find the latest one
-        self.current_results_dir = output_dir
+        # Live monitoring finds the timestamped run folder that training creates in here
         self.results_widget.start_monitoring(str(output_dir))
 
     def _stop_training(self):
@@ -1647,7 +1530,6 @@ class ModelTuningTab(QWidget):
 
         # Stop results monitoring
         self.results_widget.stop_monitoring()
-        self.current_results_dir = None
 
         self._reset_training_ui()
         self.progress_info_label.setText("Training stopped by user")
@@ -1670,11 +1552,6 @@ class ModelTuningTab(QWidget):
             elapsed_time = time.time() - self.training_start_time
             elapsed_str = self._format_elapsed_time(elapsed_time)
 
-            # For time remaining estimates, use actual training time (excluding preprocessing)
-            actual_training_elapsed = 0
-            if hasattr(self, "actual_training_start_time") and self.actual_training_start_time:
-                actual_training_elapsed = time.time() - self.actual_training_start_time
-
             # Extract epoch info for time estimation
             current_epoch = 0
             total_epochs = 0
@@ -1690,20 +1567,6 @@ class ModelTuningTab(QWidget):
                 except (ValueError, IndexError):
                     pass
 
-            # Also try to extract epoch from YOLO format at start of line (e.g., "5/100    3.71G...")
-            if current_epoch == 0 and "/" in status:
-                try:
-                    # Look for pattern like "5/100" at the beginning of the status line
-                    epoch_match = re.match(r"^(\d+)/(\d+)\s+", status.strip())
-                    if epoch_match:
-                        current_epoch = int(epoch_match.group(1))
-                        total_epochs = int(epoch_match.group(2))
-                        print(
-                            f"[TRAINING_TIME_DEBUG] Parsed YOLO epoch format: {current_epoch}/{total_epochs}"
-                        )
-                except (ValueError, IndexError):
-                    pass
-
             # Try to extract iterations per second if available
             if "it/s" in status:
                 try:
@@ -1713,38 +1576,11 @@ class ModelTuningTab(QWidget):
                 except (ValueError, IndexError):
                     pass
 
-            # Calculate remaining time using multiple methods
+            # Estimate the remaining time
             remaining_str = ""
 
-            # Method 1: Use epoch-based estimation if we have valid epoch info and actual training time
-            if current_epoch > 0 and total_epochs > 0 and actual_training_elapsed > 0:
-                # Calculate regardless of last_epoch to ensure we always have an estimate
-                avg_time_per_epoch = actual_training_elapsed / current_epoch
-                remaining_epochs = total_epochs - current_epoch
-                estimated_remaining = avg_time_per_epoch * remaining_epochs
-
-                if estimated_remaining > 0:
-                    remaining_str = self._format_elapsed_time(estimated_remaining)
-
-                    # Debug logging for time calculation issues
-                    if current_epoch == 5 and total_epochs == 100:  # Specific case from logs
-                        print(f"[TRAINING_TIME_DEBUG] Epoch {current_epoch}/{total_epochs}")
-                        print(
-                            f"[TRAINING_TIME_DEBUG] Actual training elapsed: {actual_training_elapsed:.2f}s"
-                        )
-                        print(
-                            f"[TRAINING_TIME_DEBUG] Avg time per epoch: {avg_time_per_epoch:.2f}s"
-                        )
-                        print(f"[TRAINING_TIME_DEBUG] Remaining epochs: {remaining_epochs}")
-                        print(
-                            f"[TRAINING_TIME_DEBUG] Estimated remaining: {estimated_remaining:.2f}s"
-                        )
-                        print(f"[TRAINING_TIME_DEBUG] Formatted remaining: {remaining_str}")
-
-                    self.last_epoch = current_epoch
-
-            # Method 2: Use iterations per second for more accurate short-term estimates
-            elif iterations_per_sec > 0 and current_epoch > 0 and total_epochs > 0:
+            # Use iterations per second when the status carries it
+            if iterations_per_sec > 0 and current_epoch > 0 and total_epochs > 0:
                 # Extract batch info if available
                 if "Batch " in status:
                     try:
@@ -1767,7 +1603,7 @@ class ModelTuningTab(QWidget):
                     except (ValueError, IndexError):
                         pass
 
-            # Method 3: Use overall progress percentage as fallback
+            # Otherwise fall back to the overall progress percentage
             elif progress_value > 5:  # Only if we have meaningful progress
                 time_per_percent = elapsed_time / progress_value
                 remaining_percent = 100 - progress_value
@@ -1787,6 +1623,16 @@ class ModelTuningTab(QWidget):
 
     def _on_raw_output(self, line: str):
         """Handle raw training output."""
+        # Ultralytics re-prints its progress bar as a new line for every update. Overwrite
+        # the previous bar in place, as a terminal would, instead of flooding the display.
+        is_progress = re.search(r"\d+% [━╸─]", line) is not None
+        cursor = self.raw_output_text.textCursor()
+        cursor.movePosition(cursor.End)
+        if is_progress and getattr(self, "_last_output_was_progress", False):
+            cursor.select(cursor.BlockUnderCursor)
+            cursor.removeSelectedText()
+        self._last_output_was_progress = is_progress and "100% " not in line
+
         # Append new line to the output display
         self.raw_output_text.append(line)
 
@@ -1814,7 +1660,6 @@ class ModelTuningTab(QWidget):
 
         # Stop monitoring on error
         self.results_widget.stop_monitoring()
-        self.current_results_dir = None
 
         self.progress_info_label.setText(f"Training failed: {error_msg}")
         QMessageBox.critical(self, "Training Error", f"Training failed:\n{error_msg}")
@@ -1835,7 +1680,7 @@ class ModelTuningTab(QWidget):
 
     def _update_time_display(self):
         """Update the time display every second during training."""
-        if not self.training_start_time or not hasattr(self, "last_status") or not self.last_status:
+        if not self.training_start_time or not self.last_status:
             return
 
         # Recalculate time information using the last known status
@@ -1851,8 +1696,6 @@ class ModelTuningTab(QWidget):
 
         # Reset timing variables
         self.training_start_time = None
-        self.actual_training_start_time = None
-        self.last_epoch = 0
         self.last_status = ""
 
         # Stop time update timer

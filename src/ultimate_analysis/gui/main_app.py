@@ -108,7 +108,6 @@ class UltimateAnalysisApp(QMainWindow):
         super().__init__()
 
         # Application state
-        self._current_video_path: Optional[str] = None
 
         # Tab references for lazy loading
         self.main_tab: Optional[MainTab] = None
@@ -176,11 +175,6 @@ class UltimateAnalysisApp(QMainWindow):
 
         self.homography_tab = LazyLoadingTab(self._create_homography_tab, "Homography Estimation")
         self.tab_widget.addTab(self.homography_tab, "Homography Estimation")
-
-        # TODO: Add more tabs as needed
-        # Example placeholder tabs:
-        # self.tab_widget.addTab(QWidget(), "Data Preprocessing")
-        # self.tab_widget.addTab(QWidget(), "Performance Analysis")
 
         # Status bar
         self.status_bar = self.statusBar()
@@ -468,7 +462,6 @@ class UltimateAnalysisApp(QMainWindow):
         Args:
             video_path: Path to the newly loaded video
         """
-        self._current_video_path = video_path
 
         # Update window title
         import os
@@ -481,14 +474,6 @@ class UltimateAnalysisApp(QMainWindow):
         self.status_bar.showMessage(f"Loaded: {video_name}")
 
         print(f"[APP] Video changed to: {video_name}")
-
-    def get_current_video_path(self) -> Optional[str]:
-        """Get the path of the currently loaded video.
-
-        Returns:
-            Path to current video or None if no video loaded
-        """
-        return self._current_video_path
 
     def closeEvent(self, event):
         """Handle application close event."""

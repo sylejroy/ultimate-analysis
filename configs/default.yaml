@@ -7,47 +7,41 @@ app:
   version: "0.1.0"
   debug: false
   log_level: "INFO"
-  max_file_size_lines: 500
 
 # Video Processing Settings
 video:
   supported_formats: [".mp4", ".avi", ".mov", ".mkv", ".wmv"]
-  max_fps: 30
   default_fps: 25
-  frame_skip: 1
-  cache_frames: true
-  max_cached_frames: 100
 
 # Model Configuration
 models:
   base_path: "data/models"
   
-  # Backward compatibility - will be deprecated
-  detection:
-    default_model: "data/models/detection/20250802_1_detection_yolo11s_object_detection.v3i.yolov8/finetune_20250802_102035/weights/best.pt"
-    confidence_threshold: 0.5
-    nms_threshold: 0.45
-    max_detections: 100
-    cache_results: true
+  # Inference optimization settings
+  inference:
+    half_precision: true  # Use FP16 for ~2x speedup (requires compatible GPU)
+    warmup_on_load: true   # Pre-warm models to avoid first-frame delay
+    tensorrt: true         # Use a TensorRT engine when one was built for the model (scripts/export_tensorrt.py)
   
   # Separate player and disc detection models
   player_detection:
     default_model: "data/models/detection/20250802_1_detection_yolo11s_object_detection.v3i.yolov8/finetune_20250802_102035/weights/best.pt"
     confidence_threshold: 0.5
     nms_threshold: 0.45
-    max_detections: 50
     
   disc_detection:
     default_model: "data/models/detection/20250913_4_detection_disc_yolo11s_object_detection_disc.v1i.yolov8/finetune_20250913_205313/weights/best.pt"
     confidence_threshold: 0.3
     nms_threshold: 0.45
-    max_detections: 5
+    adaptive_skip: true          # Skip disc model when no disc detected recently
+    skip_threshold: 30           # Frames without disc before skipping disc model
   
   segmentation:
     default_model: "data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt"
     confidence_threshold: 0.6
-    mask_alpha: 0.3
     show_raw_masks: false       # Whether to show raw segmentation model output masks
+    frame_interval: 5           # Process segmentation every N frames (1=every frame, 5=every 5th)
+    iou_threshold: 0.7          # IoU threshold for segmentation
     
     # Morphological operations for mask smoothing
     morphological:
@@ -78,6 +72,7 @@ models:
         distance_threshold: 5.0 # Maximum distance from point to line for inliers
         min_samples: 2          # Minimum number of points needed to fit a line
         max_trials: 20        # Maximum RANSAC iterations per line segment
+        backend: "numpy"        # Line fitter: "numpy" (fast, fits vertical lines) or "sklearn"
         line_color: [0, 255, 0] # BGR color for RANSAC lines (green)
         outlier_color: [0, 165, 255] # BGR color for RANSAC outlier points (orange)
         outlier_radius: 6       # Radius for outlier point visualization (increased for visibility)
@@ -96,36 +91,26 @@ models:
   
   tracking:
     default_tracker: "deepsort"
-    max_tracks: 300
     track_history_length: 300
-    color_pool_size: 50
     
-    # DeepSORT specific settings
-    max_age: 10              # Frames to keep lost tracks alive
-    n_init: 5                # Frames needed to confirm a track
-    nms_overlap: 1           # Non-maximum suppression overlap threshold
-    max_cosine_distance: 0.2 # Feature similarity threshold
-    nn_budget: 100           # Feature budget per class
+    # DeepSORT specific settings (optimized for performance)
+    max_age: 30                  # Frames to keep lost tracks (reduced from 50)
+    n_init: 3                    # Frames needed to confirm a track
+    nms_overlap: 0.7             # Non-maximum suppression overlap threshold
+    max_cosine_distance: 0.5     # Feature similarity threshold (tighter for faster matching)
+    nn_budget: 50                # Feature budget per class (reduced from 100 for speed)
     
-    # Histogram tracking specific settings
-    histogram_match_threshold: 0.3  # Minimum similarity for track matching
-    histogram_bins: 32              # Number of histogram bins per channel
-  
   player_id:
-    ocr_enabled: true
-    ocr_languages: ["en"]
-    ocr_confidence_threshold: 0.7
-    cache_player_ids: true
     # Performance optimization: only run OCR on a subset of frames per track
     ocr_frame_interval: 5          # Run OCR for a given track every N frames (>=1)
     ocr_frame_interval_stagger: true # Stagger per track using track_id % interval to spread load
-    finalized_certainty_threshold: 0.999 # Probability at which jersey number is considered final (skip future OCR)
+    finalized_certainty_threshold: 0.95 # Probability at which jersey number is considered final (skip future OCR) - reduced from 0.999 for faster finalization
     verbose_debug: false           # Enable extra per-crop debug logging when troubleshooting
     
     # Jersey number tracking settings
     tracking:
-      max_history_length: 30              # Maximum measurements to keep per track
-      confidence_decay_factor: 0.95       # Decay factor for old measurements per frame
+      max_history_length: 20              # Maximum measurements to keep per track - reduced from 30 for better performance
+      confidence_decay_factor: 0.93       # Decay factor for old measurements per frame - slightly faster decay from 0.95
       spatial_weight_center_bonus: 0.3    # Bonus weight for center-positioned digits
       min_confidence_threshold: 0.1       # Minimum probability to keep in memory
       center_region_width: 0.4            # Width of "center" region (fraction of bbox)
@@ -133,50 +118,9 @@ models:
       measurement_weight_old: 0.5         # Weight for old measurements
       probability_smoothing: 0.1          # Smoothing factor for probability updates
 
-# GUI Settings
-gui:
-  window_title: "Ultimate Analysis"
-  window_width: 1920
-  window_height: 1080
-  theme: "dark"
-  auto_save_settings: true
-  fps_display: true
-
-# Performance Settings
-performance:
-  enable_gpu: true
-  max_cpu_cores: -1  # -1 means use all available
-  memory_limit_mb: 4096
-  cache_size_mb: 512
-  enable_profiling: false
-  profiling_interval_ms: 1000
-
 # Logging Settings
 logging:
-  level: "INFO"
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-  file_enabled: true
-  file_path: "logs/ultimate_analysis.log"
-  max_file_size_mb: 10
-  backup_count: 5
-
-# Paths
-paths:
-  data_dir: "data"
-  models_dir: "data/models"
-  cache_dir: "data/cache"
-  logs_dir: "logs"
-  output_dir: "output"
-  temp_dir: "temp"
-
-# Data Directories
-data:
-  raw_dir: "data/raw"
-  processed_dir: "data/processed"
-  dev_data_dir: "data/processed/dev_data"
-  raw_videos_dir: "data/raw/videos"
-  training_dir: "data/raw/training_data"
-  dataset_dir: "data/raw/dataset"
 
 # Homography Estimation Settings
 homography:
@@ -186,6 +130,7 @@ homography:
   slider_range_perspective: [-0.2, 0.2]      # Range for H20, H21 (perspective/extreme)
   buffer_factor: 1.8                         # Output canvas size multiplier (1.8 = 80% larger)
   output_aspect_ratio: 3.0                   # Height:width ratio for homography output canvas (3.0 = 3:1)
+  display_scale: 0.5                         # Main-tab top-down view render scale (1.0 = full canvas, sharper when zoomed but ~4x slower warp)
 
 # Genetic Algorithm Optimization Settings
 optimization:
@@ -194,7 +139,6 @@ optimization:
   ga_elite_size: 2              # Number of best individuals to preserve
   ga_mutation_rate: 0.2         # Probability of parameter mutation
   ga_crossover_rate: 0.7        # Probability of crossover between parents
-  ga_generations_per_batch: 10  # Default for "Skip N Gens" button
   
   # Fitness Function Weights (must sum to 1.0)
   ga_fitness_weights:
@@ -204,15 +148,6 @@ optimization:
     proportion: 0.1             # Field proportion accuracy
     distortion: 0.05            # Perspective distortion penalty
     orientation: 0.15           # Vertical/horizontal line balance reward
-  
-  # Mutation Parameters
-  ga_mutation_amount: 0.1       # Scale factor for mutation magnitude
-  ga_adaptive_mutation: false   # Whether to decrease mutation over time
-  
-  # Convergence Parameters
-  ga_convergence_threshold: 0.001  # Stop if fitness improvement < this
-  ga_convergence_generations: 5    # Generations without improvement to trigger stop
-  ga_max_generations: 100          # Maximum generations before auto-stop
   
   # Continuous Evolution Settings
   continuous_evolution_interval_ms: 1000  # Milliseconds between generations in continuous mode
@@ -224,13 +159,11 @@ optimization:
     vertical_tolerance: 5.0     # Degrees tolerance for vertical lines
     horizontal_tolerance: 5.0   # Degrees tolerance for horizontal lines
     min_line_length: 10         # Minimum line length to consider (pixels)
-    confidence_weight: true     # Weight by RANSAC confidence scores
   
   # Field Coverage Evaluation  
   ga_field_coverage:
     black_pixel_threshold: 10   # Pixels below this value considered "black"
     optimal_coverage_ratio: 0.75 # Optimal ratio of non-black pixels (avoids over-zooming)
-    edge_penalty: 0.1           # Penalty for content near edges
   
   # Field Proportion Evaluation
   ga_field_proportion:

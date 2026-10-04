@@ -106,32 +106,31 @@ def create_unified_field_mask_processing(
             else:
                 masks = mask_data.numpy() if hasattr(mask_data, "numpy") else mask_data
 
-            # Combine all class masks into unified mask
-            for mask in masks:
-                # Ensure mask is 2D
-                if len(mask.shape) == 3:
-                    mask = mask[0]
+            masks = np.asarray(masks)
+            if masks.ndim == 4:
+                masks = masks[:, 0]
+            if len(masks) == 0:
+                continue
 
-                # Resize to target frame size if needed
-                if mask.shape != (frame_h, frame_w):
-                    mask_resized = cv2.resize(
-                        mask.astype(np.float32), (frame_w, frame_h), interpolation=cv2.INTER_NEAREST
-                    )
-                else:
-                    mask_resized = mask
+            # Combine the class masks first, so only one image is scaled to the frame
+            combined = masks.max(axis=0)
+            if combined.shape != (frame_h, frame_w):
+                combined = cv2.resize(
+                    combined.astype(np.float32), (frame_w, frame_h), interpolation=cv2.INTER_LINEAR
+                )
 
-                # Add to unified mask (any field class becomes 1)
-                unified_mask = np.logical_or(unified_mask, mask_resized > 0.5).astype(np.uint8)
+            # Any field class becomes 1
+            np.maximum(unified_mask, (combined > 0.5).view(np.uint8), out=unified_mask)
 
         except Exception as e:
             logger = get_logger("FIELD_ANALYSIS")
             logger.error(f"Error creating unified mask: {e}")
 
     # Apply morphological operations to smooth the mask
-    if np.any(unified_mask):
+    if cv2.countNonZero(unified_mask):
         unified_mask = apply_morphological_smoothing(unified_mask)
 
-    return unified_mask if np.any(unified_mask) else None
+    return unified_mask if cv2.countNonZero(unified_mask) else None
 
 
 def calculate_field_contour_processing(
@@ -208,7 +207,7 @@ def apply_morphological_smoothing(
     Returns:
         Smoothed binary mask
     """
-    if not np.any(mask):
+    if not cv2.countNonZero(mask):
         return mask
 
     # Use config values if parameters not provided
@@ -225,7 +224,7 @@ def apply_morphological_smoothing(
 
     try:
         # Ensure mask is binary
-        mask_binary = (mask > 0).astype(np.uint8)
+        _, mask_binary = cv2.threshold(mask.astype(np.uint8, copy=False), 0, 1, cv2.THRESH_BINARY)
 
         # 1. Opening operation: erosion followed by dilation
         # This removes small noise and disconnected components
@@ -286,19 +285,6 @@ def _fill_holes_flood_fill_optimized(mask: np.ndarray) -> np.ndarray:
         logger = get_logger("FIELD_ANALYSIS")
         logger.error(f"Error in optimized hole filling: {e}")
         return mask
-
-
-def _fill_holes_flood_fill(mask: np.ndarray) -> np.ndarray:
-    """Fill holes in a binary mask using flood fill from the borders.
-
-    Args:
-        mask: Binary mask (H, W) with values 0 or 1
-
-    Returns:
-        Mask with holes filled
-    """
-    # Use optimized version
-    return _fill_holes_flood_fill_optimized(mask)
 
 
 try:
@@ -529,7 +515,7 @@ def fit_field_lines_ransac(
         all_outliers = []
         all_inliers = []
 
-        for iteration in range(num_lines):
+        for _ in range(num_lines):
             if len(remaining_points) < min_samples:
                 # Insufficient points remaining for line fitting
                 break
@@ -593,10 +579,12 @@ def _fit_line_ransac_with_outliers(
     if len(points) < min_samples:
         return None
 
-    if SKLEARN_AVAILABLE:
+    # The numpy fitter is the default: sklearn spends most of its time validating
+    # inputs on every trial and regresses y on x, which cannot fit vertical lines.
+    backend = get_setting("models.segmentation.contour.ransac.backend", "numpy")
+    if backend == "sklearn" and SKLEARN_AVAILABLE:
         return _fit_line_ransac_sklearn(points, distance_threshold, min_samples, max_trials)
-    else:
-        return _fit_line_ransac_fallback(points, distance_threshold, min_samples, max_trials)
+    return _fit_line_ransac_numpy(points, distance_threshold, min_samples, max_trials)
 
 
 def _fit_line_ransac_sklearn(
@@ -665,260 +653,70 @@ def _fit_line_ransac_sklearn(
         return None
 
 
-def _fit_line_ransac_fallback(
+def _fit_line_ransac_numpy(
     points: np.ndarray, distance_threshold: float, min_samples: int, max_trials: int
 ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, float]]:
-    """Fallback RANSAC implementation when sklearn is not available."""
+    """Fit a line with RANSAC using perpendicular distances, then refit on the inliers."""
     logger = get_logger("FIELD_ANALYSIS")
 
     try:
-        if len(points) < min_samples:
+        num_points = len(points)
+        if points.ndim != 2 or points.shape[1] != 2 or num_points < max(2, min_samples):
             return None
 
-        best_inliers = None
-        best_line = None
-        best_inlier_count = 0
-
-        # Pre-compute for efficiency
-        num_points = len(points)
+        xs = points[:, 0].astype(np.float64)
+        ys = points[:, 1].astype(np.float64)
         threshold_sq = distance_threshold**2  # Use squared distance to avoid sqrt
 
-        for trial in range(max_trials):
-            # Randomly sample min_samples points
-            sample_indices = np.random.choice(num_points, min_samples, replace=False)
-            sample_points = points[sample_indices]
+        best_inliers = None
+        best_inlier_count = 0
 
-            # For 2-point sampling (most common case)
-            if min_samples == 2:
-                p1, p2 = sample_points[0], sample_points[1]
+        # A line hypothesis only ever needs two points
+        samples = np.random.randint(0, num_points, size=(max_trials, 2))
+        for i1, i2 in samples:
+            x1, y1 = xs[i1], ys[i1]
+            dx, dy = xs[i2] - x1, ys[i2] - y1
+            norm_sq = dx * dx + dy * dy
 
-                # Calculate direction vector
-                direction = p2 - p1
-                direction_norm_sq = np.dot(direction, direction)
+            # Skip if points are too close
+            if norm_sq < 1e-12:
+                continue
 
-                # Skip if points are too close
-                if direction_norm_sq < 1e-12:
-                    continue
+            # Squared perpendicular distance of every point to the line through the pair
+            cross = dx * (ys - y1) - dy * (xs - x1)
+            inlier_mask = cross * cross <= threshold_sq * norm_sq
+            inlier_count = int(np.count_nonzero(inlier_mask))
 
-                direction_norm = np.sqrt(direction_norm_sq)
+            if inlier_count > best_inlier_count:
+                best_inlier_count = inlier_count
+                best_inliers = inlier_mask
 
-                # Normal vector to the line (perpendicular)
-                normal = np.array([-direction[1], direction[0]]) / direction_norm
-                a, b = normal[0], normal[1]
-                c = -(a * p1[0] + b * p1[1])
+        if best_inliers is None or best_inlier_count < 2:
+            return None
 
-                # Vectorized distance calculation (much faster)
-                distances_sq = (a * points[:, 0] + b * points[:, 1] + c) ** 2
+        inliers = points[best_inliers]
+        outliers = points[~best_inliers]
 
-                # Find inliers using squared threshold
-                inlier_mask = distances_sq <= threshold_sq
-                inlier_count = np.sum(inlier_mask)
+        # Total least squares refit on the consensus set (independent of orientation)
+        inliers_f64 = inliers.astype(np.float64)
+        centroid = inliers_f64.mean(axis=0)
+        _, _, vt = np.linalg.svd(inliers_f64 - centroid, full_matrices=False)
+        direction = vt[0]
+        if direction[0] < 0:
+            direction = -direction  # Keep endpoints ordered by increasing x
 
-                # Update best model if this is better
-                if inlier_count > best_inlier_count:
-                    best_inlier_count = inlier_count
-                    best_inliers = inlier_mask
+        # Endpoints are the extreme inlier projections onto the fitted line
+        projections = (inliers_f64 - centroid) @ direction
+        line_points = np.array(
+            [
+                centroid + projections.min() * direction,
+                centroid + projections.max() * direction,
+            ]
+        )
 
-                    # Calculate line endpoints from all inliers
-                    inlier_points = points[inlier_mask]
-                    if len(inlier_points) >= 2:
-                        x_coords = inlier_points[:, 0]
-                        x_min, x_max = x_coords.min(), x_coords.max()
-
-                        # Calculate corresponding y values on the line
-                        if abs(b) > 1e-6:  # Line is not vertical
-                            y_min = -(a * x_min + c) / b
-                            y_max = -(a * x_max + c) / b
-                        else:  # Vertical line
-                            y_coords = inlier_points[:, 1]
-                            y_min, y_max = y_coords.min(), y_coords.max()
-                            x_min = x_max = -c / a
-
-                        best_line = np.array([[x_min, y_min], [x_max, y_max]])
-
-        if best_inliers is not None and best_line is not None:
-            # Validate mask dimensions
-            if len(best_inliers) != num_points:
-                return None
-
-            inliers = points[best_inliers]
-            outliers = points[~best_inliers]
-            confidence = best_inlier_count / num_points
-            return best_line, outliers, inliers, confidence
-
-        return None
+        confidence = best_inlier_count / num_points
+        return line_points, outliers, inliers, confidence
 
     except Exception as e:
-        logger.error(f"Error in fallback RANSAC fitting: {e}")
+        logger.error(f"Error in numpy RANSAC fitting: {e}")
         return None
-
-
-def extract_field_lines_ransac_processing(
-    contour: np.ndarray,
-    frame: np.ndarray,
-    num_lines: int = 4,
-    distance_threshold: float = 15.0,
-    min_samples: int = 30,
-    max_trials: int = 1000,
-) -> Tuple[
-    List[np.ndarray], List[float], List[np.ndarray], List[np.ndarray], np.ndarray, Dict[str, Any]
-]:
-    """Heavy RANSAC processing function for extracting field lines from contour.
-
-    This function contains all the heavy computational processing for line extraction
-    and should be called from processing modules, not visualization code.
-
-    Args:
-        contour: Input contour points
-        frame: Frame for shape information
-        num_lines: Maximum number of lines to extract
-        distance_threshold: RANSAC distance threshold
-        min_samples: Minimum samples per line
-        max_trials: Maximum RANSAC trials
-
-    Returns:
-        Tuple of (fitted_lines, line_confidences, all_outliers, all_inliers, edge_filtered_points, processing_stats)
-    """
-    if contour is None or len(contour) < num_lines * min_samples:
-        return [], [], [], [], np.array([]).reshape(0, 2), {}
-
-    logger = get_logger("FIELD_ANALYSIS")
-    processing_stats = {
-        "original_points": 0,
-        "interpolated_points": 0,
-        "edge_filtered_points": 0,
-        "lines_fitted": 0,
-        "processing_time_ms": 0,
-    }
-
-    import time
-
-    start_time = time.time()
-
-    try:
-        # Convert contour to 2D points array
-        points = contour.reshape(-1, 2).astype(np.float32)
-        processing_stats["original_points"] = len(points)
-        edge_filtered_points = np.array([]).reshape(0, 2)
-
-        # Apply interpolation if enabled (before edge filtering)
-        interpolation_enabled = get_setting(
-            "models.segmentation.contour.interpolation.enabled", False
-        )
-        if interpolation_enabled:
-            max_distance = get_setting(
-                "models.segmentation.contour.interpolation.max_point_distance", 10
-            )
-            min_distance = get_setting(
-                "models.segmentation.contour.interpolation.min_point_distance", 3
-            )
-
-            # Convert to contour format for interpolation
-            contour_format = points.reshape(-1, 1, 2)
-            interpolated_contour = interpolate_contour_points(
-                contour_format, max_distance, min_distance
-            )
-            points = interpolated_contour.reshape(-1, 2).astype(np.float32)
-            processing_stats["interpolated_points"] = len(points)
-
-            # Log interpolation results (only when significant change or debugging)
-            if len(points) != processing_stats["original_points"]:
-                logger.debug(
-                    f"Interpolated contour: {processing_stats['original_points']} -> {len(points)} points"
-                )
-
-        # Apply edge filtering after interpolation if enabled
-        edge_filtering_enabled = get_setting(
-            "models.segmentation.contour.ransac.edge_filtering.enabled", False
-        )
-        if edge_filtering_enabled:
-            edge_margin = get_setting(
-                "models.segmentation.contour.ransac.edge_filtering.margin", 20
-            )
-
-            # Convert to contour format for edge filtering
-            contour_format = points.reshape(-1, 1, 2)
-            filtered_contour, edge_points = filter_edge_points(
-                contour_format, frame.shape, edge_margin
-            )
-
-            # Update points to use only non-edge points
-            if len(filtered_contour) > 0:
-                original_count = len(points)
-                points = filtered_contour.reshape(-1, 2).astype(np.float32)
-                edge_filtered_points = (
-                    edge_points.reshape(-1, 2).astype(np.float32)
-                    if len(edge_points) > 0
-                    else np.array([]).reshape(0, 2)
-                )
-                processing_stats["edge_filtered_points"] = len(edge_filtered_points)
-
-                # Log edge filtering results (only when significant filtering occurs)
-                filtered_ratio = len(edge_filtered_points) / original_count
-                if filtered_ratio > 0.1:  # Log only if >10% of points filtered
-                    logger.debug(
-                        f"Edge filtering: {original_count} -> {len(points)} points ({len(edge_filtered_points)} filtered)"
-                    )
-            else:
-                logger.warning("Edge filtering removed all points!")
-
-        # Sequential RANSAC: Find lines one by one, removing inliers each time
-        remaining_points = points.copy()
-        fitted_lines = []
-        line_confidences = []
-        all_outliers = []
-        all_inliers = []
-
-        for iteration in range(num_lines):
-            if len(remaining_points) < min_samples:
-                if iteration == 0:  # Only log for first iteration to avoid spam
-                    logger.debug(
-                        f"Insufficient remaining points ({len(remaining_points)} < {min_samples})"
-                    )
-                break
-
-            # Fit line to remaining points using RANSAC
-            result = _fit_line_ransac_with_outliers(
-                remaining_points, distance_threshold, min_samples, max_trials
-            )
-
-            if result is not None:
-                line_points, outliers, inliers, confidence = result
-                fitted_lines.append(line_points)
-                line_confidences.append(confidence)
-                all_inliers.append(inliers)
-
-                # Remove inliers from remaining points for next iteration
-                remaining_points = outliers
-                processing_stats["lines_fitted"] += 1
-            else:
-                break
-
-        # All remaining points after all iterations are final outliers
-        if len(remaining_points) > 0:
-            all_outliers.append(remaining_points)
-        else:
-            all_outliers.append(np.array([]).reshape(0, 2))
-
-        processing_stats["processing_time_ms"] = (time.time() - start_time) * 1000
-
-        # Log final results (only when lines are found)
-        if fitted_lines:
-            avg_confidence = np.mean(line_confidences)
-            logger.debug(
-                f"Found {len(fitted_lines)} field lines with avg confidence {avg_confidence:.3f} "
-                f"in {processing_stats['processing_time_ms']:.1f}ms"
-            )
-
-        return (
-            fitted_lines,
-            line_confidences,
-            all_outliers,
-            all_inliers,
-            edge_filtered_points,
-            processing_stats,
-        )
-
-    except Exception as e:
-        logger.error(f"Error in RANSAC processing: {e}")
-        return [], [], [], [], np.array([]).reshape(0, 2), processing_stats
