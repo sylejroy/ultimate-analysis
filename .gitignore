@@ -176,6 +176,7 @@ cython_debug/
 *.joblib
 *.model
 *.onnx
+*.engine
 *.pb
 *.pth
 *.pt
@@ -196,6 +197,8 @@ cython_debug/
 /data/processed/
 /data/interim/
 /data/external/
+/data/models/
+/data/cache/
 
 # Model outputs and experiments
 /models/
@@ -244,6 +247,9 @@ cython_debug/
 *.tar.bz2
 *.rar
 *.7z
+
+# Profiles written by scripts/profile_app.py
+*.prof
 
 # Temporary files
 *.tmp

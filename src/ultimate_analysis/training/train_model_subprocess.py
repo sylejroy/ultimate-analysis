@@ -3,6 +3,7 @@
 Standalone training script for YOLO models.
 This script is called by the GUI as a subprocess to train models without conflicts.
 """
+
 import argparse
 import json
 import multiprocessing
@@ -40,7 +41,14 @@ if __name__ == "__main__":
 
     # Load model
     print(f"Loading model: {model_path}")
-    model = YOLO(model_path)
+    if model_path.endswith(".yaml"):
+        # An architecture variant such as yolo26s-p2.yaml (extra head for small objects)
+        # has no pretrained weights of its own; it starts from those of its base model
+        base_weights = Path("data/models/pretrained") / f"{Path(model_path).stem.split('-')[0]}.pt"
+        print(f"Starting from the weights of {base_weights}")
+        model = YOLO(model_path).load(str(base_weights))
+    else:
+        model = YOLO(model_path)
 
     # The GUI sends batch as a float: below 1 it is a GPU memory fraction for
     # auto-batch, otherwise it is a plain batch size and must be an integer.

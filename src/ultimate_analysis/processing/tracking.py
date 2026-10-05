@@ -14,6 +14,8 @@ from ..config.settings import get_setting
 from ..constants import TRACK_HISTORY_MAX_LENGTH
 from ..utils.logger import get_logger
 
+logger = get_logger("TRACKING")
+
 # Try to import DeepSORT
 try:
     import torch
@@ -22,7 +24,6 @@ try:
 
     DEEPSORT_AVAILABLE = True
 except ImportError:
-    logger = get_logger("TRACKING")
     logger.warning("DeepSORT not available, install with: pip install deep-sort-realtime")
     DEEPSORT_AVAILABLE = False
     DeepSort = None
@@ -65,7 +66,6 @@ class Track:
 def _initialize_deepsort_tracker():
     """Initialize DeepSORT tracker with optimal settings."""
     global _deepsort_tracker
-    logger = get_logger("TRACKING")
 
     if not DEEPSORT_AVAILABLE:
         logger.warning("Cannot initialize DeepSORT - not available")
@@ -134,9 +134,9 @@ def _get_embedder_network(embedder: Any) -> Any:
         if actual.shape == expected.shape and similarity > 0.99999:
             network = compiled
         else:
-            get_logger("TRACKING").warning("Compiled embedder differs; using the original")
+            logger.warning("Compiled embedder differs; using the original")
     except Exception as e:
-        get_logger("TRACKING").warning(f"Could not compile embedder, using the original: {e}")
+        logger.warning(f"Could not compile embedder, using the original: {e}")
 
     _compiled_embedder = (embedder, network)
     return network
@@ -191,7 +191,6 @@ def run_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) -> List[Tr
     """
     global _frame_count
     _frame_count += 1
-    logger = get_logger("TRACKING")
 
     logger.debug(
         f"Processing {len(detections)} detections with DeepSORT tracker (frame {_frame_count})"
@@ -213,7 +212,6 @@ def _run_deepsort_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) 
     Returns:
         List of Track objects with consistent IDs
     """
-    logger = get_logger("TRACKING")
 
     if not _initialize_deepsort_tracker():
         logger.warning("DeepSORT not available, falling back to simple tracking")
@@ -332,10 +330,7 @@ def _run_deepsort_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) 
         return tracks
 
     except Exception as e:
-        logger.error(f"Error in DeepSORT tracking: {e}")
-        import traceback
-
-        traceback.print_exc()
+        logger.exception(f"Error in DeepSORT tracking: {e}")
         return _run_simple_tracking(detections)
 
 
@@ -389,44 +384,12 @@ def _get_class_name_from_id(class_id: int) -> str:
     return class_mapping.get(class_id, "unknown")
 
 
-def set_tracker_type(tracker_type: str) -> bool:
-    """Set the type of tracker to use.
-
-    Args:
-        tracker_type: Type of tracker (only "deepsort" is supported)
-
-    Returns:
-        True if tracker type set successfully, False otherwise
-
-    Example:
-        set_tracker_type("deepsort")
-    """
-    global _deepsort_tracker
-    logger = get_logger("TRACKING")
-
-    tracker_type = tracker_type.lower()
-
-    if tracker_type != "deepsort":
-        logger.warning(f"Unsupported tracker type: {tracker_type}. Only 'deepsort' is supported.")
-        return False
-
-    logger.info(f"Setting tracker type to: {tracker_type}")
-
-    # Reset tracker instance to force reinitialization
-    _deepsort_tracker = None
-
-    reset_tracker()
-
-    return True
-
-
 def reset_tracker() -> None:
     """Reset the tracker state and clear all tracks.
 
     This should be called when switching videos or when tracking quality degrades.
     """
     global _deepsort_tracker, _track_histories, _frame_count
-    logger = get_logger("TRACKING")
 
     logger.info("Resetting tracker state")
 
@@ -474,13 +437,3 @@ def _update_track_history(track_id: int, center_point: Tuple[int, int]) -> None:
     max_length = get_setting("models.tracking.track_history_length", TRACK_HISTORY_MAX_LENGTH)
     if len(_track_histories[track_id]) > max_length:
         _track_histories[track_id] = _track_histories[track_id][-max_length:]
-
-
-def _load_default_tracker():
-    """Load the default tracker type."""
-    default_tracker = get_setting("models.tracking.default_tracker", "deepsort")
-    set_tracker_type(default_tracker)
-
-
-# Initialize default tracker when module is imported
-_load_default_tracker()

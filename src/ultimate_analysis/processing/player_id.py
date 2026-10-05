@@ -1,32 +1,27 @@
 """Player identification module - OCR and jersey number detection.
 
-This module handles identifying players by their jersey numbers using either
-EasyOCR for text recognition or YOLO models trained on digit detection.
-Includes probabilistic tracking for reliable jersey number identification.
+This module identifies players by their jersey numbers. The numbers are read by EasyOCR
+or by one of the readers in jersey_readers.py (models.player_id.method), and combined
+over time by probabilistic tracking.
 """
 
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-import cv2
 import numpy as np
 import yaml
-
-try:
-    import easyocr
-
-    EASYOCR_AVAILABLE = True
-except ImportError:
-    EASYOCR_AVAILABLE = False
-    # Import logger after we know easyocr is not available
-    from ..utils.logger import get_logger
-
-    get_logger("PLAYER_ID").warning("EasyOCR not available, using mock results")
 
 from ..config.settings import get_setting
 from ..constants import JERSEY_NUMBER_MAX, JERSEY_NUMBER_MIN
 from ..utils.logger import get_logger
+from .jersey_crops import (
+    best_number,
+    crop_top_fraction,
+    easyocr_readtext_parameters,
+    preprocess_crop,
+)
+from .jersey_readers import READER_LABELS, get_reader
 from .jersey_tracker import (
     add_jersey_measurement,
     get_best_jersey_number,
@@ -34,8 +29,20 @@ from .jersey_tracker import (
     get_jersey_tracker,
 )
 
-# Global player ID state - only EasyOCR is supported
+logger = get_logger("PLAYER_ID")
+
+try:
+    import easyocr
+
+    EASYOCR_AVAILABLE = True
+except ImportError:
+    EASYOCR_AVAILABLE = False
+    logger.warning("EasyOCR not available; jersey numbers will not be read")
+
+# Global player ID state
 _easyocr_reader = None
+# Reader chosen in the GUI; None means the configured one (models.player_id.method)
+_method_override: Optional[str] = None
 
 # Parsed easyocr_params.yaml, reloaded only when the file changes on disk
 _easyocr_config_path: Optional[Path] = None
@@ -43,20 +50,32 @@ _easyocr_config_mtime_ns: Optional[int] = None
 _easyocr_config_cache: Dict[str, Any] = {}
 
 
-def _get_player_id_setting(key: str, default: Any) -> Any:
-    """Fetch a player_id setting from config supporting both legacy and nested namespaces.
+def get_player_id_method() -> str:
+    """Name of the jersey reader in use: easyocr, parseq, florence, or yolo_digits."""
+    method = _method_override or get_setting("models.player_id.method", "easyocr")
+    return method if method in READER_LABELS else "easyocr"
 
-    Lookup order:
-      1. player_id.<key>
-      2. models.player_id.<key>
-    Environment overrides have been removed; only YAML is consulted.
-    """
-    # Direct path
-    value = get_setting(f"player_id.{key}", None)
-    if value is not None:
-        return value
-    # Fallback nested under models.player_id
-    return get_setting(f"models.player_id.{key}", default)
+
+def set_player_id_method(method: str) -> None:
+    """Choose the jersey reader for the following frames."""
+    global _method_override
+    if method not in READER_LABELS:
+        raise ValueError(f"Unknown player ID method: {method}")
+    _method_override = method
+
+
+def _get_text_detector() -> Any:
+    """The EasyOCR reader, whose text detector the PARSeq reader uses."""
+    _initialize_easyocr()
+    return _easyocr_reader
+
+
+def _get_active_reader() -> Optional[Any]:
+    """The reader replacing EasyOCR's recognition, or None to use EasyOCR."""
+    method = get_player_id_method()
+    if method == "easyocr":
+        return None
+    return get_reader(method, _get_text_detector)
 
 
 def run_player_id_on_tracks(
@@ -100,17 +119,16 @@ def run_player_id_on_tracks(
                 for jersey, prob, count in details['tracking_history']:
                     logger.debug(f"  {jersey}: {prob:.1%} ({count} measurements)")
     """
-    logger = get_logger("PLAYER_ID")
 
     player_identifications = {}
     if finalized_tracks is None:
         finalized_tracks = set()
 
     # Optimization settings
-    ocr_frame_interval = max(1, _get_player_id_setting("ocr_frame_interval", 1))
-    stagger_enabled = _get_player_id_setting("ocr_frame_interval_stagger", True)
-    finalized_threshold = _get_player_id_setting("finalized_certainty_threshold", 0.999)
-    verbose_debug = _get_player_id_setting("verbose_debug", False)
+    ocr_frame_interval = max(1, get_setting("models.player_id.ocr_frame_interval", 1))
+    stagger_enabled = get_setting("models.player_id.ocr_frame_interval_stagger", True)
+    finalized_threshold = get_setting("models.player_id.finalized_certainty_threshold", 0.999)
+    verbose_debug = get_setting("models.player_id.verbose_debug", False)
     total_timing = {"preprocessing_ms": 0.0, "ocr_ms": 0.0, "filtering_ms": 0.0}
     batch_timing: Dict[str, float] = {"preprocessing_ms": 0.0, "ocr_ms": 0.0, "filtering_ms": 0.0}
 
@@ -198,7 +216,7 @@ def run_player_id_on_tracks(
 
     # Run batch OCR processing if we have crops
     if player_crops:
-        batch_results, batch_timing = _run_batch_easyocr_detection(player_crops)
+        batch_results, batch_timing = _read_jersey_numbers(player_crops)
 
         # Process batch results
         for i, metadata in enumerate(track_metadata):
@@ -302,7 +320,7 @@ def run_player_id_on_tracks(
     return player_identifications, total_timing, finalized_tracks
 
 
-def _run_batch_easyocr_detection(
+def _read_jersey_numbers(
     crop_images: List[np.ndarray],
 ) -> Tuple[List[Tuple[str, Optional[Dict], Dict[str, float]]], Dict[str, float]]:
     """Run EasyOCR detection on a batch of cropped player images.
@@ -322,7 +340,6 @@ def _run_batch_easyocr_detection(
     Crops are read one after another: they all share a single GPU model, so a
     thread pool measured no faster than this loop and gave identical results.
     """
-    logger = get_logger("PLAYER_ID")
     batch_timing = {"preprocessing_ms": 0.0, "ocr_ms": 0.0, "filtering_ms": 0.0}
     batch_results = []
 
@@ -344,10 +361,14 @@ def _run_batch_easyocr_detection(
         logger.debug(f"Starting batch OCR processing for {len(crop_images)} crops")
 
         # Start preprocessing timer for batch
-        prep_start_time = time.time()
+        prep_start_time = time.perf_counter()
 
         # Load user configuration (same as individual processing)
         user_config = _load_easyocr_config()
+
+        # A reader other than EasyOCR takes the upper-body crop as it is; the contrast
+        # and scaling steps below are tuned for EasyOCR.
+        reader = _get_active_reader()
 
         # Preprocess all crops in batch
         processed_crops = []
@@ -362,7 +383,7 @@ def _run_batch_easyocr_detection(
 
                 crop_height, crop_width = crop_image.shape[:2]
                 if crop_width < min_crop_width or crop_height < min_crop_height:
-                    if get_setting("player_id.verbose_debug", False):
+                    if get_setting("models.player_id.verbose_debug", False):
                         logger.debug(
                             f"Batch crop {i} too small ({crop_width}x{crop_height}), skipping"
                         )
@@ -371,8 +392,12 @@ def _run_batch_easyocr_detection(
                     continue
 
                 # Apply preprocessing pipeline
-                processed_crop = _apply_crop_fraction(crop_image, crop_config)
-                final_processed_crop = _preprocess_crop(processed_crop, crop_config)
+                processed_crop = crop_top_fraction(crop_image, crop_config)
+                final_processed_crop = (
+                    preprocess_crop(processed_crop, crop_config)
+                    if reader is None
+                    else processed_crop
+                )
 
                 processed_crops.append(final_processed_crop)
                 crop_metadata.append(
@@ -388,50 +413,30 @@ def _run_batch_easyocr_detection(
                 )
 
             except Exception as e:
-                if get_setting("player_id.verbose_debug", False):
+                if get_setting("models.player_id.verbose_debug", False):
                     logger.debug(f"Error preprocessing batch crop {i}: {e}")
                 processed_crops.append(None)
                 crop_metadata.append(None)
 
         # End preprocessing timer
-        batch_timing["preprocessing_ms"] = (time.time() - prep_start_time) * 1000
+        batch_timing["preprocessing_ms"] = (time.perf_counter() - prep_start_time) * 1000
 
         # Start OCR timer for batch
-        ocr_start_time = time.time()
+        ocr_start_time = time.perf_counter()
 
-        # Get EasyOCR parameters
-        ocr_params = user_config.get("easyocr", {})
-        readtext_params = {
-            "text_threshold": ocr_params.get("text_threshold", 0.7),
-            "low_text": ocr_params.get("low_text", 0.6),
-            "link_threshold": ocr_params.get("link_threshold", 0.4),
-            "width_ths": ocr_params.get("width_ths", 0.4),
-            "height_ths": ocr_params.get("height_ths", 0.7),
-            "canvas_size": ocr_params.get("canvas_size", 2560),
-            "mag_ratio": ocr_params.get("mag_ratio", 2.0),
-            "slope_ths": ocr_params.get("slope_ths", 0.1),
-            "ycenter_ths": ocr_params.get("ycenter_ths", 0.5),
-            "y_ths": ocr_params.get("y_ths", 0.5),
-            "x_ths": ocr_params.get("x_ths", 1.0),
-            "paragraph": ocr_params.get("paragraph", False),
-            "adjust_contrast": ocr_params.get("adjust_contrast", 0.5),
-            "filter_ths": ocr_params.get("filter_ths", 0.003),
-            "batch_size": ocr_params.get("batch_size", 1),
-            "workers": ocr_params.get("workers", 0),
-            "decoder": ocr_params.get("decoder", "greedy"),
-            "beamWidth": ocr_params.get("beamWidth", 5),
-            "detail": ocr_params.get("detail", 1),
-        }
-
-        # Add character filtering if specified
-        if ocr_params.get("allowlist"):
-            readtext_params["allowlist"] = ocr_params["allowlist"]
+        readtext_params = easyocr_readtext_parameters(user_config.get("easyocr", {}))
 
         # Process valid crops
         valid_crops = [crop for crop in processed_crops if crop is not None]
         batch_ocr_results = []
 
-        if valid_crops:
+        if valid_crops and reader is not None:
+            try:
+                batch_ocr_results = reader.read(valid_crops)
+            except Exception as e:
+                logger.error(f"Error reading jersey numbers with {get_player_id_method()}: {e}")
+                batch_ocr_results = [[] for _ in valid_crops]
+        elif valid_crops:
             logger.debug(f"Running batch OCR on {len(valid_crops)} valid crops")
             for crop_index, crop in enumerate(valid_crops):
                 try:
@@ -441,7 +446,7 @@ def _run_batch_easyocr_detection(
                     batch_ocr_results.append([])
 
         # End OCR timer
-        batch_timing["ocr_ms"] = (time.time() - ocr_start_time) * 1000
+        batch_timing["ocr_ms"] = (time.perf_counter() - ocr_start_time) * 1000
 
         # Process results for each original crop
         valid_crop_index = 0
@@ -464,22 +469,14 @@ def _run_batch_easyocr_detection(
                 valid_crop_index += 1
 
                 # Filter low confidence detections (same as individual processing)
-                per_crop_filter_start = time.time()
+                per_crop_filter_start = time.perf_counter()
                 min_confidence = 0.5
                 filtered_ocr_results = []
                 for bbox, text, confidence in ocr_results:
                     if confidence >= min_confidence:
                         filtered_ocr_results.append((bbox, text, confidence))
 
-                # Find best numeric text
-                best_text = ""
-                best_confidence = 0.0
-
-                for bbox, text, confidence in filtered_ocr_results:
-                    clean_text = "".join(filter(str.isdigit, text))
-                    if clean_text and confidence > best_confidence:
-                        best_text = clean_text
-                        best_confidence = confidence
+                best_text, best_confidence = best_number(filtered_ocr_results)
 
                 # Prepare result
                 if best_text and _validate_jersey_number(best_text):
@@ -500,7 +497,7 @@ def _run_batch_easyocr_detection(
                     }
 
                 # End per-crop filtering timer and accumulate
-                filtering_ms = (time.time() - per_crop_filter_start) * 1000
+                filtering_ms = (time.perf_counter() - per_crop_filter_start) * 1000
                 individual_timing["filtering_ms"] = filtering_ms
                 batch_timing["filtering_ms"] += filtering_ms
 
@@ -517,10 +514,7 @@ def _run_batch_easyocr_detection(
         return batch_results, batch_timing
 
     except Exception as e:
-        logger.error(f"Error in batch OCR processing: {e}")
-        import traceback
-
-        traceback.print_exc()
+        logger.exception(f"Error in batch OCR processing: {e}")
 
         # Return empty results for all crops on error
         for _ in crop_images:
@@ -550,8 +544,8 @@ def _load_easyocr_config() -> Dict[str, Any]:
                     break
 
             if project_root is None:
-                if get_setting("player_id.verbose_debug", False):
-                    print("[PLAYER_ID] Could not find configs directory")
+                if get_setting("models.player_id.verbose_debug", False):
+                    logger.error("Could not find configs directory")
                 return {}
 
             _easyocr_config_path = project_root / "configs" / "easyocr_params.yaml"
@@ -561,8 +555,8 @@ def _load_easyocr_config() -> Dict[str, Any]:
         try:
             mtime_ns = config_path.stat().st_mtime_ns
         except FileNotFoundError:
-            if get_setting("player_id.verbose_debug", False):
-                print(f"[PLAYER_ID] Config file not found: {config_path}")
+            if get_setting("models.player_id.verbose_debug", False):
+                logger.warning(f"Config file not found: {config_path}")
             return {}
 
         if mtime_ns != _easyocr_config_mtime_ns:
@@ -574,121 +568,9 @@ def _load_easyocr_config() -> Dict[str, Any]:
         return _easyocr_config_cache
 
     except Exception as e:
-        if get_setting("player_id.verbose_debug", False):
-            print(f"[PLAYER_ID] Error loading config: {e}")
+        if get_setting("models.player_id.verbose_debug", False):
+            logger.error(f"Error loading config: {e}")
         return {}
-
-
-def _apply_crop_fraction(image: np.ndarray, preprocess_config: Dict[str, Any]) -> np.ndarray:
-    """Apply crop fraction to image (same as tuning tab)."""
-    crop_fraction = preprocess_config.get("crop_top_fraction", 0.33)
-    if crop_fraction > 0:
-        h = image.shape[0]
-        crop_pixels = int(h * crop_fraction)
-        return image[:crop_pixels, :]
-    return image
-
-
-def _preprocess_crop(crop: np.ndarray, preprocess_params: Dict[str, Any]) -> np.ndarray:
-    """Apply preprocessing to a crop (copied from tuning tab)."""
-    processed = crop.copy()
-
-    # Resize (absolute takes priority over factor)
-    abs_width = preprocess_params.get("resize_absolute_width", 0)
-    abs_height = preprocess_params.get("resize_absolute_height", 0)
-    resize_factor = preprocess_params.get("resize_factor", 1.0)
-
-    if abs_width > 0 and abs_height > 0:
-        # Absolute resize
-        processed = cv2.resize(processed, (abs_width, abs_height))
-    elif abs_width > 0:
-        # Absolute width, maintain aspect ratio
-        current_height, current_width = processed.shape[:2]
-        new_height = int(current_height * abs_width / current_width)
-        processed = cv2.resize(processed, (abs_width, new_height))
-    elif abs_height > 0:
-        # Absolute height, maintain aspect ratio
-        current_height, current_width = processed.shape[:2]
-        new_width = int(current_width * abs_height / current_height)
-        processed = cv2.resize(processed, (new_width, abs_height))
-    elif resize_factor != 1.0:
-        # Factor-based resize
-        new_height = int(processed.shape[0] * resize_factor)
-        new_width = int(processed.shape[1] * resize_factor)
-        processed = cv2.resize(processed, (new_width, new_height))
-
-    # Color mode conversion
-    if preprocess_params.get("bw_mode", True):
-        processed = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
-        processed = cv2.cvtColor(processed, cv2.COLOR_GRAY2BGR)
-    elif not preprocess_params.get("colour_mode", False):
-        # Default grayscale processing
-        if len(processed.shape) == 3:
-            processed = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
-            processed = cv2.cvtColor(processed, cv2.COLOR_GRAY2BGR)
-
-    # Denoising
-    if preprocess_params.get("denoise", False):
-        if len(processed.shape) == 3:
-            processed = cv2.fastNlMeansDenoisingColored(processed, None, 10, 10, 7, 21)
-        else:
-            processed = cv2.fastNlMeansDenoising(processed, None, 10, 7, 21)
-
-    # Contrast and brightness
-    alpha = preprocess_params.get("contrast_alpha", 1.0)
-    beta = preprocess_params.get("brightness_beta", 0)
-    if alpha != 1.0 or beta != 0:
-        processed = cv2.convertScaleAbs(processed, alpha=alpha, beta=beta)
-
-    # Gaussian blur
-    blur_kernel = preprocess_params.get("gaussian_blur", 13)
-    if blur_kernel > 0:
-        # Ensure kernel size is odd
-        if blur_kernel % 2 == 0:
-            blur_kernel += 1
-        processed = cv2.GaussianBlur(processed, (blur_kernel, blur_kernel), 0)
-
-    # CLAHE enhancement
-    if preprocess_params.get("enhance_contrast", False):
-        clip_limit = preprocess_params.get("clahe_clip_limit", 3.0)
-        grid_size = preprocess_params.get("clahe_grid_size", 8)
-
-        if len(processed.shape) == 3:
-            # Convert to LAB, apply CLAHE to L channel
-            lab = cv2.cvtColor(processed, cv2.COLOR_BGR2LAB)
-            clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(grid_size, grid_size))
-            lab[:, :, 0] = clahe.apply(lab[:, :, 0])
-            processed = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-        else:
-            # Grayscale
-            clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(grid_size, grid_size))
-            processed = clahe.apply(processed)
-
-    # Sharpening
-    if preprocess_params.get("sharpen", True):
-        strength = preprocess_params.get("sharpen_strength", 0.05)
-        kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]]) * strength
-        kernel[1, 1] = 1 + (8 * strength)  # Adjust center to maintain brightness
-        processed = cv2.filter2D(processed, -1, kernel)
-
-    # Upscaling
-    if preprocess_params.get("upscale", True):
-        if preprocess_params.get("upscale_to_size", True):
-            # Upscale to fixed size
-            target_size = preprocess_params.get("upscale_target_size", 256)
-            processed = cv2.resize(
-                processed, (target_size, target_size), interpolation=cv2.INTER_CUBIC
-            )
-        else:
-            # Upscale by factor
-            factor = preprocess_params.get("upscale_factor", 3.0)
-            new_height = int(processed.shape[0] * factor)
-            new_width = int(processed.shape[1] * factor)
-            processed = cv2.resize(
-                processed, (new_width, new_height), interpolation=cv2.INTER_CUBIC
-            )
-
-    return processed
 
 
 def _initialize_easyocr() -> None:
@@ -698,8 +580,7 @@ def _initialize_easyocr() -> None:
     if _easyocr_reader is not None:
         return
 
-    logger = get_logger("PLAYER_ID")
-    if get_setting("player_id.verbose_debug", False):
+    if get_setting("models.player_id.verbose_debug", False):
         logger.debug("Initializing EasyOCR reader")
 
     try:
@@ -713,7 +594,7 @@ def _initialize_easyocr() -> None:
             gpu = easyocr_config.get("gpu", True)
 
             _easyocr_reader = easyocr.Reader(languages, gpu=gpu)
-            if get_setting("player_id.verbose_debug", False):
+            if get_setting("models.player_id.verbose_debug", False):
                 logger.debug("EasyOCR reader initialized successfully")
         else:
             logger.warning("EasyOCR not available, using mock reader")
@@ -749,9 +630,9 @@ def initialize_player_id_system() -> None:
 
     Safe to call multiple times - initialization only happens once.
     """
-    logger = get_logger("PLAYER_ID")
     logger.info("Pre-initializing player ID system...")
     _initialize_easyocr()
+    _get_active_reader()
     if EASYOCR_AVAILABLE and _easyocr_reader is not None:
         logger.info("Player ID system pre-initialized successfully")
     else:

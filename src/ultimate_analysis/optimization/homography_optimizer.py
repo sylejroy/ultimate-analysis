@@ -11,6 +11,9 @@ import cv2
 import numpy as np
 
 from ..config.settings import get_setting
+from ..utils.logger import get_logger
+
+logger = get_logger("HOMOGRAPHY_GA")
 
 
 class HomographyIndividual:
@@ -233,7 +236,7 @@ class HomographyOptimizer:
             return final_score
 
         except Exception as e:
-            print(f"[GA_OPTIMIZER] Error calculating fitness: {e}")
+            logger.error(f"Error calculating fitness: {e}")
             individual.fitness = 0.0
             return 0.0
 
@@ -305,7 +308,6 @@ class HomographyOptimizer:
                     and 0 <= end_2d[0] < output_width
                     and 0 <= end_2d[1] < output_height
                 ):
-
                     # Calculate alignment score
                     # Check vertical alignment (90° or 270°)
                     vertical_deviation = min(abs(90 - abs(angle)), abs(270 - abs(angle)))

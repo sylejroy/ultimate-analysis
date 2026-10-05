@@ -1,18 +1,82 @@
-"""Video player component for handling video playback.
-
-This module provides a simple video player using OpenCV for frame extraction
-and basic playback controls.
-"""
+"""Video files: discovery, metadata, and frame-by-frame reading with OpenCV."""
 
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
 
 from ..config.settings import get_setting
-from ..constants import MAX_FPS, MIN_FPS, SUPPORTED_VIDEO_EXTENSIONS
+from ..constants import DEFAULT_PATHS, MAX_FPS, MIN_FPS, SUPPORTED_VIDEO_EXTENSIONS
+from .logger import get_logger
+
+logger = get_logger("VIDEO")
+
+
+def find_video_files() -> List[str]:
+    """Paths of the videos in the development and raw video folders, sorted."""
+    video_files = []
+    for folder in (Path(DEFAULT_PATHS["DEV_DATA"]), Path(DEFAULT_PATHS["RAW_VIDEOS"])):
+        if folder.exists():
+            video_files.extend(
+                str(path)
+                for path in folder.glob("*")
+                if path.is_file() and path.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS
+            )
+    return sorted(video_files)
+
+
+def get_video_duration(video_path: str) -> str:
+    """Get video duration as formatted string.
+
+    Args:
+        video_path: Path to video file
+
+    Returns:
+        Duration string in format "MM:SS" or "Unknown"
+    """
+    info = get_video_info(video_path)
+    return info["duration_formatted"] if info is not None else "Unknown"
+
+
+def get_video_info(video_path: str) -> Optional[dict]:
+    """Get comprehensive video information.
+
+    Args:
+        video_path: Path to video file
+
+    Returns:
+        Dictionary with video properties or None if failed
+    """
+    cap = None
+    try:
+        cap = cv2.VideoCapture(video_path)
+        if cap.isOpened():
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            duration_seconds = frame_count / fps if fps > 0 else 0
+            minutes = int(duration_seconds // 60)
+            seconds = int(duration_seconds % 60)
+
+            return {
+                "fps": fps,
+                "frame_count": frame_count,
+                "width": width,
+                "height": height,
+                "duration_seconds": duration_seconds,
+                "duration_formatted": f"{minutes:02d}:{seconds:02d}" if fps > 0 else "Unknown",
+            }
+
+    except Exception as e:
+        logger.error(f"Error getting video info for {video_path}: {e}")
+    finally:
+        if cap is not None:
+            cap.release()
+
+    return None
 
 
 class VideoPlayer:
@@ -48,16 +112,16 @@ class VideoPlayer:
         Returns:
             True if video loaded successfully, False otherwise
         """
-        print(f"[VIDEO_PLAYER] Loading video: {video_path}")
+        logger.info(f"Loading video: {video_path}")
 
         # Validate file path
         if not Path(video_path).exists():
-            print(f"[VIDEO_PLAYER] Video file not found: {video_path}")
+            logger.warning(f"Video file not found: {video_path}")
             return False
 
         # Check file extension
         if not video_path.lower().endswith(SUPPORTED_VIDEO_EXTENSIONS):
-            print(f"[VIDEO_PLAYER] Unsupported video format: {video_path}")
+            logger.debug(f"Unsupported video format: {video_path}")
             return False
 
         # Close existing video if open
@@ -68,7 +132,7 @@ class VideoPlayer:
             self.cap = cv2.VideoCapture(video_path)
 
             if not self.cap.isOpened():
-                print(f"[VIDEO_PLAYER] Failed to open video: {video_path}")
+                logger.error(f"Failed to open video: {video_path}")
                 self.close_video()
                 return False
 
@@ -80,22 +144,21 @@ class VideoPlayer:
 
             # Validate and clamp FPS
             if not np.isfinite(self.fps) or self.fps < MIN_FPS or self.fps > MAX_FPS:
-                print(f"[VIDEO_PLAYER] Invalid FPS {self.fps}, using default")
+                logger.warning(f"Invalid FPS {self.fps}, using default")
                 self.fps = get_setting("video.default_fps", 25.0)
 
             self.current_video_path = video_path
             self.current_frame_idx = 0
 
-            print("[VIDEO_PLAYER] Video loaded successfully:")
-            print(f"  - Path: {video_path}")
-            print(f"  - Frames: {self.total_frames}")
-            print(f"  - FPS: {self.fps}")
-            print(f"  - Duration: {self.total_frames / self.fps:.1f}s")
+            logger.info(
+                f"Video loaded: {video_path} ({self.total_frames} frames, {self.fps:.2f} fps, "
+                f"{self.total_frames / self.fps:.1f}s)"
+            )
 
             return True
 
         except Exception as e:
-            print(f"[VIDEO_PLAYER] Error loading video {video_path}: {e}")
+            logger.error(f"Error loading video {video_path}: {e}")
             self.close_video()
             return False
 
@@ -112,7 +175,7 @@ class VideoPlayer:
         ret, frame = decoded if decoded is not None else self.cap.read()
 
         if not ret:
-            print("[VIDEO_PLAYER] End of video reached")
+            logger.debug("End of video reached")
             return None
 
         self.current_frame_idx += 1
@@ -142,11 +205,11 @@ class VideoPlayer:
             if not self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx):
                 return False
             self.current_frame_idx = frame_idx
-            print(f"[VIDEO_PLAYER] Seeked to frame {frame_idx}")
+            logger.debug(f"Seeked to frame {frame_idx}")
             return True
 
         except Exception as e:
-            print(f"[VIDEO_PLAYER] Error seeking to frame {frame_idx}: {e}")
+            logger.error(f"Error seeking to frame {frame_idx}: {e}")
             return False
 
     def get_current_frame(self) -> Optional[np.ndarray]:
@@ -213,7 +276,7 @@ class VideoPlayer:
         """Close the currently loaded video and release resources."""
         self._take_decode_ahead()
         if self.cap is not None:
-            print(f"[VIDEO_PLAYER] Closing video: {self.current_video_path}")
+            logger.info(f"Closing video: {self.current_video_path}")
             self.cap.release()
             self.cap = None
 

@@ -5,13 +5,12 @@
 app:
   name: "Ultimate Analysis"
   version: "0.1.0"
-  debug: false
   log_level: "INFO"
 
 # Video Processing Settings
 video:
-  supported_formats: [".mp4", ".avi", ".mov", ".mkv", ".wmv"]
-  default_fps: 25
+  default_fps: 25                # Used when a video file reports no valid frame rate
+  default_video: "portland_vs_san_francisco_2024_snippet_4_40912.mp4"  # Opened at startup if present
 
 # Model Configuration
 models:
@@ -25,12 +24,12 @@ models:
   
   # Separate player and disc detection models
   player_detection:
-    default_model: "data/models/detection/20250802_1_detection_yolo11s_object_detection.v3i.yolov8/finetune_20250802_102035/weights/best.pt"
+    default_model: "data/models/detection/20261005_1_detection_yolo26s_players_merged.v2.yolov8/finetune_20261005_010313/weights/best.pt"
     confidence_threshold: 0.5
     nms_threshold: 0.45
     
   disc_detection:
-    default_model: "data/models/detection/20250913_4_detection_disc_yolo11s_object_detection_disc.v1i.yolov8/finetune_20250913_205313/weights/best.pt"
+    default_model: "data/models/detection/20261004_1_detection_yolo26s_discs_merged.v2.yolov8/finetune_20261004_231958/weights/best.pt"
     confidence_threshold: 0.3
     nms_threshold: 0.45
     adaptive_skip: true          # Skip disc model when no disc detected recently
@@ -90,7 +89,6 @@ models:
           show_edge_points: true # Whether to visualize filtered edge points
   
   tracking:
-    default_tracker: "deepsort"
     track_history_length: 300
     
     # DeepSORT specific settings (optimized for performance)
@@ -100,7 +98,21 @@ models:
     max_cosine_distance: 0.5     # Feature similarity threshold (tighter for faster matching)
     nn_budget: 50                # Feature budget per class (reduced from 100 for speed)
     
+  # Possession: the disc belongs to the player whose box it is in
+  possession:
+    confirm_frames: 10           # Frames the disc must be seen at another player (or at none) before the holder changes
+    box_margin: 0.15             # Player boxes are widened by this fraction; a held disc is often just outside
+
   player_id:
+    # Jersey number reader: easyocr, parseq, florence, or yolo_digits (also selectable in the GUI).
+    # parseq read 18 of 23 test players with none wrong, at EasyOCR's speed; see README.
+    method: "parseq"
+    florence:
+      min_confidence: 0.7          # Below this the model is guessing; lower finds more numbers but more wrong ones
+    yolo_digits:
+      model: ""                    # Digit detector weights; empty = newest detection run trained on a digits dataset
+      min_confidence: 0.5
+
     # Performance optimization: only run OCR on a subset of frames per track
     ocr_frame_interval: 5          # Run OCR for a given track every N frames (>=1)
     ocr_frame_interval_stagger: true # Stagger per track using track_id % interval to spread load

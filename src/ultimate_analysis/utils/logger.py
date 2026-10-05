@@ -1,85 +1,33 @@
-"""
-Logging utilities for the Ultimate Analysis application.
+"""Console logging for the application.
 
-This module provides a centralized logging system that respects the application's
-debug configuration settings.
+Every module gets its logger with get_logger("TAG"). The level comes from app.log_level
+and the line format from logging.format in configs/default.yaml.
 """
 
 import logging
 import sys
-from typing import Optional
+from typing import Dict
 
-from ultimate_analysis.config.settings import get_setting
+from ..config.settings import get_setting
+
+_loggers: Dict[str, logging.Logger] = {}
 
 
-class DebugLogger:
-    """A logger that respects the app's debug configuration."""
-
-    _loggers = {}
-    _debug_enabled: Optional[bool] = None
-    _log_level: Optional[str] = None
-
-    @classmethod
-    def get_logger(cls, name: str) -> logging.Logger:
-        """Get or create a logger for the given module name."""
-        if name not in cls._loggers:
-            cls._loggers[name] = cls._create_logger(name)
-        return cls._loggers[name]
-
-    @classmethod
-    def _create_logger(cls, name: str) -> logging.Logger:
-        """Create a new logger with proper configuration."""
+def get_logger(name: str) -> logging.Logger:
+    """Logger that writes to the console under the given name."""
+    if name not in _loggers:
         logger = logging.getLogger(name)
-
-        # Only set up handler if not already done
         if not logger.handlers:
             handler = logging.StreamHandler(sys.stdout)
-            formatter = logging.Formatter(
-                get_setting(
-                    "logging.format", "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+            handler.setFormatter(
+                logging.Formatter(
+                    get_setting(
+                        "logging.format", "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+                    )
                 )
             )
-            handler.setFormatter(formatter)
             logger.addHandler(handler)
-
-        # Set level based on config
-        log_level = cls._get_log_level()
-        logger.setLevel(getattr(logging, log_level))
-
-        return logger
-
-    @classmethod
-    def _get_log_level(cls) -> str:
-        """Get the log level from config, with caching."""
-        if cls._log_level is None:
-            cls._log_level = get_setting("app.log_level", "INFO").upper()
-        return cls._log_level
-
-    @classmethod
-    def is_debug_enabled(cls) -> bool:
-        """Check if debug mode is enabled in config."""
-        if cls._debug_enabled is None:
-            cls._debug_enabled = get_setting("app.debug", False)
-        return cls._debug_enabled
-
-    @classmethod
-    def debug_print(cls, message: str, module_name: str = "DEBUG") -> None:
-        """Print a debug message only if debug mode is enabled."""
-        if cls.is_debug_enabled():
-            logger = cls.get_logger(module_name)
-            logger.debug(message)
-
-
-def get_logger(module_name: str) -> logging.Logger:
-    """Convenience function to get a logger for a module."""
-    return DebugLogger.get_logger(module_name)
-
-
-def debug_print(message: str, module_name: str = "DEBUG") -> None:
-    """Convenience function for debug printing."""
-    DebugLogger.debug_print(message, module_name)
-
-
-def is_debug_enabled() -> bool:
-    """Convenience function to check if debug is enabled."""
-    return DebugLogger.is_debug_enabled()
+        level = str(get_setting("app.log_level", "INFO")).upper()
+        logger.setLevel(getattr(logging, level, logging.INFO))
+        _loggers[name] = logger
+    return _loggers[name]

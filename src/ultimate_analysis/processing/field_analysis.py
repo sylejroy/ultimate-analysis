@@ -20,6 +20,8 @@ import numpy as np
 from ..config.settings import get_setting
 from ..utils.logger import get_logger
 
+logger = get_logger("FIELD_ANALYSIS")
+
 # Cache for morphological kernels to avoid recreation
 _kernel_cache = {}
 
@@ -69,7 +71,7 @@ def _get_morphological_kernel(size: int, shape=cv2.MORPH_ELLIPSE) -> np.ndarray:
     return _kernel_cache[cache_key]
 
 
-def create_unified_field_mask_processing(
+def create_unified_field_mask(
     segmentation_results: List[Any], frame_shape: Tuple[int, int]
 ) -> Optional[np.ndarray]:
     """Create a unified mask combining all segmentation classes into one binary mask.
@@ -123,7 +125,6 @@ def create_unified_field_mask_processing(
             np.maximum(unified_mask, (combined > 0.5).view(np.uint8), out=unified_mask)
 
         except Exception as e:
-            logger = get_logger("FIELD_ANALYSIS")
             logger.error(f"Error creating unified mask: {e}")
 
     # Apply morphological operations to smooth the mask
@@ -133,7 +134,7 @@ def create_unified_field_mask_processing(
     return unified_mask if cv2.countNonZero(unified_mask) else None
 
 
-def calculate_field_contour_processing(
+def calculate_field_contour(
     unified_mask: np.ndarray, simplify_epsilon: float = None, min_contour_area: int = None
 ) -> Optional[np.ndarray]:
     """Calculate and simplify the contour of the field mask.
@@ -168,7 +169,6 @@ def calculate_field_contour_processing(
         # Check if contour meets minimum area requirement
         contour_area = cv2.contourArea(largest_contour)
         if contour_area < min_contour_area:
-            logger = get_logger("FIELD_ANALYSIS")
             logger.debug(f"Contour area {contour_area} below threshold {min_contour_area}")
             return None
 
@@ -177,7 +177,6 @@ def calculate_field_contour_processing(
         epsilon = simplify_epsilon * perimeter
         simplified_contour = cv2.approxPolyDP(largest_contour, epsilon, True)
 
-        logger = get_logger("FIELD_ANALYSIS")
         logger.debug(
             f"Original contour points: {len(largest_contour)}, simplified: {len(simplified_contour)}"
         )
@@ -185,7 +184,6 @@ def calculate_field_contour_processing(
         return simplified_contour
 
     except Exception as e:
-        logger = get_logger("FIELD_ANALYSIS")
         logger.error(f"Error calculating field contour: {e}")
         return None
 
@@ -245,7 +243,6 @@ def apply_morphological_smoothing(
         return mask_binary
 
     except Exception as e:
-        logger = get_logger("FIELD_ANALYSIS")
         logger.error(f"Error in morphological smoothing: {e}")
         return mask
 
@@ -282,7 +279,6 @@ def _fill_holes_flood_fill_optimized(mask: np.ndarray) -> np.ndarray:
         return filled_mask.astype(np.uint8)
 
     except Exception as e:
-        logger = get_logger("FIELD_ANALYSIS")
         logger.error(f"Error in optimized hole filling: {e}")
         return mask
 
@@ -293,6 +289,7 @@ try:
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
+
     # Fallback implementation will be used automatically when needed
 
 
@@ -568,7 +565,7 @@ def fit_field_lines_ransac(
         )
 
     except Exception as e:
-        print(f"[FIELD_ANALYSIS] Error in RANSAC line fitting: {e}")
+        logger.error(f"Error in RANSAC line fitting: {e}")
         return None, None, None, np.array([]).reshape(0, 2), {}, {}
 
 
@@ -591,7 +588,6 @@ def _fit_line_ransac_sklearn(
     points: np.ndarray, distance_threshold: float, min_samples: int, max_trials: int
 ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, float]]:
     """Fit a line using sklearn RANSAC."""
-    logger = get_logger("FIELD_ANALYSIS")
 
     try:
         # Validate input dimensions once
@@ -657,7 +653,6 @@ def _fit_line_ransac_numpy(
     points: np.ndarray, distance_threshold: float, min_samples: int, max_trials: int
 ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, float]]:
     """Fit a line with RANSAC using perpendicular distances, then refit on the inliers."""
-    logger = get_logger("FIELD_ANALYSIS")
 
     try:
         num_points = len(points)
@@ -720,3 +715,104 @@ def _fit_line_ransac_numpy(
     except Exception as e:
         logger.error(f"Error in numpy RANSAC fitting: {e}")
         return None
+
+
+def extract_raw_lines_from_segmentation(
+    segmentation_results: List[Any], frame_shape: Tuple[int, int]
+) -> Tuple[List[Tuple[np.ndarray, np.ndarray]], List[float]]:
+    """Extract raw RANSAC lines directly from segmentation results.
+
+    Args:
+        segmentation_results: YOLO segmentation results
+        frame_shape: Shape of the frame (height, width)
+
+    Returns:
+        Tuple of (detected_lines, confidences) where:
+        - detected_lines: List of (start_point, end_point) tuples
+        - confidences: List of confidence scores for each line
+    """
+    unified_mask = create_unified_field_mask(segmentation_results, frame_shape)
+    detected_lines, confidences, _, _ = fit_lines_from_mask(unified_mask)
+    return detected_lines, confidences
+
+
+def fit_lines_from_mask(
+    unified_mask: np.ndarray,
+) -> Tuple[List[Tuple[np.ndarray, np.ndarray]], List[float], Optional[np.ndarray], Optional[tuple]]:
+    """Fit RANSAC lines to a unified mask, keeping the intermediate geometry.
+
+    RANSAC is randomized, so callers that both use and draw the lines should
+    run it once through this function and reuse the returned fit.
+
+    Args:
+        unified_mask: Binary mask where 1 indicates field area
+
+    Returns:
+        Tuple of (detected_lines, confidences, simplified_contour, ransac_fit) where
+        ransac_fit is the raw fit_field_lines_ransac result (None if no contour was found)
+    """
+    detected_lines = []
+    confidences = []
+    simplified_contour = None
+    result = None
+
+    if unified_mask is None or not np.any(unified_mask):
+        return detected_lines, confidences, simplified_contour, result
+
+    try:
+        # Import here to avoid circular imports
+
+        # Calculate contour for RANSAC
+        simplified_contour = calculate_field_contour(unified_mask)
+
+        if simplified_contour is not None:
+            # Get RANSAC parameters
+            num_lines = get_setting("models.segmentation.contour.ransac.num_lines", 4)
+            distance_threshold = get_setting(
+                "models.segmentation.contour.ransac.distance_threshold", 10.0
+            )
+            min_samples = get_setting("models.segmentation.contour.ransac.min_samples", 2)
+            max_trials = get_setting("models.segmentation.contour.ransac.max_trials", 1000)
+
+            # Create dummy frame for RANSAC (only shape is used)
+            frame_shape = unified_mask.shape
+            dummy_frame = np.zeros((frame_shape[0], frame_shape[1], 3), dtype=np.uint8)
+
+            # Run RANSAC line fitting
+            result = fit_field_lines_ransac(
+                simplified_contour,
+                dummy_frame,
+                num_lines=num_lines,
+                distance_threshold=distance_threshold,
+                min_samples=min_samples,
+                max_trials=max_trials,
+            )
+
+            if result and result[0]:  # Check if fitted_lines exist
+                fitted_lines, outlier_points, inlier_points, edge_filtered_points, _, _ = result
+
+                # Extract lines with confidence based on inlier ratio
+                total_contour_points = len(simplified_contour)
+
+                for i, (start_point, end_point) in enumerate(fitted_lines):
+                    detected_lines.append((start_point, end_point))
+
+                    # Calculate confidence based on inlier count
+                    if i < len(inlier_points) and len(inlier_points[i]) > 0:
+                        inlier_count = len(inlier_points[i])
+                        # Confidence based on inlier ratio (normalized to expected points per line)
+                        expected_points_per_line = max(1, total_contour_points // num_lines)
+                        confidence = min(0.95, inlier_count / expected_points_per_line)
+                    else:
+                        confidence = 0.3  # Low confidence for lines without inliers
+
+                    confidences.append(confidence)
+
+                logger.debug(
+                    f"Extracted {len(detected_lines)} lines from mask with confidences: {[f'{c:.3f}' for c in confidences]}"
+                )
+
+    except Exception as e:
+        logger.error(f"Error extracting lines from mask: {e}")
+
+    return detected_lines, confidences, simplified_contour, result

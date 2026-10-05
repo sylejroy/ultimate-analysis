@@ -9,12 +9,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
-import yaml
 
 from ..config.settings import get_setting
-from ..constants import FALLBACK_DEFAULTS
 from ..utils.logger import get_logger
+from ..utils.model_files import default_model_path, get_training_image_size
 from .tensorrt_engines import get_engine
+
+logger = get_logger("INFERENCE")
 
 try:
     from ultralytics import YOLO
@@ -24,7 +25,7 @@ try:
     # Newer Ultralytics replaced `half` with `quantize` and warns on every call otherwise
     FP16_KWARGS = {"quantize": 16} if "quantize" in DEFAULT_CFG_DICT else {"half": True}
 except ImportError:
-    print("[INFERENCE] Warning: ultralytics not available, inference will be disabled")
+    logger.warning("ultralytics not available, inference will be disabled")
     YOLO_AVAILABLE = False
     FP16_KWARGS = {}
 
@@ -46,37 +47,6 @@ def reset_inference_state() -> None:
     """Resume disc detection when the video or playback position changes."""
     global _frames_since_last_disc
     _frames_since_last_disc = 0
-
-
-def _get_model_training_params(model_path: str) -> Dict[str, Any]:
-    """Extract training parameters from model's args.yaml file.
-
-    Args:
-        model_path: Path to the model file (.pt)
-
-    Returns:
-        Dictionary of training parameters, or empty dict if not found
-    """
-    try:
-        model_path = Path(model_path)
-
-        # Ultralytics writes args.yaml to the run folder, one level above weights/
-        args_yaml_path = model_path.parent.parent / "args.yaml"
-        if not args_yaml_path.exists():
-            args_yaml_path = model_path.parent / "args.yaml"
-
-        if args_yaml_path.exists():
-            with open(args_yaml_path, "r") as f:
-                args = yaml.safe_load(f)
-                print(f"[INFERENCE] Loaded training parameters from {args_yaml_path}")
-                return args if args else {}
-        else:
-            print(f"[INFERENCE] No args.yaml found at {args_yaml_path}")
-
-    except Exception as e:
-        print(f"[INFERENCE] Error reading model training parameters: {e}")
-
-    return {}
 
 
 # Detected class -> (settings prefix, model type shown by the visualization)
@@ -211,14 +181,39 @@ def _predict_detections(
         timing["postprocessing"] = time.perf_counter() - postprocess_start
 
     except Exception as e:
-        print(f"[INFERENCE] Error during {'/'.join(roles)} model inference: {e}")
-        import traceback
-
-        traceback.print_exc()
+        logger.exception(f"Error during {'/'.join(roles)} model inference: {e}")
 
     timing["total"] = time.perf_counter() - total_start
 
     return detections, timing
+
+
+def load_detection_model(model_path: str) -> Optional[Tuple[Any, int]]:
+    """Load detection weights for use outside the live pipeline.
+
+    The pipeline's own player and disc models are set with set_player_model and
+    set_disc_model; a tool that analyses single frames loads its own copy here, so
+    choosing a model in the tool does not change what the pipeline runs.
+
+    Returns:
+        (model, image size it runs at), or None if the weights cannot be loaded
+    """
+    model_file_path = _resolve_model_path(model_path)
+    if model_file_path is None or not YOLO_AVAILABLE:
+        return None
+    try:
+        return YOLO(model_file_path), get_training_image_size(model_file_path)
+    except Exception as e:
+        logger.error(f"Failed to load detection model {model_path}: {e}")
+        return None
+
+
+def detect_players(frame: np.ndarray, model: Any, model_imgsz: int) -> List[Dict[str, Any]]:
+    """Players a model finds in a frame, with the pipeline's player detection settings."""
+    detections, _ = _run_single_model_inference(
+        frame, model, model_imgsz, "models.player_detection", "player"
+    )
+    return detections
 
 
 def _resolve_model_path(model_path: str) -> Optional[str]:
@@ -238,7 +233,7 @@ def _resolve_model_path(model_path: str) -> Optional[str]:
         if Path(model_path).exists():
             model_file_path = model_path
         else:
-            print(f"[INFERENCE] Absolute path does not exist: {model_path}")
+            logger.warning(f"Absolute path does not exist: {model_path}")
             return None
     else:
         # If it's just a filename, try to find it in the models directory
@@ -256,7 +251,7 @@ def _resolve_model_path(model_path: str) -> Optional[str]:
 
     # Validate model path exists
     if model_file_path is None or not Path(model_file_path).exists():
-        print(f"[INFERENCE] Model file not found: {model_path}")
+        logger.warning(f"Model file not found: {model_path}")
         return None
 
     return model_file_path
@@ -269,7 +264,6 @@ def warmup_models() -> None:
     This reduces first-frame latency by pre-allocating GPU memory and
     initializing CUDA kernels.
     """
-    logger = get_logger("INFERENCE")
 
     if not YOLO_AVAILABLE:
         return
@@ -312,18 +306,14 @@ def _load_default_models() -> None:
 
     # Load default player model
     if _player_model is None:
-        default_player_model = get_setting(
-            "models.player_detection.default_model", FALLBACK_DEFAULTS["model_player_detection"]
-        )
-        print(f"[INFERENCE] Loading default player model: {default_player_model}")
+        default_player_model = default_model_path("player_detection")
+        logger.debug(f"Loading default player model: {default_player_model}")
         set_player_model(default_player_model)
 
     # Load default disc model
     if _disc_model is None:
-        default_disc_model = get_setting(
-            "models.disc_detection.default_model", FALLBACK_DEFAULTS["model_disc_detection"]
-        )
-        print(f"[INFERENCE] Loading default disc model: {default_disc_model}")
+        default_disc_model = default_model_path("disc_detection")
+        logger.debug(f"Loading default disc model: {default_disc_model}")
         set_disc_model(default_disc_model)
 
 
@@ -342,37 +332,32 @@ def set_player_model(model_path: str) -> bool:
         return True
 
     if not YOLO_AVAILABLE:
-        print("[INFERENCE] YOLO not available, cannot load player model")
+        logger.error("YOLO not available, cannot load player model")
         return False
 
-    print(f"[INFERENCE] Setting player detection model: {model_path}")
+    logger.info(f"Setting player detection model: {model_path}")
 
     model_file_path = _resolve_model_path(model_path)
     if model_file_path is None:
         return False
 
     try:
-        print(f"[INFERENCE] Loading player YOLO model from: {model_file_path}")
+        logger.debug(f"Loading player YOLO model from: {model_file_path}")
         # The same weights in both roles are loaded once and run in a single pass
         _player_model = _disc_model if model_path == _disc_model_path else YOLO(model_file_path)
         _player_model_path = model_path
 
-        # Load training parameters to get the image size used during training
-        training_params = _get_model_training_params(model_file_path)
-        _player_model_imgsz = training_params.get("imgsz", 640)
+        _player_model_imgsz = get_training_image_size(model_file_path)
 
-        print(f"[INFERENCE] Player model loaded successfully: {model_path}")
-        print(f"[INFERENCE] Player model image size: {_player_model_imgsz}")
+        logger.info(f"Player model loaded successfully: {model_path}")
+        logger.debug(f"Player model image size: {_player_model_imgsz}")
         if hasattr(_player_model, "names"):
-            print(f"[INFERENCE] Player model classes: {dict(_player_model.names)}")
+            logger.debug(f"Player model classes: {dict(_player_model.names)}")
 
         return True
 
     except Exception as e:
-        print(f"[INFERENCE] Failed to load player model {model_path}: {e}")
-        import traceback
-
-        traceback.print_exc()
+        logger.exception(f"Failed to load player model {model_path}: {e}")
         return False
 
 
@@ -391,38 +376,33 @@ def set_disc_model(model_path: str) -> bool:
         return True
 
     if not YOLO_AVAILABLE:
-        print("[INFERENCE] YOLO not available, cannot load disc model")
+        logger.error("YOLO not available, cannot load disc model")
         return False
 
-    print(f"[INFERENCE] Setting disc detection model: {model_path}")
+    logger.info(f"Setting disc detection model: {model_path}")
 
     model_file_path = _resolve_model_path(model_path)
     if model_file_path is None:
         return False
 
     try:
-        print(f"[INFERENCE] Loading disc YOLO model from: {model_file_path}")
+        logger.debug(f"Loading disc YOLO model from: {model_file_path}")
         # The same weights in both roles are loaded once and run in a single pass
         _disc_model = _player_model if model_path == _player_model_path else YOLO(model_file_path)
         _disc_model_path = model_path
         reset_inference_state()
 
-        # Load training parameters to get the image size used during training
-        training_params = _get_model_training_params(model_file_path)
-        _disc_model_imgsz = training_params.get("imgsz", 640)
+        _disc_model_imgsz = get_training_image_size(model_file_path)
 
-        print(f"[INFERENCE] Disc model loaded successfully: {model_path}")
-        print(f"[INFERENCE] Disc model image size: {_disc_model_imgsz}")
+        logger.info(f"Disc model loaded successfully: {model_path}")
+        logger.debug(f"Disc model image size: {_disc_model_imgsz}")
         if hasattr(_disc_model, "names"):
-            print(f"[INFERENCE] Disc model classes: {dict(_disc_model.names)}")
+            logger.debug(f"Disc model classes: {dict(_disc_model.names)}")
 
         return True
 
     except Exception as e:
-        print(f"[INFERENCE] Failed to load disc model {model_path}: {e}")
-        import traceback
-
-        traceback.print_exc()
+        logger.exception(f"Failed to load disc model {model_path}: {e}")
         return False
 
 
@@ -460,7 +440,6 @@ def run_inference(
         detections, timing = run_inference(frame, return_timing=True)
         print(f"Inference took {timing['total_time']*1000:.1f}ms")
     """
-    logger = get_logger("INFERENCE")
 
     logger.debug(f"Processing frame with shape {frame.shape}")
 
@@ -478,7 +457,7 @@ def run_inference(
 
     # Ensure we have models (lazy loading optimization)
     if _player_model is None or _disc_model is None:
-        print("[INFERENCE] Loading default models on first use (lazy loading)")
+        logger.debug("Loading default models on first use (lazy loading)")
         _load_default_models()
 
     # Collect detections from both models
@@ -501,14 +480,14 @@ def run_inference(
         disc_count = sum(1 for det in all_detections if det["class_name"] == "disc")
         player_count = len(all_detections) - disc_count
     elif _player_model is not None:
-        logger.debug("[INFERENCE] ┌─ Running player model inference...")
+        logger.debug("┌─ Running player model inference...")
         player_detections, player_timing = _run_single_model_inference(
             frame, _player_model, _player_model_imgsz, "models.player_detection", "player"
         )
         player_count = len(player_detections)
         all_detections.extend(player_detections)
     else:
-        print("[INFERENCE] Player model not loaded")
+        logger.warning("Player model not loaded")
 
     # Run disc detection with adaptive skipping
     # Skip disc model if no disc detected in recent frames (optimization)
@@ -525,7 +504,7 @@ def run_inference(
     if shared_model:
         disc_timing = {"preprocessing": 0.0, "inference": 0.0, "postprocessing": 0.0, "total": 0.0}
     elif _disc_model is not None and not skip_disc:
-        logger.debug("[INFERENCE] ┌─ Running disc model inference...")
+        logger.debug("┌─ Running disc model inference...")
         disc_detections, disc_timing = _run_single_model_inference(
             frame, _disc_model, _disc_model_imgsz, "models.disc_detection", "disc"
         )
@@ -538,18 +517,16 @@ def run_inference(
         else:
             _frames_since_last_disc += 1
     elif skip_disc:
-        logger.debug(
-            f"[INFERENCE] Skipping disc model (no disc for {_frames_since_last_disc} frames)"
-        )
+        logger.debug(f"Skipping disc model (no disc for {_frames_since_last_disc} frames)")
         _frames_since_last_disc += 1
         disc_timing = {"preprocessing": 0.0, "inference": 0.0, "postprocessing": 0.0, "total": 0.0}
     else:
-        print("[INFERENCE] Disc model not loaded")
+        logger.warning("Disc model not loaded")
 
     total_inference_time = time.perf_counter() - total_inference_start
 
     if _player_model is None and _disc_model is None:
-        print("[INFERENCE] No detection models available")
+        logger.warning("No detection models available")
 
     logger.debug(f"Found {len(all_detections)} total detections")
 

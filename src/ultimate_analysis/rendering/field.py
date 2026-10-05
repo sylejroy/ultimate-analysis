@@ -1,0 +1,414 @@
+"""Drawing the field segmentation: masks, outline, and simplified contour."""
+
+from typing import Any, Dict, List, Optional, Tuple
+
+import cv2
+import numpy as np
+
+from ..config.settings import get_setting
+from ..processing.field_analysis import calculate_field_contour, fit_field_lines_ransac
+from ..utils.logger import get_logger
+from .field_lines import draw_field_lines_ransac_with_outliers
+
+logger = get_logger("RENDERING")
+
+
+# Outline of the most recently drawn field mask: (mask, contours). The mask only changes
+# when segmentation runs again, so the frames in between reuse its outline.
+_mask_outline_cache: Tuple[Optional[np.ndarray], tuple] = (None, ())
+
+
+def _get_mask_outline(unified_mask: np.ndarray) -> tuple:
+    """External contours of a field mask, computed once per mask object."""
+    global _mask_outline_cache
+    if _mask_outline_cache[0] is not unified_mask:
+        contours, _ = cv2.findContours(unified_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        _mask_outline_cache = (unified_mask, contours)
+    return _mask_outline_cache[1]
+
+
+def get_segmentation_colors() -> Dict[int, Tuple[int, int, int]]:
+    """Get the standard segmentation colors used throughout the application.
+
+    Returns:
+        Dictionary mapping class indices to BGR color tuples
+    """
+    return {
+        0: (0, 255, 255),  # Central Field: bright cyan (BGR)
+        1: (255, 0, 255),  # Endzone: bright magenta (BGR)
+    }
+
+
+def get_primary_field_color() -> Tuple[int, int, int]:
+    """Get the primary field color (central field) for consistent visualization.
+
+    Returns:
+        BGR color tuple for the primary field area
+    """
+    colors = get_segmentation_colors()
+    return colors[0]  # Return central field color (cyan)
+
+
+def draw_field_segmentation(frame: np.ndarray, segmentation_results: List[Any]) -> np.ndarray:
+    """Draw field segmentation masks and boundaries.
+
+    Args:
+        frame: Input frame to draw on
+        segmentation_results: List of segmentation result objects
+
+    Returns:
+        Frame with field segmentation overlays
+    """
+    if not segmentation_results:
+        return frame
+
+    vis_frame = frame.copy()
+
+    for result in segmentation_results:
+        if not hasattr(result, "masks") or result.masks is None:
+            continue
+
+        try:
+            # Get mask data
+            if hasattr(result.masks, "data"):
+                mask_data = result.masks.data
+            else:
+                continue
+
+            # Convert to numpy if needed
+            if hasattr(mask_data, "cpu"):
+                mask = mask_data.cpu().numpy()
+            else:
+                mask = mask_data.numpy() if hasattr(mask_data, "numpy") else mask_data
+
+            # Draw field segmentation overlay
+            vis_frame = _draw_segmentation_masks(vis_frame, mask)
+
+        except Exception as e:
+            logger.error(f"Error drawing field segmentation: {e}")
+
+    return vis_frame
+
+
+def _draw_segmentation_masks(frame: np.ndarray, masks: np.ndarray) -> np.ndarray:
+    """Draw segmentation masks with color overlays.
+
+    Args:
+        frame: Input frame
+        masks: Mask array with shape (N, H, W)
+
+    Returns:
+        Frame with mask overlays
+    """
+    if masks.size == 0:
+        return frame
+
+    overlay = frame.copy()
+    color_mask = np.zeros_like(frame)
+
+    # Use centralized segmentation colors for consistency
+    color_dict = get_segmentation_colors()
+
+    name_dict = {0: "Central Field", 1: "Endzone"}
+
+    n_classes = min(masks.shape[0], 2)  # Only process class 0 and 1
+    frame_h, frame_w = frame.shape[:2]
+
+    for cls in range(n_classes):
+        # Resize each class mask to match frame size
+        class_mask = masks[cls]
+
+        # Skip if mask is empty
+        if np.sum(class_mask) == 0:
+            continue
+
+        # Masks arrive at model resolution; scale smoothly so the edge is not blocky
+        class_mask_resized = cv2.resize(
+            class_mask.astype(np.float32), (frame_w, frame_h), interpolation=cv2.INTER_LINEAR
+        )
+        mask_bool = class_mask_resized > 0.5
+        class_mask_resized = mask_bool.view(np.uint8)
+
+        # Skip if no pixels in mask
+        if not np.any(mask_bool):
+            continue
+
+        color = color_dict.get(cls, (200, 200, 200))
+        color_mask[mask_bool] = color
+
+        # Draw border for the mask
+        contours, _ = cv2.findContours(
+            class_mask_resized, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        if contours:
+            border_color = tuple(int(c * 0.7) for c in color)
+            cv2.drawContours(overlay, contours, -1, border_color, 2)
+
+            # Find center of mask for label
+            ys, xs = np.where(mask_bool)
+            if len(xs) > 0 and len(ys) > 0:
+                cx, cy = int(np.mean(xs)), int(np.mean(ys))
+                label = name_dict.get(cls, str(cls))
+
+                cv2.putText(
+                    overlay,
+                    label,
+                    (cx, cy),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    border_color,
+                    2,
+                    cv2.LINE_AA,
+                )
+
+    # Blend with higher alpha for maximum visibility
+    cv2.addWeighted(color_mask, 0.4, overlay, 0.6, 0, overlay)
+    return overlay
+
+
+def draw_field_contour(
+    frame: np.ndarray,
+    contour: np.ndarray,
+    contour_color: Tuple[int, int, int] = None,
+    point_color: Tuple[int, int, int] = None,
+    line_thickness: int = None,
+    point_radius: int = None,
+    draw_points: bool = None,
+    in_place: bool = False,
+) -> np.ndarray:
+    """Draw field contour lines and points on the frame.
+
+    Args:
+        frame: Input frame to draw on
+        contour: Contour points as numpy array of shape (N, 1, 2)
+        contour_color: BGR color for contour lines
+        point_color: BGR color for contour points
+        line_thickness: Thickness of contour lines
+        point_radius: Radius of contour points
+        draw_points: Whether to draw individual contour points
+        in_place: Draw directly on frame instead of a copy (caller must own the frame)
+
+    Returns:
+        Frame with contour overlay
+    """
+    if contour is None or len(contour) == 0:
+        return frame
+
+    # Use config values if parameters not provided
+    if contour_color is None:
+        # Get color from config as list and convert to tuple
+        color_list = get_setting("models.segmentation.contour.line_color", [255, 255, 0])
+        contour_color = tuple(color_list) if isinstance(color_list, list) else (255, 255, 0)
+    if point_color is None:
+        color_list = get_setting("models.segmentation.contour.point_color", [0, 255, 255])
+        point_color = tuple(color_list) if isinstance(color_list, list) else (0, 255, 255)
+    if line_thickness is None:
+        line_thickness = get_setting("models.segmentation.contour.line_thickness", 3)
+    if point_radius is None:
+        point_radius = get_setting("models.segmentation.contour.point_radius", 5)
+    if draw_points is None:
+        draw_points = get_setting("models.segmentation.contour.draw_points", True)
+
+    result = frame if in_place else frame.copy()
+
+    try:
+        # Draw contour lines
+        cv2.drawContours(result, [contour], -1, contour_color, line_thickness)
+
+        # Draw contour points if enabled
+        if draw_points:
+            for point in contour:
+                center = tuple(point[0])  # point is shape (1, 2), so point[0] is (x, y)
+                cv2.circle(result, center, point_radius, point_color, -1)
+                # Add small white border for better visibility
+                cv2.circle(result, center, point_radius + 1, (255, 255, 255), 1)
+
+        logger.debug(f"Drew contour with {len(contour)} points")
+
+    except Exception as e:
+        logger.error(f"Error drawing field contour: {e}")
+
+    return result
+
+
+def draw_unified_field_mask(
+    frame: np.ndarray,
+    unified_mask: np.ndarray,
+    color: Tuple[int, int, int] = (0, 255, 0),
+    alpha: float = 0.4,
+    draw_contour: bool = True,
+    fill_mask: bool = False,
+    ransac_fit: Optional[tuple] = None,
+    field_contour: Optional[np.ndarray] = None,
+    in_place: bool = False,
+) -> Tuple[np.ndarray, Dict[str, np.ndarray], Dict[str, Tuple[np.ndarray, float, bool]]]:
+    """Draw a unified field mask with optional fill and contour.
+
+    Args:
+        frame: Input frame to draw on
+        unified_mask: Binary mask (H, W) where 1 indicates field area
+        color: BGR color tuple for the overlay
+        alpha: Transparency for overlay (0.0 = transparent, 1.0 = opaque)
+        draw_contour: Whether to calculate and draw simplified contours
+        fill_mask: Whether to fill the mask area (False = contour only)
+        ransac_fit: Precomputed fit_field_lines_ransac result for this mask. RANSAC only
+            runs here when this is None, so per-frame callers should pass a cached fit.
+        field_contour: Precomputed calculate_field_contour result for this mask
+        in_place: Draw directly on frame instead of a copy (caller must own the frame)
+
+    Returns:
+        Tuple of (frame with unified mask overlay and optional contour, empty dictionary, all_lines_for_display dictionary)
+    """
+    if unified_mask is None or not np.any(unified_mask):
+        return frame, {}, {}
+
+    result = frame if in_place else frame.copy()
+    classified_lines = {}  # Always empty since classification removed
+    all_lines_for_display = {}  # Initialize empty all lines dictionary
+
+    # Only fill mask if explicitly requested (disabled by default for better runtime)
+    if fill_mask:
+        overlay = frame.copy()
+        overlay[unified_mask == 1] = color
+        cv2.addWeighted(frame, 1 - alpha, overlay, alpha, 0, dst=result)
+
+    # Always draw contour for field boundary visibility
+    contours = _get_mask_outline(unified_mask)
+    if contours:
+        border_color = tuple(int(c * 0.7) for c in color)
+        cv2.drawContours(result, contours, -1, border_color, 2)
+
+    # Draw simplified contour or RANSAC lines if requested
+    if draw_contour:
+        # Check if RANSAC line fitting is enabled
+        ransac_enabled = get_setting("models.segmentation.contour.ransac.enabled", False)
+
+        if ransac_enabled:
+            # Use RANSAC line fitting approach
+            simplified_contour = field_contour
+            if ransac_fit is None and simplified_contour is None:
+                simplified_contour = calculate_field_contour(unified_mask)
+            if ransac_fit is None and simplified_contour is not None:
+                # Fit lines using RANSAC
+                num_lines = get_setting("models.segmentation.contour.ransac.num_lines", 4)
+                distance_threshold = get_setting(
+                    "models.segmentation.contour.ransac.distance_threshold", 10.0
+                )
+                min_samples = get_setting("models.segmentation.contour.ransac.min_samples", 2)
+                max_trials = get_setting("models.segmentation.contour.ransac.max_trials", 1000)
+
+                ransac_fit = fit_field_lines_ransac(
+                    simplified_contour,
+                    frame,
+                    num_lines=num_lines,
+                    distance_threshold=distance_threshold,
+                    min_samples=min_samples,
+                    max_trials=max_trials,
+                )
+
+            if ransac_fit is not None:
+                (
+                    fitted_lines,
+                    outlier_points,
+                    inlier_points,
+                    edge_filtered_points,
+                    classified_lines,
+                    all_lines_for_display,
+                ) = ransac_fit
+
+                if fitted_lines:
+                    # Draw RANSAC-fitted lines and outliers
+                    line_color_list = get_setting(
+                        "models.segmentation.contour.ransac.line_color", [0, 255, 0]
+                    )
+                    line_color = (
+                        tuple(line_color_list) if isinstance(line_color_list, list) else (0, 255, 0)
+                    )
+                    result = draw_field_lines_ransac_with_outliers(
+                        result, fitted_lines, outlier_points, line_color=line_color, in_place=True
+                    )
+
+                    # Draw edge-filtered points if enabled
+                    edge_filtering_enabled = get_setting(
+                        "models.segmentation.contour.ransac.edge_filtering.enabled", False
+                    )
+                    show_edge_points = get_setting(
+                        "models.segmentation.contour.ransac.edge_filtering.show_edge_points", True
+                    )
+                    if (
+                        edge_filtering_enabled
+                        and show_edge_points
+                        and len(edge_filtered_points) > 0
+                    ):
+                        edge_color_list = get_setting(
+                            "models.segmentation.contour.ransac.edge_filtering.edge_point_color",
+                            [0, 0, 255],
+                        )
+                        edge_color = (
+                            tuple(edge_color_list)
+                            if isinstance(edge_color_list, list)
+                            else (0, 0, 255)
+                        )
+                        edge_radius = get_setting(
+                            "models.segmentation.contour.ransac.edge_filtering.edge_point_radius", 2
+                        )
+
+                        for point in edge_filtered_points:
+                            x, y = int(point[0]), int(point[1])
+                            if 0 <= x < result.shape[1] and 0 <= y < result.shape[0]:
+                                # Draw white border for better visibility
+                                cv2.circle(result, (x, y), edge_radius + 1, (255, 255, 255), -1)
+                                # Draw colored point on top
+                                cv2.circle(result, (x, y), edge_radius, edge_color, -1)
+
+                        logger.debug(f"Drew {len(edge_filtered_points)} edge-filtered points")
+
+                    # Draw inlier points if enabled
+                    show_inliers = get_setting(
+                        "models.segmentation.contour.ransac.show_inliers", True
+                    )
+                    if show_inliers and inlier_points and len(inlier_points) > 0:
+                        inlier_color_list = get_setting(
+                            "models.segmentation.contour.ransac.inlier_color", [0, 255, 0]
+                        )
+                        inlier_color = (
+                            tuple(inlier_color_list)
+                            if isinstance(inlier_color_list, list)
+                            else (0, 255, 0)
+                        )
+                        inlier_radius = get_setting(
+                            "models.segmentation.contour.ransac.inlier_radius", 2
+                        )
+
+                        # Draw inliers for each segment
+                        total_inliers = 0
+                        for inlier_segment in inlier_points:
+                            if len(inlier_segment) > 0:
+                                for point in inlier_segment:
+                                    x, y = int(point[0]), int(point[1])
+                                    if 0 <= x < result.shape[1] and 0 <= y < result.shape[0]:
+                                        # Draw white border for better visibility
+                                        cv2.circle(
+                                            result, (x, y), inlier_radius + 1, (255, 255, 255), -1
+                                        )
+                                        # Draw colored point on top
+                                        cv2.circle(result, (x, y), inlier_radius, inlier_color, -1)
+                                        total_inliers += 1
+
+                        logger.debug(f"Drew {total_inliers} inlier points")
+                else:
+                    logger.error("RANSAC line fitting failed, falling back to contour")
+                    if simplified_contour is None:
+                        simplified_contour = calculate_field_contour(unified_mask)
+                    result = draw_field_contour(result, simplified_contour, in_place=True)
+            else:
+                logger.debug("No contour found for RANSAC line fitting")
+        else:
+            # Use traditional contour approach
+            simplified_contour = field_contour
+            if simplified_contour is None:
+                simplified_contour = calculate_field_contour(unified_mask)
+            if simplified_contour is not None:
+                result = draw_field_contour(result, simplified_contour, in_place=True)
+
+    return result, classified_lines, all_lines_for_display

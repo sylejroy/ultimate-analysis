@@ -1,0 +1,7 @@
+[tool.ruff]
+line-length = 100
+extend-exclude = ["data", ".venv"]
+
+[tool.ruff.lint]
+# Default rules plus import sorting
+extend-select = ["I"]

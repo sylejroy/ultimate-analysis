@@ -1,24 +1,13 @@
-"""Model Tuning tab for training YOLO models.
+"""Model Training tab: train YOLO detection and segmentation models on custom datasets."""
 
-This module provides a GUI interface for training both detection and segmentation
-models using Ultralytics YOLO framework with custom datasets.
-"""
-
-import json
-import os
 import re
-import sys
-import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import pandas as pd
 import yaml
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
-from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QCheckBox,
@@ -39,568 +28,21 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from ...utils.logger import get_logger
+from .results_widget import TrainingResultsWidget
+from .training_thread import ModelTrainingThread
 
-class TrainingResultsWidget(QWidget):
-    """Widget for displaying live training results from results.csv"""
+logger = get_logger("TRAINING")
 
-    def __init__(self):
-        super().__init__()
-        self.results_path = None
-        self.reference_path = Path(
-            "data/models/detection/object_detection_yolo11l/finetune3/results.csv"
-        )
-        self.figure = Figure(figsize=(12, 8))
-        self.canvas = FigureCanvas(self.figure)
+# Earlier runs whose curves are drawn behind a new run for comparison
+REFERENCE_RESULTS = {
+    "detection": "data/models/detection/object_detection_yolo11l/finetune3/results.csv",
+    "segmentation": "data/models/segmentation/field_finder_yolo11x-seg/segmentation_finetune4/results.csv",
+}
 
-        layout = QVBoxLayout()
-        layout.addWidget(self.canvas)
-        self.setLayout(layout)
 
-        # Timer for updating plots
-        self.update_timer = QTimer()
-        self.update_timer.timeout.connect(self.update_plots)
-
-    def start_monitoring(self, results_dir: str):
-        """Start monitoring a results directory for CSV updates."""
-        self.results_dir = Path(results_dir)
-        self.results_path = None
-        self.update_timer.start(2000)  # Update every 2 seconds
-
-    def stop_monitoring(self):
-        """Stop monitoring for updates."""
-        self.update_timer.stop()
-        self.results_path = None
-
-    def set_reference_path(self, reference_path: str):
-        """Set the reference results.csv file for comparison."""
-        self.reference_path = Path(reference_path)
-        print(f"[TRAINING_RESULTS] Reference path set to: {self.reference_path}")
-
-    def update_plots(self):
-        """Update the plots with latest data from results.csv"""
-        # First, try to find the results.csv file
-        if not self.results_path or not self.results_path.exists():
-            self._find_results_csv()
-
-        if not self.results_path or not self.results_path.exists():
-            return
-
-        try:
-            # Read the current training CSV file
-            df = pd.read_csv(self.results_path)
-
-            # Load reference data
-            reference_df = None
-            if self.reference_path.exists():
-                try:
-                    reference_df = pd.read_csv(self.reference_path)
-                    print(
-                        f"[TRAINING_RESULTS] Loaded reference data with {len(reference_df)} epochs from {self.reference_path}"
-                    )
-                except Exception as e:
-                    print(f"[TRAINING_RESULTS] Could not load reference data: {e}")
-            else:
-                print(f"[TRAINING_RESULTS] Reference file not found: {self.reference_path}")
-
-            if df.empty:
-                return
-
-            # Clear the figure
-            self.figure.clear()
-
-            # Create subplots
-            ax1 = self.figure.add_subplot(2, 2, 1)
-            ax2 = self.figure.add_subplot(2, 2, 2)
-            ax3 = self.figure.add_subplot(2, 2, 3)
-            ax4 = self.figure.add_subplot(2, 2, 4)
-
-            epochs = df.index + 1
-
-            # Plot training and validation losses
-            if "train/box_loss" in df.columns:
-                ax1.plot(
-                    epochs, df["train/box_loss"], label="Train Box Loss", color="blue", linewidth=2
-                )
-            if "train/cls_loss" in df.columns:
-                ax1.plot(
-                    epochs, df["train/cls_loss"], label="Train Cls Loss", color="red", linewidth=2
-                )
-            if "train/dfl_loss" in df.columns:
-                ax1.plot(
-                    epochs, df["train/dfl_loss"], label="Train DFL Loss", color="green", linewidth=2
-                )
-            if "val/box_loss" in df.columns:
-                ax1.plot(
-                    epochs,
-                    df["val/box_loss"],
-                    label="Val Box Loss",
-                    color="cyan",
-                    linestyle="--",
-                    linewidth=2,
-                )
-            if "val/cls_loss" in df.columns:
-                ax1.plot(
-                    epochs,
-                    df["val/cls_loss"],
-                    label="Val Cls Loss",
-                    color="magenta",
-                    linestyle="--",
-                    linewidth=2,
-                )
-            if "val/dfl_loss" in df.columns:
-                ax1.plot(
-                    epochs,
-                    df["val/dfl_loss"],
-                    label="Val DFL Loss",
-                    color="orange",
-                    linestyle="--",
-                    linewidth=2,
-                )
-
-            # Add reference data to loss plot
-            if reference_df is not None:
-                ref_epochs = reference_df.index + 1
-                if "train/box_loss" in reference_df.columns:
-                    ax1.plot(
-                        ref_epochs,
-                        reference_df["train/box_loss"],
-                        label="Ref Train Box",
-                        color="lightblue",
-                        alpha=0.6,
-                        linestyle="--",
-                        linewidth=1.5,
-                    )
-                if "val/box_loss" in reference_df.columns:
-                    ax1.plot(
-                        ref_epochs,
-                        reference_df["val/box_loss"],
-                        label="Ref Val Box",
-                        color="lightcyan",
-                        alpha=0.6,
-                        linestyle="--",
-                        linewidth=1.5,
-                    )
-
-            ax1.set_title("Loss Curves")
-            ax1.set_xlabel("Epoch")
-            ax1.set_ylabel("Loss")
-            ax1.legend()
-            ax1.grid(True)
-
-            # Plot mAP metrics
-            if "metrics/mAP50(B)" in df.columns:
-                ax2.plot(epochs, df["metrics/mAP50(B)"], label="mAP@0.5", color="blue", linewidth=2)
-            if "metrics/mAP50-95(B)" in df.columns:
-                ax2.plot(
-                    epochs,
-                    df["metrics/mAP50-95(B)"],
-                    label="mAP@0.5:0.95",
-                    color="red",
-                    linewidth=2,
-                )
-
-            # Add reference mAP data
-            if reference_df is not None:
-                if "metrics/mAP50(B)" in reference_df.columns:
-                    ax2.plot(
-                        ref_epochs,
-                        reference_df["metrics/mAP50(B)"],
-                        label="Ref mAP@0.5",
-                        color="lightblue",
-                        alpha=0.6,
-                        linestyle="--",
-                        linewidth=1.5,
-                    )
-                if "metrics/mAP50-95(B)" in reference_df.columns:
-                    ax2.plot(
-                        ref_epochs,
-                        reference_df["metrics/mAP50-95(B)"],
-                        label="Ref mAP@0.5:0.95",
-                        color="lightcoral",
-                        alpha=0.6,
-                        linestyle="--",
-                        linewidth=1.5,
-                    )
-
-            ax2.set_title("mAP Metrics")
-            ax2.set_xlabel("Epoch")
-            ax2.set_ylabel("mAP")
-            ax2.legend()
-            ax2.grid(True)
-
-            # Plot precision and recall
-            if "metrics/precision(B)" in df.columns:
-                ax3.plot(
-                    epochs,
-                    df["metrics/precision(B)"],
-                    label="Precision",
-                    color="green",
-                    linewidth=2,
-                )
-            if "metrics/recall(B)" in df.columns:
-                ax3.plot(
-                    epochs, df["metrics/recall(B)"], label="Recall", color="orange", linewidth=2
-                )
-
-            # Add reference precision/recall data
-            if reference_df is not None:
-                if "metrics/precision(B)" in reference_df.columns:
-                    ax3.plot(
-                        ref_epochs,
-                        reference_df["metrics/precision(B)"],
-                        label="Ref Precision",
-                        color="lightgreen",
-                        alpha=0.6,
-                        linestyle="--",
-                        linewidth=1.5,
-                    )
-                if "metrics/recall(B)" in reference_df.columns:
-                    ax3.plot(
-                        ref_epochs,
-                        reference_df["metrics/recall(B)"],
-                        label="Ref Recall",
-                        color="wheat",
-                        alpha=0.6,
-                        linestyle="--",
-                        linewidth=1.5,
-                    )
-
-            ax3.set_title("Precision & Recall")
-            ax3.set_xlabel("Epoch")
-            ax3.set_ylabel("Score")
-            ax3.legend()
-            ax3.grid(True)
-
-            # Plot learning rate and other metrics
-            if "lr/pg0" in df.columns:
-                ax4.plot(epochs, df["lr/pg0"], label="Learning Rate", color="purple", linewidth=2)
-                ax4.set_ylabel("Learning Rate", color="purple")
-                ax4.tick_params(axis="y", labelcolor="purple")
-
-                # Add reference learning rate
-                if reference_df is not None and "lr/pg0" in reference_df.columns:
-                    ax4.plot(
-                        ref_epochs,
-                        reference_df["lr/pg0"],
-                        label="Ref LR",
-                        color="plum",
-                        alpha=0.6,
-                        linestyle="--",
-                        linewidth=1.5,
-                    )
-
-                # Add a second y-axis for fitness if available
-                if "fitness" in df.columns:
-                    ax4_twin = ax4.twinx()
-                    ax4_twin.plot(epochs, df["fitness"], label="Fitness", color="red", linewidth=2)
-                    ax4_twin.set_ylabel("Fitness", color="red")
-                    ax4_twin.tick_params(axis="y", labelcolor="red")
-
-                    # Add reference fitness
-                    if reference_df is not None and "fitness" in reference_df.columns:
-                        ax4_twin.plot(
-                            ref_epochs,
-                            reference_df["fitness"],
-                            label="Ref Fitness",
-                            color="lightcoral",
-                            alpha=0.6,
-                            linestyle="--",
-                            linewidth=1.5,
-                        )
-
-            ax4.set_title("Learning Rate & Fitness")
-            ax4.set_xlabel("Epoch")
-            ax4.legend()
-            ax4.grid(True)
-
-            # Adjust layout and refresh
-            self.figure.tight_layout()
-            self.canvas.draw()
-
-        except Exception as e:
-            print(f"[TRAINING_RESULTS] Error updating plots: {e}")
-
-    def _find_results_csv(self):
-        """Find the results.csv file in subdirectories."""
-        if not hasattr(self, "results_dir") or not self.results_dir.exists():
-            return
-
-        # Look for results.csv in the directory and subdirectories
-        for csv_path in self.results_dir.rglob("results.csv"):
-            if csv_path.exists():
-                self.results_path = csv_path
-                print(f"[TRAINING_RESULTS] Found results.csv at: {csv_path}")
-                return
-
-        # Also check direct path
-        direct_path = self.results_dir / "results.csv"
-        if direct_path.exists():
-            self.results_path = direct_path
-            print(f"[TRAINING_RESULTS] Found results.csv at: {direct_path}")
-
-
-ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-
-
-# Output that marks the switch from dataset preparation to training
-TRAINING_START_KEYWORDS = (
-    "starting training",
-    "train:",
-    "optimizer:",
-    "lr0=",
-    "momentum=",
-    "ultralytics yolo",
-    "model summary:",
-    "freezing",
-    "amp:",
-    "image sizes",
-    "tensorboard:",
-)
-# Output printed while the dataset is scanned and cached
-PREPARATION_KEYWORDS = (
-    "scanning",
-    "loading",
-    "cache",
-    "labels",
-    "dataset",
-    "images",
-    "caching",
-    "reading",
-    "found",
-    "missing",
-    "empty",
-    "checking",
-)
-
-
-class ModelTrainingThread(QThread):
-    """Background thread for model training to prevent GUI freezing."""
-
-    progress_update = pyqtSignal(int, str)  # epoch, status message
-    raw_output = pyqtSignal(str)  # raw training output line
-    training_complete = pyqtSignal(str, bool)  # results_path, success
-    error_occurred = pyqtSignal(str)  # error message
-
-    def __init__(
-        self,
-        task_type: str,
-        model_path: str,
-        data_path: str,
-        epochs: int,
-        patience: int,
-        batch_size: float,
-        lr: float,
-        output_dir: str,
-        training_params: dict = None,
-    ):
-        super().__init__()
-        self.task_type = task_type
-        self.model_path = model_path
-        self.data_path = data_path
-        self.epochs = epochs
-        self.patience = patience
-        self.batch_size = batch_size
-        self.lr = lr
-        self.output_dir = output_dir
-        self.training_params = training_params or {}
-        self.should_stop = False
-        self._training_started = False
-        self._last_prep_update = 0.0
-        self._fallback_sent = False
-
-    def run(self):
-        """Run the training process."""
-
-        try:
-            print("[TRAINING] Starting model training in separate process...")
-
-            # Create training configuration
-            training_config = {
-                "model_path": self.model_path,
-                "data_path": self.data_path,
-                "output_dir": self.output_dir,
-                "epochs": self.epochs,
-                "patience": self.patience,
-                "batch_size": self.batch_size,
-                "learning_rate": self.lr,
-                "device": self.training_params.get("device", 0),
-                "workers": self.training_params.get("workers", 0),
-                "imgsz": self.training_params.get("imgsz", 640),
-                "optimizer": self.training_params.get("optimizer", "SGD"),
-                "momentum": self.training_params.get("momentum", 0.937),
-                "weight_decay": self.training_params.get("weight_decay", 0.0005),
-                "augment": self.training_params.get("augment", True),
-                "cosine_lr": self.training_params.get("cosine_lr", False),
-                "mosaic": self.training_params.get("mosaic", 1.0),
-                "mixup": self.training_params.get("mixup", 0.0),
-                "copy_paste": self.training_params.get("copy_paste", 0.0),
-                "hsv_h": self.training_params.get("hsv_h", 0.015),
-                "hsv_s": self.training_params.get("hsv_s", 0.7),
-                "hsv_v": self.training_params.get("hsv_v", 0.4),
-                "results_file": "training_results.txt",
-            }
-
-            # Write config to temporary file
-            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-                json.dump(training_config, f, indent=2)
-                config_path = f.name
-
-            # Path to training script
-            script_path = Path(__file__).parent.parent / "training" / "train_model_subprocess.py"
-
-            try:
-                # Start training process
-                import subprocess
-
-                # Ultralytics prints UTF-8 progress bars; the Windows default pipe
-                # encoding (cp1252) cannot decode them and would abort the run.
-                process = subprocess.Popen(
-                    [sys.executable, str(script_path), "--config", config_path],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    cwd=os.getcwd(),
-                    env={**os.environ, "PYTHONIOENCODING": "utf-8"},
-                )
-
-                epoch_count = 0
-                total_epochs = self.epochs
-                start_time = time.time()
-
-                while True:
-                    if self.should_stop:
-                        process.terminate()
-                        process.wait()
-                        break
-
-                    # Read output line by line
-                    line = process.stdout.readline()
-
-                    if line == "" and process.poll() is not None:
-                        break
-
-                    if line:
-                        # Ultralytics prefixes progress lines with terminal control codes
-                        line = ANSI_ESCAPE_PATTERN.sub("", line).strip()
-                        current_time = time.time()
-
-                        # Emit raw output for display
-                        if line:  # Only emit non-empty lines
-                            self.raw_output.emit(line)
-
-                        # Simple progress detection
-                        epoch_count = self._process_training_line(
-                            line, current_time, start_time, epoch_count, total_epochs
-                        )
-
-                # Check result
-                return_code = process.wait()
-
-                if return_code == 0 and not self.should_stop:
-                    # Read results path
-                    results_path = self.output_dir
-                    if os.path.exists("training_results.txt"):
-                        with open("training_results.txt", "r") as f:
-                            results_path = f.read().strip()
-                        os.remove("training_results.txt")
-
-                    self.training_complete.emit(results_path, True)
-                elif self.should_stop:
-                    print("[TRAINING] Training stopped by user")
-                else:
-                    self.error_occurred.emit(f"Training failed with return code: {return_code}")
-
-            finally:
-                # Cleanup temporary files
-                if os.path.exists(config_path):
-                    os.remove(config_path)
-                if os.path.exists("training_results.txt"):
-                    os.remove("training_results.txt")
-
-        except Exception as e:
-            print(f"[TRAINING] Error: {e}")
-            self.error_occurred.emit(str(e))
-
-    def stop_training(self):
-        """Request to stop training."""
-        self.should_stop = True
-
-    def _process_training_line(
-        self, line: str, current_time: float, start_time: float, epoch_count: int, total_epochs: int
-    ):
-        """Process a single line of training output and emit progress updates."""
-        if not line:
-            return epoch_count
-
-        lower_line = line.lower()
-
-        if epoch_count == 0:
-            # Transition from preparation to training
-            if any(keyword in lower_line for keyword in TRAINING_START_KEYWORDS):
-                if not self._training_started:
-                    self.progress_update.emit(1, "Training starting • Epoch ??/?? • Batch ??/??")
-                    self._training_started = True
-                return epoch_count
-
-            # During preparation, avoid interpreting numbers as epochs/batches
-            if not self._training_started and any(
-                keyword in lower_line for keyword in PREPARATION_KEYWORDS
-            ):
-                # Only update every 3 seconds during prep to avoid spam
-                if current_time - self._last_prep_update > 3:
-                    self.progress_update.emit(0, "Preparing training • Epoch ??/?? • Batch ??/??")
-                    self._last_prep_update = current_time
-                return epoch_count
-
-        # Training lines begin with the epoch counter: "1/120  5.2G ... 10% ━── 14/134 1.8it/s"
-        epoch_match = re.match(r"(\d+)/(\d+)\s", line)
-        if epoch_match:
-            current_epoch = int(epoch_match.group(1))
-            total_epochs = int(epoch_match.group(2)) or total_epochs
-
-            if current_epoch != epoch_count and 1 <= current_epoch <= total_epochs:
-                # Epochs completed so far; batch lines fill in the current epoch
-                progress_percent = int(((current_epoch - 1) / total_epochs) * 100)
-                self.progress_update.emit(
-                    progress_percent, f"Training • Epoch {current_epoch}/{total_epochs}"
-                )
-                self._training_started = True
-                return current_epoch
-
-            # Batch progress within the epoch. The validation bar uses the same layout but
-            # does not begin with the epoch counter, so it never moves the progress.
-            batch_match = re.search(r"(\d+)%.*?(\d+)/(\d+)", line)
-            if batch_match and epoch_count > 0:
-                batch_percent = int(batch_match.group(1))
-                overall_progress = min(
-                    100, int((epoch_count - 1 + batch_percent / 100) / total_epochs * 100)
-                )
-
-                status = (
-                    f"Training • Epoch {epoch_count}/{total_epochs}"
-                    f" • Batch {batch_match.group(2)}/{batch_match.group(3)}"
-                )
-                rate_match = re.search(r"([\d.]+)(it/s|s/it)", line)
-                if rate_match:
-                    status += f" • {rate_match.group(1)}{rate_match.group(2)}"
-                self.progress_update.emit(overall_progress, status)
-                return epoch_count
-
-        # Fallback: if training has been running for a while without clear state detection
-        if current_time - start_time > 30 and epoch_count == 0 and not self._fallback_sent:
-            if self._training_started:
-                self.progress_update.emit(2, "Training • Epoch ??/?? • Batch ??/??")
-            else:
-                self.progress_update.emit(1, "Training starting • Epoch ??/?? • Batch ??/??")
-                self._training_started = True
-            self._fallback_sent = True
-
-        return epoch_count
-
-class ModelTuningTab(QWidget):
-    """Tab for tuning YOLO models with custom datasets."""
+class ModelTrainingTab(QWidget):
+    """Tab for training YOLO models with custom datasets."""
 
     def __init__(self):
         super().__init__()
@@ -624,17 +66,7 @@ class ModelTuningTab(QWidget):
         self._update_model_options()
         self._update_data_options()
 
-        # Set initial reference path for baseline comparison
-        if self.current_task == "detection":
-            detection_reference = Path(
-                "data/models/detection/object_detection_yolo11l/finetune3/results.csv"
-            )
-            self.results_widget.set_reference_path(str(detection_reference))
-        else:  # segmentation
-            segmentation_reference = Path(
-                "data/models/segmentation/field_finder_yolo11x-seg/segmentation_finetune4/results.csv"
-            )
-            self.results_widget.set_reference_path(str(segmentation_reference))
+        self.results_widget.set_reference_path(REFERENCE_RESULTS[self.current_task])
 
     def _get_preferred_model_file(self, weights_dir: Path) -> Optional[Path]:
         """Get the preferred model file from a weights directory.
@@ -1051,7 +483,7 @@ class ModelTuningTab(QWidget):
                     },
                 }
         except Exception as e:
-            print(f"[MODEL_TUNING] Error loading config: {e}")
+            logger.error(f"Error loading config: {e}")
 
     def _apply_config_to_ui(self):
         """Apply loaded configuration to UI elements."""
@@ -1094,20 +526,8 @@ class ModelTuningTab(QWidget):
 
     def _on_task_changed(self, task: str):
         """Handle task type change."""
-        if task == "detection":
-            self.current_task = "detection"
-            # Set reference path for detection baseline
-            detection_reference = Path(
-                "data/models/detection/object_detection_yolo11l/finetune3/results.csv"
-            )
-            self.results_widget.set_reference_path(str(detection_reference))
-        else:  # field segmentation
-            self.current_task = "segmentation"
-            # Set reference path for segmentation baseline
-            segmentation_reference = Path(
-                "data/models/segmentation/field_finder_yolo11x-seg/segmentation_finetune4/results.csv"
-            )
-            self.results_widget.set_reference_path(str(segmentation_reference))
+        self.current_task = "detection" if task == "detection" else "segmentation"
+        self.results_widget.set_reference_path(REFERENCE_RESULTS[self.current_task])
 
         self._update_model_options()
         self._update_data_options()
@@ -1123,7 +543,9 @@ class ModelTuningTab(QWidget):
         available_models = []
 
         if self.current_task == "detection":
-            # Add common YOLO models (Ultralytics will auto-download if missing)
+            # Add common detection models (Ultralytics will auto-download if missing).
+            # RT-DETR is a transformer detector: it stretches frames to a square and needs
+            # several times the compute of YOLO and a lower learning rate.
             common_detection_models = [
                 "yolo26n.pt",
                 "yolo26s.pt",
@@ -1135,6 +557,8 @@ class ModelTuningTab(QWidget):
                 "yolo11m.pt",
                 "yolo11l.pt",
                 "yolo11x.pt",
+                "rtdetr-l.pt",
+                "rtdetr-x.pt",
             ]
 
             # Add pretrained detection models (non-seg)
@@ -1148,6 +572,10 @@ class ModelTuningTab(QWidget):
                 model_path = pretrained_path / model_name
                 if str(model_path) not in available_models:
                     available_models.append(str(model_path))
+
+            # Variants with an extra detection head for small objects such as the disc.
+            # They are built from their definition and start from the base model's weights.
+            available_models.extend(["yolo26n-p2.yaml", "yolo26s-p2.yaml", "yolo26m-p2.yaml"])
 
             # Add existing detection models for further tuning (including finetune directories)
             detection_path = models_path / "detection"
@@ -1244,7 +672,7 @@ class ModelTuningTab(QWidget):
                     name_lower = dataset_dir.name.lower()
                     if "field" not in name_lower and any(
                         keyword in name_lower
-                        for keyword in ["object_detection", "player", "disc", "detection"]
+                        for keyword in ["object_detection", "player", "disc", "detection", "digits"]
                     ):
                         yaml_files = list(dataset_dir.glob("*.yaml"))
                         if yaml_files:
@@ -1280,9 +708,7 @@ class ModelTuningTab(QWidget):
         # Select the configured default dataset, otherwise the first (newest) one
         if available_datasets:
             default_index = 0
-            default_dataset = self.training_config.get(self.current_task, {}).get(
-                "default_dataset"
-            )
+            default_dataset = self.training_config.get(self.current_task, {}).get("default_dataset")
             for index, dataset in enumerate(available_datasets):
                 if Path(dataset).parent.name == default_dataset:
                     default_index = index
@@ -1463,7 +889,7 @@ class ModelTuningTab(QWidget):
             counter += 1
 
         output_dir.mkdir(parents=True, exist_ok=True)
-        print(f"[TRAINING] Created output directory: {output_dir}")
+        logger.debug(f"Created output directory: {output_dir}")
 
         # Collect all training parameters from UI
         training_params = {
@@ -1700,3 +1126,11 @@ class ModelTuningTab(QWidget):
 
         # Stop time update timer
         self.time_update_timer.stop()
+
+    def closeEvent(self, event):
+        """Stop a running training with the application, so it does not continue unseen."""
+        if self.training_thread and self.training_thread.isRunning():
+            self.training_thread.stop_training()
+            self.training_thread.wait()
+        self.results_widget.stop_monitoring()
+        super().closeEvent(event)

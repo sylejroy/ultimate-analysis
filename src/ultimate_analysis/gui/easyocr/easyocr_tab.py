@@ -5,7 +5,6 @@ on detected player bounding boxes for optimal jersey number recognition.
 """
 
 import random
-import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -15,31 +14,31 @@ import yaml
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
-    QCheckBox,
     QComboBox,
-    QDoubleSpinBox,
     QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QPushButton,
     QScrollArea,
     QSlider,
-    QSpinBox,
     QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
-from ..config.settings import get_setting
-from ..constants import DEFAULT_PATHS, SUPPORTED_VIDEO_EXTENSIONS
-from ..processing import run_inference, set_player_model
-from ..utils.video_utils import get_video_duration
-from .video_player import VideoPlayer
+from ...processing.inference import detect_players, load_detection_model
+from ...processing.jersey_crops import best_number, easyocr_readtext_parameters, preprocess_crop
+from ...processing.model_lock import MODEL_LOCK
+from ...utils.logger import get_logger
+from ...utils.model_files import default_model_path, models_root
+from ...utils.video import VideoPlayer
+from ..widgets.images import frame_to_pixmap
+from ..widgets.model_selection import populate_detection_model_combo
+from ..widgets.parameter_form import build_form, control_names, read_control, write_control
+from ..widgets.video_list import VideoListWidget
+from .parameters import OCR_FORM, PREPROCESS_FORM
 
 # Try to import EasyOCR for parameter checking
 try:
@@ -50,53 +49,11 @@ except ImportError:
     EASYOCR_AVAILABLE = False
     easyocr = None
 
-
 # Parameter name -> attribute of the control that edits it
-PREPROCESS_CONTROLS = {
-    "crop_top_fraction": "crop_fraction_spin",
-    "contrast_alpha": "contrast_spin",
-    "brightness_beta": "brightness_spin",
-    "gaussian_blur": "blur_spin",
-    "min_crop_width": "min_crop_width_spin",
-    "min_crop_height": "min_crop_height_spin",
-    "enhance_contrast": "enhance_check",
-    "clahe_clip_limit": "clahe_clip_spin",
-    "clahe_grid_size": "clahe_grid_spin",
-    "sharpen": "sharpen_check",
-    "sharpen_strength": "sharpen_strength_spin",
-    "upscale": "upscale_check",
-    "upscale_factor": "upscale_factor_spin",
-    "upscale_to_size": "upscale_to_size_check",
-    "upscale_target_size": "upscale_target_spin",
-    "colour_mode": "colour_mode_check",
-    "bw_mode": "bw_mode_check",
-    "resize_factor": "resize_spin",
-    "resize_absolute_width": "resize_width_spin",
-    "resize_absolute_height": "resize_height_spin",
-    "denoise": "denoise_check",
-}
-OCR_CONTROLS = {
-    "text_threshold": "text_threshold_spin",
-    "low_text": "low_text_spin",
-    "link_threshold": "link_threshold_spin",
-    "width_ths": "width_ths_spin",
-    "height_ths": "height_ths_spin",
-    "x_ths": "x_ths_spin",
-    "y_ths": "y_ths_spin",
-    "ycenter_ths": "ycenter_ths_spin",
-    "slope_ths": "slope_ths_spin",
-    "canvas_size": "canvas_size_spin",
-    "mag_ratio": "mag_ratio_spin",
-    "adjust_contrast": "adjust_contrast_spin",
-    "filter_ths": "filter_ths_spin",
-    "workers": "workers_spin",
-    "batch_size": "batch_size_spin",
-    "beamWidth": "beam_width_spin",
-    "gpu": "gpu_check",
-    "paragraph": "paragraph_check",
-    "detail": "detail_spin",
-    "allowlist": "allowlist_edit",
-}
+PREPROCESS_CONTROLS = control_names(PREPROCESS_FORM)
+OCR_CONTROLS = control_names(OCR_FORM)
+
+logger = get_logger("EASYOCR_TUNING")
 
 
 class EasyOCRTuningTab(QWidget):
@@ -112,6 +69,8 @@ class EasyOCRTuningTab(QWidget):
         self.current_frame: Optional[np.ndarray] = None
         self.current_detections: List[Dict] = []
         self.current_crops: List[Tuple[np.ndarray, Dict]] = []  # (crop_image, detection_info)
+        self._detector = None  # (model, image size) of the selected model, loaded on first run
+        self._readers: Dict[bool, Any] = {}  # EasyOCR reader per GPU setting
 
         # EasyOCR parameters (with optimized defaults)
         self.ocr_params = {
@@ -170,11 +129,11 @@ class EasyOCRTuningTab(QWidget):
 
         # Initialize UI
         self._init_ui()
-        self._load_videos()
+        self._reload_videos()
         # Load parameters from config (including easyocr_params.yaml) automatically on startup
         self._load_parameters_from_config()
 
-        print("[EASYOCR_TUNING] EasyOCR Tuning Tab initialized with user configuration loaded")
+        logger.info("EasyOCR Tuning Tab initialized with user configuration loaded")
 
     def _init_ui(self):
         """Initialize the user interface."""
@@ -235,14 +194,14 @@ class EasyOCRTuningTab(QWidget):
         list_header.addWidget(QLabel("Videos"))
 
         refresh_button = QPushButton("Refresh")
-        refresh_button.clicked.connect(self._load_videos)
+        refresh_button.clicked.connect(self._reload_videos)
         refresh_button.setToolTip("Refresh video list")
         list_header.addWidget(refresh_button)
 
         video_layout.addLayout(list_header)
 
         # Video list widget
-        self.video_list = QListWidget()
+        self.video_list = VideoListWidget()
         self.video_list.setMinimumHeight(200)  # Make video list taller
         self.video_list.currentRowChanged.connect(self._on_video_selection_changed)
         video_layout.addWidget(self.video_list)
@@ -255,7 +214,11 @@ class EasyOCRTuningTab(QWidget):
         model_layout = QFormLayout()
 
         self.detection_model_combo = QComboBox()
-        self._populate_model_combo()
+        populate_detection_model_combo(
+            self.detection_model_combo,
+            "player",
+            default_model_path("player_detection"),
+        )
         self.detection_model_combo.currentTextChanged.connect(self._on_model_changed)
         model_layout.addRow("Model:", self.detection_model_combo)
 
@@ -272,7 +235,22 @@ class EasyOCRTuningTab(QWidget):
 
         preprocess_group = QGroupBox("Preprocessing Parameters")
         preprocess_layout = QFormLayout()
-        self._create_preprocessing_controls(preprocess_layout)
+        build_form(
+            self,
+            preprocess_layout,
+            PREPROCESS_FORM,
+            self.preprocess_params,
+            self._on_preprocess_param_changed,
+            self._create_section_header,
+        )
+        # Dependent controls are only editable while their feature is switched on
+        self.enhance_check.stateChanged.connect(self._update_clahe_controls)
+        self.sharpen_check.stateChanged.connect(self._update_sharpen_controls)
+        self.upscale_check.stateChanged.connect(self._update_upscale_controls)
+        self.upscale_to_size_check.stateChanged.connect(self._update_upscale_controls)
+        self._update_clahe_controls()
+        self._update_sharpen_controls()
+        self._update_upscale_controls()
         preprocess_group.setLayout(preprocess_layout)
         left_layout.addWidget(preprocess_group)
         left_layout.addStretch()
@@ -284,7 +262,17 @@ class EasyOCRTuningTab(QWidget):
 
         ocr_group = QGroupBox("EasyOCR Parameters")
         ocr_layout = QFormLayout()
-        self._create_ocr_controls(ocr_layout)
+        if EASYOCR_AVAILABLE:
+            build_form(
+                self,
+                ocr_layout,
+                OCR_FORM,
+                self.ocr_params,
+                self._on_ocr_param_changed,
+                self._create_section_header,
+            )
+        else:
+            ocr_layout.addRow(QLabel("EasyOCR not available"))
         ocr_group.setLayout(ocr_layout)
         right_layout.addWidget(ocr_group)
         right_layout.addStretch()
@@ -402,473 +390,51 @@ class EasyOCRTuningTab(QWidget):
         panel.setLayout(layout)
         return panel
 
-    def _create_preprocessing_controls(self, layout: QFormLayout):
-        """Create preprocessing parameter controls."""
-        # Top crop fraction
-        self.crop_fraction_spin = QDoubleSpinBox()
-        self.crop_fraction_spin.setRange(0.1, 1.0)
-        self.crop_fraction_spin.setSingleStep(0.05)
-        self.crop_fraction_spin.setValue(self.preprocess_params["crop_top_fraction"])
-        self.crop_fraction_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("Top Crop Fraction:", self.crop_fraction_spin)
-
-        # Contrast
-        self.contrast_spin = QDoubleSpinBox()
-        self.contrast_spin.setRange(0.1, 3.0)
-        self.contrast_spin.setSingleStep(0.1)
-        self.contrast_spin.setValue(self.preprocess_params["contrast_alpha"])
-        self.contrast_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("Contrast (α):", self.contrast_spin)
-
-        # Brightness
-        self.brightness_spin = QSpinBox()
-        self.brightness_spin.setRange(-100, 100)
-        self.brightness_spin.setValue(self.preprocess_params["brightness_beta"])
-        self.brightness_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("Brightness (β):", self.brightness_spin)
-
-        # Gaussian blur
-        self.blur_spin = QSpinBox()
-        self.blur_spin.setRange(0, 31)  # Must be odd
-        self.blur_spin.setSingleStep(2)
-        self.blur_spin.setValue(self.preprocess_params["gaussian_blur"])
-        self.blur_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("Gaussian Blur (ksize):", self.blur_spin)
-
-        # Minimum Crop Size Filtering Section
-        layout.addRow(self._create_section_header("=== Minimum Crop Size Filtering ==="))
-
-        # Minimum crop width
-        self.min_crop_width_spin = QSpinBox()
-        self.min_crop_width_spin.setRange(5, 200)
-        self.min_crop_width_spin.setValue(self.preprocess_params["min_crop_width"])
-        self.min_crop_width_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        self.min_crop_width_spin.setToolTip(
-            "Skip OCR on crops narrower than this width (pixels). \nRecommended: 1080p=25px, 720p=18px, 480p=12px"
-        )
-        layout.addRow("Min Crop Width (px):", self.min_crop_width_spin)
-
-        # Minimum crop height
-        self.min_crop_height_spin = QSpinBox()
-        self.min_crop_height_spin.setRange(5, 200)
-        self.min_crop_height_spin.setValue(self.preprocess_params["min_crop_height"])
-        self.min_crop_height_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        self.min_crop_height_spin.setToolTip(
-            "Skip OCR on crops shorter than this height (pixels). \nRecommended: 1080p=35px, 720p=25px, 480p=18px"
-        )
-        layout.addRow("Min Crop Height (px):", self.min_crop_height_spin)
-
-        # Add helpful text
-        min_crop_info = QLabel("Skip OCR on crops smaller than these dimensions")
-        min_crop_info.setStyleSheet("color: #cccccc; font-size: 10px;")
-        layout.addRow("", min_crop_info)
-
-        # Contrast Enhancement Section
-        layout.addRow(self._create_section_header("=== Contrast Enhancement ==="))
-
-        # CLAHE enhancement toggle
-        self.enhance_check = QCheckBox()
-        self.enhance_check.setChecked(self.preprocess_params["enhance_contrast"])
-        self.enhance_check.stateChanged.connect(self._on_preprocess_param_changed)
-        self.enhance_check.stateChanged.connect(
-            self._update_clahe_controls
-        )  # Update control states
-        layout.addRow("Enable CLAHE Enhancement:", self.enhance_check)
-
-        # CLAHE parameters (indented to show dependency)
-        self.clahe_clip_spin = QDoubleSpinBox()
-        self.clahe_clip_spin.setRange(1.0, 10.0)
-        self.clahe_clip_spin.setSingleStep(0.5)
-        self.clahe_clip_spin.setValue(self.preprocess_params["clahe_clip_limit"])
-        self.clahe_clip_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("  → Clip Limit:", self.clahe_clip_spin)
-
-        self.clahe_grid_spin = QSpinBox()
-        self.clahe_grid_spin.setRange(2, 16)
-        self.clahe_grid_spin.setValue(self.preprocess_params["clahe_grid_size"])
-        self.clahe_grid_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("  → Grid Size:", self.clahe_grid_spin)
-
-        # Denoising Section
-        layout.addRow(self._create_section_header("=== Denoising ==="))
-
-        # Denoising toggle
-        self.denoise_check = QCheckBox()
-        self.denoise_check.setChecked(self.preprocess_params["denoise"])
-        self.denoise_check.stateChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("Enable Denoising:", self.denoise_check)
-
-        # Sharpening Section
-        layout.addRow(self._create_section_header("=== Sharpening ==="))
-
-        # Sharpening toggle
-        self.sharpen_check = QCheckBox()
-        self.sharpen_check.setChecked(self.preprocess_params["sharpen"])
-        self.sharpen_check.stateChanged.connect(self._on_preprocess_param_changed)
-        self.sharpen_check.stateChanged.connect(
-            self._update_sharpen_controls
-        )  # Update control states
-        layout.addRow("Enable Sharpening:", self.sharpen_check)
-
-        # Sharpen strength (indented to show dependency)
-        self.sharpen_strength_spin = QDoubleSpinBox()
-        self.sharpen_strength_spin.setRange(0.01, 1.0)
-        self.sharpen_strength_spin.setSingleStep(0.01)
-        self.sharpen_strength_spin.setDecimals(3)
-        self.sharpen_strength_spin.setValue(self.preprocess_params["sharpen_strength"])
-        self.sharpen_strength_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("  → Strength:", self.sharpen_strength_spin)
-
-        # Upscaling Section
-        layout.addRow(self._create_section_header("=== Upscaling ==="))
-
-        # Upscaling toggle
-        self.upscale_check = QCheckBox()
-        self.upscale_check.setChecked(self.preprocess_params["upscale"])
-        self.upscale_check.stateChanged.connect(self._on_preprocess_param_changed)
-        self.upscale_check.stateChanged.connect(
-            self._update_upscale_controls
-        )  # Update control states
-        layout.addRow("Enable Upscaling:", self.upscale_check)
-
-        # Upscale parameters (indented to show dependency)
-        self.upscale_factor_spin = QDoubleSpinBox()
-        self.upscale_factor_spin.setRange(1.0, 8.0)
-        self.upscale_factor_spin.setSingleStep(0.5)
-        self.upscale_factor_spin.setValue(self.preprocess_params["upscale_factor"])
-        self.upscale_factor_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("  → Factor:", self.upscale_factor_spin)
-
-        self.upscale_to_size_check = QCheckBox()
-        self.upscale_to_size_check.setChecked(self.preprocess_params["upscale_to_size"])
-        self.upscale_to_size_check.stateChanged.connect(self._on_preprocess_param_changed)
-        self.upscale_to_size_check.stateChanged.connect(
-            self._update_upscale_controls
-        )  # Update target size control
-        layout.addRow("  → Scale to Fixed Size:", self.upscale_to_size_check)
-
-        self.upscale_target_spin = QSpinBox()
-        self.upscale_target_spin.setRange(64, 1024)
-        self.upscale_target_spin.setSingleStep(32)
-        self.upscale_target_spin.setValue(self.preprocess_params["upscale_target_size"])
-        self.upscale_target_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("    → Target Size (px):", self.upscale_target_spin)
-
-        # Color Processing Section
-        layout.addRow(self._create_section_header("=== Color Processing ==="))
-
-        # Color mode processing
-        self.colour_mode_check = QCheckBox()
-        self.colour_mode_check.setChecked(self.preprocess_params["colour_mode"])
-        self.colour_mode_check.stateChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("Color Mode:", self.colour_mode_check)
-
-        # Black & white mode
-        self.bw_mode_check = QCheckBox()
-        self.bw_mode_check.setChecked(self.preprocess_params["bw_mode"])
-        self.bw_mode_check.stateChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("B&W Mode:", self.bw_mode_check)
-
-        # Size Adjustment Section
-        layout.addRow(self._create_section_header("=== Size Adjustment ==="))
-
-        # Resize factor
-        self.resize_spin = QDoubleSpinBox()
-        self.resize_spin.setRange(0.5, 4.0)
-        self.resize_spin.setSingleStep(0.1)
-        self.resize_spin.setValue(self.preprocess_params["resize_factor"])
-        self.resize_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        layout.addRow("Resize Factor:", self.resize_spin)
-
-        # Absolute resize width
-        self.resize_width_spin = QSpinBox()
-        self.resize_width_spin.setRange(0, 2048)
-        self.resize_width_spin.setSingleStep(32)
-        self.resize_width_spin.setValue(self.preprocess_params["resize_absolute_width"])
-        self.resize_width_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        self.resize_width_spin.setToolTip("Absolute width in pixels (0 = use factor)")
-        layout.addRow("Absolute Width (px):", self.resize_width_spin)
-
-        # Absolute resize height
-        self.resize_height_spin = QSpinBox()
-        self.resize_height_spin.setRange(0, 2048)
-        self.resize_height_spin.setSingleStep(32)
-        self.resize_height_spin.setValue(self.preprocess_params["resize_absolute_height"])
-        self.resize_height_spin.valueChanged.connect(self._on_preprocess_param_changed)
-        self.resize_height_spin.setToolTip("Absolute height in pixels (0 = use factor)")
-        layout.addRow("Absolute Height (px):", self.resize_height_spin)
-
-        # Initialize control states based on checkboxes
-        self._update_clahe_controls()
-        self._update_sharpen_controls()
-        self._update_upscale_controls()
-
-    def _create_ocr_controls(self, layout: QFormLayout):
-        """Create EasyOCR parameter controls."""
-        if not EASYOCR_AVAILABLE:
-            layout.addRow(QLabel("EasyOCR not available"))
-            return
-
-        # Core detection parameters
-        layout.addRow(self._create_section_header("=== Detection Parameters ==="))
-
-        # Text confidence threshold
-        self.text_threshold_spin = QDoubleSpinBox()
-        self.text_threshold_spin.setRange(0.1, 1.0)
-        self.text_threshold_spin.setSingleStep(0.05)
-        self.text_threshold_spin.setValue(self.ocr_params["text_threshold"])
-        self.text_threshold_spin.valueChanged.connect(self._on_ocr_param_changed)
-        layout.addRow("Text Threshold:", self.text_threshold_spin)
-
-        # Low text threshold
-        self.low_text_spin = QDoubleSpinBox()
-        self.low_text_spin.setRange(0.1, 1.0)
-        self.low_text_spin.setSingleStep(0.05)
-        self.low_text_spin.setValue(self.ocr_params["low_text"])
-        self.low_text_spin.valueChanged.connect(self._on_ocr_param_changed)
-        layout.addRow("Low Text:", self.low_text_spin)
-
-        # Link threshold
-        self.link_threshold_spin = QDoubleSpinBox()
-        self.link_threshold_spin.setRange(0.1, 1.0)
-        self.link_threshold_spin.setSingleStep(0.05)
-        self.link_threshold_spin.setValue(self.ocr_params["link_threshold"])
-        self.link_threshold_spin.valueChanged.connect(self._on_ocr_param_changed)
-        layout.addRow("Link Threshold:", self.link_threshold_spin)
-
-        # Geometric constraints
-        layout.addRow(self._create_section_header("=== Geometric Constraints ==="))
-
-        # Width threshold
-        self.width_ths_spin = QDoubleSpinBox()
-        self.width_ths_spin.setRange(0.1, 2.0)
-        self.width_ths_spin.setSingleStep(0.1)
-        self.width_ths_spin.setValue(self.ocr_params["width_ths"])
-        self.width_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
-        layout.addRow("Width Threshold:", self.width_ths_spin)
-
-        # Height threshold
-        self.height_ths_spin = QDoubleSpinBox()
-        self.height_ths_spin.setRange(0.1, 2.0)
-        self.height_ths_spin.setSingleStep(0.1)
-        self.height_ths_spin.setValue(self.ocr_params["height_ths"])
-        self.height_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
-        layout.addRow("Height Threshold:", self.height_ths_spin)
-
-        # X threshold
-        self.x_ths_spin = QDoubleSpinBox()
-        self.x_ths_spin.setRange(0.1, 3.0)
-        self.x_ths_spin.setSingleStep(0.1)
-        self.x_ths_spin.setValue(self.ocr_params["x_ths"])
-        self.x_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
-        layout.addRow("X Threshold:", self.x_ths_spin)
-
-        # Y threshold
-        self.y_ths_spin = QDoubleSpinBox()
-        self.y_ths_spin.setRange(0.1, 1.0)
-        self.y_ths_spin.setSingleStep(0.05)
-        self.y_ths_spin.setValue(self.ocr_params["y_ths"])
-        self.y_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
-        layout.addRow("Y Threshold:", self.y_ths_spin)
-
-        # Y-center threshold
-        self.ycenter_ths_spin = QDoubleSpinBox()
-        self.ycenter_ths_spin.setRange(0.1, 1.0)
-        self.ycenter_ths_spin.setSingleStep(0.05)
-        self.ycenter_ths_spin.setValue(self.ocr_params["ycenter_ths"])
-        self.ycenter_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
-        layout.addRow("Y-Center Threshold:", self.ycenter_ths_spin)
-
-        # Slope threshold
-        self.slope_ths_spin = QDoubleSpinBox()
-        self.slope_ths_spin.setRange(0.01, 1.0)
-        self.slope_ths_spin.setSingleStep(0.05)
-        self.slope_ths_spin.setValue(self.ocr_params["slope_ths"])
-        self.slope_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
-        layout.addRow("Slope Threshold:", self.slope_ths_spin)
-
-        # Image processing parameters
-        layout.addRow(self._create_section_header("=== Image Processing ==="))
-
-        # Canvas size
-        self.canvas_size_spin = QSpinBox()
-        self.canvas_size_spin.setRange(512, 4096)
-        self.canvas_size_spin.setSingleStep(256)
-        self.canvas_size_spin.setValue(self.ocr_params["canvas_size"])
-        self.canvas_size_spin.valueChanged.connect(self._on_ocr_param_changed)
-        layout.addRow("Canvas Size:", self.canvas_size_spin)
-
-        # Magnification ratio
-        self.mag_ratio_spin = QDoubleSpinBox()
-        self.mag_ratio_spin.setRange(0.5, 3.0)
-        self.mag_ratio_spin.setSingleStep(0.1)
-        self.mag_ratio_spin.setValue(self.ocr_params["mag_ratio"])
-        self.mag_ratio_spin.valueChanged.connect(self._on_ocr_param_changed)
-        layout.addRow("Mag Ratio:", self.mag_ratio_spin)
-
-        # Adjust contrast
-        self.adjust_contrast_spin = QDoubleSpinBox()
-        self.adjust_contrast_spin.setRange(0.0, 2.0)
-        self.adjust_contrast_spin.setSingleStep(0.1)
-        self.adjust_contrast_spin.setValue(self.ocr_params["adjust_contrast"])
-        self.adjust_contrast_spin.valueChanged.connect(self._on_ocr_param_changed)
-        layout.addRow("Adjust Contrast:", self.adjust_contrast_spin)
-
-        # Filter threshold
-        self.filter_ths_spin = QDoubleSpinBox()
-        self.filter_ths_spin.setRange(0.001, 0.1)
-        self.filter_ths_spin.setSingleStep(0.001)
-        self.filter_ths_spin.setDecimals(4)
-        self.filter_ths_spin.setValue(self.ocr_params["filter_ths"])
-        self.filter_ths_spin.valueChanged.connect(self._on_ocr_param_changed)
-        layout.addRow("Filter Threshold:", self.filter_ths_spin)
-
-        # Performance and parallel processing
-        layout.addRow(self._create_section_header("=== Performance ==="))
-
-        # Number of workers
-        self.workers_spin = QSpinBox()
-        self.workers_spin.setRange(0, 16)
-        self.workers_spin.setValue(self.ocr_params["workers"])
-        self.workers_spin.valueChanged.connect(self._on_ocr_param_changed)
-        self.workers_spin.setToolTip("Number of parallel workers (0 = auto)")
-        layout.addRow("Workers:", self.workers_spin)
-
-        # Batch size
-        self.batch_size_spin = QSpinBox()
-        self.batch_size_spin.setRange(1, 32)
-        self.batch_size_spin.setValue(self.ocr_params["batch_size"])
-        self.batch_size_spin.valueChanged.connect(self._on_ocr_param_changed)
-        layout.addRow("Batch Size:", self.batch_size_spin)
-
-        # Beam width (for beam search decoder)
-        self.beam_width_spin = QSpinBox()
-        self.beam_width_spin.setRange(1, 20)
-        self.beam_width_spin.setValue(self.ocr_params["beamWidth"])
-        self.beam_width_spin.valueChanged.connect(self._on_ocr_param_changed)
-        layout.addRow("Beam Width:", self.beam_width_spin)
-
-        # Options and flags
-        layout.addRow(self._create_section_header("=== Options ==="))
-
-        # GPU usage
-        self.gpu_check = QCheckBox()
-        self.gpu_check.setChecked(self.ocr_params["gpu"])
-        self.gpu_check.stateChanged.connect(self._on_ocr_param_changed)
-        layout.addRow("Use GPU:", self.gpu_check)
-
-        # Paragraph mode
-        self.paragraph_check = QCheckBox()
-        self.paragraph_check.setChecked(self.ocr_params["paragraph"])
-        self.paragraph_check.stateChanged.connect(self._on_ocr_param_changed)
-        layout.addRow("Paragraph Mode:", self.paragraph_check)
-
-        # Detail level
-        self.detail_spin = QSpinBox()
-        self.detail_spin.setRange(0, 2)
-        self.detail_spin.setValue(self.ocr_params["detail"])
-        self.detail_spin.valueChanged.connect(self._on_ocr_param_changed)
-        self.detail_spin.setToolTip("0=no detail, 1=bbox, 2=polygon")
-        layout.addRow("Detail Level:", self.detail_spin)
-
-        # Character filtering
-        layout.addRow(self._create_section_header("=== Character Filtering ==="))
-
-        # Allowlist (only allow these characters)
-        self.allowlist_edit = QLineEdit()
-        if self.ocr_params["allowlist"]:
-            self.allowlist_edit.setText(self.ocr_params["allowlist"])
-        self.allowlist_edit.textChanged.connect(self._on_ocr_param_changed)
-        self.allowlist_edit.setPlaceholderText("e.g., 0123456789")
-        layout.addRow("Allowlist:", self.allowlist_edit)
-
-        # Additional parameters
-        layout.addRow(self._create_section_header("=== Additional Options ==="))
-
-    def _load_videos(self):
-        """Load and display available video files."""
-        print("[EASYOCR_TUNING] Loading video files...")
-
-        self.video_files.clear()
-        self.video_list.clear()
-
-        # Search paths for videos
-        search_paths = [Path(DEFAULT_PATHS["DEV_DATA"]), Path(DEFAULT_PATHS["RAW_VIDEOS"])]
-
-        for search_path in search_paths:
-            if not search_path.exists():
-                print(f"[EASYOCR_TUNING] Search path does not exist: {search_path}")
-                continue
-
-            print(f"[EASYOCR_TUNING] Searching for videos in: {search_path}")
-
-            # Find video files
-            for file_path in search_path.glob("*"):
-                if file_path.is_file() and file_path.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS:
-                    self.video_files.append(str(file_path))
-
-        # Sort videos by name
-        self.video_files.sort()
-
-        # Populate list with video info
-        for video_path in self.video_files:
-            duration = get_video_duration(video_path)
-            filename = Path(video_path).name
-
-            # Create list item with filename and duration
-            item_text = f"{filename} ({duration})"
-            item = QListWidgetItem(item_text)
-            item.setToolTip(video_path)
-            self.video_list.addItem(item)
-
-        print(f"[EASYOCR_TUNING] Found {len(self.video_files)} video files")
-
-        # Auto-select a random video if available
-        if self.video_files:
-            random_index = random.randint(0, len(self.video_files) - 1)
-            self.video_list.setCurrentRow(random_index)
-            self.current_video_index = random_index
-            selected_video = self.video_files[random_index]
-            print(f"[EASYOCR_TUNING] Auto-selected random video: {Path(selected_video).name}")
-
-            # Load the selected video
-            self._load_selected_video()
-
-    def _populate_model_combo(self):
-        """Populate detection model combo box."""
-        self.detection_model_combo.clear()
-
-        # Look for models in the models directory
-        models_path = Path(get_setting("models.base_path", DEFAULT_PATHS["MODELS"]))
-
-        if not models_path.exists():
-            print(f"[EASYOCR_TUNING] Models directory not found: {models_path}")
-            return
-
-        # Search for detection model files
-        model_files = []
-        for model_dir in models_path.rglob("*"):
-            if model_dir.is_file() and model_dir.suffix == ".pt":
-                # Check if this is a detection model
-                if "detection" in str(model_dir).lower() or "object" in str(model_dir).lower():
-                    relative_path = model_dir.relative_to(models_path)
-                    model_files.append(str(relative_path))
-
-        # Add pretrained models
-        pretrained_path = models_path / "pretrained"
-        if pretrained_path.exists():
-            for model_file in pretrained_path.glob("*.pt"):
-                if not model_file.name.endswith("-seg.pt"):  # Exclude segmentation models
-                    relative_path = model_file.relative_to(models_path)
-                    model_files.append(str(relative_path))
-
-        # Sort and add to combo
-        model_files.sort()
-        self.detection_model_combo.addItems(model_files)
-
-        print(f"[EASYOCR_TUNING] Found {len(model_files)} detection models")
-
     # ========== EVENT HANDLERS ==========
+    def _reload_videos(self):
+        """List the available videos and open a random one."""
+        self.video_files = self.video_list.reload()
+        logger.info(f"Found {len(self.video_files)} video files")
+        if self.video_files:
+            # Selecting the row loads the video
+            self.video_list.setCurrentRow(random.randint(0, len(self.video_files) - 1))
+
+    def _on_model_changed(self, model_path: str):
+        """Handle player detection model change: the new model loads on the next run."""
+        self._detector = None
+
+    def _get_detector(self):
+        """The selected detection model as (model, image size), loaded on first use.
+
+        The tab has its own copy; choosing a model here leaves the main tab's alone.
+        """
+        if self._detector is None and self.detection_model_combo.currentText():
+            weights = models_root() / self.detection_model_combo.currentText()
+            self._detector = load_detection_model(str(weights))
+        return self._detector
+
+    def _get_reader(self):
+        """EasyOCR reader for the current GPU setting, created once and kept."""
+        gpu = self.ocr_params["gpu"]
+        if gpu not in self._readers:
+            self._readers[gpu] = easyocr.Reader(self.ocr_params["languages"], gpu=gpu)
+        return self._readers[gpu]
+
+    def _display_frame(self, frame: np.ndarray):
+        """Display a frame in the video label, scaled to fit."""
+        if frame is None:
+            return
+
+        # Leave room for the label's 2px border
+        label_size = self.video_label.size()
+        scaled_pixmap = frame_to_pixmap(frame).scaled(
+            label_size.width() - 4,
+            label_size.height() - 4,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        self.video_label.setPixmap(scaled_pixmap)
+
     def _on_video_selection_changed(self, row: int):
         """Handle video selection change."""
         if 0 <= row < len(self.video_files):
@@ -881,7 +447,7 @@ class EasyOCRTuningTab(QWidget):
             return
 
         video_path = self.video_files[self.current_video_index]
-        print(f"[EASYOCR_TUNING] Loading video: {video_path}")
+        logger.info(f"Loading video: {video_path}")
 
         # Load video
         if self.video_player.load_video(video_path):
@@ -904,7 +470,7 @@ class EasyOCRTuningTab(QWidget):
                 # Enable analysis button when video is loaded
                 self.run_analysis_button.setEnabled(True)
 
-            print(f"[EASYOCR_TUNING] Video loaded successfully: {filename}")
+            logger.info(f"Video loaded successfully: {filename}")
         else:
             self.video_label.setText("Failed to load video")
 
@@ -928,18 +494,10 @@ class EasyOCRTuningTab(QWidget):
                 self.current_crops.clear()
                 self._clear_crops_display()
 
-    def _on_model_changed(self, model_path: str):
-        """Handle player detection model change."""
-        if model_path:
-            full_path = Path(get_setting("models.base_path", DEFAULT_PATHS["MODELS"])) / model_path
-            # Use the new player-specific model setter
-            set_player_model(str(full_path))
-            print(f"[EASYOCR_TUNING] Player detection model changed to: {model_path}")
-
     def _on_preprocess_param_changed(self):
         """Handle preprocessing parameter change."""
         for key, control in PREPROCESS_CONTROLS.items():
-            self.preprocess_params[key] = self._get_control_value(getattr(self, control))
+            self.preprocess_params[key] = read_control(getattr(self, control))
 
     def _on_ocr_param_changed(self):
         """Handle EasyOCR parameter change."""
@@ -947,28 +505,9 @@ class EasyOCRTuningTab(QWidget):
             return
 
         for key, control in OCR_CONTROLS.items():
-            self.ocr_params[key] = self._get_control_value(getattr(self, control))
+            self.ocr_params[key] = read_control(getattr(self, control))
         # An empty allowlist means no character restriction
         self.ocr_params["allowlist"] = self.ocr_params["allowlist"].strip() or None
-
-    @staticmethod
-    def _get_control_value(control: QWidget) -> Any:
-        """Read the value of a parameter control."""
-        if isinstance(control, QCheckBox):
-            return control.isChecked()
-        if isinstance(control, QLineEdit):
-            return control.text()
-        return control.value()
-
-    @staticmethod
-    def _set_control_value(control: QWidget, value: Any):
-        """Show a parameter value in its control."""
-        if isinstance(control, QCheckBox):
-            control.setChecked(value)
-        elif isinstance(control, QLineEdit):
-            control.setText(str(value) if value else "")
-        else:
-            control.setValue(value)
 
     def _update_clahe_controls(self):
         """Enable/disable CLAHE controls based on enhance_contrast checkbox."""
@@ -992,20 +531,17 @@ class EasyOCRTuningTab(QWidget):
     def _run_easyocr_analysis(self):
         """Run combined inference and EasyOCR analysis."""
         if self.current_frame is None:
-            print("[EASYOCR_TUNING] No frame loaded")
+            logger.debug("No frame loaded")
             return
 
         try:
-            # Step 1: Run YOLO detection
-            detections = run_inference(self.current_frame)
-
-            # Filter for person detections (including various person-related classes)
-            person_detections = []
-            for det in detections:
-                class_name = det.get("class_name", "").lower()
-                # Check for person, player, or similar classes
-                if "person" in class_name or "player" in class_name or class_name == "person":
-                    person_detections.append(det)
+            # Step 1: Detect the players
+            detector = self._get_detector()
+            if detector is None:
+                logger.error("No player detection model could be loaded")
+                return
+            with MODEL_LOCK:
+                person_detections = detect_players(self.current_frame, *detector)
 
             self.current_detections = person_detections
 
@@ -1028,16 +564,16 @@ class EasyOCRTuningTab(QWidget):
                 annotated_frame = self._draw_detections(self.current_frame.copy())
                 self._display_frame(annotated_frame)
 
-            print(
-                f"[EASYOCR_TUNING] Analysis complete: {len(person_detections)} detections, {len(self.current_crops)} crops"
+            logger.info(
+                f"Analysis complete: {len(person_detections)} detections, {len(self.current_crops)} crops"
             )
 
         except Exception as e:
             # Clear crops display and show error
             self._clear_crops_display()
             error_msg = f"Analysis error: {str(e)}"
-            print(f"[EASYOCR_TUNING] {error_msg}")
-            traceback.print_exc()
+            logger.debug(f"{error_msg}")
+            logger.exception("Unexpected error")
 
     def _extract_crops_from_detections(self):
         """Extract crops from person detections."""
@@ -1071,7 +607,7 @@ class EasyOCRTuningTab(QWidget):
                 crop = self.current_frame[y1:crop_y2, x1:x2]
 
                 # Apply preprocessing
-                processed_crop = self._preprocess_crop(crop)
+                processed_crop = preprocess_crop(crop, self.preprocess_params)
 
                 self.current_crops.append(
                     {
@@ -1083,109 +619,7 @@ class EasyOCRTuningTab(QWidget):
                     }
                 )
 
-        print(f"[EASYOCR_TUNING] Extracted {len(self.current_crops)} crops")
-
-    def _preprocess_crop(self, crop: np.ndarray) -> np.ndarray:
-        """Apply preprocessing to a crop."""
-        processed = crop.copy()
-
-        # Resize (absolute takes priority over factor)
-        abs_width = self.preprocess_params["resize_absolute_width"]
-        abs_height = self.preprocess_params["resize_absolute_height"]
-        resize_factor = self.preprocess_params["resize_factor"]
-
-        if abs_width > 0 and abs_height > 0:
-            # Absolute resize
-            processed = cv2.resize(processed, (abs_width, abs_height))
-        elif abs_width > 0:
-            # Absolute width, maintain aspect ratio
-            current_height, current_width = processed.shape[:2]
-            new_height = int(current_height * abs_width / current_width)
-            processed = cv2.resize(processed, (abs_width, new_height))
-        elif abs_height > 0:
-            # Absolute height, maintain aspect ratio
-            current_height, current_width = processed.shape[:2]
-            new_width = int(current_width * abs_height / current_height)
-            processed = cv2.resize(processed, (new_width, abs_height))
-        elif resize_factor != 1.0:
-            # Factor-based resize
-            new_height = int(processed.shape[0] * resize_factor)
-            new_width = int(processed.shape[1] * resize_factor)
-            processed = cv2.resize(processed, (new_width, new_height))
-
-        # Color mode conversion
-        if self.preprocess_params["bw_mode"]:
-            processed = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
-            processed = cv2.cvtColor(processed, cv2.COLOR_GRAY2BGR)
-        elif not self.preprocess_params.get("colour_mode", False):
-            # Default grayscale processing
-            if len(processed.shape) == 3:
-                processed = cv2.cvtColor(processed, cv2.COLOR_BGR2GRAY)
-                processed = cv2.cvtColor(processed, cv2.COLOR_GRAY2BGR)
-
-        # Denoising
-        if self.preprocess_params["denoise"]:
-            if len(processed.shape) == 3:
-                processed = cv2.fastNlMeansDenoisingColored(processed, None, 10, 10, 7, 21)
-            else:
-                processed = cv2.fastNlMeansDenoising(processed, None, 10, 7, 21)
-
-        # Bilateral filter
-        # Contrast and brightness
-        alpha = self.preprocess_params["contrast_alpha"]
-        beta = self.preprocess_params["brightness_beta"]
-        if alpha != 1.0 or beta != 0:
-            processed = cv2.convertScaleAbs(processed, alpha=alpha, beta=beta)
-
-        # Gaussian blur
-        blur_kernel = self.preprocess_params["gaussian_blur"]
-        if blur_kernel > 0:
-            # Ensure kernel size is odd
-            if blur_kernel % 2 == 0:
-                blur_kernel += 1
-            processed = cv2.GaussianBlur(processed, (blur_kernel, blur_kernel), 0)
-
-        # CLAHE enhancement
-        if self.preprocess_params["enhance_contrast"]:
-            clip_limit = self.preprocess_params["clahe_clip_limit"]
-            grid_size = self.preprocess_params["clahe_grid_size"]
-
-            if len(processed.shape) == 3:
-                # Convert to LAB, apply CLAHE to L channel
-                lab = cv2.cvtColor(processed, cv2.COLOR_BGR2LAB)
-                clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(grid_size, grid_size))
-                lab[:, :, 0] = clahe.apply(lab[:, :, 0])
-                processed = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-            else:
-                # Grayscale
-                clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(grid_size, grid_size))
-                processed = clahe.apply(processed)
-
-        # Sharpening
-        if self.preprocess_params["sharpen"]:
-            strength = self.preprocess_params["sharpen_strength"]
-            kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]]) * strength
-            kernel[1, 1] = 1 + (8 * strength)  # Adjust center to maintain brightness
-            processed = cv2.filter2D(processed, -1, kernel)
-
-        # Upscaling
-        if self.preprocess_params["upscale"]:
-            if self.preprocess_params["upscale_to_size"]:
-                # Upscale to fixed size
-                target_size = self.preprocess_params["upscale_target_size"]
-                processed = cv2.resize(
-                    processed, (target_size, target_size), interpolation=cv2.INTER_CUBIC
-                )
-            else:
-                # Upscale by factor
-                factor = self.preprocess_params["upscale_factor"]
-                new_height = int(processed.shape[0] * factor)
-                new_width = int(processed.shape[1] * factor)
-                processed = cv2.resize(
-                    processed, (new_width, new_height), interpolation=cv2.INTER_CUBIC
-                )
-
-        return processed
+        logger.debug(f"Extracted {len(self.current_crops)} crops")
 
     def _run_easyocr_on_crops(self):
         """Run EasyOCR on all detected crops."""
@@ -1198,9 +632,7 @@ class EasyOCRTuningTab(QWidget):
             return
 
         try:
-            # Initialize EasyOCR reader with current parameters
-            gpu = self.ocr_params["gpu"]
-            reader = easyocr.Reader(self.ocr_params["languages"], gpu=gpu)
+            reader = self._get_reader()
 
             results = []
 
@@ -1212,8 +644,8 @@ class EasyOCRTuningTab(QWidget):
                 min_crop_height = self.preprocess_params["min_crop_height"]
 
                 if orig_width < min_crop_width or orig_height < min_crop_height:
-                    print(
-                        f"[EASYOCR_TUNING] Original crop too small ({orig_width}x{orig_height}), skipping OCR (min: {min_crop_width}x{min_crop_height})"
+                    logger.debug(
+                        f"Original crop too small ({orig_width}x{orig_height}), skipping OCR (min: {min_crop_width}x{min_crop_height})"
                     )
                     # Add result showing crop was skipped
                     results.append(
@@ -1230,46 +662,14 @@ class EasyOCRTuningTab(QWidget):
                 # Use processed crop for OCR
                 processed_crop = crop_data["processed_crop"]
 
-                # Prepare parameters for readtext
-                readtext_params = {
-                    "text_threshold": self.ocr_params["text_threshold"],
-                    "low_text": self.ocr_params["low_text"],
-                    "link_threshold": self.ocr_params["link_threshold"],
-                    "width_ths": self.ocr_params["width_ths"],
-                    "height_ths": self.ocr_params["height_ths"],
-                    "canvas_size": self.ocr_params["canvas_size"],
-                    "mag_ratio": self.ocr_params["mag_ratio"],
-                    "slope_ths": self.ocr_params["slope_ths"],
-                    "ycenter_ths": self.ocr_params["ycenter_ths"],
-                    "y_ths": self.ocr_params["y_ths"],
-                    "x_ths": self.ocr_params["x_ths"],
-                    "paragraph": self.ocr_params["paragraph"],
-                    "adjust_contrast": self.ocr_params["adjust_contrast"],
-                    "filter_ths": self.ocr_params["filter_ths"],
-                    "batch_size": self.ocr_params["batch_size"],
-                    "workers": self.ocr_params["workers"],
-                    "decoder": self.ocr_params["decoder"],
-                    "beamWidth": self.ocr_params["beamWidth"],
-                    "detail": self.ocr_params["detail"],
-                }
-
-                # Add character filtering if specified
-                if self.ocr_params["allowlist"]:
-                    readtext_params["allowlist"] = self.ocr_params["allowlist"]
+                readtext_params = easyocr_readtext_parameters(self.ocr_params)
 
                 # Run EasyOCR
-                ocr_results = reader.readtext(processed_crop, **readtext_params)
+                with MODEL_LOCK:
+                    ocr_results = reader.readtext(processed_crop, **readtext_params)
 
-                # Process results - find best numeric text (likely jersey number)
-                best_text = ""
-                best_confidence = 0.0
-
-                for bbox, text, confidence in ocr_results:
-                    # Clean text and check if it's a valid jersey number
-                    clean_text = "".join(filter(str.isdigit, text))
-                    if clean_text and confidence > best_confidence:
-                        best_text = clean_text
-                        best_confidence = confidence
+                # The most confident numeric reading is taken as the jersey number
+                best_text, best_confidence = best_number(ocr_results)
 
                 results.append(
                     {
@@ -1291,45 +691,16 @@ class EasyOCRTuningTab(QWidget):
             # Print summary with skipped crop information
             skipped_count = sum(1 for r in results if "skipped_reason" in r)
             processed_count = len(results) - skipped_count
-            print(
-                f"[EASYOCR_TUNING] EasyOCR complete: {processed_count} crops processed, {skipped_count} crops skipped (too small)"
+            logger.info(
+                f"EasyOCR complete: {processed_count} crops processed, {skipped_count} crops skipped (too small)"
             )
 
         except Exception as e:
             # Clear crops display and show error
             self._clear_crops_display()
             error_msg = f"EasyOCR error: {str(e)}"
-            print(f"[EASYOCR_TUNING] {error_msg}")
-            traceback.print_exc()
-
-    # ========== VISUALIZATION METHODS ==========
-    def _display_frame(self, frame: np.ndarray):
-        """Display a frame in the video label."""
-        if frame is None:
-            return
-
-        # Convert BGR to RGB
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-        # Convert to QImage
-        height, width = rgb_frame.shape[:2]
-        bytes_per_line = 3 * width
-        q_image = QImage(rgb_frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
-
-        # Create pixmap and scale to fit label while maintaining aspect ratio
-        pixmap = QPixmap.fromImage(q_image)
-
-        # Get the fixed display size (excluding borders)
-        label_size = self.video_label.size()
-        display_width = label_size.width() - 4  # Account for 2px border on each side
-        display_height = label_size.height() - 4
-
-        # Scale pixmap to fit within the fixed dimensions
-        scaled_pixmap = pixmap.scaled(
-            display_width, display_height, Qt.KeepAspectRatio, Qt.SmoothTransformation
-        )
-
-        self.video_label.setPixmap(scaled_pixmap)
+            logger.debug(f"{error_msg}")
+            logger.exception("Unexpected error")
 
     def _draw_detections(self, frame: np.ndarray) -> np.ndarray:
         """Draw detection bounding boxes on frame."""
@@ -1342,7 +713,7 @@ class EasyOCRTuningTab(QWidget):
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
             # Draw detection info
-            label = f"Person {i+1}: {confidence:.2f}"
+            label = f"Person {i + 1}: {confidence:.2f}"
             label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
             cv2.rectangle(
                 frame, (x1, y1 - label_size[1] - 5), (x1 + label_size[0], y1), (0, 255, 0), -1
@@ -1373,7 +744,7 @@ class EasyOCRTuningTab(QWidget):
             crop_widget = self._create_crop_display(crop_data, result, i + 1)
             self.crops_layout.addWidget(crop_widget, row, col)
 
-        print(f"[EASYOCR_TUNING] Displayed {num_crops} crops in {rows}x{cols} grid")
+        logger.debug(f"Displayed {num_crops} crops in {rows}x{cols} grid")
 
     def _create_crop_display(self, crop_data: Dict, result: Dict, crop_num: int) -> QWidget:
         """Create a widget to display a single crop with OCR result."""
@@ -1647,10 +1018,9 @@ class EasyOCRTuningTab(QWidget):
             # Update UI controls with loaded values
             self._update_controls_from_params()
 
-            print("[EASYOCR_TUNING] Parameters loaded from configuration")
+            logger.info("Parameters loaded from configuration")
         except Exception as e:
-            print(f"[EASYOCR_TUNING] Error loading parameters from config: {e}")
-            traceback.print_exc()
+            logger.exception(f"Error loading parameters from config: {e}")
             # Continue with default values if config loading fails
 
     def _load_user_config(self) -> Dict[str, Any]:
@@ -1681,13 +1051,13 @@ class EasyOCRTuningTab(QWidget):
                 user_config = yaml.safe_load(f)
 
             if user_config:
-                print(f"[EASYOCR_TUNING] User configuration loaded from: {user_config_file}")
+                logger.debug(f"User configuration loaded from: {user_config_file}")
                 return user_config
             else:
                 return {}
 
         except Exception as e:
-            print(f"[EASYOCR_TUNING] Error loading user config: {e}")
+            logger.error(f"Error loading user config: {e}")
             return {}
 
     def _update_controls_from_params(self):
@@ -1703,7 +1073,7 @@ class EasyOCRTuningTab(QWidget):
                 # back into the parameters
                 control.blockSignals(True)
                 try:
-                    self._set_control_value(control, params[key])
+                    write_control(control, params[key])
                 finally:
                     control.blockSignals(False)
 
@@ -1724,7 +1094,7 @@ class EasyOCRTuningTab(QWidget):
                     break
 
             if project_root is None:
-                print("[EASYOCR_TUNING] Error: Could not find project root with configs directory")
+                logger.error("Error: Could not find project root with configs directory")
                 return
 
             config_path = project_root / "configs" / "easyocr_params.yaml"
@@ -1753,7 +1123,7 @@ class EasyOCRTuningTab(QWidget):
                     with open(config_path, "r", encoding="utf-8") as f:
                         existing_config = yaml.safe_load(f) or {}
                 except Exception as e:
-                    print(f"[EASYOCR_TUNING] Warning: Could not read existing config: {e}")
+                    logger.error(f"Warning: Could not read existing config: {e}")
                     existing_config = {}
 
             # Merge updates
@@ -1763,18 +1133,17 @@ class EasyOCRTuningTab(QWidget):
             with open(config_path, "w", encoding="utf-8") as f:
                 yaml.dump(existing_config, f, default_flow_style=False, indent=2)
 
-            print(f"[EASYOCR_TUNING] Parameters saved successfully to {config_path}")
-            print(
-                f"[EASYOCR_TUNING]   - Preprocessing parameters: {len(config_updates['player_id']['preprocessing'])} saved"
+            logger.info(f"Parameters saved successfully to {config_path}")
+            logger.info(
+                f"  - Preprocessing parameters: {len(config_updates['player_id']['preprocessing'])} saved"
             )
             if EASYOCR_AVAILABLE and "easyocr" in config_updates["player_id"]:
-                print(
-                    f"[EASYOCR_TUNING]   - EasyOCR parameters: {len(config_updates['player_id']['easyocr'])} saved"
+                logger.info(
+                    f"  - EasyOCR parameters: {len(config_updates['player_id']['easyocr'])} saved"
                 )
 
         except Exception as e:
-            print(f"[EASYOCR_TUNING] Error saving parameters to config: {e}")
-            traceback.print_exc()
+            logger.exception(f"Error saving parameters to config: {e}")
 
     def _deep_update(self, base_dict: Dict, update_dict: Dict):
         """Recursively update nested dictionaries."""

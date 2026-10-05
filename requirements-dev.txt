@@ -1,0 +1,6 @@
+# Runtime dependencies plus development tools
+-r requirements.txt
+
+ruff        # linting, import sorting, and formatting
+vulture     # dead code check
+snakeviz    # viewer for scripts/profile_app.py profiles

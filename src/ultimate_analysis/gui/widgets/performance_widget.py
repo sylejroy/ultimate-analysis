@@ -53,7 +53,6 @@ class PerformanceMetrics:
 class PerformanceWidget(QWidget):
     """Hierarchical runtime table with expandable categories."""
 
-
     def __init__(self):
         super().__init__()
         self.metrics = PerformanceMetrics()
@@ -64,7 +63,6 @@ class PerformanceWidget(QWidget):
             "Tracking",
             "Player Identification",
             "Field Segmentation",
-            "Cache",
             "Homography",
             "Visualization",
             "UI Display",
@@ -74,20 +72,16 @@ class PerformanceWidget(QWidget):
         self.known_children: Dict[str, List[str]] = {
             "Player Identification": [
                 "Preprocessing",
-                "Optical Character Recognition",
+                "Reading",
                 "Jersey Number Filtering",
             ],
             "Homography": [
                 "Calculation",
-                "Display",
+                "Overlays",
             ],
             "Field Segmentation": [
                 "Line Extraction",
                 "Mask Unification",
-            ],
-            "Cache": [
-                "Lookup",
-                "Store",
             ],
         }
         # Track which metrics were updated in the current frame
@@ -187,20 +181,12 @@ class PerformanceWidget(QWidget):
         if n == "Frame I/O":
             return "Frame I/O", None
 
-        # Cache operations
-        if n.startswith("Cache"):
-            sub = None
-            if " - " in n:
-                sub = n.split(" - ", 1)[1].strip()
-            return "Cache", sub
         # Player ID mappings
         if n.startswith("Player ID"):
             sub = None
             if " - " in n:
                 sub_raw = n.split(" - ", 1)[1].strip()
-                if sub_raw.lower() == "easyocr":
-                    sub = "Optical Character Recognition"
-                elif "preprocess" in sub_raw.lower():
+                if "preprocess" in sub_raw.lower():
                     sub = "Preprocessing"
                 elif "filter" in sub_raw.lower():
                     sub = "Jersey Number Filtering"
@@ -212,9 +198,7 @@ class PerformanceWidget(QWidget):
         if n.startswith("Homography"):
             if "Calculation" in n:
                 return "Homography", "Calculation"
-            if "Display" in n:
-                return "Homography", "Display"
-            return "Homography", None
+            return "Homography", "Overlays"
 
         # Field Segmentation subcategories
         if n == "Line Extraction":

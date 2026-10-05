@@ -12,6 +12,12 @@ torchvision>=0.15.0
 
 # OCR for player identification
 easyocr>=1.7.0
+# PARSeq reader (loaded through torch.hub)
+timm
+pytorch-lightning
+nltk
+# Florence-2 reader
+transformers>=5.0
 
 # Object tracking
 deep-sort-realtime>=1.2.0

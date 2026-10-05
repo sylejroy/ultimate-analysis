@@ -32,13 +32,10 @@ TRACK_HISTORY_MAX_LENGTH = 100
 # Color scheme for visualization (BGR format for OpenCV)
 VISUALIZATION_COLORS = {
     "DETECTION_BOX": (0, 255, 0),  # Green (default)
-    "TRACKING_BOX": (255, 0, 0),  # Blue
-    "PLAYER_ID_BOX": (0, 255, 255),  # Yellow
-    "FIELD_MASK": (0, 0, 255),  # Red
-    "BACKGROUND": (30, 30, 30),  # Dark gray
     # Class-specific colors
     "DISC": (0, 255, 255),  # Bright cyan - easy to spot
     "PLAYER": (128, 128, 128),  # Subtle gray
+    "POSSESSION": (0, 215, 255),  # Gold - the player holding the disc
     # Model-specific colors for differentiation
     "PLAYER_MODEL": (0, 200, 0),  # Bright green for player model detections
     "DISC_MODEL": (
@@ -51,22 +48,14 @@ VISUALIZATION_COLORS = {
 # File system paths (relative to project root)
 DEFAULT_PATHS = {
     "MODELS": "data/models",
-    "PRETRAINED": "data/models/pretrained",
     "DEV_DATA": "data/processed/dev_data",
     "RAW_VIDEOS": "data/raw/videos",
-    "OUTPUT": "output",
-    "LOGS": "logs",
-    "CACHE": "data/cache",
 }
 
 # Fallback defaults (used when configuration is not available)
 FALLBACK_DEFAULTS = {
-    "video_fps": 25,
-    "confidence_threshold": 0.5,
-    "nms_threshold": 0.45,
-    "tracker_type": "deepsort",
-    "model_player_detection": "data/models/detection/20250802_1_detection_yolo11s_object_detection.v3i.yolov8/finetune_20250802_102035/weights/best.pt",
-    "model_disc_detection": "data/models/detection/20250913_4_detection_disc_yolo11s_object_detection_disc.v1i.yolov8/finetune_20250913_205313/weights/best.pt",
+    "model_player_detection": "data/models/detection/20261005_1_detection_yolo26s_players_merged.v2.yolov8/finetune_20261005_010313/weights/best.pt",
+    "model_disc_detection": "data/models/detection/20261004_1_detection_yolo26s_discs_merged.v2.yolov8/finetune_20261004_231958/weights/best.pt",
     "model_segmentation": "data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt",
 }
 

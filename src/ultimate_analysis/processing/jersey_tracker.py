@@ -11,6 +11,9 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..config.settings import get_setting
+from ..utils.logger import get_logger
+
+logger = get_logger("JERSEY_TRACKER")
 
 
 @dataclass
@@ -67,8 +70,12 @@ class JerseyNumberTracker:
         self.measurement_weight_recent = get_setting(
             "models.player_id.tracking.measurement_weight_recent", 1.0
         )
-        self.measurement_weight_old = get_setting("models.player_id.tracking.measurement_weight_old", 0.5)
-        self.probability_smoothing = get_setting("models.player_id.tracking.probability_smoothing", 0.1)
+        self.measurement_weight_old = get_setting(
+            "models.player_id.tracking.measurement_weight_old", 0.5
+        )
+        self.probability_smoothing = get_setting(
+            "models.player_id.tracking.probability_smoothing", 0.1
+        )
 
     def _calculate_spatial_weight(self, bbox_center_x: float) -> float:
         """Calculate spatial weight based on digit position within bounding box.
@@ -322,9 +329,6 @@ def reset_jersey_tracker() -> None:
     This should be called when the main tracker is reset or when switching videos.
     """
     global _jersey_tracker
-    from ..utils.logger import get_logger
-
-    logger = get_logger("JERSEY_TRACKER")
 
     logger.info("Resetting jersey tracking state")
     _jersey_tracker = None  # This will force recreation on next access
