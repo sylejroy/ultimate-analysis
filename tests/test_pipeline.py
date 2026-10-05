@@ -2,7 +2,7 @@
 
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 from support import load_module
@@ -15,6 +15,12 @@ STAGES = (
     "create_unified_field_mask",
     "fit_lines_from_mask",
     "get_track_histories",
+    "apply_camera_motion",
+    "missing_players",
+    "kit_distance",
+    "merge_players",
+    "merge_jersey_readings",
+    "set_frame_rate",
     "get_best_jersey_number",
     "reset_tracker",
     "reset_inference_state",
@@ -52,7 +58,7 @@ class PipelineTests(unittest.TestCase):
         self.mocks["draw_unified_field_mask"].side_effect = lambda frame, *a, **k: (frame, {}, {})
 
         self.track = SimpleNamespace(track_id=7, class_name="player", bbox=[1, 1, 5, 5])
-        self.mocks["run_inference"].return_value = [{"class_name": "player"}]
+        self.mocks["run_inference"].return_value = [{"class_name": "player", "bbox": [1, 1, 5, 5]}]
         self.mocks["run_tracking"].return_value = [self.track]
         self.mocks["run_field_segmentation"].return_value = [object()]
         self.mocks["run_player_id_on_tracks"].return_value = (
@@ -63,6 +69,7 @@ class PipelineTests(unittest.TestCase):
         self.mocks["create_unified_field_mask"].return_value = np.ones((8, 8), dtype=np.uint8)
         self.mocks["fit_lines_from_mask"].return_value = ([], [], None, None)
         self.mocks["get_track_histories"].return_value = {}
+        self.mocks["missing_players"].return_value = []
         self.mocks["get_best_jersey_number"].return_value = (None, 0.0)
 
         self.pipeline = self.module.AnalysisPipeline()
@@ -137,6 +144,29 @@ class PipelineTests(unittest.TestCase):
         # Track 7 is gone, and so is its number
         self.assertNotIn(7, result.player_ids)
 
+    def test_a_player_with_the_number_of_a_missing_player_becomes_that_player(self):
+        numbers = {7: ("17", 0.8), 3: ("17", 0.9), 5: ("17", 0.9)}
+        self.mocks["get_best_jersey_number"].side_effect = lambda player: numbers.get(
+            player, (None, 0.0)
+        )
+
+        # Player 3 is missing and looks like the new player 7: one and the same
+        self.mocks["missing_players"].return_value = [3]
+        self.mocks["kit_distance"].return_value = 5.0
+        result = self.pipeline.process(self.frame, 0, self.options)
+        self.mocks["merge_players"].assert_called_once_with(7, 3)
+        self.mocks["merge_jersey_readings"].assert_called_once_with(7, 3)
+        self.assertEqual([track.track_id for track in result.tracks], [3])
+        self.assertEqual(list(result.player_ids), [3])
+
+        # The other team's number 17 looks different and stays somebody else
+        self.track.track_id = 7
+        self.mocks["missing_players"].return_value = [5]
+        self.mocks["kit_distance"].return_value = 50.0
+        result = self.pipeline.process(self.frame, 1, self.options)
+        self.assertEqual([track.track_id for track in result.tracks], [7])
+        self.mocks["merge_players"].assert_called_once()
+
     def test_top_down_view_needs_a_homography(self):
         options = self.module.PipelineOptions()
         result = self.pipeline.process(self.frame, 0, options)
@@ -150,6 +180,31 @@ class PipelineTests(unittest.TestCase):
             result = self.pipeline.process(self.frame, 0, options)
         self.assertIsNotNone(result.top_down_view)
         self.assertIn("Homography Calculation", result.timings)
+
+    def test_top_down_calibration_follows_the_camera_and_starts_again_on_reset(self):
+        calibration = np.diag([2.0, 2.0, 1.0])
+        self.pipeline.homography_matrix = calibration
+        # The picture moves 6 px to the left per frame (the camera pans right)
+        pan = np.array([[1.0, 0, -6], [0, 1, 0], [0, 0, 1]])
+        self.pipeline._camera_motion = Mock(update=Mock(return_value=pan))
+
+        for index in range(3):
+            self.pipeline.process(self.frame, index, self.options)
+        # Redrawing a frame does not move the camera again
+        self.pipeline.process(self.frame, 2, self.options)
+
+        # A spot calibrated at x=100 is now at x=82 in the picture, same place on the field
+        spot_now = self.pipeline._top_down_matrix() @ [82, 50, 1]
+        np.testing.assert_allclose(spot_now, calibration @ [100, 50, 1])
+        self.mocks["apply_camera_motion"].assert_called_with(pan)
+
+        # Unknown motion (a cut) leaves the calibration where it was
+        self.pipeline._camera_motion.update.return_value = None
+        self.pipeline.process(self.frame, 3, self.options)
+        np.testing.assert_allclose(self.pipeline._top_down_matrix() @ [82, 50, 1], spot_now)
+
+        self.pipeline.reset()
+        np.testing.assert_allclose(self.pipeline._top_down_matrix(), calibration)
 
 
 if __name__ == "__main__":

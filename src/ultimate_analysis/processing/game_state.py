@@ -32,6 +32,7 @@ from ..config.settings import get_setting
 SPEED_WINDOW_S = 0.5  # Player speed is measured over this time
 MIN_SPEED_HISTORY_S = 0.25
 CUT_THUMBNAIL = (64, 36)
+HOLD_GRACE_S = 0.4
 
 
 class GameState(str, Enum):
@@ -124,7 +125,7 @@ class GameStateTracker:
         self.state = GameState.UNKNOWN
         self._state_since = 0.0
         self._positions: Dict[int, Deque[Tuple[float, float, float]]] = {}
-        self._held_since: Dict[str, Optional[float]] = {}
+        self._held_since: Dict[str, Optional[Tuple[float, float]]] = {}
         self._thumbnail: Optional[np.ndarray] = None
         self._holder_id: Optional[int] = None
         self._end_zone_catch_at: Optional[float] = None
@@ -168,19 +169,27 @@ class GameStateTracker:
         return float((speeds > _setting("moving_speed", 0.6)).mean())
 
     def _held_for(self, name: str, condition: bool, time_s: float) -> float:
-        """Seconds a condition has held without interruption (0 if it does not hold)."""
-        if not condition:
+        """Seconds a condition has held (0 if it does not hold).
+
+        A break shorter than HOLD_GRACE_S does not start the count again: a player is
+        missed for a frame or two, or steps out of the row and back.
+        """
+        since, last_true = self._held_since.get(name) or (None, None)
+        if condition:
+            since = time_s if since is None else since
+            self._held_since[name] = (since, time_s)
+            return time_s - since
+        if since is not None and time_s - last_true > HOLD_GRACE_S:
             self._held_since[name] = None
-            return 0.0
-        if self._held_since.get(name) is None:
-            self._held_since[name] = time_s
-        return time_s - self._held_since[name]
+        return 0.0
 
     def _enter(self, state: GameState, time_s: float) -> None:
         if state != self.state:
             self.state = state
             self._state_since = time_s
             self._end_zone_catch_at = None
+            # Evidence gathered in the old state does not count towards leaving the new one
+            self._held_since.clear()
 
     # ------------------------------------------------------------------ per frame
 
@@ -191,6 +200,7 @@ class GameStateTracker:
         tracks: List[Any],
         holder_id: Optional[int],
         field_results: List[Any],
+        disc_in_flight: bool = False,
     ) -> GameState:
         """Take a frame's results into account; returns the game state.
 
@@ -200,6 +210,7 @@ class GameStateTracker:
             tracks: Tracked objects of the frame
             holder_id: Track ID of the player holding the disc, if any
             field_results: Field segmentation results, to place a catch in an end zone
+            disc_in_flight: Whether a disc is detected away from every player
         """
         if self._is_cut(frame):
             # The tracks before and after a cut have nothing to do with each other.
@@ -225,8 +236,13 @@ class GameStateTracker:
         lined = (
             in_line >= int(_setting("line_players", 5))
             and in_rows >= _setting("line_share", 0.8)
-            and 0 <= moving < 0.4
+            and 0 <= moving < _setting("line_up_moving", 0.2)
         )
+        # The pull is up when the disc is seen in the air while the teams are still in rows
+        rows = in_line >= int(_setting("line_players", 5)) and in_rows >= _setting(
+            "line_share", 0.8
+        )
+        pulled_for = self._held_for("pulled", rows and disc_in_flight, time_s)
         self.features = {"players": count, "in_line": in_line, "in_rows": in_rows, "moving": moving}
 
         lined_for = self._held_for("lined", lined, time_s)
@@ -248,7 +264,10 @@ class GameStateTracker:
             self._end_zone_catch_at = catch_at = None
 
         state = self.state
-        if state == GameState.LINED_UP:
+        waiting = state in (GameState.UNKNOWN, GameState.BETWEEN_POINTS, GameState.LINED_UP)
+        if waiting and pulled_for >= 0.2:
+            self._enter(GameState.PULL, time_s)
+        elif state == GameState.LINED_UP:
             if dispersed_for >= _setting("pull_start_s", 0.5):
                 self._enter(GameState.PULL, time_s)
         elif (
@@ -265,7 +284,7 @@ class GameStateTracker:
         elif state == GameState.LIVE:
             if catch_at is not None and 0 <= moving < 0.2 and time_s - catch_at >= 2.0:
                 self._enter(GameState.BETWEEN_POINTS, time_s)
-            elif still_for >= _setting("stoppage_s", 4):
+            elif still_for >= _setting("stoppage_s", 8):
                 self._enter(GameState.STOPPAGE, time_s)
         elif state == GameState.STOPPAGE:
             if active_for >= 1.0:

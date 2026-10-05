@@ -258,10 +258,7 @@ def run_player_id_on_tracks(
 
                     # Add measurement to tracker
                     confidence = details.get("confidence", 0.0)
-                    ocr_results = details.get("ocr_results", [])
-                    add_jersey_measurement(
-                        track_id, jersey_number, confidence, bbox_center_x, ocr_results
-                    )
+                    add_jersey_measurement(track_id, jersey_number, confidence, bbox_center_x)
 
                 # Get tracking history and best tracked result
                 tracking_history = get_jersey_probabilities(track_id, top_k=3)
@@ -292,13 +289,9 @@ def run_player_id_on_tracks(
                     }
                 )
 
-                # Decide which result to return as primary
-                if best_tracked_number and best_tracked_prob > 0.5:
-                    # Use tracked result if high confidence
-                    primary_result = best_tracked_number
-                else:
-                    # Fall back to single-frame detection
-                    primary_result = jersey_number
+                # A number is shown once the readings so far add up to one; a single
+                # reading is too often wrong to be shown on its own
+                primary_result = best_tracked_number or "Unknown"
 
                 player_identifications[track_id] = (primary_result, enhanced_details)
 

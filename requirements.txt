@@ -21,6 +21,7 @@ transformers>=5.0
 
 # Object tracking
 deep-sort-realtime>=1.2.0
+scipy  # matching returning players to missing ones
 setuptools<81  # deep-sort-realtime imports pkg_resources, removed in newer setuptools
 
 # System monitoring

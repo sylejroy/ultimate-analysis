@@ -13,6 +13,9 @@ import numpy as np
 from ..config.settings import get_setting
 from ..constants import TRACK_HISTORY_MAX_LENGTH
 from ..utils.logger import get_logger
+from . import appearance
+from .camera_motion import move_points
+from .player_identity import Observation, PlayerIdentities
 
 logger = get_logger("TRACKING")
 
@@ -35,6 +38,15 @@ _deepsort_tracker = None
 # itself when compiling is not possible
 _compiled_embedder: Tuple[Any, Any] = (None, None)
 _track_histories = defaultdict(list)
+# Frames per second of the video; how long a lost track is kept is set in seconds
+_frame_rate = 30.0
+
+# Players keep their identity when the tracker loses them and picks them up again as a
+# new track. The IDs handed out below are those of the players, not of the tracks.
+_identities = PlayerIdentities()
+_history_last_frame: Dict[int, int] = {}
+# Discs are not players; their track IDs are moved out of the way of the player IDs
+DISC_ID_OFFSET = 100000
 _frame_count = 0
 
 
@@ -77,9 +89,7 @@ def _initialize_deepsort_tracker():
     try:
         # DeepSORT configuration optimized for Ultimate Frisbee
         _deepsort_tracker = DeepSort(
-            max_age=get_setting(
-                "models.tracking.max_age", 30
-            ),  # Reduced from 50 for faster cleanup
+            max_age=_max_age_frames(),
             n_init=get_setting("models.tracking.n_init", 3),  # Frames needed to confirm track
             nms_max_overlap=get_setting("models.tracking.nms_overlap", 0.7),  # Non-max suppression
             max_cosine_distance=get_setting(
@@ -104,6 +114,25 @@ def _initialize_deepsort_tracker():
         logger.error(f"Failed to initialize DeepSORT: {e}")
         _deepsort_tracker = None
         return False
+
+
+def _max_age_frames() -> int:
+    """Frames a track is kept without being detected.
+
+    Half a second, the tracker's own default at 60 frames per second, loses a player who
+    runs behind another one; the track then returns as somebody new.
+    """
+    seconds = float(get_setting("models.tracking.max_age_seconds", 3.0))
+    return max(1, round(seconds * _frame_rate))
+
+
+def set_frame_rate(frames_per_second: float) -> None:
+    """Tell the tracker the frame rate of the video its frames come from."""
+    global _frame_rate
+    if frames_per_second and frames_per_second > 0:
+        _frame_rate = float(frames_per_second)
+    if _deepsort_tracker is not None:
+        _deepsort_tracker.tracker.max_age = _max_age_frames()
 
 
 def _get_embedder_network(embedder: Any) -> Any:
@@ -284,12 +313,6 @@ def _run_deepsort_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) 
                 deepsort_detections, embeds=embeds, frame=frame
             )
 
-        # Retired tracks no longer need trajectory storage.
-        active_ids = {int(track.track_id) for track in tracks_deepsort}
-        for track_id in list(_track_histories):
-            if track_id not in active_ids:
-                del _track_histories[track_id]
-
         # Convert DeepSORT tracks to our Track format
         tracks = []
         for track in tracks_deepsort:
@@ -321,10 +344,21 @@ def _run_deepsort_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) 
 
             tracks.append(our_track)
 
-            # Update track history for visualization (at player's feet - bottom center)
-            foot_x = (ltrb[0] + ltrb[2]) / 2  # Center X
-            foot_y = ltrb[3]  # Bottom Y (feet level)
-            _update_track_history(our_track.track_id, (int(foot_x), int(foot_y)))
+        _assign_player_identities(frame, tracks)
+
+        # Update track history for visualization (at player's feet - bottom center)
+        for our_track in tracks:
+            x1, _, x2, y2 = our_track.bbox
+            _update_track_history(our_track.track_id, (int((x1 + x2) / 2), int(y2)))
+            _history_last_frame[our_track.track_id] = _frame_count
+
+        # Trails of tracks that are gone for good no longer need to be stored
+        oldest = _frame_count - _max_age_frames()
+        for track_id in [
+            t for t in _track_histories if _history_last_frame.get(t, float("-inf")) < oldest
+        ]:
+            del _track_histories[track_id]
+            _history_last_frame.pop(track_id, None)
 
         logger.debug(f"DeepSORT returned {len(tracks)} confirmed tracks")
         return tracks
@@ -332,6 +366,67 @@ def _run_deepsort_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) 
     except Exception as e:
         logger.exception(f"Error in DeepSORT tracking: {e}")
         return _run_simple_tracking(detections)
+
+
+def _assign_player_identities(frame: np.ndarray, tracks: List[Track]) -> None:
+    """Replace the track IDs of this frame's tracks by the IDs of the players they are.
+
+    The kit colour of a player is taken every few frames; a track that is new gets it at
+    once, since that is when it is compared with the missing players.
+    """
+    players = [track for track in tracks if track.class_name == "player"]
+    for track in tracks:
+        if track.class_name != "player":
+            track.track_id += DISC_ID_OFFSET
+    if not players:
+        return
+
+    if not get_setting("models.tracking.identity.enabled", True):
+        return
+    interval = max(1, int(get_setting("models.tracking.identity.appearance_interval", 10)))
+    due = [
+        index
+        for index, track in enumerate(players)
+        if not _identities.knows_track(track.track_id)
+        or (_frame_count + track.track_id) % interval == 0
+    ]
+    features: List[Optional[np.ndarray]] = [None] * len(players)
+    for index, vector in zip(due, appearance.encode(frame, [players[i].bbox for i in due])):
+        features[index] = vector
+
+    observations = [
+        Observation(
+            track_id=track.track_id,
+            position=((track.bbox[0] + track.bbox[2]) / 2, track.bbox[3]),
+            height=track.bbox[3] - track.bbox[1],
+            feature=feature,
+        )
+        for track, feature in zip(players, features)
+    ]
+    alive = {int(track.track_id) for track in _deepsort_tracker.tracker.tracks}
+    # A track is reported once it has been detected in n_init frames in a row
+    track_age = float(get_setting("models.tracking.n_init", 3)) / _frame_rate
+    player_of_track = _identities.assign(_frame_count / _frame_rate, observations, alive, track_age)
+    for track in players:
+        track.track_id = player_of_track[track.track_id]
+
+
+def merge_players(player_id: int, into_player_id: int) -> None:
+    """Declare a player to be an earlier one who went missing (e.g. same jersey number)."""
+    _identities.merge(player_id, into_player_id)
+    if player_id in _track_histories:
+        _track_histories[into_player_id] = _track_histories.pop(player_id)
+        _history_last_frame[into_player_id] = _history_last_frame.pop(player_id, _frame_count)
+
+
+def missing_players(present: set) -> List[int]:
+    """Players that are remembered but not among the given ones."""
+    return _identities.missing_players(present)
+
+
+def kit_distance(first_player: int, second_player: int) -> Optional[float]:
+    """How different the kits of two players are (0 = the same), or None if not known."""
+    return _identities.kit_distance(first_player, second_player)
 
 
 def _run_simple_tracking(detections: List[Dict[str, Any]]) -> List[Track]:
@@ -401,6 +496,8 @@ def reset_tracker() -> None:
 
     # Clear track histories and reset frame count
     _track_histories.clear()
+    _history_last_frame.clear()
+    _identities.reset()
     _frame_count = 0
 
     # Reset jersey tracking as well
@@ -421,6 +518,61 @@ def get_track_histories() -> Dict[int, List[Tuple[int, int]]]:
         Dictionary mapping track_id to list of (center_x, center_y) positions
     """
     return dict(_track_histories)
+
+
+def apply_camera_motion(camera_motion: np.ndarray) -> None:
+    """Move everything the tracker remembers along with the picture.
+
+    Positions from earlier frames are pixel positions. When the camera pans or zooms, the
+    spot on the field a player stood on is somewhere else in the picture.
+
+    - The trails are moved there, so a trail stays on the ground the player ran over.
+    - So is where each track expects its player next. Otherwise a pan looks to the tracker
+      as if every player had jumped, and it matches them worse or loses them.
+
+    Call this before run_tracking for the frame.
+
+    Args:
+        camera_motion: Homography from the previous frame to the current one
+    """
+    _move_track_states(camera_motion)
+    _identities.apply_camera_motion(camera_motion)
+    # All tracks in one call; there are thousands of stored positions
+    track_ids = list(_track_histories)
+    lengths = [len(_track_histories[track_id]) for track_id in track_ids]
+    moved = move_points(
+        [point for track_id in track_ids for point in _track_histories[track_id]], camera_motion
+    )
+    start = 0
+    for track_id, length in zip(track_ids, lengths):
+        _track_histories[track_id] = moved[start : start + length]
+        start += length
+
+
+def _move_track_states(camera_motion: np.ndarray) -> None:
+    """Apply the camera motion to the tracker's motion model of every track.
+
+    A track's state is its box centre, aspect ratio, and height, and the speed of each
+    (x, y, a, h, vx, vy, va, vh). The centre moves with the picture; near a point the
+    motion is a small linear map, which turns the speed and scales the height.
+    """
+    if _deepsort_tracker is None:
+        return
+    for track in _deepsort_tracker.tracker.tracks:
+        x, y = float(track.mean[0]), float(track.mean[1])
+        moved = camera_motion @ np.array([x, y, 1.0])
+        if abs(moved[2]) < 1e-9:
+            continue
+        new_x, new_y = moved[0] / moved[2], moved[1] / moved[2]
+        # How the picture stretches and turns around this point
+        step = np.array([[x + 1.0, y, 1.0], [x, y + 1.0, 1.0]]) @ camera_motion.T
+        local = (step[:, :2] / step[:, 2:3] - [new_x, new_y]).T
+        scale = float(np.sqrt(abs(np.linalg.det(local))))
+
+        track.mean[0], track.mean[1] = new_x, new_y
+        track.mean[3] *= scale
+        track.mean[4:6] = local @ track.mean[4:6]
+        track.mean[7] *= scale
 
 
 def _update_track_history(track_id: int, center_point: Tuple[int, int]) -> None:

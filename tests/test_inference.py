@@ -16,13 +16,14 @@ class InferenceTests(unittest.TestCase):
     def test_disc_detection_resumes_after_an_empty_scene(self):
         module = self.module
         frame = np.zeros((8, 8, 3), dtype=np.uint8)
+        disc = {"class_name": "disc", "bbox": [2, 2, 4, 4], "confidence": 0.9}
         disc_calls = 0
 
         def predict(frame, model, size, prefix, target):
             nonlocal disc_calls
             if target == "disc":
                 disc_calls += 1
-                return ([{"class_name": "disc"}] if disc_calls >= 32 else []), {}
+                return ([disc] if disc_calls >= 32 else []), {}
             return [], {}
 
         with (
@@ -32,9 +33,55 @@ class InferenceTests(unittest.TestCase):
         ):
             for _ in range(61):
                 detections = module.run_inference(frame)
-        self.assertEqual(detections, [{"class_name": "disc"}])
+        self.assertEqual(detections, [disc])
         self.assertEqual(disc_calls, 32)
         self.assertEqual(module._frames_since_last_disc, 0)
+
+    def test_a_followed_disc_is_searched_in_a_window_around_where_it_is_heading(self):
+        module = self.module
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        seen = []  # (shape searched, image size) per call
+        found = True
+
+        def predict(image, model, size, prefix, target):
+            seen.append((image.shape[:2], size))
+            if not found:
+                return [], {}
+            if image.shape[:2] == (1080, 1920):
+                # Whole frame: the disc moves 20 px to the right per frame
+                x = 1000 + 20 * (len(seen) - 1)
+                return [
+                    {"class_name": "disc", "bbox": [x - 8, 492, x + 8, 508], "confidence": 0.8}
+                ], {}
+            # Window: found in its centre, reported in window coordinates
+            return [{"class_name": "disc", "bbox": [312, 312, 328, 328], "confidence": 0.8}], {}
+
+        with (
+            patch.multiple(module, _disc_model=Mock(), _disc_model_imgsz=1280),
+            patch.object(module, "_run_single_model_inference", side_effect=predict),
+            patch.object(module, "get_setting", side_effect=lambda key, default=None: default),
+        ):
+            first, _ = module._detect_disc(frame)
+            second, _ = module._detect_disc(frame)
+            # Never seen before: the whole frame. Then a 640 px window, shown to the model
+            # at the scale it sees whole frames at (1280 / 1920)
+            self.assertEqual(seen, [((1080, 1920), 1280), ((640, 640), 416)])
+            # No speed is known yet, so the window is centred on the last position, and
+            # the detection is reported in frame coordinates
+            self.assertEqual(second[0]["bbox"], [992, 492, 1008, 508])
+
+            # Whole frame again at the regular interval, even while the disc is followed
+            for _ in range(20):
+                module._detect_disc(frame)
+            self.assertEqual(sum(shape == (1080, 1920) for shape, _ in seen), 2)
+
+            # Lost for a while: back to the whole frame
+            found = False
+            del seen[:]
+            for _ in range(10):
+                module._detect_disc(frame)
+            self.assertEqual([shape for shape, _ in seen[:6]], [(640, 640)] * 6)
+            self.assertEqual({shape for shape, _ in seen[6:]}, {(1080, 1920)})
 
     def test_unavailable_yolo_preserves_timing_return_contract(self):
         with patch.object(self.module, "YOLO_AVAILABLE", False):

@@ -58,7 +58,7 @@ def draw_jersey_table(frame: np.ndarray) -> None:
 
         # Get best and second-best jersey numbers for each track
         tracked_data = []
-        for track_id in tracker._track_probabilities.keys():
+        for track_id in tracker.tracked_ids():
             top_probs = tracker.get_top_probabilities(track_id, top_k=2)
             if top_probs:
                 best_jersey, best_prob = top_probs[0][0], top_probs[0][1]

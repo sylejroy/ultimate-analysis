@@ -34,6 +34,9 @@ models:
     nms_threshold: 0.45
     adaptive_skip: true          # Skip disc model when no disc detected recently
     skip_threshold: 30           # Frames without disc before skipping disc model
+    follow_window: 640           # Side of the area searched around a followed disc, in frame pixels (0 = always the whole frame)
+    follow_max_missing: 5        # Frames the followed disc may be missing before the whole frame is searched again
+    full_search_interval: 15     # Search the whole frame at least this often, so a wrong lock does not last
   
   segmentation:
     default_model: "data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt"
@@ -90,9 +93,23 @@ models:
   
   tracking:
     track_history_length: 300
+    camera_motion_compensation: true   # Keep trails on the ground when the camera pans or zooms
     
     # DeepSORT specific settings (optimized for performance)
-    max_age: 30                  # Frames to keep lost tracks (reduced from 50)
+    max_age_seconds: 3.0         # How long a player who is not detected is remembered and can return as the same track
+
+    # Player identities: a player who was lost and comes back as a new track is recognised
+    identity:
+      enabled: true
+      memory_seconds: 30.0                # How long a missing player is remembered, to be recognised by their number
+      position_match_seconds: 0.0         # Up to this long after a player was lost, a new track where they must be is them. Off (0): on test footage it recovered no player and joined two different ones once
+      max_speed_heights_per_second: 5.0   # Top speed of a player, in body heights per second
+      max_acceleration_heights_per_second2: 4.0  # How fast a player can change speed or direction
+      carry_on_seconds: 1.0               # For this long a missing player is expected to carry on as they were going
+      min_margin: 0.25                    # How much nearer than any other candidate a match must be (share of the reachable distance)
+      max_kit_distance: 30.0              # Average kit colours further apart than this (Lab units) are different teams: same number, different player
+      appearance_interval: 10             # Frames between looks at a player's kit colour
+      number_certainty: 0.6               # Certainty of a jersey number from which it identifies a missing player
     n_init: 3                    # Frames needed to confirm a track
     nms_overlap: 0.7             # Non-maximum suppression overlap threshold
     max_cosine_distance: 0.5     # Feature similarity threshold (tighter for faster matching)
@@ -116,19 +133,16 @@ models:
     # Performance optimization: only run OCR on a subset of frames per track
     ocr_frame_interval: 5          # Run OCR for a given track every N frames (>=1)
     ocr_frame_interval_stagger: true # Stagger per track using track_id % interval to spread load
-    finalized_certainty_threshold: 0.95 # Probability at which jersey number is considered final (skip future OCR) - reduced from 0.999 for faster finalization
+    finalized_certainty_threshold: 0.9 # Probability at which jersey number is considered final (skip future OCR) - reduced from 0.999 for faster finalization
     verbose_debug: false           # Enable extra per-crop debug logging when troubleshooting
     
     # Jersey number tracking settings
     tracking:
-      max_history_length: 20              # Maximum measurements to keep per track - reduced from 30 for better performance
-      confidence_decay_factor: 0.93       # Decay factor for old measurements per frame - slightly faster decay from 0.95
+      max_history_length: 40              # Readings kept per player
+      min_readings: 2                     # Times a number must be read before it is shown
+      unknown_weight: 1.0                 # Votes held back for "unknown": one reading is never certain
       spatial_weight_center_bonus: 0.3    # Bonus weight for center-positioned digits
-      min_confidence_threshold: 0.1       # Minimum probability to keep in memory
       center_region_width: 0.4            # Width of "center" region (fraction of bbox)
-      measurement_weight_recent: 1.0      # Weight for recent measurements
-      measurement_weight_old: 0.5         # Weight for old measurements
-      probability_smoothing: 0.1          # Smoothing factor for probability updates
 
 # Logging Settings
 logging:

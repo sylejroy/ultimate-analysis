@@ -62,6 +62,7 @@ class PipelineWorker(QObject):
 
                 if self.video_player.load_video(video_path):
                     info = self.video_player.get_video_info()
+                    self.pipeline.set_frame_rate(info.get("fps", 0))
                     # Loading models here keeps the first frame from stalling playback
                     if options.player_id:
                         initialize_player_id_system()

@@ -57,6 +57,13 @@ class PossessionTracker:
         self._candidate_id = None
         self._candidate_frames = 0
 
+    def rename(self, player_id: int, new_player_id: int) -> None:
+        """A player turned out to be another one known earlier; keep following them."""
+        if self.holder_id == player_id:
+            self.holder_id = new_player_id
+        if self._candidate_id == player_id:
+            self._candidate_id = new_player_id
+
     def update(self, detections: List[Dict[str, Any]], tracks: List[Any]) -> Optional[int]:
         """Take a frame's detections and tracks into account; returns the holder's track ID."""
         discs = [detection for detection in detections if detection.get("class_name") == "disc"]

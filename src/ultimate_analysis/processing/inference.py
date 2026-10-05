@@ -42,11 +42,99 @@ _disc_model_imgsz = None
 # Performance optimization: disc detection skipping
 _frames_since_last_disc = 0
 
+# Following the disc: where it was last seen, how it moved, and for how long it is missing
+_disc_position: Optional[Tuple[float, float]] = None
+_disc_velocity = (0.0, 0.0)  # Pixels per frame
+_disc_frames_missing = 0
+_frames_since_full_search = 0
+
 
 def reset_inference_state() -> None:
     """Resume disc detection when the video or playback position changes."""
-    global _frames_since_last_disc
+    global _frames_since_last_disc, _disc_position, _disc_velocity
+    global _disc_frames_missing, _frames_since_full_search
     _frames_since_last_disc = 0
+    _disc_position = None
+    _disc_velocity = (0.0, 0.0)
+    _disc_frames_missing = 0
+    _frames_since_full_search = 0
+
+
+def _disc_search_window(frame_shape: Tuple[int, ...]) -> Optional[Tuple[int, int, int, int]]:
+    """Part of the frame (x1, y1, x2, y2) to look for the disc in, or None for all of it.
+
+    While the disc is being followed it can only be near where it was, so a small window
+    around its expected position is searched: several times faster than the whole frame,
+    and a look-alike elsewhere in the picture cannot be mistaken for it. The whole frame
+    is searched when the disc has not been seen lately, and every so often regardless, so
+    that a wrong lock does not last.
+    """
+    size = int(get_setting("models.disc_detection.follow_window", 640))
+    frame_h, frame_w = frame_shape[:2]
+    if (
+        size <= 0
+        or size >= min(frame_h, frame_w)
+        or _disc_position is None
+        or _disc_frames_missing > int(get_setting("models.disc_detection.follow_max_missing", 5))
+        or _frames_since_full_search
+        >= int(get_setting("models.disc_detection.full_search_interval", 15))
+    ):
+        return None
+
+    frames_ahead = _disc_frames_missing + 1
+    center_x = _disc_position[0] + _disc_velocity[0] * frames_ahead
+    center_y = _disc_position[1] + _disc_velocity[1] * frames_ahead
+    x1 = int(min(max(center_x - size / 2, 0), frame_w - size))
+    y1 = int(min(max(center_y - size / 2, 0), frame_h - size))
+    return x1, y1, x1 + size, y1 + size
+
+
+def _detect_disc(frame: np.ndarray) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
+    """Run the disc model, on a window around the followed disc when there is one."""
+    global _disc_position, _disc_velocity, _disc_frames_missing, _frames_since_full_search
+
+    window = _disc_search_window(frame.shape)
+    if window is None:
+        _frames_since_full_search = 0
+        detections, timing = _run_single_model_inference(
+            frame, _disc_model, _disc_model_imgsz, "models.disc_detection", "disc"
+        )
+    else:
+        _frames_since_full_search += 1
+        x1, y1, x2, y2 = window
+        # The window is shown to the model at the scale it sees whole frames at
+        scale = (_disc_model_imgsz or 640) / max(frame.shape[:2])
+        window_imgsz = max(32, int(round((x2 - x1) * scale / 32)) * 32)
+        detections, timing = _run_single_model_inference(
+            np.ascontiguousarray(frame[y1:y2, x1:x2]),
+            _disc_model,
+            window_imgsz,
+            "models.disc_detection",
+            "disc",
+        )
+        for detection in detections:
+            bx1, by1, bx2, by2 = detection["bbox"]
+            detection["bbox"] = [bx1 + x1, by1 + y1, bx2 + x1, by2 + y1]
+
+    if detections:
+        best = max(detections, key=lambda detection: detection["confidence"])
+        position = (
+            (best["bbox"][0] + best["bbox"][2]) / 2,
+            (best["bbox"][1] + best["bbox"][3]) / 2,
+        )
+        if _disc_position is not None and _disc_frames_missing <= 5:
+            frames = _disc_frames_missing + 1
+            _disc_velocity = (
+                (position[0] - _disc_position[0]) / frames,
+                (position[1] - _disc_position[1]) / frames,
+            )
+        else:
+            _disc_velocity = (0.0, 0.0)
+        _disc_position = position
+        _disc_frames_missing = 0
+    else:
+        _disc_frames_missing += 1
+    return detections, timing
 
 
 # Detected class -> (settings prefix, model type shown by the visualization)
@@ -212,6 +300,14 @@ def detect_players(frame: np.ndarray, model: Any, model_imgsz: int) -> List[Dict
     """Players a model finds in a frame, with the pipeline's player detection settings."""
     detections, _ = _run_single_model_inference(
         frame, model, model_imgsz, "models.player_detection", "player"
+    )
+    return detections
+
+
+def detect_discs(frame: np.ndarray, model: Any, model_imgsz: int) -> List[Dict[str, Any]]:
+    """Discs a model finds in a whole frame, with the pipeline's disc detection settings."""
+    detections, _ = _run_single_model_inference(
+        frame, model, model_imgsz, "models.disc_detection", "disc"
     )
     return detections
 
@@ -505,9 +601,7 @@ def run_inference(
         disc_timing = {"preprocessing": 0.0, "inference": 0.0, "postprocessing": 0.0, "total": 0.0}
     elif _disc_model is not None and not skip_disc:
         logger.debug("┌─ Running disc model inference...")
-        disc_detections, disc_timing = _run_single_model_inference(
-            frame, _disc_model, _disc_model_imgsz, "models.disc_detection", "disc"
-        )
+        disc_detections, disc_timing = _detect_disc(frame)
         disc_count = len(disc_detections)
         all_detections.extend(disc_detections)
 

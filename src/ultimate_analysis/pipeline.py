@@ -14,14 +14,29 @@ import cv2
 import numpy as np
 
 from .config.settings import get_setting
+from .processing.camera_motion import CameraMotionEstimator
+from .processing.camera_motion import is_enabled as camera_motion_enabled
 from .processing.field_analysis import create_unified_field_mask, fit_lines_from_mask
 from .processing.field_segmentation import reset_segmentation_cache, run_field_segmentation
 from .processing.homography import output_canvas_size
 from .processing.inference import reset_inference_state, run_inference
-from .processing.jersey_tracker import get_best_jersey_number, reset_jersey_tracker
+from .processing.jersey_tracker import (
+    get_best_jersey_number,
+    merge_jersey_readings,
+    reset_jersey_tracker,
+)
 from .processing.player_id import run_player_id_on_tracks
 from .processing.possession import PossessionTracker
-from .processing.tracking import get_track_histories, reset_tracker, run_tracking
+from .processing.tracking import (
+    apply_camera_motion,
+    get_track_histories,
+    kit_distance,
+    merge_players,
+    missing_players,
+    reset_tracker,
+    run_tracking,
+    set_frame_rate,
+)
 from .rendering.field import (
     draw_field_segmentation,
     draw_unified_field_mask,
@@ -84,8 +99,11 @@ class AnalysisPipeline:
     FPS_WINDOW = 30  # Frames the displayed processing rate is averaged over
 
     def __init__(self):
-        # Camera-to-top-down homography; without one there is no top-down view
-        self.homography_matrix: Optional[np.ndarray] = None
+        # Camera-to-top-down homography as calibrated; without one there is no top-down
+        # view. The camera has moved since the frame it was calibrated on (taken to be the
+        # first frame after a reset), which is undone before it is applied.
+        self._homography_matrix: Optional[np.ndarray] = None
+        self._camera_since_calibration = np.eye(3)
 
         # Results for the current frame
         self.detections: List[Dict[str, Any]] = []
@@ -101,6 +119,7 @@ class AnalysisPipeline:
         self._finalized_player_ids: Set[int] = set()
 
         self._possession = PossessionTracker()
+        self._camera_motion = CameraMotionEstimator()
 
         # Redrawing the frame that was just analysed (pause, toggling an overlay) must not
         # advance the tracker again, so its results are reused.
@@ -123,12 +142,30 @@ class AnalysisPipeline:
 
     # ------------------------------------------------------------------ state
 
+    @property
+    def homography_matrix(self) -> Optional[np.ndarray]:
+        """Calibrated camera-to-top-down homography."""
+        return self._homography_matrix
+
+    @homography_matrix.setter
+    def homography_matrix(self, matrix: Optional[np.ndarray]) -> None:
+        self._homography_matrix = matrix
+        self._camera_since_calibration = np.eye(3)
+
+    def _top_down_matrix(self) -> Optional[np.ndarray]:
+        """Homography from the current frame to the top-down view."""
+        if self._homography_matrix is None:
+            return None
+        return self._homography_matrix @ np.linalg.inv(self._camera_since_calibration)
+
     def reset(self) -> None:
         """Forget everything derived from earlier frames."""
         reset_tracker()
         reset_inference_state()
         reset_segmentation_cache()
         self._possession.reset()
+        self._camera_motion.reset()
+        self._camera_since_calibration = np.eye(3)
         self.invalidate()
         self.detections = []
         self.tracks = []
@@ -136,6 +173,10 @@ class AnalysisPipeline:
         self.player_ids.clear()
         self._player_id_last_seen.clear()
         self._finalized_player_ids.clear()
+
+    def set_frame_rate(self, frames_per_second: float) -> None:
+        """Tell the pipeline the frame rate of the video; durations are set in seconds."""
+        set_frame_rate(frames_per_second)
 
     def reset_player_ids(self) -> None:
         """Forget the jersey numbers read so far (e.g. after switching the reader)."""
@@ -228,6 +269,17 @@ class AnalysisPipeline:
             self.detections = run_inference(frame)
             self._record("Inference", start)
 
+        if (options.tracking or options.top_down_view) and camera_motion_enabled():
+            # Before tracking adds this frame's positions: the trails from earlier frames
+            # follow the picture when the camera moves, and so does the top-down calibration
+            start = time.perf_counter()
+            boxes = [detection["bbox"] for detection in self.detections]
+            motion = self._camera_motion.update(frame, boxes)
+            if motion is not None:
+                apply_camera_motion(motion)
+                self._camera_since_calibration = motion @ self._camera_since_calibration
+            self._record("Camera Motion", start)
+
         if options.tracking:
             start = time.perf_counter()
             self.tracks = run_tracking(frame, self.detections)
@@ -287,11 +339,54 @@ class AnalysisPipeline:
                     self.player_ids[track_id] = (best_number, details)
                     self._player_id_last_seen[track_id] = frame_index
 
+        self._merge_players_by_number()
+
         # Drop the numbers of tracks that are gone
         current_ids = {getattr(t, "track_id", getattr(t, "id", -1)) for t in self.tracks}
         for track_id in [tid for tid in self.player_ids if tid not in current_ids]:
             self.player_ids.pop(track_id, None)
             self._player_id_last_seen.pop(track_id, None)
+
+    def _merge_players_by_number(self) -> None:
+        """A player whose number is that of a missing player is that player.
+
+        Place and looks could not decide who a new track was when it appeared; the jersey
+        number can, once it has been read often enough. Both teams may have the same
+        number, so the two must also wear the same kit.
+        """
+        certainty_needed = float(get_setting("models.tracking.identity.number_certainty", 0.6))
+        max_distance = float(get_setting("models.tracking.identity.max_kit_distance", 30.0))
+        present = {track.track_id for track in self.tracks if track.class_name == "player"}
+        missing = {}
+        for player_id in missing_players(present):
+            number, certainty = get_best_jersey_number(player_id)
+            if number and certainty >= certainty_needed:
+                missing.setdefault(number, player_id)
+
+        for track in self.tracks:
+            player_id = track.track_id
+            if track.class_name != "player" or not missing:
+                continue
+            number, certainty = get_best_jersey_number(player_id)
+            earlier = missing.get(number) if number and certainty >= certainty_needed else None
+            if earlier is None:
+                continue
+            distance = kit_distance(player_id, earlier)
+            if distance is None or distance > max_distance:
+                continue
+
+            merge_players(player_id, earlier)
+            merge_jersey_readings(player_id, earlier)
+            track.track_id = earlier
+            if player_id in self.player_ids:
+                self.player_ids[earlier] = self.player_ids.pop(player_id)
+                self._player_id_last_seen[earlier] = self._player_id_last_seen.pop(player_id, 0)
+            if player_id in self._finalized_player_ids:
+                self._finalized_player_ids.discard(player_id)
+                self._finalized_player_ids.add(earlier)
+            self._possession.rename(player_id, earlier)
+            del missing[number]
+            logger.info(f"Player {player_id} is player {earlier} again (number {number})")
 
     def _field_geometry(self, frame_shape: Tuple[int, int]) -> Optional[np.ndarray]:
         """Field mask for the current segmentation result; also updates contour and lines.
@@ -415,7 +510,8 @@ class AnalysisPipeline:
         Returns:
             (view, "") or (None, reason there is no view)
         """
-        if self.homography_matrix is None:
+        top_down_matrix = self._top_down_matrix()
+        if top_down_matrix is None:
             return None, "Homography matrix not available"
 
         try:
@@ -427,11 +523,11 @@ class AnalysisPipeline:
             # scale; warp cost is proportional to the output pixel count.
             scale = float(get_setting("homography.display_scale", 0.5))
             scale = min(1.0, max(0.1, scale))
-            matrix = self.homography_matrix
+            matrix = top_down_matrix
             if scale != 1.0:
                 output_width = max(1, int(output_width * scale))
                 output_height = max(1, int(output_height * scale))
-                matrix = np.diag([scale, scale, 1.0]) @ self.homography_matrix
+                matrix = np.diag([scale, scale, 1.0]) @ top_down_matrix
 
             view = cv2.warpPerspective(frame, matrix, (output_width, output_height))
             warp_ms = self._record("Homography Calculation", start)

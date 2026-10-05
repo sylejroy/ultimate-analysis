@@ -64,6 +64,44 @@ class TrackingTests(unittest.TestCase):
             self.assertIs(self.module._deepsort_tracker, tracker)
             self.assertEqual(tracker.tracker.metric.samples, {})
 
+    def test_lost_tracks_are_kept_for_seconds_whatever_the_frame_rate(self):
+        tracker = Mock()
+        settings = {"models.tracking.max_age_seconds": 3.0}
+        with (
+            patch.object(self.module, "_deepsort_tracker", tracker),
+            patch.object(
+                self.module, "get_setting", side_effect=lambda key, d=None: settings.get(key, d)
+            ),
+        ):
+            self.module.set_frame_rate(60)
+            self.assertEqual(tracker.tracker.max_age, 180)
+            self.module.set_frame_rate(29.97)
+            self.assertEqual(tracker.tracker.max_age, 90)
+            # A video without a usable frame rate keeps the last one
+            self.module.set_frame_rate(0)
+            self.assertEqual(tracker.tracker.max_age, 90)
+
+    def test_camera_motion_moves_trails_and_where_tracks_expect_their_players(self):
+        from types import SimpleNamespace
+
+        # x, y, aspect, height and their speeds
+        track = SimpleNamespace(mean=np.array([400.0, 300.0, 0.4, 100.0, 5.0, 0.0, 0.0, 1.0]))
+        tracker = Mock()
+        tracker.tracker.tracks = [track]
+        self.module._track_histories[1] = [(400, 350), (410, 350)]
+
+        with patch.object(self.module, "_deepsort_tracker", tracker):
+            # The camera pans: the picture moves 20 px left and 4 px up
+            pan = np.array([[1.0, 0, -20], [0, 1, -4], [0, 0, 1]])
+            self.module.apply_camera_motion(pan)
+            np.testing.assert_allclose(track.mean, [380, 296, 0.4, 100, 5, 0, 0, 1])
+            self.assertEqual(self.module._track_histories[1], [(380, 346), (390, 346)])
+
+            # The camera zooms in by 10% around the picture's corner
+            zoom = np.diag([1.1, 1.1, 1.0])
+            self.module.apply_camera_motion(zoom)
+            np.testing.assert_allclose(track.mean, [418, 325.6, 0.4, 110, 5.5, 0, 0, 1.1])
+
 
 if __name__ == "__main__":
     unittest.main()
