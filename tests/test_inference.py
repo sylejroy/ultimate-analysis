@@ -40,6 +40,8 @@ class InferenceTests(unittest.TestCase):
     def test_a_followed_disc_is_searched_in_a_window_around_where_it_is_heading(self):
         module = self.module
         frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        # The window is off by default; this is about how it works when switched on
+        settings = {"models.disc_detection.follow_window": 640}
         seen = []  # (shape searched, image size) per call
         found = True
 
@@ -59,7 +61,11 @@ class InferenceTests(unittest.TestCase):
         with (
             patch.multiple(module, _disc_model=Mock(), _disc_model_imgsz=1280),
             patch.object(module, "_run_single_model_inference", side_effect=predict),
-            patch.object(module, "get_setting", side_effect=lambda key, default=None: default),
+            patch.object(
+                module,
+                "get_setting",
+                side_effect=lambda key, default=None: settings.get(key, default),
+            ),
         ):
             first, _ = module._detect_disc(frame)
             second, _ = module._detect_disc(frame)

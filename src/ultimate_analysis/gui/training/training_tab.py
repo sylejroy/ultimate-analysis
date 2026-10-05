@@ -712,25 +712,12 @@ class ModelTrainingTab(QWidget):
                         if yaml_files:
                             available_datasets.append(str(yaml_files[0]))
 
-        # Sort datasets to prefer v3i specifically, then newer versions
-        def extract_version(path_str):
-            """Extract version number from dataset path for sorting, preferring v3i."""
-            # Look for patterns like v3i, v4i, etc.
-            version_match = re.search(r"\.v(\d+)i", path_str)
-            if version_match:
-                version = int(version_match.group(1))
-                # Give v3i highest priority
-                if version == 3:
-                    return 1000  # High priority for v3i
-                return version
-            return 0  # Default for paths without version
-
-        # Sort by version number (v3i first, then descending order)
-        available_datasets.sort(key=extract_version, reverse=True)
+        # By name: the names start with where a dataset comes from (labelled_, roboflow_)
+        available_datasets.sort()
 
         self.data_combo.addItems(available_datasets)
 
-        # Select the configured default dataset, otherwise the first (newest) one
+        # Select the configured default dataset, otherwise the first one
         if available_datasets:
             default_index = 0
             default_dataset = self.training_config.get(self.current_task, {}).get("default_dataset")

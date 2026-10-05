@@ -101,6 +101,30 @@ class PhoneLabellingTests(unittest.TestCase):
         self.assertEqual(offered, 20)
         self.assertGreater(len(reads), 40)  # Most frames were read and passed over
 
+    def test_the_box_is_fitted_to_the_disc_at_the_tapped_spot(self):
+        import cv2
+
+        grass = np.full((1080, 1920, 3), (60, 140, 70), dtype=np.uint8)
+        # A disc seen from the side (a thin line), one from above (round), and a shirt
+        cv2.ellipse(grass, (500, 300), (11, 2), 0, 0, 360, (235, 235, 235), -1)
+        cv2.circle(grass, (900, 600), 8, (235, 235, 235), -1)
+        cv2.rectangle(grass, (1400, 200), (1500, 400), (240, 240, 240), -1)
+        session = self.session_module.LabelSession(
+            self.dataset, {VIDEO: 10}, lambda video, index: grass, lambda frame: [], seed=1
+        )
+        task = session.next_task()["task"]
+
+        side_on = session.fit_box(task, 503, 302)  # Tapped slightly off its middle
+        np.testing.assert_allclose(side_on, [488, 297, 513, 304], atol=2)
+        from_above = session.fit_box(task, 900, 600)
+        np.testing.assert_allclose(from_above, [891, 591, 910, 610], atol=2)
+
+        # Nothing disc-like at the tap, or something far too big: a box of typical size
+        for x, y in ((200, 900), (1450, 300)):
+            box = session.fit_box(task, x, y)
+            np.testing.assert_allclose(box, [x - 9, y - 7, x + 9, y + 7])
+        self.assertIsNone(session.fit_box("unknown", 10, 10))
+
     def test_pictures_are_cut_inside_the_frame(self):
         session = self.session
         task = session.next_task()

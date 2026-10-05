@@ -32,12 +32,12 @@ DISC, PLAYER = 0, 1
 # Source dataset -> {source class id: merged class id}
 SOURCES = {
     # names: ['disc', 'player'] (referees were annotated as players)
-    "object_detection.v3i.yolov8": {0: DISC, 1: PLAYER},
+    "roboflow_object_detection_v3i": {0: DISC, 1: PLAYER},
     # names: ['disc', 'player', 'player in possession', 'ref']
-    "player disc detection.v4i.yolov8": {0: DISC, 1: PLAYER, 2: PLAYER, 3: PLAYER},
+    "roboflow_player_disc_detection_v4i": {0: DISC, 1: PLAYER, 2: PLAYER, 3: PLAYER},
 }
 # names: ['disc']; players are not annotated
-DISC_ONLY_SOURCE = "object_detection_disc.v1i.yolov8"
+DISC_ONLY_SOURCE = "roboflow_object_detection_disc_v1i"
 SPLITS = ("train", "valid", "test")
 
 
@@ -184,7 +184,7 @@ def build(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--name", default="players_discs_merged.v1.yolov8")
+    parser.add_argument("--name", default="roboflow_merged_players_discs_v1")
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
     parser.add_argument(

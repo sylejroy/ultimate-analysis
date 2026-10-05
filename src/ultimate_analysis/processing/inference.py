@@ -69,7 +69,7 @@ def _disc_search_window(frame_shape: Tuple[int, ...]) -> Optional[Tuple[int, int
     is searched when the disc has not been seen lately, and every so often regardless, so
     that a wrong lock does not last.
     """
-    size = int(get_setting("models.disc_detection.follow_window", 640))
+    size = int(get_setting("models.disc_detection.follow_window", 0))
     frame_h, frame_w = frame_shape[:2]
     if (
         size <= 0
@@ -89,6 +89,21 @@ def _disc_search_window(frame_shape: Tuple[int, ...]) -> Optional[Tuple[int, int
     return x1, y1, x1 + size, y1 + size
 
 
+def disc_window_image_size(frame_shape: Tuple[int, ...], model_imgsz: Optional[int]) -> int:
+    """Image size the disc model runs a search window at (0 if there is no window).
+
+    The window is shown to the model at the scale it sees whole frames at. A TensorRT
+    engine has to be built for this size as well (scripts/export_tensorrt.py), otherwise
+    the window is searched with PyTorch, which is slower than the whole frame with an
+    engine.
+    """
+    window = int(get_setting("models.disc_detection.follow_window", 0))
+    if window <= 0 or window >= min(frame_shape[:2]):
+        return 0
+    scale = (model_imgsz or 640) / max(frame_shape[:2])
+    return max(32, int(round(window * scale / 32)) * 32)
+
+
 def _detect_disc(frame: np.ndarray) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
     """Run the disc model, on a window around the followed disc when there is one."""
     global _disc_position, _disc_velocity, _disc_frames_missing, _frames_since_full_search
@@ -102,9 +117,7 @@ def _detect_disc(frame: np.ndarray) -> Tuple[List[Dict[str, Any]], Dict[str, flo
     else:
         _frames_since_full_search += 1
         x1, y1, x2, y2 = window
-        # The window is shown to the model at the scale it sees whole frames at
-        scale = (_disc_model_imgsz or 640) / max(frame.shape[:2])
-        window_imgsz = max(32, int(round((x2 - x1) * scale / 32)) * 32)
+        window_imgsz = disc_window_image_size(frame.shape, _disc_model_imgsz)
         detections, timing = _run_single_model_inference(
             np.ascontiguousarray(frame[y1:y2, x1:x2]),
             _disc_model,

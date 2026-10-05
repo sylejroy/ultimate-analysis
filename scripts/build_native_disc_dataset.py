@@ -4,15 +4,15 @@
 A disc is about 17 pixels wide in a video frame. The Roboflow exports shrink the frames,
 and with them the disc, so this dataset goes back to the original frames:
 
-- `object_detection_disc.v1i` already holds unchanged 1920x1080 frames.
-- `player disc detection.v4i` holds frames of one game stretched to 1280x1280. Their names
+- `roboflow_object_detection_disc_v1i` already holds unchanged 1920x1080 frames.
+- `roboflow_player_disc_detection_v4i` holds frames of one game stretched to 1280x1280. Their names
   carry the frame number, so the original frame is read from the video in data/raw/videos.
   Validation and test images are otherwise unchanged and keep their labels. Training
   images come in three augmented versions (slightly rotated, sheared, or cropped); the
   version that matches the original best is lined up with it and its labels are moved
   along.
 
-Splits: the test frames are those of `players_discs_merged.v2`, so results stay comparable.
+Splits: the test frames are those of `roboflow_merged_players_discs_v2`, so results stay comparable.
 The validation set is the old one plus every seventh training frame, because a best epoch
 picked on some 50 discs is partly luck.
 
@@ -33,10 +33,10 @@ REPO = Path(__file__).resolve().parents[1]
 TRAINING_DATA = REPO / "data" / "raw" / "training_data"
 VIDEOS = REPO / "data" / "raw" / "videos"
 
-NATIVE_SOURCE = "object_detection_disc.v1i.yolov8"  # 1920x1080 frames, class 0 = disc
-# Frames of these sources are held out for testing in players_discs_merged.v2
-SAME_FRAMES_SOURCE = "object_detection.v3i.yolov8"  # the frames of NATIVE_SOURCE at 960x960
-STRETCHED_SOURCE = "player disc detection.v4i.yolov8"  # class 0 = disc
+NATIVE_SOURCE = "roboflow_object_detection_disc_v1i"  # 1920x1080 frames, class 0 = disc
+# Frames of these sources are held out for testing in roboflow_merged_players_discs_v2
+SAME_FRAMES_SOURCE = "roboflow_object_detection_v3i"  # the frames of NATIVE_SOURCE at 960x960
+STRETCHED_SOURCE = "roboflow_player_disc_detection_v4i"  # class 0 = disc
 STRETCHED_VIDEO = "portland_vs_san_francisco_2024.mp4"
 
 SPLITS = ("train", "valid", "test")
@@ -262,6 +262,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--name", default="discs_native.v3.yolov8")
+    parser.add_argument("--name", default="roboflow_native_discs_v3")
     args = parser.parse_args()
     build(TRAINING_DATA / args.name)

@@ -5,8 +5,9 @@ them and saves the frame; saved frames go into a dataset folder at full resoluti
 to be selected in the Model Training tab.
 """
 
+import random
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -41,16 +42,19 @@ from .box_canvas import BoxCanvas
 
 logger = get_logger("LABELLING")
 
-DEFAULT_DATASET = "players_discs_labelled.v1.yolov8"
+DEFAULT_DATASET = "labelled_players_discs_v1"
+RANDOM_FRAME_TRIES = 20
 HELP_TEXT = (
-    "Drag on free space: new box\n"
-    "Click a box: select, drag: move\n"
-    "Drag a grip: resize\n"
+    "Drag: new box (also across other boxes)\n"
+    "Click a box: select it\n"
+    "Drag the selected box: move, a grip: resize\n"
     "Delete: remove the selected box\n"
     "1 / 2: disc / player\n"
     "Wheel: zoom, right drag: move view, 0: whole frame\n"
     "Enter: save and go on\n"
-    "Left / Right: step without saving"
+    "Left / Right: step without saving\n"
+    "R: random frame of a random video;\n"
+    "    saving then goes on at random too"
 )
 
 
@@ -64,6 +68,7 @@ class LabellingTab(QWidget):
         self._frame_count = 0
         self._frame_index = 0
         self._frame: Optional[np.ndarray] = None
+        self._frame_counts: Dict[str, int] = {}  # Per video, for picking random frames
         self._saved = False  # The shown frame is in the dataset
         self._edited = False  # ... and its boxes were changed since
         # (model, image size) for players and discs; loaded when first needed
@@ -117,14 +122,27 @@ class LabellingTab(QWidget):
         frames_layout.addLayout(move_row)
         labelled_row = QHBoxLayout()
         previous_labelled = QPushButton("Previous labelled")
-        previous_labelled.setToolTip("Go to the labelled frame of this video before this one")
+        previous_labelled.setToolTip("Go to the frame labelled before this one (in any video)")
         previous_labelled.clicked.connect(lambda: self._go_to_labelled(-1))
         next_labelled = QPushButton("Next labelled")
-        next_labelled.setToolTip("Go to the labelled frame of this video after this one")
+        next_labelled.setToolTip("Go to the frame labelled after this one (in any video)")
         next_labelled.clicked.connect(lambda: self._go_to_labelled(1))
         labelled_row.addWidget(previous_labelled)
         labelled_row.addWidget(next_labelled)
         frames_layout.addLayout(labelled_row)
+        random_button = QPushButton("Random frame (R)")
+        random_button.setToolTip(
+            "Go to a frame of any video that is not labelled yet. Frames from all over the "
+            "games teach a model more than neighbouring frames of one point."
+        )
+        random_button.clicked.connect(self._go_to_random_frame)
+        frames_layout.addWidget(random_button)
+        self.random_check = QCheckBox("Go on at random after saving")
+        self.random_check.setToolTip(
+            "Save and go on opens another random frame instead of the next frame of this "
+            "video. Ticked by Random frame."
+        )
+        frames_layout.addWidget(self.random_check)
         panel_layout.addWidget(frames)
 
         boxes = QGroupBox("Boxes")
@@ -198,6 +216,7 @@ class LabellingTab(QWidget):
             Qt.Key_1: lambda: self._set_class(0),
             Qt.Key_2: lambda: self._set_class(1),
             Qt.Key_0: self.canvas.reset_view,
+            Qt.Key_R: self._go_to_random_frame,
         }
         for key, action in shortcuts.items():
             shortcut = QShortcut(key, self)
@@ -231,16 +250,63 @@ class LabellingTab(QWidget):
     def _step(self, direction: int) -> None:
         self._go_to(self._frame_index + direction * self.step_spin.value())
 
+    def _go_to_random_frame(self) -> None:
+        """Open a frame that is not labelled yet, anywhere in any video.
+
+        Every frame is equally likely, so a full game is drawn far more often than a
+        short clip. From here on, saving goes on to another random frame.
+        """
+        self.random_check.setChecked(True)
+        videos = self.video_list.video_files
+        for video in videos:
+            if video not in self._frame_counts:
+                capture = cv2.VideoCapture(video)
+                self._frame_counts[video] = max(0, int(capture.get(cv2.CAP_PROP_FRAME_COUNT)))
+                capture.release()
+        weights = [self._frame_counts[video] for video in videos]
+        if not any(weights):
+            return
+
+        for _ in range(RANDOM_FRAME_TRIES):
+            row = random.choices(range(len(videos)), weights=weights)[0]
+            index = random.randrange(weights[row])
+            name = label_files.frame_name(videos[row], index)
+            if (self._dataset_dir() / "labels" / f"{name}.txt").exists():
+                continue
+            if row != self.video_list.currentRow():
+                self.video_list.setCurrentRow(row)  # Opens the video at its first frame
+            self._go_to(index)
+            return
+
     def _go_to_labelled(self, direction: int) -> None:
-        """Go to the nearest labelled frame of this video before or after the current one."""
-        names = label_files.labelled_frames(self._dataset_dir(), self._video_path)
-        indices = [label_files.frame_index_of(name) for name in names]
-        if direction > 0:
-            candidates = [index for index in indices if index > self._frame_index]
+        """Go to the frame labelled before or after the current one, in any video.
+
+        The frames are taken in the order they were labelled in: with random frames, the
+        one labelled last is in another video. From a frame that is not labelled yet,
+        "previous" is the one labelled last.
+        """
+        labels = self._dataset_dir() / "labels"
+        rows = {Path(video).stem: row for row, video in enumerate(self.video_list.video_files)}
+        # Creation time: changing a frame's boxes later does not move it in the order
+        names = sorted(
+            (
+                name
+                for name in label_files.labelled_frames(self._dataset_dir())
+                if name.rsplit("_frame_", 1)[0] in rows
+            ),
+            key=lambda name: ((labels / f"{name}.txt").stat().st_ctime, name),
+        )
+        current = label_files.frame_name(self._video_path, self._frame_index)
+        if current in names:
+            position = names.index(current) + direction
         else:
-            candidates = [index for index in reversed(indices) if index < self._frame_index]
-        if candidates:
-            self._go_to(candidates[0])
+            position = len(names) - 1 if direction < 0 else len(names)
+        if not 0 <= position < len(names):
+            return
+        row = rows[names[position].rsplit("_frame_", 1)[0]]
+        if row != self.video_list.currentRow():
+            self.video_list.setCurrentRow(row)  # Opens the video at its first frame
+        self._go_to(label_files.frame_index_of(names[position]))
 
     def _go_to(self, frame_index: int) -> None:
         if self._capture is None:
@@ -358,7 +424,10 @@ class LabellingTab(QWidget):
 
     def _save_and_go_on(self) -> None:
         self._save()
-        self._step(1)
+        if self.random_check.isChecked():
+            self._go_to_random_frame()
+        else:
+            self._step(1)
 
     def _remove_frame(self) -> None:
         if self._frame is None or not self._saved:

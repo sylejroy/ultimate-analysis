@@ -34,14 +34,14 @@ models:
     nms_threshold: 0.45
     adaptive_skip: true          # Skip disc model when no disc detected recently
     skip_threshold: 30           # Frames without disc before skipping disc model
-    follow_window: 640           # Side of the area searched around a followed disc, in frame pixels (0 = always the whole frame)
+    follow_window: 0             # Side of the area searched around a followed disc, in frame pixels (0 = always the whole frame). Off: with a TensorRT engine for the window the app crashed during playback, without one the window is slower than the whole frame
     follow_max_missing: 5        # Frames the followed disc may be missing before the whole frame is searched again
     full_search_interval: 15     # Search the whole frame at least this often, so a wrong lock does not last
   
   segmentation:
     default_model: "data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt"
-    confidence_threshold: 0.6
-    show_raw_masks: false       # Whether to show raw segmentation model output masks
+    confidence_threshold: 0.4   # 0.6 cut the far end zone away in about one frame in five
+    show_raw_masks: false      # Whether to show raw segmentation model output masks
     frame_interval: 5           # Process segmentation every N frames (1=every frame, 5=every 5th)
     iou_threshold: 0.7          # IoU threshold for segmentation
     
@@ -73,7 +73,8 @@ models:
         num_lines: 4            # Number of line segments to fit (3-4 for field boundaries)
         distance_threshold: 5.0 # Maximum distance from point to line for inliers
         min_samples: 2          # Minimum number of points needed to fit a line
-        max_trials: 20        # Maximum RANSAC iterations per line segment
+        max_trials: 100         # Point pairs tried per line (all at once, so they are cheap)
+        min_line_length: 60     # Pixels; anything shorter is a corner or dent, not a field line
         backend: "numpy"        # Line fitter: "numpy" (fast, fits vertical lines) or "sklearn"
         line_color: [0, 255, 0] # BGR color for RANSAC lines (green)
         outlier_color: [0, 165, 255] # BGR color for RANSAC outlier points (orange)

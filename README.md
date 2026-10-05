@@ -106,10 +106,28 @@ Everything under `data/` is local and not tracked by Git.
   automatically when selected for training.
 - `data/models/detection/`, `data/models/segmentation/` — one folder per training run.
   The model dropdowns list each run's `weights/best.pt`.
-- `data/raw/training_data/` — datasets in YOLO format.
-  `scripts/build_merged_detection_dataset.py` builds the merged player + disc dataset
-  at 1280×720 from the Roboflow exports, and `scripts/build_single_class_dataset.py`
-  copies a dataset with the labels of one class, for a detector of discs or players only.
+- `data/raw/training_data/` — datasets in YOLO format, named
+  `<origin>_<content>_<version>`. The origin says who made the labels and how far the
+  folder can be trusted as a source:
+
+  | Folder | What it is | Used for |
+  | --- | --- | --- |
+  | `labelled_players_discs_v1` | Frames labelled in the Labelling tab, full resolution | Future training |
+  | `labelled_discs_v1` | Frames labelled from the phone, discs only, full resolution | Future training |
+  | `roboflow_merged_players_v2` | Built from the Roboflow exports: 1,442 images at 1280×720, players only | The default player model, benchmarks |
+  | `roboflow_merged_discs_v2` | The same images, discs only | The default disc model, benchmarks |
+  | `roboflow_object_detection_v3i` | Roboflow export as downloaded: players and discs, 960×960 | Source of the merged sets |
+  | `roboflow_player_disc_detection_v4i` | Roboflow export: players and discs of one game, stretched to 1280×1280 | Source of the merged sets |
+  | `roboflow_object_detection_disc_v1i` | Roboflow export: discs only, 1920×1080 | Source of the merged sets |
+  | `roboflow_field_finder_v8i` | Roboflow export: field and end zones, stretched to a square | The field segmentation model |
+  | `roboflow_digits_v1i` | Roboflow export: house-number digits | A rough start for a jersey digit detector |
+
+  `labelled_` is labelled with this app, `roboflow_` is a Roboflow export exactly as
+  downloaded, and `roboflow_merged_` is built from those exports by
+  `scripts/build_merged_detection_dataset.py` (1280×720, 16:9 restored) and
+  `scripts/build_single_class_dataset.py` (the labels of one class only). The version
+  counts up within one name; Roboflow's own version numbers end in `i`. The folders of
+  training runs made before the renaming still end in the old dataset names.
 
 ## Labelling
 
@@ -140,7 +158,7 @@ address to open in the phone's browser. The page shows one frame of a game at a 
   of what is not a disc.
 
 Frames come from all games in `data/raw/videos`, favouring those the model is unsure
-about. Answers go to the disc-only dataset `discs_labelled.v1.yolov8`, at full resolution
+about. Answers go to the disc-only dataset `labelled_discs_v1`, at full resolution
 and with the same file layout as the Labelling tab. The PC has to stay on.
 
 The address contains a key, kept in `data/cache/phone_labelling.key`; requests without
@@ -196,7 +214,7 @@ both roles runs it once per frame instead of twice.
 default training dataset (141 images with 1,981 players and 98 discs) and times them on
 video frames. A detection counts when it overlaps a labelled box of its class with
 IoU ≥ 0.5; recall is at the app's confidence threshold (players 0.5, discs 0.3). All
-models below were trained on the `merged.v2` data; times are with TensorRT engines unless
+models below were trained on the `roboflow_merged_*_v2` data; times are with TensorRT engines unless
 noted.
 
 | Model | Player AP50 | Player recall | Disc AP50 | Disc recall | Time per frame |
@@ -283,6 +301,21 @@ The training images are 16:9 frames stretched to a square, so the app stretches 
 the same way before segmenting it. Padding the frame to a square instead, as the app did
 before, gave 0.983 field IoU, 0.892 for the end zones, and a 14 px outline error.
 
+These labelled images are easy ones from the short clips; the full games are harder. On
+200 random frames of the five games, a confidence threshold of 0.6 cut a part of the field
+away (mostly the far end zone) in 38 frames, and 0.4 in 17; the scores above are the same
+for both. The model has not been trained on the low side-line camera of
+`raleigh_vs_portland_2024` and finds no usable field in about a quarter of its frames.
+
+The line fit (RANSAC on the field outline) gives the same lines for the same mask, and
+stops when what is left of the outline is shorter than a field line. Measured on 79 masks
+from the games:
+
+| | Outline explained | Difference between two runs | Junk lines | Time |
+| --- | --- | --- | --- | --- |
+| Before (20 random pairs per line, always 4 lines) | 96.2% | 2.0 px (worst tenth 5.5 px) | 6.6% | 4.8 ms |
+| Now (100 pairs at once, fixed seed, refined fit) | 96.7% | 0 px | 5.7% | 5.6 ms |
+
 ### Jersey number readers
 
 The reader is chosen with "Jersey Number Reader" in the Main Analysis tab or
@@ -305,7 +338,7 @@ for the players without one.
 - `florence` is the Florence-2 vision-language model. It answers for every crop, so reads
   below `models.player_id.florence.min_confidence` (0.7) are discarded.
 - `yolo_digits` uses the newest detection run trained on a dataset with "digits" in its
-  name (train one in the Model Training tab; `digits.v1i.yolov8` is house numbers, a rough
+  name (train one in the Model Training tab; `roboflow_digits_v1i` is house numbers, a rough
   starting point). Until one exists the app falls back to EasyOCR, as it does for any
   reader that fails to load.
 

@@ -14,6 +14,7 @@ CLASS_COLORS = [QColor(255, 220, 0), QColor(0, 220, 90)]  # disc, player
 HANDLE_RADIUS = 5  # Size of the grips on the selected box, in screen pixels
 GRIP_REACH = 8  # How close the mouse must be to a grip to take it
 MIN_BOX_SIZE = 3  # A drawn box smaller than this (frame pixels) was a stray click
+CLICK_SLACK = 4  # The mouse may move this far (screen pixels) and it is still a click
 MAX_ZOOM = 16.0
 
 # Grip -> the edges of the box it moves
@@ -32,10 +33,11 @@ GRIPS: Dict[str, str] = {
 class BoxCanvas(QWidget):
     """Shows a frame and lets the user edit the boxes on it.
 
-    - Drag on free space: draw a new box of the current class
-    - Click a box: select it (the smallest one under the mouse, so a disc inside a
-      player's box can be reached); drag it to move it
-    - Drag a grip of the selected box: resize it
+    - Drag: draw a new box of the current class, also across existing boxes (a disc in
+      front of a player lies inside the player's box)
+    - Click a box: select it (the smallest one under the mouse)
+    - Drag the selected box: move it; drag one of its grips: resize it
+    - Click on free space or Escape: select nothing
     - Delete or Backspace: remove the selected box
     - Mouse wheel: zoom at the mouse; right or middle button drag: move the view
     """
@@ -187,16 +189,17 @@ class BoxCanvas(QWidget):
             self._drag = (GRIPS[grip], position, None)
             return
 
-        index = self._box_at(x, y)
-        if index is not None:
-            self.selected = index
-            box = self.boxes[index]
-            self._drag = ("move", position, LabelBox(box.class_id, box.x1, box.y1, box.x2, box.y2))
+        selected = self.boxes[self.selected] if self.selected is not None else None
+        if (
+            selected is not None
+            and selected.x1 <= x <= selected.x2
+            and selected.y1 <= y <= selected.y2
+        ):
+            copy = LabelBox(selected.class_id, selected.x1, selected.y1, selected.x2, selected.y2)
+            self._drag = ("move", position, copy)
         else:
-            self.boxes.append(LabelBox(self.current_class, x, y, x, y))
-            self.selected = len(self.boxes) - 1
-            self._drag = ("rb", position, None)
-        self.update()
+            # A click or the start of a new box: the first movement tells
+            self._drag = ("undecided", position, None)
 
     def mouseMoveEvent(self, event):
         position = QPointF(event.pos())
@@ -209,10 +212,21 @@ class BoxCanvas(QWidget):
             self._pan_from = position
             self.update()
             return
-        if self._drag is None or self.selected is None:
+        if self._drag is None:
             return
 
         mode, start, original = self._drag
+        if mode == "undecided":
+            if (position - start).manhattanLength() <= CLICK_SLACK:
+                return
+            # Dragging draws a new box from where the button went down
+            start_x, start_y = self.to_frame(start)
+            self.boxes.append(LabelBox(self.current_class, start_x, start_y, start_x, start_y))
+            self.selected = len(self.boxes) - 1
+            mode = "rb"
+            self._drag = (mode, start, None)
+        if self.selected is None:
+            return
         box = self.boxes[self.selected]
         width, height = self._frame_size
         x, y = self.to_frame(position)
@@ -239,7 +253,16 @@ class BoxCanvas(QWidget):
         if event.button() in (Qt.RightButton, Qt.MiddleButton):
             self._pan_from = None
             return
-        if self._drag is None or self.selected is None:
+        if self._drag is None:
+            return
+        if self._drag[0] == "undecided":
+            # A click: select the box under the mouse, or nothing on free space
+            self._drag = None
+            self.selected = self._box_at(*self.to_frame(QPointF(event.pos())))
+            self.update()
+            return
+        if self.selected is None:
+            self._drag = None
             return
         moved = (QPointF(event.pos()) - self._drag[1]).manhattanLength() > 0
         self._drag = None

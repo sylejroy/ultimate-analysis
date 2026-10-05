@@ -79,6 +79,7 @@ class MainTab(QWidget):
         # Frames in flight become stale when the video position or the models change;
         # their generation number then no longer matches and they are not shown.
         self._generation = 0
+        self._seek_target = -1  # Newest position asked for with the seek bar
         self._busy = False  # A frame request is with the worker
         self._redraw_pending = False  # The current frame must be drawn again when it returns
         self._last_request_time = 0.0
@@ -667,7 +668,12 @@ class MainTab(QWidget):
         if not self.video_info:
             return
         self._generation += 1
-        self._run_on_worker(lambda worker: worker.seek(frame_idx))
+        # Dragging the bar sends hundreds of positions and a seek in a long video takes
+        # over 100 ms: the worker only goes to a position if it is still the newest one
+        self._seek_target = frame_idx
+        self._run_on_worker(
+            lambda worker: worker.seek(frame_idx) if frame_idx == self._seek_target else None
+        )
         self._request_display_update(immediate=True)
 
     def _reset_tracker(self):

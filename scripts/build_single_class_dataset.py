@@ -4,7 +4,7 @@
 A model trained on the result detects just that class, e.g. a dedicated disc detector.
 All images are kept: the ones without the class teach the model what is not one.
 
-    python scripts/build_single_class_dataset.py players_discs_merged.v2.yolov8 disc discs_merged.v2.yolov8
+    python scripts/build_single_class_dataset.py roboflow_merged_players_discs_v2 disc roboflow_merged_discs_v2
 
 The source is read-only; the result is written to a new dataset directory.
 """

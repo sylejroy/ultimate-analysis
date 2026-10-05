@@ -60,6 +60,15 @@ def create_server(session: LabelSession, key: str, host: str, port: int) -> Thre
             elif url.path == "/api/next":
                 with lock:
                     self._json(session.next_task() or {})
+            elif url.path == "/api/fit":
+                try:
+                    x, y = float(query["x"][0]), float(query["y"][0])
+                    task_id = query["task"][0]
+                except (KeyError, ValueError):
+                    self._send(HTTPStatus.BAD_REQUEST, b"Bad fit request", "text/plain")
+                    return
+                with lock:
+                    self._json({"box": session.fit_box(task_id, x, y)})
             elif url.path == "/api/picture":
                 try:
                     numbers = [float(query[name][0]) for name in ("x", "y", "w", "h", "out")]

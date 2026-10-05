@@ -512,6 +512,7 @@ def fit_field_lines_ransac(
         all_outliers = []
         all_inliers = []
 
+        min_line_length = get_setting("models.segmentation.contour.ransac.min_line_length", 60)
         for _ in range(num_lines):
             if len(remaining_points) < min_samples:
                 # Insufficient points remaining for line fitting
@@ -524,12 +525,21 @@ def fit_field_lines_ransac(
 
             if result is not None:
                 line_points, outliers, inliers, confidence = result
+                # The lines come strongest first. A view often shows fewer sides of the
+                # field than num_lines: what is left then are corners and dents of the
+                # outline, and a line through a few of those is not a field line.
+                if np.linalg.norm(line_points[1] - line_points[0]) < min_line_length:
+                    break
                 fitted_lines.append(line_points)
                 line_confidences.append(confidence)
                 all_inliers.append(inliers)
 
-                # Remove inliers from remaining points for next iteration
-                remaining_points = outliers
+                # The points of this line are taken out, and those just outside the
+                # threshold with them: they would otherwise give the same line again
+                remaining_points = outliers[
+                    _distance_to_segment(outliers, line_points[0], line_points[1])
+                    > 2 * distance_threshold
+                ]
             else:
                 # Failed to fit line, stopping sequential RANSAC
                 break
@@ -567,6 +577,15 @@ def fit_field_lines_ransac(
     except Exception as e:
         logger.error(f"Error in RANSAC line fitting: {e}")
         return None, None, None, np.array([]).reshape(0, 2), {}, {}
+
+
+def _distance_to_segment(points: np.ndarray, start: np.ndarray, end: np.ndarray) -> np.ndarray:
+    """Distance of each point (N, 2) to the segment from start to end."""
+    start = np.asarray(start, dtype=np.float64)
+    along = np.asarray(end, dtype=np.float64) - start
+    offsets = points.astype(np.float64) - start
+    position = np.clip(offsets @ along / max(float(along @ along), 1e-12), 0.0, 1.0)
+    return np.linalg.norm(offsets - position[:, None] * along, axis=1)
 
 
 def _fit_line_ransac_with_outliers(
@@ -652,48 +671,61 @@ def _fit_line_ransac_sklearn(
 def _fit_line_ransac_numpy(
     points: np.ndarray, distance_threshold: float, min_samples: int, max_trials: int
 ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, float]]:
-    """Fit a line with RANSAC using perpendicular distances, then refit on the inliers."""
+    """Fit a line with RANSAC using perpendicular distances, then refit on the inliers.
+
+    The same points always give the same line: the pairs are drawn with a fixed seed. A
+    fit that changed from one run to the next made the field lines flicker.
+    """
 
     try:
         num_points = len(points)
         if points.ndim != 2 or points.shape[1] != 2 or num_points < max(2, min_samples):
             return None
 
-        xs = points[:, 0].astype(np.float64)
-        ys = points[:, 1].astype(np.float64)
+        points_f64 = points.astype(np.float64)
+        xs, ys = points_f64[:, 0], points_f64[:, 1]
         threshold_sq = distance_threshold**2  # Use squared distance to avoid sqrt
 
-        best_inliers = None
-        best_inlier_count = 0
-
-        # A line hypothesis only ever needs two points
-        samples = np.random.randint(0, num_points, size=(max_trials, 2))
-        for i1, i2 in samples:
-            x1, y1 = xs[i1], ys[i1]
-            dx, dy = xs[i2] - x1, ys[i2] - y1
-            norm_sq = dx * dx + dy * dy
-
-            # Skip if points are too close
-            if norm_sq < 1e-12:
-                continue
-
-            # Squared perpendicular distance of every point to the line through the pair
-            cross = dx * (ys - y1) - dy * (xs - x1)
-            inlier_mask = cross * cross <= threshold_sq * norm_sq
-            inlier_count = int(np.count_nonzero(inlier_mask))
-
-            if inlier_count > best_inlier_count:
-                best_inlier_count = inlier_count
-                best_inliers = inlier_mask
-
-        if best_inliers is None or best_inlier_count < 2:
+        # A line hypothesis only ever needs two points. All pairs are tried at once.
+        samples = np.random.default_rng(0).integers(0, num_points, size=(max_trials, 2))
+        x1, y1 = xs[samples[:, 0]], ys[samples[:, 0]]
+        dx, dy = xs[samples[:, 1]] - x1, ys[samples[:, 1]] - y1
+        norm_sq = dx * dx + dy * dy
+        # Two points close together give the direction of the line badly
+        usable = norm_sq > (4 * distance_threshold) ** 2
+        if not usable.any():
+            usable = norm_sq > 1e-12
+        if not usable.any():
             return None
+        x1, y1, dx, dy, norm_sq = x1[usable], y1[usable], dx[usable], dy[usable], norm_sq[usable]
+
+        # Squared perpendicular distance of every point to the line through each pair
+        cross = dx[:, None] * (ys[None, :] - y1[:, None]) - dy[:, None] * (
+            xs[None, :] - x1[:, None]
+        )
+        inlier_masks = cross * cross <= threshold_sq * norm_sq[:, None]
+        best_inliers = inlier_masks[int(np.argmax(inlier_masks.sum(axis=1)))]
+        if int(best_inliers.sum()) < 2:
+            return None
+
+        # Total least squares refit on the consensus set (independent of orientation).
+        # The refitted line has slightly different inliers than the pair it came from;
+        # taking those and fitting again settles on the line through all of its points.
+        for _ in range(3):
+            centroid = points_f64[best_inliers].mean(axis=0)
+            _, _, vt = np.linalg.svd(points_f64[best_inliers] - centroid, full_matrices=False)
+            direction = vt[0]
+            offsets = points_f64 - centroid
+            distance = np.abs(offsets[:, 0] * direction[1] - offsets[:, 1] * direction[0])
+            refined = distance <= distance_threshold
+            if int(refined.sum()) < 2 or np.array_equal(refined, best_inliers):
+                break
+            best_inliers = refined
+        best_inlier_count = int(best_inliers.sum())
 
         inliers = points[best_inliers]
         outliers = points[~best_inliers]
-
-        # Total least squares refit on the consensus set (independent of orientation)
-        inliers_f64 = inliers.astype(np.float64)
+        inliers_f64 = points_f64[best_inliers]
         centroid = inliers_f64.mean(axis=0)
         _, _, vt = np.linalg.svd(inliers_f64 - centroid, full_matrices=False)
         direction = vt[0]

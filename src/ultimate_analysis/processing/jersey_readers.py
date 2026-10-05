@@ -254,7 +254,7 @@ def get_reader(name: str, text_detector_factory: Callable[[], Any]) -> Optional[
                 weights = find_digit_model()
                 if weights is None:
                     raise RuntimeError(
-                        "no digit detector has been trained (dataset digits.v1i.yolov8)"
+                        "no digit detector has been trained (dataset roboflow_digits_v1i)"
                     )
                 _readers[name] = YoloDigitReader(weights)
             else:

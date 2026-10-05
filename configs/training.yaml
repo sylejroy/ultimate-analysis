@@ -3,7 +3,7 @@ detection:
   batch_size: 8
   copy_paste: 0.0
   cosine_lr: true
-  default_dataset: players_discs_merged.v2.yolov8
+  default_dataset: roboflow_merged_discs_v2
   default_model: yolo26s.pt
   epochs: 120
   hsv_h: 0.015
