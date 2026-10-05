@@ -79,6 +79,7 @@ if __name__ == "__main__":
         "augment": config.get("augment", True),
         "cos_lr": config.get("cosine_lr", False),
         "mosaic": config.get("mosaic", 1.0),
+        "scale": config.get("scale", 0.5),
         "mixup": config.get("mixup", 0.0),
         "copy_paste": config.get("copy_paste", 0.0),
         "hsv_h": config.get("hsv_h", 0.015),

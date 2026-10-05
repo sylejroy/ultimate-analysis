@@ -29,16 +29,15 @@ from PyQt5.QtWidgets import (
 )
 
 from ...utils.logger import get_logger
+from ...utils.model_files import find_training_runs, model_display_name, run_dataset_name
+from ..widgets.panels import PANEL_WIDTH, compact_combo, side_panel
 from .results_widget import TrainingResultsWidget
 from .training_thread import ModelTrainingThread
 
 logger = get_logger("TRAINING")
 
-# Earlier runs whose curves are drawn behind a new run for comparison
-REFERENCE_RESULTS = {
-    "detection": "data/models/detection/object_detection_yolo11l/finetune3/results.csv",
-    "segmentation": "data/models/segmentation/field_finder_yolo11x-seg/segmentation_finetune4/results.csv",
-}
+# The settings hold long model and dataset paths
+SETTINGS_WIDTH = PANEL_WIDTH + 100
 
 
 class ModelTrainingTab(QWidget):
@@ -66,7 +65,7 @@ class ModelTrainingTab(QWidget):
         self._update_model_options()
         self._update_data_options()
 
-        self.results_widget.set_reference_path(REFERENCE_RESULTS[self.current_task])
+        self._update_comparison_options()
 
     def _get_preferred_model_file(self, weights_dir: Path) -> Optional[Path]:
         """Get the preferred model file from a weights directory.
@@ -109,16 +108,16 @@ class ModelTrainingTab(QWidget):
         splitter = QSplitter(Qt.Horizontal)
 
         # Left panel - Configuration
-        config_panel = self._create_config_panel()
-        splitter.addWidget(config_panel)
+        splitter.addWidget(side_panel(self._create_config_panel(), SETTINGS_WIDTH))
 
         # Right panel - Training and Results
         results_panel = self._create_results_panel()
         splitter.addWidget(results_panel)
 
         # Set splitter proportions
-        splitter.setStretchFactor(0, 1)  # Config panel
-        splitter.setStretchFactor(1, 2)  # Results panel
+        # Output and plots are what is watched for hours; they get the room
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
 
         main_layout.addWidget(splitter)
         self.setLayout(main_layout)
@@ -132,7 +131,7 @@ class ModelTrainingTab(QWidget):
         task_group = QGroupBox("Training Task")
         task_layout = QFormLayout()
 
-        self.task_combo = QComboBox()
+        self.task_combo = compact_combo(QComboBox())
         self.task_combo.addItems(["detection", "field segmentation"])
         self.task_combo.currentTextChanged.connect(self._on_task_changed)
         self.task_combo.setToolTip(
@@ -147,7 +146,7 @@ class ModelTrainingTab(QWidget):
         model_group = QGroupBox("Base Model Selection")
         model_layout = QFormLayout()
 
-        self.model_combo = QComboBox()
+        self.model_combo = compact_combo(QComboBox())
         self.model_combo.currentTextChanged.connect(self._on_model_changed)
         self.model_combo.setToolTip(
             "Select the base YOLO model to start training from.\n\n• Model sizes: n (nano), s (small), m (medium), l (large), x (extra-large)\n• Examples: yolo11n.pt (fast, 2.6M params), yolo11s.pt (6.5M params), yolo11l.pt (accurate, 25.3M params)\n• Pretrained models: learned features from COCO dataset (80 classes)\n• Auto-download: Missing YOLO26/YOLO11 models will be downloaded automatically\n• Trade-offs: Larger models = better accuracy but slower training/inference\n• Custom models: .pt files from previous training runs"
@@ -170,7 +169,7 @@ class ModelTrainingTab(QWidget):
         data_group = QGroupBox("Training Dataset")
         data_layout = QFormLayout()
 
-        self.data_combo = QComboBox()
+        self.data_combo = compact_combo(QComboBox())
         self.data_combo.currentTextChanged.connect(self._on_data_changed)
         self.data_combo.setToolTip(
             "Select the dataset to train on (YOLO format required).\n\n• Format: data.yaml file with train/val paths and class names\n• Examples: coco8.yaml (sample), custom_dataset_v3.yaml\n• Version numbers: v2, v3, v4 (higher = typically improved)\n• Structure: train/images/, train/labels/, valid/images/, valid/labels/\n• More training images = generally better model performance\n• Labels: .txt files with class_id x_center y_center width height"
@@ -230,7 +229,7 @@ class ModelTrainingTab(QWidget):
 
         # Image size
         self.imgsz_spin = QSpinBox()
-        self.imgsz_spin.setRange(320, 1280)
+        self.imgsz_spin.setRange(320, 1920)
         self.imgsz_spin.setSingleStep(32)
         self.imgsz_spin.setValue(640)
         self.imgsz_spin.setToolTip(
@@ -239,7 +238,7 @@ class ModelTrainingTab(QWidget):
         params_layout.addRow("Image Size:", self.imgsz_spin)
 
         # Optimizer
-        self.optimizer_combo = QComboBox()
+        self.optimizer_combo = compact_combo(QComboBox())
         self.optimizer_combo.addItems(["SGD", "Adam", "AdamW", "RMSProp"])
         self.optimizer_combo.setCurrentText("SGD")
         self.optimizer_combo.setToolTip(
@@ -307,6 +306,19 @@ class ModelTrainingTab(QWidget):
             "Probability of mosaic augmentation (combines 4 images).\n• Default: 1.0 (always on)\n• Range: 0.0-1.0\n• Highly effective for scene understanding"
         )
         aug_layout.addRow("Mosaic:", self.mosaic_spin)
+
+        # Random zoom
+        self.scale_spin = QDoubleSpinBox()
+        self.scale_spin.setRange(0.0, 0.9)
+        self.scale_spin.setDecimals(2)
+        self.scale_spin.setSingleStep(0.05)
+        self.scale_spin.setValue(0.5)
+        self.scale_spin.setToolTip(
+            "Random zoom: images are shown at between (1 - value) and (1 + value) times "
+            "their size.\n• Default: 0.5\n• Use about 0.2 for small objects such as the "
+            "disc: at 0.5 a disc is often shrunk to half its size, too small to learn from"
+        )
+        aug_layout.addRow("Scale:", self.scale_spin)
 
         # Mixup probability
         self.mixup_spin = QDoubleSpinBox()
@@ -416,7 +428,7 @@ class ModelTrainingTab(QWidget):
 
         # Progress section
         progress_group = QGroupBox("Training Progress")
-        progress_group.setMaximumHeight(200)  # Make section smaller
+        progress_group.setMaximumHeight(300)
         progress_layout = QVBoxLayout()
         progress_layout.setSpacing(1)  # Minimal spacing
         progress_layout.setContentsMargins(8, 3, 8, 3)  # Smaller margins
@@ -432,7 +444,7 @@ class ModelTrainingTab(QWidget):
 
         # Raw output display
         self.raw_output_text = QTextEdit()
-        self.raw_output_text.setMaximumHeight(120)  # Compact but readable
+        self.raw_output_text.setMaximumHeight(220)
         self.raw_output_text.setReadOnly(True)
         self.raw_output_text.setFont(QFont("Consolas", 8))  # Small monospace font
         self.raw_output_text.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -445,6 +457,18 @@ class ModelTrainingTab(QWidget):
         # Results visualization
         results_group = QGroupBox("Training Results")
         results_layout = QVBoxLayout()
+
+        # Earlier run whose curves are drawn dashed behind the current one
+        comparison_row = QHBoxLayout()
+        comparison_row.addWidget(QLabel("Compare with:"))
+        self.comparison_combo = compact_combo(QComboBox())
+        self.comparison_combo.setToolTip(
+            "An earlier run to draw behind the current one. The latest run on the selected "
+            "dataset is chosen automatically."
+        )
+        self.comparison_combo.currentIndexChanged.connect(self._on_comparison_changed)
+        comparison_row.addWidget(self.comparison_combo, 1)
+        results_layout.addLayout(comparison_row)
 
         # Training results widget
         self.results_widget = TrainingResultsWidget()
@@ -513,6 +537,8 @@ class ModelTrainingTab(QWidget):
             self.cosine_lr_check.setChecked(task_config["cosine_lr"])
         if "mosaic" in task_config:
             self.mosaic_spin.setValue(task_config["mosaic"])
+        if "scale" in task_config:
+            self.scale_spin.setValue(task_config["scale"])
         if "mixup" in task_config:
             self.mixup_spin.setValue(task_config["mixup"])
         if "copy_paste" in task_config:
@@ -527,10 +553,9 @@ class ModelTrainingTab(QWidget):
     def _on_task_changed(self, task: str):
         """Handle task type change."""
         self.current_task = "detection" if task == "detection" else "segmentation"
-        self.results_widget.set_reference_path(REFERENCE_RESULTS[self.current_task])
-
         self._update_model_options()
         self._update_data_options()
+        self._update_comparison_options()
         self._apply_config_to_ui()
 
     def _update_model_options(self):
@@ -716,6 +741,37 @@ class ModelTrainingTab(QWidget):
             self.data_combo.setCurrentIndex(default_index)
             self._on_data_changed(available_datasets[default_index])
 
+    def _update_comparison_options(self) -> None:
+        """List the earlier runs of the current task, newest first."""
+        if not hasattr(self, "comparison_combo"):
+            return
+        self.comparison_combo.blockSignals(True)
+        self.comparison_combo.clear()
+        self.comparison_combo.addItem("Nothing", None)
+        for results in find_training_runs(self.current_task):
+            name = model_display_name(results.parent / "weights" / "best.pt")
+            self.comparison_combo.addItem(name, str(results))
+        self.comparison_combo.blockSignals(False)
+        self._select_comparison_for_dataset()
+
+    def _select_comparison_for_dataset(self) -> None:
+        """Compare with the latest run on the selected dataset, else with the latest run."""
+        if not hasattr(self, "comparison_combo") or self.comparison_combo.count() < 2:
+            return
+        dataset = Path(self.current_data_path).parent.name if self.current_data_path else ""
+        index = 1
+        for candidate in range(1, self.comparison_combo.count()):
+            if dataset and run_dataset_name(self.comparison_combo.itemData(candidate)) == dataset:
+                index = candidate
+                break
+        self.comparison_combo.setCurrentIndex(index)
+        self._on_comparison_changed(index)
+
+    def _on_comparison_changed(self, index: int) -> None:
+        self.results_widget.set_reference(
+            self.comparison_combo.itemData(index), self.comparison_combo.itemText(index)
+        )
+
     def _on_model_changed(self, model_path: str):
         """Handle model selection change."""
         self.current_model_path = model_path
@@ -724,6 +780,7 @@ class ModelTrainingTab(QWidget):
     def _on_data_changed(self, data_path: str):
         """Handle dataset selection change."""
         self.current_data_path = data_path
+        self._select_comparison_for_dataset()
         self._update_dataset_info()
 
     def _update_model_info(self):
@@ -820,6 +877,7 @@ class ModelTrainingTab(QWidget):
             "augment": self.augment_check.isChecked(),
             "cosine_lr": self.cosine_lr_check.isChecked(),
             "mosaic": self.mosaic_spin.value(),
+            "scale": self.scale_spin.value(),
             "mixup": self.mixup_spin.value(),
             "copy_paste": self.copy_paste_spin.value(),
             "hsv_h": self.hsv_h_spin.value(),
@@ -902,6 +960,7 @@ class ModelTrainingTab(QWidget):
             "augment": self.augment_check.isChecked(),
             "cosine_lr": self.cosine_lr_check.isChecked(),
             "mosaic": self.mosaic_spin.value(),
+            "scale": self.scale_spin.value(),
             "mixup": self.mixup_spin.value(),
             "copy_paste": self.copy_paste_spin.value(),
             "hsv_h": self.hsv_h_spin.value(),
@@ -935,6 +994,7 @@ class ModelTrainingTab(QWidget):
         # Set maximum to 100 for percentage-based progress
         self.progress_bar.setMaximum(100)
         self.progress_info_label.setText("Starting training...")
+        self.raw_output_text.clear()
 
         # Start training
         self.training_thread.start()
@@ -946,7 +1006,9 @@ class ModelTrainingTab(QWidget):
         self.time_update_timer.start(1000)  # Update every 1000ms (1 second)
 
         # Live monitoring finds the timestamped run folder that training creates in here
-        self.results_widget.start_monitoring(str(output_dir))
+        self.results_widget.start_monitoring(
+            str(output_dir), self.epochs_spin.value(), self.patience_spin.value()
+        )
 
     def _stop_training(self):
         """Stop current training."""
@@ -1118,7 +1180,8 @@ class ModelTrainingTab(QWidget):
         self.stop_training_btn.setEnabled(False)
         self.progress_bar.setValue(0)
         self.progress_info_label.setText("Ready to start training")
-        self.raw_output_text.clear()
+        # The output stays until the next run starts: it holds the final results, or the
+        # error a failed run ended with
 
         # Reset timing variables
         self.training_start_time = None

@@ -61,6 +61,7 @@ from ...utils.model_files import default_model_path
 from ...utils.video import VideoPlayer
 from ..widgets.images import frame_to_pixmap
 from ..widgets.model_selection import populate_segmentation_model_combo
+from ..widgets.panels import collapsible, side_panel
 from ..widgets.video_list import VideoListWidget
 from ..widgets.zoomable_image_label import ZoomableImageLabel
 from .fitness_chart import FitnessChart
@@ -177,21 +178,24 @@ class HomographyTab(QWidget):
         content_splitter = QSplitter(Qt.Horizontal)
 
         # Left panel: Video list and parameter controls (excluding GA)
-        left_panel = self._create_left_panel()
-        content_splitter.addWidget(left_panel)
+        content_splitter.addWidget(side_panel(self._create_left_panel()))
 
         # Right panel: Side-by-side video displays
         right_panel = self._create_right_panel()
         content_splitter.addWidget(right_panel)
 
-        # Set splitter proportions (25% left, 75% right for larger image display)
-        content_splitter.setSizes([300, 1200])
+        content_splitter.setStretchFactor(0, 0)
+        content_splitter.setStretchFactor(1, 1)
 
-        main_layout.addWidget(content_splitter)
+        main_layout.addWidget(content_splitter, 1)
 
-        # GA controls below images for better chart visibility
-        ga_panel = self._create_ga_panel()
-        main_layout.addWidget(ga_panel)
+        # The assistant and its chart take a third of the window; folded away until
+        # wanted, the two images get that room
+        ga_section = QGroupBox("Genetic Algorithm Assistant")
+        ga_section_layout = QVBoxLayout()
+        ga_section_layout.addWidget(self._create_ga_panel())
+        ga_section.setLayout(ga_section_layout)
+        main_layout.addWidget(collapsible(ga_section, expanded=False))
 
         self.setLayout(main_layout)
 

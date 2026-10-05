@@ -72,6 +72,21 @@ def find_detection_models(target_class: str) -> List[str]:
     return sorted(models)
 
 
+def find_training_runs(task: str) -> List[Path]:
+    """results.csv of every training run of a task ("detection" or "segmentation"), newest first.
+
+    Runs that were stopped early are included; their curves are worth comparing with too.
+    """
+    results = (models_root() / task).rglob("results.csv")
+    return sorted(results, key=lambda path: path.stat().st_mtime, reverse=True)
+
+
+def run_dataset_name(results: PathLike) -> str:
+    """Name of the dataset a run was trained on ("" if unknown)."""
+    data = get_training_args(Path(results).parent / "weights" / "best.pt").get("data")
+    return Path(str(data)).parent.name if data else ""
+
+
 def find_segmentation_models() -> List[str]:
     """Paths of the finished field segmentation runs."""
     return sorted(str(weights) for weights in (models_root() / "segmentation").rglob("best.pt"))

@@ -36,6 +36,7 @@ from ...utils.model_files import default_model_path, models_root
 from ...utils.video import VideoPlayer
 from ..widgets.images import frame_to_pixmap
 from ..widgets.model_selection import populate_detection_model_combo
+from ..widgets.panels import PANEL_WIDTH, side_panel
 from ..widgets.parameter_form import build_form, control_names, read_control, write_control
 from ..widgets.video_list import VideoListWidget
 from .parameters import OCR_FORM, PREPROCESS_FORM
@@ -143,15 +144,15 @@ class EasyOCRTuningTab(QWidget):
         splitter = QSplitter(Qt.Horizontal)
 
         # Left panel: Video list and parameters
-        left_panel = self._create_left_panel()
-        splitter.addWidget(left_panel)
+        # Two columns of parameters
+        splitter.addWidget(side_panel(self._create_left_panel(), 2 * PANEL_WIDTH))
 
         # Right panel: Video display and results
         right_panel = self._create_right_panel()
         splitter.addWidget(right_panel)
 
-        # Set splitter proportions (35% left, 65% right - more space for parameters)
-        splitter.setSizes([350, 1400])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
 
         main_layout.addWidget(splitter)
         self.setLayout(main_layout)

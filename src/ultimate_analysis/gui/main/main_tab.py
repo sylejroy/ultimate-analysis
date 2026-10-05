@@ -40,6 +40,7 @@ from ..widgets.model_selection import (
     populate_detection_model_combo,
     populate_segmentation_model_combo,
 )
+from ..widgets.panels import PANEL_WIDTH, collapsible, compact_combo, side_panel
 from ..widgets.performance_widget import PerformanceWidget
 from ..widgets.video_list import VideoListWidget
 from ..widgets.zoomable_image_label import ZoomableImageLabel
@@ -132,10 +133,7 @@ class MainTab(QWidget):
         splitter = QSplitter(Qt.Horizontal)
 
         # Left panel: Video list and controls
-        left_panel = self._create_left_panel()
-        left_panel.setMinimumWidth(300)  # Minimum width to prevent collapse
-        left_panel.setMaximumWidth(500)  # Maximum width to prevent taking too much space
-        splitter.addWidget(left_panel)
+        splitter.addWidget(side_panel(self._create_left_panel()))
 
         # Center panel: Main video display
         center_panel = self._create_center_panel()
@@ -148,7 +146,11 @@ class MainTab(QWidget):
         splitter.addWidget(right_panel)
 
         # Simple initial sizing - left takes ~20%, center takes ~50%, right takes ~30%
-        splitter.setSizes([350, 1000, 500])  # Initial sizes in pixels
+        # The video gets whatever the side panels leave free
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 0)
+        splitter.setSizes([PANEL_WIDTH, 1600, 420])
 
         main_layout.addWidget(splitter)
         self.setLayout(main_layout)
@@ -236,9 +238,10 @@ class MainTab(QWidget):
         # Model selection section
         models_group = QGroupBox("Model Settings")
         models_layout = QFormLayout()
+        # Model names are long: each label goes above its dropdown
+        models_layout.setRowWrapPolicy(QFormLayout.WrapAllRows)
 
-        # Player detection model dropdown
-        self.player_model_combo = QComboBox()
+        self.player_model_combo = compact_combo(QComboBox())
         populate_detection_model_combo(
             self.player_model_combo,
             "player",
@@ -248,7 +251,7 @@ class MainTab(QWidget):
         models_layout.addRow("Player Detection Model:", self.player_model_combo)
 
         # Jersey number reader dropdown
-        self.player_id_method_combo = QComboBox()
+        self.player_id_method_combo = compact_combo(QComboBox())
         for method, label in READER_LABELS.items():
             self.player_id_method_combo.addItem(label, method)
         self.player_id_method_combo.setCurrentIndex(
@@ -265,7 +268,7 @@ class MainTab(QWidget):
         models_layout.addRow("Jersey Number Reader:", self.player_id_method_combo)
 
         # Disc detection model dropdown
-        self.disc_model_combo = QComboBox()
+        self.disc_model_combo = compact_combo(QComboBox())
         populate_detection_model_combo(
             self.disc_model_combo,
             "disc",
@@ -294,8 +297,7 @@ class MainTab(QWidget):
         model_layout = QHBoxLayout()
         model_layout.addWidget(QLabel("Model:"))
 
-        self.segmentation_model_combo = QComboBox()
-        self.segmentation_model_combo.setMinimumWidth(150)
+        self.segmentation_model_combo = compact_combo(QComboBox())
         self.segmentation_model_combo.currentTextChanged.connect(
             self._on_segmentation_model_changed
         )
@@ -312,8 +314,13 @@ class MainTab(QWidget):
         layout.addWidget(segmentation_group)
 
         # Performance metrics section
+        # Only needed when tuning, so it is folded away until asked for
+        timings_group = QGroupBox("Stage Timings")
+        timings_layout = QVBoxLayout()
         self.performance_widget = PerformanceWidget()
-        layout.addWidget(self.performance_widget)
+        timings_layout.addWidget(self.performance_widget)
+        timings_group.setLayout(timings_layout)
+        layout.addWidget(collapsible(timings_group, expanded=False))
 
         # Add stretch to push everything to top
         layout.addStretch()
@@ -329,7 +336,7 @@ class MainTab(QWidget):
         # Video display area with zoom capability
         self.video_scroll_area = QScrollArea()
         self.video_scroll_area.setWidgetResizable(True)
-        self.video_scroll_area.setMinimumHeight(1080)  # Much bigger for main tab
+        self.video_scroll_area.setMinimumHeight(360)
         self.video_scroll_area.setStyleSheet(
             """
             QScrollArea {
@@ -555,10 +562,11 @@ class MainTab(QWidget):
             self.progress_bar.setValue(processed.video_position)
         display_ms = (time.perf_counter() - display_start) * 1000
 
-        self.performance_widget.begin_frame()
-        for stage, duration_ms in result.timings.items():
-            self.performance_widget.add_processing_measurement(stage, duration_ms)
-        self.performance_widget.add_processing_measurement("UI Display", display_ms)
+        if self.performance_widget.isVisible():
+            self.performance_widget.begin_frame()
+            for stage, duration_ms in result.timings.items():
+                self.performance_widget.add_processing_measurement(stage, duration_ms)
+            self.performance_widget.add_processing_measurement("UI Display", display_ms)
 
     # ------------------------------------------------------------------ videos
 

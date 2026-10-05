@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import List
 
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QListWidget, QListWidgetItem
 
 from ...utils.video import find_video_files, get_video_duration
@@ -15,6 +16,10 @@ class VideoListWidget(QListWidget):
         super().__init__()
         self._show_duration = show_duration
         self.video_files: List[str] = []
+
+        # Names differ at their end (the clip number): shorten them in the middle
+        self.setTextElideMode(Qt.ElideMiddle)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         self.setStyleSheet(
             """

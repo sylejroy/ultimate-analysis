@@ -93,7 +93,7 @@ def apply_dark_theme(window: QWidget) -> None:
             background-color: #333333;
         }
 
-        QCheckBox {
+        QCheckBox, QRadioButton {
             color: #ffffff;
             spacing: 8px;
         }
@@ -119,6 +119,7 @@ def apply_dark_theme(window: QWidget) -> None:
             background-color: #3c3c3c;
             border: 1px solid #666666;
             padding: 4px 8px;
+            min-height: 18px;
             border-radius: 3px;
             color: #ffffff;
         }
@@ -197,6 +198,7 @@ def apply_dark_theme(window: QWidget) -> None:
             background-color: #3c3c3c;
             border: 1px solid #666666;
             padding: 4px 8px;
+            min-height: 18px;
             border-radius: 3px;
             color: #ffffff;
         }
@@ -209,6 +211,7 @@ def apply_dark_theme(window: QWidget) -> None:
             background-color: #3c3c3c;
             border: 1px solid #666666;
             padding: 4px 8px;
+            min-height: 18px;
             border-radius: 3px;
             color: #ffffff;
         }

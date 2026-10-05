@@ -110,6 +110,7 @@ class ModelTrainingThread(QThread):
                 "augment": self.training_params.get("augment", True),
                 "cosine_lr": self.training_params.get("cosine_lr", False),
                 "mosaic": self.training_params.get("mosaic", 1.0),
+                "scale": self.training_params.get("scale", 0.5),
                 "mixup": self.training_params.get("mixup", 0.0),
                 "copy_paste": self.training_params.get("copy_paste", 0.0),
                 "hsv_h": self.training_params.get("hsv_h", 0.015),

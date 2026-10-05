@@ -71,6 +71,7 @@ class LazyLoadingTab(QWidget):
             # Replace placeholder with actual content
             layout = self.layout()
             layout.removeWidget(self.placeholder_label)
+            self.placeholder_label.hide()
             self.placeholder_label.deleteLater()
             layout.addWidget(self.actual_tab)
 
@@ -117,6 +118,7 @@ class UltimateAnalysisApp(QMainWindow):
         self.easyocr_tab: Optional[LazyLoadingTab] = None
         self.model_training_tab: Optional[LazyLoadingTab] = None
         self.homography_tab: Optional[LazyLoadingTab] = None
+        self.labelling_tab: Optional[LazyLoadingTab] = None
 
         # Initialize UI
         self._init_ui()
@@ -141,6 +143,12 @@ class UltimateAnalysisApp(QMainWindow):
         from .homography.homography_tab import HomographyTab
 
         return HomographyTab()
+
+    def _create_labelling_tab(self) -> QWidget:
+        """Factory method to create labelling tab."""
+        from .labelling.labelling_tab import LabellingTab
+
+        return LabellingTab()
 
     def _init_ui(self):
         """Initialize the user interface."""
@@ -170,14 +178,19 @@ class UltimateAnalysisApp(QMainWindow):
         self.tab_widget.addTab(self.main_tab, "Main Analysis")
 
         # Create lazy loading tabs
-        self.easyocr_tab = LazyLoadingTab(self._create_easyocr_tab, "EasyOCR Tuning")
-        self.tab_widget.addTab(self.easyocr_tab, "EasyOCR Tuning")
+        # After the analysis itself, in the order the work is done: label frames, train
+        # models on them, calibrate the top-down view, tune the jersey number reading
+        self.labelling_tab = LazyLoadingTab(self._create_labelling_tab, "Labelling")
+        self.tab_widget.addTab(self.labelling_tab, "Labelling")
 
         self.model_training_tab = LazyLoadingTab(self._create_model_training_tab, "Model Training")
         self.tab_widget.addTab(self.model_training_tab, "Model Training")
 
-        self.homography_tab = LazyLoadingTab(self._create_homography_tab, "Homography Estimation")
-        self.tab_widget.addTab(self.homography_tab, "Homography Estimation")
+        self.homography_tab = LazyLoadingTab(self._create_homography_tab, "Field Calibration")
+        self.tab_widget.addTab(self.homography_tab, "Field Calibration")
+
+        self.easyocr_tab = LazyLoadingTab(self._create_easyocr_tab, "Jersey Number Tuning")
+        self.tab_widget.addTab(self.easyocr_tab, "Jersey Number Tuning")
 
         # Status bar
         self.status_bar = self.statusBar()
@@ -224,7 +237,7 @@ class UltimateAnalysisApp(QMainWindow):
             self.main_tab.close()
 
         # Cleanup lazy loading tabs if they were loaded
-        for tab_attr in ["easyocr_tab", "model_training_tab", "homography_tab"]:
+        for tab_attr in ["easyocr_tab", "model_training_tab", "homography_tab", "labelling_tab"]:
             if hasattr(self, tab_attr):
                 tab = getattr(self, tab_attr)
                 if isinstance(tab, LazyLoadingTab) and tab.is_loaded():
@@ -243,17 +256,20 @@ def create_application() -> QApplication:
     Returns:
         Configured QApplication instance
     """
-    # Create application
+    # On a scaled display (e.g. 150% on a 4K screen) Qt lays the interface out in scaled
+    # units and draws it sharply. This only takes effect when set before the application
+    # object exists; otherwise the window is either tiny or blurred by Windows.
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    QApplication.setHighDpiScaleFactorRoundingPolicy(
+        Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+    )
     app = QApplication(sys.argv)
 
     # Set application properties
     app.setApplicationName(get_setting("app.name", "Ultimate Analysis"))
     app.setApplicationVersion(get_setting("app.version", "0.1.0"))
     app.setOrganizationName("Ultimate Analysis Team")
-
-    # Set high DPI scaling
-    app.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-    app.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
     return app
 
