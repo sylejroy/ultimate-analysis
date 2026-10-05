@@ -13,10 +13,12 @@ DeepSORT tracking, OCR-based player identification, and a top-down field view.
   Florence-2, a YOLO digit detector, or EasyOCR) and aggregated over time, plus a tuning
   tab for the EasyOCR and crop-preprocessing parameters.
 - **Field segmentation**: field mask, contour, and RANSAC boundary lines.
-- **Homography**: interactive perspective correction with a genetic-algorithm
+- **Field calibration**: interactive perspective correction with a genetic-algorithm
   assistant; the result drives the top-down view in the main tab.
 - **Model training**: train YOLO11/YOLO26 detection and segmentation models from the
   GUI with live output, progress, and metric plots against a baseline.
+- **Labelling**: mark players and discs on frames of your videos, starting from what the
+  current models find, and train on the result without leaving the app.
 - **Performance monitoring**: per-stage timings while analysis runs.
 
 ## Screenshots
@@ -30,13 +32,17 @@ field outline, and the top-down view:
 
 ![Model Training tab](docs/gui_example_model_training.png)
 
-**Homography Estimation** — manual calibration and the genetic-algorithm assistant:
+**Field Calibration** — manual calibration and the genetic-algorithm assistant:
 
-![Homography Estimation tab](docs/gui_example_homography.png)
+![Field Calibration tab](docs/gui_example_homography.png)
 
-**EasyOCR Tuning** — crop preprocessing and reader parameters on single frames:
+**Jersey Number Tuning** — crop preprocessing and reader parameters on single frames:
 
-![EasyOCR Tuning tab](docs/gui_example_ocr_tuning.png)
+![Jersey Number Tuning tab](docs/gui_example_ocr_tuning.png)
+
+**Labelling** — correcting the models' suggestions to build a training dataset:
+
+![Labelling tab](docs/gui_example_labelling.png)
 
 ## Pipeline
 
@@ -46,7 +52,10 @@ switched off:
 1. **Detection** — one YOLO26s model for players and one for discs, both at image size
    1280 and run as TensorRT engines when built. The disc model is skipped while no disc
    has been seen for a while.
-2. **Tracking** — DeepSORT gives players and the disc stable IDs and trails.
+2. **Tracking** — DeepSORT gives players and the disc stable IDs and trails. A player who
+   is not detected is remembered for three seconds. The camera's own motion is estimated
+   from the background and taken out of the trails and of the tracker's expectations, so
+   a pan does not look like every player jumping.
 3. **Possession** — the player whose box holds the detected disc, confirmed over several
    frames.
 4. **Jersey numbers** — a few tracks per frame are read (PARSeq by default) and the
@@ -77,7 +86,7 @@ python main.py
 2. Choose the player, disc, and field-segmentation models.
 3. Press play. Toggle detection, tracking, player ID, segmentation, and the top-down
    view independently.
-4. Use the Homography tab to calibrate the top-down view, and the EasyOCR Tuning and
+4. Use the Field Calibration tab to calibrate the top-down view, and the Jersey Number Tuning and
    Model Training tabs for the specialist workflows.
 
 ## Configuration
@@ -101,6 +110,45 @@ Everything under `data/` is local and not tracked by Git.
   `scripts/build_merged_detection_dataset.py` builds the merged player + disc dataset
   at 1280×720 from the Roboflow exports, and `scripts/build_single_class_dataset.py`
   copies a dataset with the labels of one class, for a detector of discs or players only.
+
+## Labelling
+
+The Labelling tab builds a dataset from your own videos at full resolution.
+
+1. Pick a video and a frame. The boxes the current default models find are shown dashed,
+   as suggestions.
+2. Correct them: drag a box to move it, drag a grip to resize it, press Delete to remove
+   it, and drag on free space to draw a new one (press 1 for a disc, 2 for a player
+   first). Zoom in with the mouse wheel for the disc.
+3. Press Enter to save the frame and move on by the step size. Left and Right step
+   without saving, so frames you skip do not end up in the dataset.
+
+Saved frames go to `data/raw/training_data/<dataset name>` as images and YOLO labels,
+named after the video and frame number. Each stretch of 300 frames belongs as a whole to
+training, validation (one in ten), or testing (one in ten), so near-identical frames never
+land on both sides. The dataset is listed in the Model Training tab as soon as it has
+frames.
+
+### Labelling discs from a phone
+
+`python scripts/phone_labelling.py` starts a small web server on this PC and prints an
+address to open in the phone's browser. The page shows one frame of a game at a time:
+
+- "Is this the disc?" with the disc model's suggestion: Yes, No, or move the box.
+- Without a suggestion, or after No: tap the disc on the frame, tap it again on a closer
+  view, drag the box onto it. Or "No disc visible", which stores the frame as an example
+  of what is not a disc.
+
+Frames come from all games in `data/raw/videos`, favouring those the model is unsure
+about. Answers go to the disc-only dataset `discs_labelled.v1.yolov8`, at full resolution
+and with the same file layout as the Labelling tab. The PC has to stay on.
+
+The address contains a key, kept in `data/cache/phone_labelling.key`; requests without
+it are refused. On the home network the printed address works as it is (allow Python
+through the Windows firewall for private networks when asked). From anywhere else, install
+Tailscale on the PC and the phone and sign in with the same account; the script then
+prints a second address that works over that private link. Do not forward the port on
+your router.
 
 ## Development
 
@@ -156,6 +204,7 @@ noted.
 | YOLO26s at 1280, players only (default player model) | 0.982 | 0.977 | | | 6.5 ms |
 | YOLO26s at 1280, discs only (default disc model) | | | 0.505 | 0.449 | 5.3 ms |
 | YOLO26s at 1280, both classes | 0.980 | 0.976 | 0.384 | 0.296 | 5.4 ms |
+| YOLO26s-P2 at 1280, discs only (extra head for small objects) | | | 0.531 | 0.357 | 5.8 ms |
 | RT-DETR-L at 960, both classes | 0.977 | 0.970 | 0.280 | 0.316 | 30.5 ms (PyTorch) |
 
 The previous defaults (YOLO11s trained on the older, smaller datasets) scored 0.853 AP50
@@ -171,6 +220,53 @@ The tab also lists RT-DETR (`rtdetr-l.pt`, `rtdetr-x.pt`), a transformer detecto
 alternative to YOLO. It stretches the frame to a square and runs in PyTorch only. On this
 data it matched YOLO for players, was worse for discs (a quarter of its disc detections
 at the app's threshold were right), and took twice as long to train.
+
+### Camera motion
+
+The motion of the picture between frames is estimated from background points followed
+with optical flow (players masked out) and fitted as a homography. Compared on stretches
+of a game where the camera pans, by how well the previous frame moved by the estimate
+matches the current one on the background (mean grey difference, lower is better):
+
+| Estimator | After 1 frame | After 30 frames | Time per frame |
+| --- | --- | --- | --- |
+| None | 9.0 | 15.8 | |
+| Phase correlation (shift only) | 10.7 | 19.1 | 10 ms |
+| ORB feature matching, homography | 7.7 | 16.5 | 27 ms |
+| Optical flow, similarity (shift, zoom, roll) | 7.3 | 18.3 | 13 ms |
+| Dense Farneback flow, homography | 3.7 | 12.4 | 22 ms |
+| Optical flow, homography, frame to frame | 3.3 | 10.6 | 7 ms |
+| Optical flow, homography, same points followed for 30 frames (used) | 3.5 | 8.1 | 4 ms |
+
+Times were taken while a training run used the machine and are only comparable with each
+other. `models.tracking.camera_motion_compensation: false` switches the stage off.
+
+### Tracking and player identities
+
+Measured on a 45-second uncut stretch with about 15 players on screen, by how many player
+IDs the tracker hands out (fewer is better; players walking into the picture also get
+new IDs, so the count never reaches the number of players):
+
+| | Player IDs | Tracks lasting most of the stretch |
+| --- | --- | --- |
+| Track memory of 30 frames (0.5 s at 60 fps) | 32 | 7 |
+| Track memory of 3 s, camera motion given to the tracker | 21 | 12 |
+
+Fast pans still break tracks: a 22-second stretch with the fastest camera motion gave 41
+IDs for 14 players.
+
+Recognising a lost player again by looks does not work on this footage. Players are about
+90 pixels tall and teammates wear the same kit: a network trained to re-identify people
+(OSNet) picked the right one of 16 players in 24% of cases, the tracker's own appearance
+vector in 13%. Matching a new track to a missing player by where that player could have
+run to (`models.tracking.identity.position_match_seconds`) recovered nobody on three
+test stretches and joined two different players once, so it is off. What remains is the
+jersey number: a player whose number is that of a missing player in the same kit becomes
+that player again.
+
+Jersey numbers are decided by vote over all readings of a player. A number is shown from
+the second reading on, and its certainty grows with agreement; a single reading never
+makes a number final.
 
 ### Field segmentation
 
