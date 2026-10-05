@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Disc labelling</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin: 0; background: #1e1e1e; color: #eee; font-family: system-ui, sans-serif;
+         display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
+  header { padding: 8px 12px; font-size: 13px; color: #aaa; display: flex; justify-content: space-between; }
+  #question { padding: 4px 12px 8px; font-size: 20px; font-weight: 600; min-height: 34px; }
+  #stage { flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; }
+  canvas { max-width: 100%; max-height: 100%; touch-action: none; background: #000; }
+  #buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 10px; }
+  button { font-size: 18px; padding: 16px 8px; border: 0; border-radius: 10px; color: #fff;
+           background: #444; }
+  button.yes { background: #2e7d32; } button.no { background: #c62828; }
+  button.wide { grid-column: 1 / 3; } button.small { font-size: 15px; padding: 11px 8px; background: #333; }
+  button:active { filter: brightness(1.3); }
+</style>
+</head>
+<body>
+<header><span id="where"></span><span id="count"></span></header>
+<div id="question">Loading…</div>
+<div id="stage"><canvas id="canvas"></canvas></div>
+<div id="buttons"></div>
+<script>
+const key = new URLSearchParams(location.search).get("key") || "";
+const canvas = document.getElementById("canvas"), context = canvas.getContext("2d");
+const DISC = [18, 14];        // Typical size of a disc in frame pixels
+let task = null, box = null, view = null, picture = null, mode = "", onTap = null, drag = null;
+
+async function api(path, body) {
+  const response = await fetch(`${path}${path.includes("?") ? "&" : "?"}key=${key}`,
+    body ? {method: "POST", body: JSON.stringify(body)} : {});
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
+function ask(text) { document.getElementById("question").textContent = text; }
+
+function buttons(list) {
+  const holder = document.getElementById("buttons");
+  holder.innerHTML = "";
+  for (const [label, style, action] of list) {
+    const button = document.createElement("button");
+    button.textContent = label; button.className = style; button.onclick = action;
+    holder.appendChild(button);
+  }
+}
+
+// The part of the frame on screen: x, y, width, height in frame pixels, kept inside the frame
+function clampView(x, y, width, height) {
+  width = Math.round(Math.min(Math.max(width, 8), task.width));
+  height = Math.round(Math.min(Math.max(height, 8), task.height));
+  x = Math.round(Math.min(Math.max(x, 0), task.width - width));
+  y = Math.round(Math.min(Math.max(y, 0), task.height - height));
+  return {x, y, width, height};
+}
+
+function show(x, y, width, height) {
+  view = clampView(x, y, width, height);
+  const outputWidth = Math.min(1280, Math.max(480, view.width));
+  return new Promise(resolve => {
+    const image = new Image();
+    image.onload = () => {
+      picture = image;
+      canvas.width = image.width; canvas.height = image.height;
+      draw(); resolve();
+    };
+    image.src = `/api/picture?task=${task.task}&x=${view.x}&y=${view.y}&w=${view.width}` +
+                `&h=${view.height}&out=${outputWidth}&key=${key}`;
+  });
+}
+
+function draw() {
+  if (!picture) return;
+  context.drawImage(picture, 0, 0);
+  if (box && mode !== "find") {
+    const scale = canvas.width / view.width;
+    context.lineWidth = Math.max(2, canvas.width / 240);
+    context.strokeStyle = "#ffdd00";
+    context.strokeRect((box[0] - view.x) * scale, (box[1] - view.y) * scale,
+                       (box[2] - box[0]) * scale, (box[3] - box[1]) * scale);
+  }
+}
+
+function framePoint(event) {
+  const bounds = canvas.getBoundingClientRect();
+  return [view.x + (event.clientX - bounds.left) / bounds.width * view.width,
+          view.y + (event.clientY - bounds.top) / bounds.height * view.height];
+}
+
+canvas.addEventListener("pointerdown", event => {
+  const [x, y] = framePoint(event);
+  if (mode === "adjust") { drag = [x, y, ...box]; canvas.setPointerCapture(event.pointerId); }
+  else if (onTap) onTap(x, y);
+});
+canvas.addEventListener("pointermove", event => {
+  if (!drag) return;
+  const [x, y] = framePoint(event), [startX, startY, x1, y1, x2, y2] = drag;
+  box = [x1 + x - startX, y1 + y - startY, x2 + x - startX, y2 + y - startY];
+  draw();
+});
+canvas.addEventListener("pointerup", () => { drag = null; });
+
+// ---------------------------------------------------------------- steps
+
+async function nextTask() {
+  ask("Loading…"); buttons([]); box = null; onTap = null;
+  task = await api("/api/next");
+  if (!task.task) { ask("No more frames found."); return; }
+  document.getElementById("where").textContent = `${task.video} · frame ${task.frame}`;
+  document.getElementById("count").textContent = `${task.labelled} labelled`;
+  if (task.box) confirmStep(); else findStep();
+}
+
+async function confirmStep() {
+  mode = "confirm"; onTap = null; box = task.box;
+  const centerX = (box[0] + box[2]) / 2, centerY = (box[1] + box[3]) / 2;
+  await show(centerX - 110, centerY - 110, 220, 220);
+  ask("Is this the disc?");
+  buttons([
+    ["No", "no", findStep],
+    ["Yes", "yes", () => save(box)],
+    ["Yes, but move the box", "small wide", adjustStep],
+    ["Skip this frame", "small", skip],
+    ["Undo last", "small", undo],
+  ]);
+}
+
+async function findStep() {
+  mode = "find"; box = null;
+  await show(0, 0, task.width, task.height);
+  ask("Tap where the disc is");
+  onTap = async (x, y) => {
+    // A closer look first: the disc is a few pixels on a phone screen
+    await show(x - 200, y - 200, 400, 400);
+    ask("Tap the disc");
+    onTap = (x, y) => {
+      box = [x - DISC[0] / 2, y - DISC[1] / 2, x + DISC[0] / 2, y + DISC[1] / 2];
+      adjustStep();
+    };
+    buttons([["Back to the whole frame", "small wide", findStep]]);
+  };
+  buttons([
+    ["No disc visible", "wide", () => save(null)],
+    ["Skip this frame", "small", skip],
+    ["Undo last", "small", undo],
+  ]);
+}
+
+async function adjustStep() {
+  mode = "adjust"; onTap = null;
+  const centerX = (box[0] + box[2]) / 2, centerY = (box[1] + box[3]) / 2;
+  await show(centerX - 60, centerY - 60, 120, 120);
+  ask("Drag the box onto the disc");
+  const grow = amount => () => {
+    box = [box[0] - amount, box[1] - amount * 0.75, box[2] + amount, box[3] + amount * 0.75];
+    if (box[2] - box[0] < 4) box = [box[0] - 1, box[1] - 1, box[2] + 1, box[3] + 1];
+    draw();
+  };
+  buttons([
+    ["Smaller", "", grow(-1)],
+    ["Larger", "", grow(1)],
+    ["Save", "yes wide", () => save(box)],
+    ["Back", "small wide", () => (task.box ? confirmStep() : findStep())],
+  ]);
+}
+
+async function save(saved) { await api("/api/save", {task: task.task, box: saved}); nextTask(); }
+async function skip() { await api("/api/skip", {task: task.task}); nextTask(); }
+async function undo() { await api("/api/undo", {}); nextTask(); }
+
+nextTask().catch(error => ask(`Cannot reach the PC: ${error.message}`));
+</script>
+</body>
+</html>
