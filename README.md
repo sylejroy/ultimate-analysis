@@ -28,6 +28,10 @@ field outline, and the top-down view:
 
 ![Main Analysis tab](docs/gui_example_main_analysis.png)
 
+**Labelling** — correcting the models' suggestions to build a training dataset:
+
+![Labelling tab](docs/gui_example_labelling.png)
+
 **Model Training** — live output and metric plots:
 
 ![Model Training tab](docs/gui_example_model_training.png)
@@ -39,10 +43,6 @@ field outline, and the top-down view:
 **Jersey Number Tuning** — crop preprocessing and reader parameters on single frames:
 
 ![Jersey Number Tuning tab](docs/gui_example_ocr_tuning.png)
-
-**Labelling** — correcting the models' suggestions to build a training dataset:
-
-![Labelling tab](docs/gui_example_labelling.png)
 
 ## Pipeline
 
