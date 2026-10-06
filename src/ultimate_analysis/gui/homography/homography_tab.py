@@ -124,9 +124,6 @@ class HomographyTab(QWidget):
             Tuple[np.ndarray, np.ndarray]
         ] = []  # Store RANSAC-calculated field lines
         self.ransac_confidences: List[float] = []  # Store RANSAC line confidences
-        self.all_lines_for_display: Dict[
-            str, Tuple[np.ndarray, float, bool]
-        ] = {}  # Store all lines for display
 
         # Runtime performance tracking
         self.runtime_dialog = RuntimeDialog(self)
@@ -847,7 +844,7 @@ class HomographyTab(QWidget):
                     self.ransac_confidences = []
 
                 # Draw unified mask for visualization (lightweight version without RANSAC re-computation)
-                original_frame, _, self.all_lines_for_display = draw_unified_field_mask(
+                original_frame = draw_unified_field_mask(
                     original_frame, unified_mask, field_color, alpha=0.4, fill_mask=False
                 )
 
@@ -858,7 +855,6 @@ class HomographyTab(QWidget):
                 logger.debug("No unified mask could be created for original frame")
                 self.ransac_lines = []
                 self.ransac_confidences = []
-                self.all_lines_for_display = {}
         elif self.show_segmentation:
             logger.warning("Segmentation enabled but no results available")
 

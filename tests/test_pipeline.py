@@ -30,7 +30,6 @@ STAGES = (
 DRAWING = (
     "draw_field_segmentation",
     "draw_unified_field_mask",
-    "draw_all_field_lines",
     "draw_ransac_field_lines",
     "draw_detections",
     "draw_tracks",
@@ -55,7 +54,7 @@ class PipelineTests(unittest.TestCase):
         # Drawing functions hand back the frame they were given
         for name in DRAWING:
             self.mocks[name].side_effect = lambda frame, *args, **kwargs: frame
-        self.mocks["draw_unified_field_mask"].side_effect = lambda frame, *a, **k: (frame, {}, {})
+        self.mocks["draw_unified_field_mask"].side_effect = lambda frame, *a, **k: frame
 
         self.track = SimpleNamespace(track_id=7, class_name="player", bbox=[1, 1, 5, 5])
         self.mocks["run_inference"].return_value = [{"class_name": "player", "bbox": [1, 1, 5, 5]}]

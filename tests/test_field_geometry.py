@@ -55,7 +55,7 @@ class FieldGeometryTests(unittest.TestCase):
         outliers = np.array([[300.0, 10.0], [400.0, 250.0], [20.0, 480.0]])
         points = np.vstack([line, outliers]).astype(np.float32)
         with patch.object(module, "get_setting", side_effect=lambda key, default=None: default):
-            (start, end), rejected, inliers, confidence = module._fit_line_ransac_with_outliers(
+            (start, end), rejected, inliers, confidence = module._fit_line_ransac_numpy(
                 points, distance_threshold=5.0, min_samples=2, max_trials=50
             )
         self.assertEqual(len(inliers), 50)
@@ -71,18 +71,15 @@ class FieldGeometryTests(unittest.TestCase):
         mask = np.zeros((40, 40), dtype=np.uint8)
         mask[10:30, 10:30] = 1
         lines = [np.array([[10.0, 10.0], [29.0, 10.0]])]
-        fit = (lines, [np.empty((0, 2))], [lines[0]], np.empty((0, 2)), {}, {"line_0": 1})
+        fit = (lines, [np.empty((0, 2))], [lines[0]], np.empty((0, 2)))
         settings = {"models.segmentation.contour.ransac.enabled": True}
         with (
             patch.object(module, "get_setting", side_effect=lambda k, d=None: settings.get(k, d)),
             patch.object(module, "fit_field_lines_ransac") as refit,
         ):
-            result, _, all_lines = module.draw_unified_field_mask(
-                frame, mask, ransac_fit=fit, in_place=True
-            )
+            result = module.draw_unified_field_mask(frame, mask, ransac_fit=fit, in_place=True)
         refit.assert_not_called()
         self.assertIs(result, frame)
-        self.assertEqual(all_lines, {"line_0": 1})
         self.assertTrue(frame.any())
 
 

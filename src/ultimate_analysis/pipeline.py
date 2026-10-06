@@ -43,7 +43,7 @@ from .rendering.field import (
     draw_unified_field_mask,
     get_primary_field_color,
 )
-from .rendering.field_lines import draw_all_field_lines, draw_ransac_field_lines
+from .rendering.field_lines import draw_ransac_field_lines
 from .rendering.overlays import draw_fps_overlay, draw_jersey_table
 from .rendering.top_down import apply_segmentation_to_warped_frame, draw_tracks_top_down
 from .rendering.tracks import (
@@ -113,7 +113,6 @@ class AnalysisPipeline:
         self.field_results: List[Any] = []
         self.ransac_lines: List[Line] = []
         self.ransac_confidences: List[float] = []
-        self._lines_for_display: Dict[str, Tuple[np.ndarray, float, bool]] = {}
 
         # Jersey numbers persist across frames: OCR only runs for some tracks per frame
         self.player_ids: Dict[int, Tuple[str, Any]] = {}
@@ -299,7 +298,6 @@ class AnalysisPipeline:
         else:
             self.ransac_lines = []
             self.ransac_confidences = []
-            self._lines_for_display = {}
 
         if options.player_id and self.tracks:
             self._read_player_ids(frame, frame_index)
@@ -457,7 +455,6 @@ class AnalysisPipeline:
             else:
                 self.ransac_lines = []
                 self.ransac_confidences = []
-                self._lines_for_display = {}
 
         # Plain detections only without tracking; tracks carry the same boxes
         if self.detections and not options.tracking:
@@ -483,7 +480,7 @@ class AnalysisPipeline:
 
     def _draw_field_overlay(self, frame: np.ndarray, mask: np.ndarray) -> np.ndarray:
         """The field outline and lines, drawn before the players."""
-        frame, _, self._lines_for_display = draw_unified_field_mask(
+        frame = draw_unified_field_mask(
             frame,
             mask,
             get_primary_field_color(),
@@ -493,14 +490,6 @@ class AnalysisPipeline:
             field_contour=self._field_contour,
             in_place=True,
         )
-        if self._lines_for_display:
-            frame = draw_all_field_lines(
-                frame,
-                self._lines_for_display,
-                scale_factor=1.0,
-                draw_raw_lines_only=True,
-                in_place=True,
-            )
         if self.ransac_lines:
             frame = draw_ransac_field_lines(
                 frame,
@@ -580,15 +569,6 @@ class AnalysisPipeline:
                     matrix,
                     scale_factor=2.0 * scale,
                     show_confidence=True,
-                    in_place=True,
-                )
-            elif self._lines_for_display:
-                view = draw_all_field_lines(
-                    view,
-                    self._lines_for_display,
-                    matrix,
-                    scale_factor=2.0 * scale,
-                    draw_raw_lines_only=False,
                     in_place=True,
                 )
 

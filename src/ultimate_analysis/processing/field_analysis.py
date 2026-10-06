@@ -12,7 +12,7 @@ Performance optimizations:
 - Efficient array operations with minimal reshaping
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -283,16 +283,6 @@ def _fill_holes_flood_fill_optimized(mask: np.ndarray) -> np.ndarray:
         return mask
 
 
-try:
-    from sklearn.linear_model import RANSACRegressor
-
-    SKLEARN_AVAILABLE = True
-except ImportError:
-    SKLEARN_AVAILABLE = False
-
-    # Fallback implementation will be used automatically when needed
-
-
 def filter_edge_points(
     contour: np.ndarray, frame_shape: tuple, edge_margin: int = 20
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -414,169 +404,87 @@ def interpolate_contour_points(
         return contour
 
 
+# Result of fit_field_lines_ransac: (lines, points on no line, points of each line, points
+# left out for being at the frame border). A line is a (2, 2) array of its two end points.
+RansacFit = Tuple[List[np.ndarray], List[np.ndarray], List[np.ndarray], np.ndarray]
+
+
 def fit_field_lines_ransac(
     contour: np.ndarray,
-    frame: np.ndarray,
+    frame_shape: Tuple[int, ...],
     num_lines: int = 4,
     distance_threshold: float = 5.0,
     min_samples: int = 2,
     max_trials: int = 100,
-) -> Optional[
-    Tuple[
-        List[Tuple[np.ndarray, np.ndarray]],
-        List[np.ndarray],
-        List[np.ndarray],
-        List[np.ndarray],
-        Dict,
-        Dict,
-    ]
-]:
-    """Fit straight lines to contour segments using RANSAC.
-
-    This function segments the contour and fits straight lines to each segment,
-    which is useful for field boundary detection where we expect rectangular shapes.
+) -> RansacFit:
+    """Fit straight lines to the outline of the field, strongest line first.
 
     Args:
-        contour: Contour points as numpy array of shape (N, 1, 2)
-        frame: Input frame for determining shape (used for edge filtering)
-        num_lines: Number of line segments to fit (typically 3-4 for field boundaries)
-        distance_threshold: Maximum distance from point to line to be considered inlier
-        min_samples: Minimum number of points needed to fit a line
-        max_trials: Maximum RANSAC iterations per line segment
+        contour: Outline points, shape (N, 1, 2)
+        frame_shape: Shape of the frame; outline points at its border are left out
+        num_lines: The most lines to look for
+        distance_threshold: A point this close to a line (pixels) belongs to it
+        min_samples: Fewest points a line needs
+        max_trials: Point pairs tried per line
 
     Returns:
-        Tuple of (fitted_lines, outlier_points, inlier_points, edge_filtered_points, empty_dict, all_lines_for_display) where:
-        - fitted_lines: List of (start_point, end_point) tuples for each fitted line
-        - outlier_points: List of outlier point arrays for each segment
-        - inlier_points: List of inlier point arrays for each segment
-        - edge_filtered_points: Points that were filtered out during edge filtering
-        - empty_dict: Empty dictionary (classification removed)
-        - all_lines_for_display: Dictionary of all lines for visualization
-        Returns (None, None, None, None, {}, {}) if fitting fails
+        (lines, outliers, inliers, edge_points); `lines` is empty if none was found.
+        `outliers` holds one array, the points on no line; `inliers` one array per line.
     """
+    no_points = np.empty((0, 2), dtype=np.float32)
     if contour is None or len(contour) < num_lines * min_samples:
-        return None, None, None, None, {}, {}
+        return [], [], [], no_points
 
     try:
-        # Convert contour to 2D points array
         points = contour.reshape(-1, 2).astype(np.float32)
-        edge_filtered_points = np.array([]).reshape(0, 2)  # Store edge-filtered points
+        edge_points = no_points
 
-        # Apply interpolation if enabled (before edge filtering)
-        interpolation_enabled = get_setting(
-            "models.segmentation.contour.interpolation.enabled", False
-        )
-        if interpolation_enabled:
-            max_distance = get_setting(
-                "models.segmentation.contour.interpolation.max_point_distance", 10
+        if get_setting("models.segmentation.contour.interpolation.enabled", False):
+            points = interpolate_contour_points(
+                points.reshape(-1, 1, 2),
+                get_setting("models.segmentation.contour.interpolation.max_point_distance", 10),
+                get_setting("models.segmentation.contour.interpolation.min_point_distance", 3),
             )
-            min_distance = get_setting(
-                "models.segmentation.contour.interpolation.min_point_distance", 3
+            points = points.reshape(-1, 2).astype(np.float32)
+
+        if get_setting("models.segmentation.contour.ransac.edge_filtering.enabled", False):
+            kept, at_edge = filter_edge_points(
+                points.reshape(-1, 1, 2),
+                frame_shape,
+                get_setting("models.segmentation.contour.ransac.edge_filtering.margin", 20),
             )
+            if len(kept) > 0:
+                points = kept.reshape(-1, 2).astype(np.float32)
+                edge_points = at_edge.reshape(-1, 2).astype(np.float32)
 
-            # Convert to contour format for interpolation
-            contour_format = points.reshape(-1, 1, 2)
-            interpolated_contour = interpolate_contour_points(
-                contour_format, max_distance, min_distance
-            )
-            points = interpolated_contour.reshape(-1, 2).astype(np.float32)
-
-        # Apply edge filtering after interpolation if enabled
-        edge_filtering_enabled = get_setting(
-            "models.segmentation.contour.ransac.edge_filtering.enabled", False
-        )
-        if edge_filtering_enabled:
-            edge_margin = get_setting(
-                "models.segmentation.contour.ransac.edge_filtering.margin", 20
-            )
-
-            # Convert to contour format for edge filtering
-            contour_format = points.reshape(-1, 1, 2)
-            filtered_contour, edge_points = filter_edge_points(
-                contour_format, frame.shape, edge_margin
-            )
-
-            # Update points to use only non-edge points
-            if len(filtered_contour) > 0:
-                points = filtered_contour.reshape(-1, 2).astype(np.float32)
-                edge_filtered_points = (
-                    edge_points.reshape(-1, 2).astype(np.float32)
-                    if len(edge_points) > 0
-                    else np.array([]).reshape(0, 2)
-                )
-
-        # Sequential RANSAC: Find lines one by one, removing inliers each time
-        remaining_points = points.copy()
-        fitted_lines = []
-        line_confidences = []  # Store confidence for each line
-        all_outliers = []
-        all_inliers = []
-
+        # One line after the other, each from the points the lines before it left over
         min_line_length = get_setting("models.segmentation.contour.ransac.min_line_length", 60)
+        remaining = points.copy()
+        lines: List[np.ndarray] = []
+        inliers: List[np.ndarray] = []
         for _ in range(num_lines):
-            if len(remaining_points) < min_samples:
-                # Insufficient points remaining for line fitting
+            if len(remaining) < min_samples:
                 break
-
-            # Fit line to remaining points using RANSAC
-            result = _fit_line_ransac_with_outliers(
-                remaining_points, distance_threshold, min_samples, max_trials
-            )
-
-            if result is not None:
-                line_points, outliers, inliers, confidence = result
-                # The lines come strongest first. A view often shows fewer sides of the
-                # field than num_lines: what is left then are corners and dents of the
-                # outline, and a line through a few of those is not a field line.
-                if np.linalg.norm(line_points[1] - line_points[0]) < min_line_length:
-                    break
-                fitted_lines.append(line_points)
-                line_confidences.append(confidence)
-                all_inliers.append(inliers)
-
-                # The points of this line are taken out, and those just outside the
-                # threshold with them: they would otherwise give the same line again
-                remaining_points = outliers[
-                    _distance_to_segment(outliers, line_points[0], line_points[1])
-                    > 2 * distance_threshold
-                ]
-            else:
-                # Failed to fit line, stopping sequential RANSAC
+            found = _fit_line_ransac_numpy(remaining, distance_threshold, min_samples, max_trials)
+            if found is None:
                 break
+            line, rest, on_line, _ = found
+            # The lines come strongest first. A view often shows fewer sides of the
+            # field than num_lines: what is left then are corners and dents of the
+            # outline, and a line through a few of those is not a field line.
+            if np.linalg.norm(line[1] - line[0]) < min_line_length:
+                break
+            lines.append(line)
+            inliers.append(on_line)
+            # The points of this line are taken out, and those just outside the
+            # threshold with them: they would otherwise give the same line again
+            remaining = rest[_distance_to_segment(rest, line[0], line[1]) > 2 * distance_threshold]
 
-        # All remaining points after all iterations are final outliers
-        if len(remaining_points) > 0:
-            all_outliers.append(remaining_points)
-        else:
-            all_outliers.append(np.array([]).reshape(0, 2))
-
-        # Create a dictionary of all lines for display purposes (no classification)
-        all_lines_for_display = {}
-
-        # Add all fitted lines for display with simple numbering
-        for i, (line, confidence) in enumerate(zip(fitted_lines, line_confidences)):
-            if line is not None:
-                line_type = f"line_{i}"
-                all_lines_for_display[line_type] = (line, confidence, False)
-
-        # Filter out None entries from fitted_lines but keep all for display
-        valid_lines = [line for line in fitted_lines if line is not None]
-        return (
-            (
-                valid_lines,
-                all_outliers,
-                all_inliers,
-                edge_filtered_points,
-                {},
-                all_lines_for_display,
-            )
-            if valid_lines
-            else (None, None, None, edge_filtered_points, {}, {})
-        )
+        return lines, [remaining], inliers, edge_points
 
     except Exception as e:
         logger.error(f"Error in RANSAC line fitting: {e}")
-        return None, None, None, np.array([]).reshape(0, 2), {}, {}
+        return [], [], [], no_points
 
 
 def _distance_to_segment(points: np.ndarray, start: np.ndarray, end: np.ndarray) -> np.ndarray:
@@ -586,86 +494,6 @@ def _distance_to_segment(points: np.ndarray, start: np.ndarray, end: np.ndarray)
     offsets = points.astype(np.float64) - start
     position = np.clip(offsets @ along / max(float(along @ along), 1e-12), 0.0, 1.0)
     return np.linalg.norm(offsets - position[:, None] * along, axis=1)
-
-
-def _fit_line_ransac_with_outliers(
-    points: np.ndarray, distance_threshold: float, min_samples: int, max_trials: int
-) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, float]]:
-    """Fit a line using RANSAC and return the line, outliers, inliers, and confidence."""
-    if len(points) < min_samples:
-        return None
-
-    # The numpy fitter is the default: sklearn spends most of its time validating
-    # inputs on every trial and regresses y on x, which cannot fit vertical lines.
-    backend = get_setting("models.segmentation.contour.ransac.backend", "numpy")
-    if backend == "sklearn" and SKLEARN_AVAILABLE:
-        return _fit_line_ransac_sklearn(points, distance_threshold, min_samples, max_trials)
-    return _fit_line_ransac_numpy(points, distance_threshold, min_samples, max_trials)
-
-
-def _fit_line_ransac_sklearn(
-    points: np.ndarray, distance_threshold: float, min_samples: int, max_trials: int
-) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, float]]:
-    """Fit a line using sklearn RANSAC."""
-
-    try:
-        # Validate input dimensions once
-        if points.ndim != 2 or points.shape[1] != 2 or len(points) < min_samples:
-            return None
-
-        # Prepare data for RANSAC (avoid reshape when possible)
-        X = points[:, 0:1]  # Keep as 2D without reshape
-        y = points[:, 1]  # 1D array for y values
-
-        # Create RANSAC regressor
-        ransac = RANSACRegressor(
-            estimator=None,  # Use default LinearRegression
-            min_samples=min_samples,
-            residual_threshold=distance_threshold,
-            max_trials=max_trials,
-            stop_probability=0.99,
-            random_state=None,
-        )
-
-        # Fit RANSAC
-        ransac.fit(X, y)
-
-        # Get and validate inlier mask
-        inlier_mask = ransac.inlier_mask_
-        if inlier_mask is None or len(inlier_mask) != len(points):
-            return None
-
-        # Ensure boolean mask
-        if inlier_mask.dtype != bool:
-            inlier_mask = inlier_mask.astype(bool)
-
-        # Extract inliers and outliers using boolean indexing
-        inliers = points[inlier_mask]
-        outliers = points[~inlier_mask]
-
-        # Early return if insufficient inliers
-        if len(inliers) < 2:
-            return None
-
-        # Calculate confidence
-        confidence = inlier_mask.sum() / len(points)
-
-        # Find line endpoints efficiently
-        x_coords = inliers[:, 0]
-        x_min, x_max = x_coords.min(), x_coords.max()
-
-        # Batch predict for endpoints
-        endpoints_x = np.array([[x_min], [x_max]])
-        endpoints_y = ransac.predict(endpoints_x)
-
-        # Create line endpoints
-        line_points = np.column_stack([endpoints_x.ravel(), endpoints_y])
-
-        return line_points, outliers, inliers, confidence
-
-    except Exception as e:
-        logger.error(f"Error in sklearn RANSAC fitting: {e}")
-        return None
 
 
 def _fit_line_ransac_numpy(
@@ -770,81 +598,44 @@ def extract_raw_lines_from_segmentation(
 
 def fit_lines_from_mask(
     unified_mask: np.ndarray,
-) -> Tuple[List[Tuple[np.ndarray, np.ndarray]], List[float], Optional[np.ndarray], Optional[tuple]]:
-    """Fit RANSAC lines to a unified mask, keeping the intermediate geometry.
-
-    RANSAC is randomized, so callers that both use and draw the lines should
-    run it once through this function and reuse the returned fit.
+) -> Tuple[List[np.ndarray], List[float], Optional[np.ndarray], Optional[RansacFit]]:
+    """Fit the field lines to a field mask, keeping the outline and the fit for drawing.
 
     Args:
         unified_mask: Binary mask where 1 indicates field area
 
     Returns:
-        Tuple of (detected_lines, confidences, simplified_contour, ransac_fit) where
-        ransac_fit is the raw fit_field_lines_ransac result (None if no contour was found)
+        (lines, confidences, outline, fit). The fit is None if the mask has no outline.
     """
-    detected_lines = []
-    confidences = []
-    simplified_contour = None
-    result = None
-
     if unified_mask is None or not np.any(unified_mask):
-        return detected_lines, confidences, simplified_contour, result
+        return [], [], None, None
 
     try:
-        # Import here to avoid circular imports
+        contour = calculate_field_contour(unified_mask)
+        if contour is None:
+            return [], [], None, None
 
-        # Calculate contour for RANSAC
-        simplified_contour = calculate_field_contour(unified_mask)
-
-        if simplified_contour is not None:
-            # Get RANSAC parameters
-            num_lines = get_setting("models.segmentation.contour.ransac.num_lines", 4)
-            distance_threshold = get_setting(
+        num_lines = get_setting("models.segmentation.contour.ransac.num_lines", 4)
+        fit = fit_field_lines_ransac(
+            contour,
+            unified_mask.shape,
+            num_lines=num_lines,
+            distance_threshold=get_setting(
                 "models.segmentation.contour.ransac.distance_threshold", 10.0
-            )
-            min_samples = get_setting("models.segmentation.contour.ransac.min_samples", 2)
-            max_trials = get_setting("models.segmentation.contour.ransac.max_trials", 1000)
-
-            # Create dummy frame for RANSAC (only shape is used)
-            frame_shape = unified_mask.shape
-            dummy_frame = np.zeros((frame_shape[0], frame_shape[1], 3), dtype=np.uint8)
-
-            # Run RANSAC line fitting
-            result = fit_field_lines_ransac(
-                simplified_contour,
-                dummy_frame,
-                num_lines=num_lines,
-                distance_threshold=distance_threshold,
-                min_samples=min_samples,
-                max_trials=max_trials,
-            )
-
-            if result and result[0]:  # Check if fitted_lines exist
-                fitted_lines, outlier_points, inlier_points, edge_filtered_points, _, _ = result
-
-                # Extract lines with confidence based on inlier ratio
-                total_contour_points = len(simplified_contour)
-
-                for i, (start_point, end_point) in enumerate(fitted_lines):
-                    detected_lines.append((start_point, end_point))
-
-                    # Calculate confidence based on inlier count
-                    if i < len(inlier_points) and len(inlier_points[i]) > 0:
-                        inlier_count = len(inlier_points[i])
-                        # Confidence based on inlier ratio (normalized to expected points per line)
-                        expected_points_per_line = max(1, total_contour_points // num_lines)
-                        confidence = min(0.95, inlier_count / expected_points_per_line)
-                    else:
-                        confidence = 0.3  # Low confidence for lines without inliers
-
-                    confidences.append(confidence)
-
-                logger.debug(
-                    f"Extracted {len(detected_lines)} lines from mask with confidences: {[f'{c:.3f}' for c in confidences]}"
-                )
+            ),
+            min_samples=get_setting("models.segmentation.contour.ransac.min_samples", 2),
+            max_trials=get_setting("models.segmentation.contour.ransac.max_trials", 1000),
+        )
+        lines, _, inliers, _ = fit
+        # Confidence of a line: its share of the points a line would have if the
+        # outline were split evenly between the lines looked for
+        points_per_line = max(1, len(contour) // num_lines)
+        confidences = [
+            min(0.95, len(on_line) / points_per_line) if len(on_line) > 0 else 0.3
+            for on_line in inliers
+        ]
+        return list(lines), confidences, contour, fit
 
     except Exception as e:
         logger.error(f"Error extracting lines from mask: {e}")
-
-    return detected_lines, confidences, simplified_contour, result
+        return [], [], None, None

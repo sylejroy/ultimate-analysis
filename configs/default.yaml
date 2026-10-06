@@ -76,7 +76,6 @@ models:
         min_samples: 2          # Minimum number of points needed to fit a line
         max_trials: 100         # Point pairs tried per line (all at once, so they are cheap)
         min_line_length: 60     # Pixels; anything shorter is a corner or dent, not a field line
-        backend: "numpy"        # Line fitter: "numpy" (fast, fits vertical lines) or "sklearn"
         line_color: [0, 255, 0] # BGR color for RANSAC lines (green)
         outlier_color: [0, 165, 255] # BGR color for RANSAC outlier points (orange)
         outlier_radius: 6       # Radius for outlier point visualization (increased for visibility)

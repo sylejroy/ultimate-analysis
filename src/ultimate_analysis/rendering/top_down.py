@@ -109,7 +109,7 @@ def apply_segmentation_to_warped_frame(
 
         # Apply overlay and draw contour on warped frame - contour only for consistency
         field_color = get_primary_field_color()  # Bright cyan (BGR) - same as segmentation
-        result_frame, _, _ = draw_unified_field_mask(
+        result_frame = draw_unified_field_mask(
             warped_frame,
             warped_mask,
             field_color,
