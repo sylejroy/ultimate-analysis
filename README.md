@@ -1,12 +1,12 @@
 # Ultimate Analysis
 
 A PyQt5 desktop application for analysing Ultimate Frisbee video with YOLO detection,
-DeepSORT tracking, OCR-based player identification, and a top-down field view.
+tracking, OCR-based player identification, and a top-down field view.
 
 ## Features
 
 - **Object detection**: players and discs, with separately selectable models.
-- **Tracking**: consistent player and disc identities across frames (DeepSORT), with
+- **Tracking**: consistent player and disc identities across frames (ByteTrack with a team rule), with
   trails and foot-level positions.
 - **Possession**: the player holding the disc is highlighted in both views.
 - **Player identification**: jersey numbers read by a selectable reader (PARSeq,
@@ -52,7 +52,7 @@ switched off:
 1. **Detection** — one YOLO26s model for players and one for discs, both at image size
    1280 and run as TensorRT engines when built. The disc model is skipped while no disc
    has been seen for a while.
-2. **Tracking** — DeepSORT gives players and the disc stable IDs and trails. A player who
+2. **Tracking** — A tracker gives players and the disc stable IDs and trails. A player who
    is not detected is remembered for three seconds. The camera's own motion is estimated
    from the background and taken out of the trails and of the tracker's expectations, so
    a pan does not look like every player jumping.
@@ -114,7 +114,8 @@ Everything under `data/` is local and not tracked by Git.
   | --- | --- | --- |
   | `labelled_players_discs_v1` | Frames labelled in the Labelling tab, full resolution | Future training |
   | `labelled_discs_v1` | Frames labelled from the phone, discs only, full resolution | Future training |
-  | `combined_discs_v1` | `roboflow_merged_discs_v2` plus the disc boxes of both `labelled_` sets, built by `scripts/build_combined_disc_dataset.py` | Trial retraining of the disc model |
+  | `combined_discs_v3` | `roboflow_merged_discs_v2` plus the disc boxes of both `labelled_` sets, built by `scripts/build_combined_disc_dataset.py` (v1 and v2: earlier, with fewer labels) | The default disc model |
+  | `tiles_discs_v4` | 960×960 tiles of the frames that exist at full resolution, built by `scripts/build_disc_tile_dataset.py` | Trial: a disc model that sees discs at their full size |
   | `roboflow_merged_players_v2` | Built from the Roboflow exports: 1,442 images at 1280×720, players only | The default player model, benchmarks |
   | `roboflow_merged_discs_v2` | The same images, discs only | The default disc model, benchmarks |
   | `roboflow_object_detection_v3i` | Roboflow export as downloaded: players and discs, 960×960 | Source of the merged sets |
@@ -221,7 +222,8 @@ noted.
 | Model | Player AP50 | Player recall | Disc AP50 | Disc recall | Time per frame |
 | --- | --- | --- | --- | --- | --- |
 | YOLO26s at 1280, players only (default player model) | 0.982 | 0.977 | | | 6.5 ms |
-| YOLO26s at 1280, discs only (default disc model) | | | 0.505 | 0.449 | 5.3 ms |
+| YOLO26s at 1280, discs only, with the frames labelled in the app, trained without mosaic (default disc model) | | | 0.556 | 0.490 | 5.1 ms |
+| YOLO26s at 1280, discs only (default disc model before) | | | 0.505 | 0.449 | 5.3 ms |
 | YOLO26s at 1280, both classes | 0.980 | 0.976 | 0.384 | 0.296 | 5.4 ms |
 | YOLO26s-P2 at 1280, discs only (extra head for small objects) | | | 0.531 | 0.357 | 5.8 ms |
 | RT-DETR-L at 960, both classes | 0.977 | 0.970 | 0.280 | 0.316 | 30.5 ms (PyTorch) |
@@ -245,8 +247,30 @@ with the settings of the default disc model.
 | Own labels, test only | 25 | 0.664 / 0.640 | 0.654 / 0.560 |
 
 AP50 rises a little on the old images, and the number of discs found at the app's
-threshold stays the same; with this few discs neither is more than a hint. The default
-model was not changed.
+threshold stays the same; with this few discs neither is more than a hint.
+
+With more labels (`combined_discs_v3`: 354 own frames with 260 discs among 1,655
+training images) seven ways of training were compared. Each is scored on the old
+validation and test images (98 discs) and on the own frames held out for validation and
+test (79 discs), as AP50 / recall at the app's threshold, run in PyTorch:
+
+| Trained on `combined_discs_v3` | Old images | Own frames |
+| --- | --- | --- |
+| Default disc model before (old data only) | 0.505 / 0.45 | 0.556 / 0.49 |
+| YOLO26s, the settings used so far | 0.531 / 0.42 | 0.666 / 0.57 |
+| YOLO26s without mosaic, size changes of 20% instead of 50% | 0.568 / 0.50 | 0.709 / 0.62 |
+| YOLO26s with mixup 0.15 | 0.573 / 0.43 | 0.652 / 0.46 |
+| YOLO26m | 0.494 / 0.43 | 0.694 / 0.62 |
+| YOLO26s-P2 | 0.492 / 0.36 | 0.671 / 0.59 |
+| YOLO11s | 0.521 / 0.43 | 0.636 / 0.57 |
+
+Mosaic puts four shrunken images into one, which makes a disc of 11 pixels smaller still;
+without it the model finds more discs on both sets, and it is the default disc model now.
+As a TensorRT engine it scores 0.556 / 0.490 on the old images, 0.687 / 0.608 on the own
+frames, and 0.611 / 0.542 on both together (177 discs; the model before: 0.524 / 0.469).
+The own frames favour models trained on frames labelled the same way, and with this few
+discs a difference of 0.03 is noise; that one way of training leads on both sets is what
+counts. A larger model, the extra head for small objects, and YOLO11 bring nothing.
 
 To train a detector for one class, build a single-class copy of a dataset with
 `scripts/build_single_class_dataset.py` and select it in the Model Training tab.
@@ -290,14 +314,40 @@ new IDs, so the count never reaches the number of players):
 Fast pans still break tracks: a 22-second stretch with the fastest camera motion gave 41
 IDs for 14 players.
 
+**Players who cover each other.** The tracker (`models.tracking.backend`) is ByteTrack,
+which follows a box by where it was heading, with a rule on top: it learns the two shirt
+colours of the game while it runs, gives every track the team its player's shirt mostly
+looked like, and never continues a track with a box that clearly wears the other colour
+(`processing/team_tracker.py`). A track cut off from the wrong player that way gets its
+player back from the identity layer: a new track in the player's kit, where they can
+have got to within 1.5 seconds, is that player. DeepSORT, the tracker before
+(`backend: deepsort`), matches by looks, and between two players who cover each other
+often continues with the wrong one.
+
+Measured on the 21 short clips (7,500 frames, about 13 players on screen). A swap between
+opponents is a track whose shirt colour changes from one team's to the other's and stays
+there; the events counted for DeepSORT were checked by eye and are real. Swaps between
+teammates cannot be seen this way.
+
+| | DeepSORT | ByteTrack with the team rule |
+| --- | --- | --- |
+| Swaps between opponents | 69 | 12 |
+| A player who is clearly the same from one frame to the next gets another ID | 23 | 29 |
+| Player IDs per player on screen | 1.30 | 1.38 |
+
+The rule and the count of swaps both rest on shirt colour, so the count favours the rule
+somewhat; `data/cache/tracking_old_vs_new.mp4`, if rendered, shows both trackers side by
+side. Without the team rule ByteTrack had 48 swaps, with the rule but without giving
+players back their IDs 1.7 IDs per player.
+
 Recognising a lost player again by looks does not work on this footage. Players are about
 90 pixels tall and teammates wear the same kit: a network trained to re-identify people
 (OSNet) picked the right one of 16 players in 24% of cases, the tracker's own appearance
 vector in 13%. Matching a new track to a missing player by where that player could have
-run to (`models.tracking.identity.position_match_seconds`) recovered nobody on three
-test stretches and joined two different players once, so it is off. What remains is the
-jersey number: a player whose number is that of a missing player in the same kit becomes
-that player again.
+run to (`models.tracking.identity.position_match_seconds`) did nothing for DeepSORT's
+lost tracks; it is what reconnects the tracks the team rule cuts. Beyond those 1.5
+seconds the jersey number remains: a player whose number is that of a missing player in
+the same kit becomes that player again.
 
 Jersey numbers are decided by vote over all readings of a player. A number is shown from
 the second reading on, and its certainty grows with agreement; a single reading never
@@ -391,6 +441,28 @@ on 20 frames from five games with 20 candidates each:
 | Colour, full size (before) | 142 ms | |
 | Grey, full size | 99 ms | 20 of 20 |
 | Grey, half size (default) | 28 ms | 20 of 20 |
+
+### Speed of the whole pipeline
+
+Everything switched on (detection, tracking, jersey numbers, field, both views), 180
+frames of the default clip after 30 to warm up, decoding and display not counted:
+
+| | Frames per second | Tracking | Detection |
+| --- | --- | --- | --- |
+| DeepSORT, player model at 1280 | 23 | 12 ms | 7.5 ms |
+| ByteTrack with the team rule, player model at 1280 | 28 | 2.4 ms | 7.8 ms |
+| ByteTrack with the team rule, player model at 960 (default) | 30 | 2.3 ms | 6.2 ms |
+
+ByteTrack runs no network of its own. The player model is trained at 1280 like the disc
+model, but players are 90 pixels tall and found as well at 960
+(`models.player_detection.image_size`): AP50 0.985 and recall 0.973, against 0.982 and
+0.977 at 1280, in 4.6 instead of 6.1 ms. Runs differ by about one frame per second.
+
+What is left: reading jersey numbers takes 8 ms per frame on average, in bursts of 25 ms
+and more on the frames it runs on, most of it in the text detector that finds the number
+on the crop. Running that detector on smaller crops loses players (17 of 23 identified
+at the present size, 16 at three quarters, 15 at half); one run for all crops of a frame
+and half precision gain under a tenth.
 
 ### Measuring the whole pipeline
 

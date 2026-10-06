@@ -25,11 +25,12 @@ models:
   # Separate player and disc detection models
   player_detection:
     default_model: "data/models/detection/20261005_1_detection_yolo26s_players_merged.v2.yolov8/finetune_20261005_010313/weights/best.pt"
+    image_size: 960              # The player model runs at this size (0 = as trained, 1280); players are found as well, in less time
     confidence_threshold: 0.5
     nms_threshold: 0.45
     
   disc_detection:
-    default_model: "data/models/detection/20261004_1_detection_yolo26s_discs_merged.v2.yolov8/finetune_20261004_231958/weights/best.pt"
+    default_model: "data/models/detection/20261006_1_detection_yolo26s_combined_discs_v3/finetune_20261006_070123/weights/best.pt"
     confidence_threshold: 0.3
     nms_threshold: 0.45
     adaptive_skip: true          # Skip disc model when no disc detected recently
@@ -93,6 +94,7 @@ models:
           show_edge_points: true # Whether to visualize filtered edge points
   
   tracking:
+    backend: bytetrack           # "bytetrack": by motion, each track within its team; "deepsort": by appearance
     track_history_length: 300
     camera_motion_compensation: true   # Keep trails on the ground when the camera pans or zooms
     
@@ -103,12 +105,12 @@ models:
     identity:
       enabled: true
       memory_seconds: 30.0                # How long a missing player is remembered, to be recognised by their number
-      position_match_seconds: 0.0         # Up to this long after a player was lost, a new track where they must be is them. Off (0): on test footage it recovered no player and joined two different ones once
+      position_match_seconds: 1.5         # Up to this long after a player was lost, a new track in their kit where they can have got to is them
       max_speed_heights_per_second: 5.0   # Top speed of a player, in body heights per second
       max_acceleration_heights_per_second2: 4.0  # How fast a player can change speed or direction
       carry_on_seconds: 1.0               # For this long a missing player is expected to carry on as they were going
       min_margin: 0.25                    # How much nearer than any other candidate a match must be (share of the reachable distance)
-      max_kit_distance: 30.0              # Average kit colours further apart than this (Lab units) are different teams: same number, different player
+      max_kit_distance: 60.0              # Kit colours further apart than this (Lab units) are different teams
       appearance_interval: 10             # Frames between looks at a player's kit colour
       number_certainty: 0.6               # Certainty of a jersey number from which it identifies a missing player
     n_init: 3                    # Frames needed to confirm a track

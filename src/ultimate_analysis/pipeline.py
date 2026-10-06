@@ -358,7 +358,7 @@ class AnalysisPipeline:
         number, so the two must also wear the same kit.
         """
         certainty_needed = float(get_setting("models.tracking.identity.number_certainty", 0.6))
-        max_distance = float(get_setting("models.tracking.identity.max_kit_distance", 30.0))
+        max_distance = float(get_setting("models.tracking.identity.max_kit_distance", 60.0))
         present = {track.track_id for track in self.tracks if track.class_name == "player"}
         missing = {}
         for player_id in missing_players(present):

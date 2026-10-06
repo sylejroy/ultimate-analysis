@@ -1,7 +1,14 @@
-"""Object tracking module - DeepSORT tracking.
+"""Tracking of players and discs across video frames.
 
-This module handles tracking of detected objects across video frames.
-Maintains consistent identities for players and discs throughout the game.
+Two trackers can do the work (models.tracking.backend):
+
+- "bytetrack": follows boxes by their motion and keeps each player track within its
+  team (team_tracker.py). The default.
+- "deepsort": matches boxes by what they look like. Between two players who cover each
+  other it decides by appearance alone, and often wrongly.
+
+On top of either, the identity layer keeps a player's ID when the tracker loses them
+and picks them up again as a new track.
 """
 
 from collections import defaultdict
@@ -16,6 +23,7 @@ from ..utils.logger import get_logger
 from . import appearance
 from .camera_motion import move_points
 from .player_identity import Observation, PlayerIdentities
+from .team_tracker import BYTETracker, DetectionBoxes, TeamTracker, tracker_settings
 
 logger = get_logger("TRACKING")
 
@@ -34,6 +42,8 @@ except ImportError:
 
 # Global tracking state
 _deepsort_tracker = None
+_player_tracker: Optional[TeamTracker] = None  # The "bytetrack" backend: players,
+_disc_tracker: Optional[BYTETracker] = None  # and discs, which have no team
 # (embedder, network) - the embedder's network compiled for inference, or the network
 # itself when compiling is not possible
 _compiled_embedder: Tuple[Any, Any] = (None, None)
@@ -133,6 +143,9 @@ def set_frame_rate(frames_per_second: float) -> None:
         _frame_rate = float(frames_per_second)
     if _deepsort_tracker is not None:
         _deepsort_tracker.tracker.max_age = _max_age_frames()
+    for tracker in (_player_tracker, _disc_tracker):
+        if tracker is not None:
+            tracker.max_frames_lost = tracker.args.track_buffer = _max_age_frames()
 
 
 def _get_embedder_network(embedder: Any) -> Any:
@@ -221,14 +234,90 @@ def run_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) -> List[Tr
     global _frame_count
     _frame_count += 1
 
-    logger.debug(
-        f"Processing {len(detections)} detections with DeepSORT tracker (frame {_frame_count})"
-    )
+    if _uses_bytetrack():
+        try:
+            return _run_bytetrack_tracking(frame, detections)
+        except Exception as e:
+            logger.exception(f"Error in ByteTrack tracking: {e}")
+            return _run_simple_tracking(detections)
 
     if not detections and _deepsort_tracker is None:
         return []
 
     return _run_deepsort_tracking(frame, detections)
+
+
+def _uses_bytetrack() -> bool:
+    return get_setting("models.tracking.backend", "bytetrack") == "bytetrack"
+
+
+def _run_bytetrack_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) -> List[Track]:
+    """Track players within their teams, and discs, by the motion of their boxes."""
+    global _player_tracker, _disc_tracker
+    if _player_tracker is None or _disc_tracker is None:
+        _player_tracker = TeamTracker(tracker_settings(_max_age_frames()))
+        _disc_tracker = BYTETracker(tracker_settings(_max_age_frames()))
+
+    tracks = []
+    for class_name, class_id, tracker in (
+        ("player", 1, _player_tracker),
+        ("disc", 0, _disc_tracker),
+    ):
+        found = [
+            detection
+            for detection in detections
+            if detection.get("class_name") == class_name and detection.get("bbox") is not None
+        ]
+        boxes = DetectionBoxes(
+            [detection["bbox"] for detection in found],
+            [detection["confidence"] for detection in found],
+        )
+        # A row is x1, y1, x2, y2, track ID, confidence, class, index of the detection
+        for row in tracker.update(boxes, frame):
+            tracks.append(
+                Track(
+                    track_id=int(row[4]),
+                    bbox=[float(value) for value in row[:4]],
+                    class_id=class_id,
+                    confidence=float(row[5]),
+                    class_name=class_name,
+                    model_type=f"{class_name}_model",
+                )
+            )
+    _finish_tracks(frame, tracks)
+    return tracks
+
+
+def _finish_tracks(frame: np.ndarray, tracks: List[Track]) -> None:
+    """Give the tracks of a frame their player IDs and add them to the trails."""
+    _assign_player_identities(frame, tracks)
+
+    # The trail follows the player's feet (bottom centre of the box)
+    for track in tracks:
+        x1, _, x2, y2 = track.bbox
+        _update_track_history(track.track_id, (int((x1 + x2) / 2), int(y2)))
+        _history_last_frame[track.track_id] = _frame_count
+
+    # Trails of tracks that are gone for good no longer need to be stored
+    oldest = _frame_count - _max_age_frames()
+    for track_id in [
+        t for t in _track_histories if _history_last_frame.get(t, float("-inf")) < oldest
+    ]:
+        del _track_histories[track_id]
+        _history_last_frame.pop(track_id, None)
+
+
+def _followed_tracks() -> Tuple[List[Any], float]:
+    """Player tracks the tracker still follows, found in this frame or not, and how long
+    a track exists before the tracker reports it (seconds)."""
+    if _uses_bytetrack() and _player_tracker is not None:
+        followed = _player_tracker.tracked_stracks + _player_tracker.lost_stracks
+        return followed, 1.0 / _frame_rate  # Reported from its second frame on
+    if _deepsort_tracker is not None:
+        # Reported once it has been detected in n_init frames in a row
+        age = float(get_setting("models.tracking.n_init", 3)) / _frame_rate
+        return list(_deepsort_tracker.tracker.tracks), age
+    return [], 0.0
 
 
 def _run_deepsort_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) -> List[Track]:
@@ -344,21 +433,7 @@ def _run_deepsort_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) 
 
             tracks.append(our_track)
 
-        _assign_player_identities(frame, tracks)
-
-        # Update track history for visualization (at player's feet - bottom center)
-        for our_track in tracks:
-            x1, _, x2, y2 = our_track.bbox
-            _update_track_history(our_track.track_id, (int((x1 + x2) / 2), int(y2)))
-            _history_last_frame[our_track.track_id] = _frame_count
-
-        # Trails of tracks that are gone for good no longer need to be stored
-        oldest = _frame_count - _max_age_frames()
-        for track_id in [
-            t for t in _track_histories if _history_last_frame.get(t, float("-inf")) < oldest
-        ]:
-            del _track_histories[track_id]
-            _history_last_frame.pop(track_id, None)
+        _finish_tracks(frame, tracks)
 
         logger.debug(f"DeepSORT returned {len(tracks)} confirmed tracks")
         return tracks
@@ -403,9 +478,8 @@ def _assign_player_identities(frame: np.ndarray, tracks: List[Track]) -> None:
         )
         for track, feature in zip(players, features)
     ]
-    alive = {int(track.track_id) for track in _deepsort_tracker.tracker.tracks}
-    # A track is reported once it has been detected in n_init frames in a row
-    track_age = float(get_setting("models.tracking.n_init", 3)) / _frame_rate
+    followed, track_age = _followed_tracks()
+    alive = {int(track.track_id) for track in followed}
     player_of_track = _identities.assign(_frame_count / _frame_rate, observations, alive, track_age)
     for track in players:
         track.track_id = player_of_track[track.track_id]
@@ -493,6 +567,9 @@ def reset_tracker() -> None:
         # Keep the loaded appearance model, but discard identities and old embeddings.
         _deepsort_tracker.delete_all_tracks()
         _deepsort_tracker.tracker.metric.samples.clear()
+    for tracker in (_player_tracker, _disc_tracker):
+        if tracker is not None:
+            tracker.reset()
 
     # Clear track histories and reset frame count
     _track_histories.clear()
@@ -556,9 +633,17 @@ def _move_track_states(camera_motion: np.ndarray) -> None:
     (x, y, a, h, vx, vy, va, vh). The centre moves with the picture; near a point the
     motion is a small linear map, which turns the speed and scales the height.
     """
-    if _deepsort_tracker is None:
-        return
-    for track in _deepsort_tracker.tracker.tracks:
+    if _uses_bytetrack():
+        states = [
+            track
+            for tracker in (_player_tracker, _disc_tracker)
+            if tracker is not None
+            for track in tracker.tracked_stracks + tracker.lost_stracks
+            if track.mean is not None
+        ]
+    else:
+        states = [] if _deepsort_tracker is None else list(_deepsort_tracker.tracker.tracks)
+    for track in states:
         x, y = float(track.mean[0]), float(track.mean[1])
         moved = camera_motion @ np.array([x, y, 1.0])
         if abs(moved[2]) < 1e-9:

@@ -168,7 +168,7 @@ class PipelineTests(unittest.TestCase):
         # The other team's number 17 looks different and stays somebody else
         self.track.track_id = 7
         self.mocks["missing_players"].return_value = [5]
-        self.mocks["kit_distance"].return_value = 50.0
+        self.mocks["kit_distance"].return_value = 90.0
         result = self.pipeline.process(self.frame, 1, self.options)
         self.assertEqual([track.track_id for track in result.tracks], [7])
         self.mocks["merge_players"].assert_called_once()

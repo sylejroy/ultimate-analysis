@@ -1,0 +1,213 @@
+"""Tracking players by where they are heading, within their team.
+
+ByteTrack follows each box by its motion: a track continues with the detection its box
+was moving towards. Two players who cross keep their tracks as long as they move
+differently. What it cannot know is who is who once two boxes have covered each other;
+there a track may carry on with the wrong player.
+
+In Ultimate most of these meetings are between a player and the opponent marking them,
+and the two teams wear different colours. The tracker here learns the two shirt colours
+of the game while it runs, gives each track the team its player's shirt mostly looked
+like, and never continues a track with a detection that clearly wears the other colour.
+A track that ended up on the wrong player is thereby cut off when the two come apart;
+reconnecting the player with their own track is left to the identity layer
+(player_identity.py), which knows where they can have got to.
+
+Swaps between teammates are not prevented by this.
+"""
+
+from types import SimpleNamespace
+from typing import Any, List, Optional
+
+import cv2
+import numpy as np
+from ultralytics.trackers.byte_tracker import BYTETracker, STrack
+
+from . import appearance
+
+# A detection is "clear" if no other box covers more of it than this (IoU). Only clear
+# detections tell a shirt colour, and only they are held against a track's team.
+CLEAR_OVERLAP = 0.35
+# Shirt colours of boxes that stand alone are collected to learn the two team colours
+SAMPLE_OVERLAP = 0.05
+SAMPLE_MIN_CONFIDENCE = 0.5
+MIN_SAMPLES = 60
+MAX_SAMPLES = 3000
+REFIT_FRAMES = 30
+# Two colour clusters closer than this (Lab units) are not two teams
+MIN_TEAM_DISTANCE = 40.0
+# A shirt belongs to a team if it is nearer to its colour than to the other by this share
+# of the distance between the two
+MIN_COLOUR_MARGIN = 0.3
+# A track has a team once this many clear sightings, and this share of them, agree
+MIN_VOTES = 3
+MIN_VOTE_SHARE = 0.75
+
+
+class DetectionBoxes:
+    """Detections in the form the Ultralytics trackers take them."""
+
+    def __init__(self, xyxy: Any, conf: Any):
+        self.xyxy = np.asarray(xyxy, dtype=np.float32).reshape(-1, 4)
+        self.conf = np.asarray(conf, dtype=np.float32).reshape(-1)
+        self.cls = np.zeros(len(self.conf), dtype=np.float32)
+
+    @property
+    def xywh(self) -> np.ndarray:
+        box = self.xyxy
+        return np.column_stack(
+            [
+                (box[:, 0] + box[:, 2]) / 2,
+                (box[:, 1] + box[:, 3]) / 2,
+                box[:, 2] - box[:, 0],
+                box[:, 3] - box[:, 1],
+            ]
+        )
+
+    def __len__(self) -> int:
+        return len(self.conf)
+
+    def __getitem__(self, index: Any) -> "DetectionBoxes":
+        return DetectionBoxes(self.xyxy[index], self.conf[index])
+
+
+def tracker_settings(track_buffer: int) -> SimpleNamespace:
+    """Ultralytics' ByteTrack settings, with our time a lost track is kept (frames)."""
+    return SimpleNamespace(
+        tracker_type="bytetrack",
+        track_high_thresh=0.25,
+        track_low_thresh=0.1,
+        new_track_thresh=0.25,
+        track_buffer=track_buffer,
+        match_thresh=0.8,
+        fuse_score=True,
+    )
+
+
+def largest_overlaps(boxes: np.ndarray) -> np.ndarray:
+    """For each box (x1, y1, x2, y2) the largest IoU it has with any other of the boxes."""
+    if len(boxes) < 2:
+        return np.zeros(len(boxes))
+    x1 = np.maximum(boxes[:, None, 0], boxes[None, :, 0])
+    y1 = np.maximum(boxes[:, None, 1], boxes[None, :, 1])
+    x2 = np.minimum(boxes[:, None, 2], boxes[None, :, 2])
+    y2 = np.minimum(boxes[:, None, 3], boxes[None, :, 3])
+    shared = np.clip(x2 - x1, 0, None) * np.clip(y2 - y1, 0, None)
+    area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+    overlap = shared / (area[:, None] + area[None, :] - shared + 1e-9)
+    np.fill_diagonal(overlap, 0.0)
+    return overlap.max(axis=1)
+
+
+class TeamTrack(STrack):
+    """A track that keeps count of which team its player's shirt looked like."""
+
+    clear = False  # As a detection: no other box covers it
+    shirt_team: Optional[int] = None  # As a detection: the team its shirt colour says
+    team: Optional[int] = None  # As a track: the team most of its clear sightings said
+
+    def _count(self, detection: "TeamTrack") -> None:
+        if not hasattr(self, "votes"):
+            self.votes = [0, 0]
+        if detection.clear and detection.shirt_team is not None:
+            self.votes[detection.shirt_team] += 1
+            best = int(self.votes[1] > self.votes[0])
+            agreed = self.votes[best] >= max(MIN_VOTES, MIN_VOTE_SHARE * sum(self.votes))
+            self.team = best if agreed else None
+
+    def activate(self, kalman_filter: Any, frame_id: int) -> None:
+        super().activate(kalman_filter, frame_id)
+        self._count(self)
+
+    def update(self, new_track: "TeamTrack", frame_id: int) -> None:
+        super().update(new_track, frame_id)
+        self._count(new_track)
+
+    def re_activate(self, new_track: "TeamTrack", frame_id: int, new_id: bool = False) -> None:
+        super().re_activate(new_track, frame_id, new_id)
+        self._count(new_track)
+
+
+class TeamTracker(BYTETracker):
+    """ByteTrack that keeps every track within its team."""
+
+    track_class = TeamTrack
+
+    def __init__(self, args: Any):
+        super().__init__(args)
+        self._shirt_samples: List[np.ndarray] = []
+        self.team_colours: Optional[np.ndarray] = None  # (2, 3) shirt colours in Lab
+        self._frames_since_fit = 0
+
+    def update(self, results: Any, img: Optional[np.ndarray] = None, *args, **kwargs):
+        self._frames_since_fit += 1
+        if len(self._shirt_samples) >= MIN_SAMPLES and (
+            self.team_colours is None or self._frames_since_fit >= REFIT_FRAMES
+        ):
+            self._learn_team_colours()
+        return super().update(results, img, *args, **kwargs)
+
+    def _learn_team_colours(self) -> None:
+        """Split the shirt colours seen so far into two groups."""
+        self._frames_since_fit = 0
+        del self._shirt_samples[:-MAX_SAMPLES]
+        samples = np.array(self._shirt_samples, dtype=np.float32)
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.5)
+        # The same samples must give the same teams: fixed starting points
+        cv2.setRNGSeed(0)
+        _, _, colours = cv2.kmeans(samples, 2, None, criteria, 3, cv2.KMEANS_PP_CENTERS)
+        if np.linalg.norm(colours[0] - colours[1]) < MIN_TEAM_DISTANCE:
+            self.team_colours = None
+            return
+        # Team 0 stays team 0: the tracks have counted their sightings by these numbers
+        if self.team_colours is not None and np.linalg.norm(
+            colours[0] - self.team_colours[0]
+        ) > np.linalg.norm(colours[1] - self.team_colours[0]):
+            colours = colours[::-1].copy()
+        self.team_colours = colours
+
+    def _team_of(self, shirt: Optional[np.ndarray]) -> Optional[int]:
+        """The team a shirt colour clearly belongs to, if any."""
+        if self.team_colours is None or shirt is None:
+            return None
+        distance = np.linalg.norm(self.team_colours - shirt, axis=1)
+        apart = np.linalg.norm(self.team_colours[0] - self.team_colours[1])
+        if abs(distance[0] - distance[1]) <= MIN_COLOUR_MARGIN * apart:
+            return None
+        return int(distance[1] < distance[0])
+
+    def init_track(self, results: Any, img: Optional[np.ndarray] = None) -> List[STrack]:
+        detections = super().init_track(results, img)
+        if img is None or not detections:
+            return detections
+        overlaps = largest_overlaps(results.xyxy)
+        kits = appearance.encode(img, results.xyxy)
+        for detection, kit, overlap, confidence in zip(detections, kits, overlaps, results.conf):
+            shirt = None if kit is None else kit[:3]
+            detection.clear = bool(overlap < CLEAR_OVERLAP)
+            detection.shirt_team = self._team_of(shirt)
+            if (
+                shirt is not None
+                and overlap < SAMPLE_OVERLAP
+                and confidence >= SAMPLE_MIN_CONFIDENCE
+            ):
+                self._shirt_samples.append(shirt)
+        return detections
+
+    def get_dists(self, tracks: List[STrack], detections: List[STrack]) -> np.ndarray:
+        distances = super().get_dists(tracks, detections)
+        for row, track in enumerate(tracks):
+            team = getattr(track, "team", None)
+            if team is None:
+                continue
+            for column, detection in enumerate(detections):
+                other = getattr(detection, "shirt_team", None)
+                if getattr(detection, "clear", False) and other is not None and other != team:
+                    distances[row, column] = 1.0  # Never matched
+        return distances
+
+    def reset(self) -> None:
+        super().reset()
+        self._shirt_samples = []
+        self.team_colours = None
+        self._frames_since_fit = 0

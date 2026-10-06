@@ -15,6 +15,7 @@ def kit(*values):
 RED_TALL = kit(120, 170, 150, 60, 128, 128)
 RED_SHORT = kit(124, 168, 151, 62, 128, 128)  # A teammate: nearly the same colours
 BLUE = kit(110, 130, 80, 60, 128, 128)
+RED_IN_SHADOW = kit(95, 160, 140, 50, 128, 128)  # The same kit, darker
 
 
 class PlayerIdentityTests(unittest.TestCase):
@@ -69,11 +70,25 @@ class PlayerIdentityTests(unittest.TestCase):
         self.see(0.5, (1, RED_TALL, 110), (2, BLUE, 800))
 
         # Track 1 is lost; the player comes back as track 7 a second later, close by.
-        # What the kit looks like at that moment (shadow, another player) does not matter.
+        # The kit need not look the same as before (here: in a shadow).
         self.see(1.0, (2, BLUE, 800))
-        back = self.see(1.5, (2, BLUE, 800), (7, BLUE, 130))
+        back = self.see(1.5, (2, BLUE, 800), (7, RED_IN_SHADOW, 130))
         self.assertEqual(back[7], first[1])
         self.assertEqual(back[2], first[2])
+
+    def test_a_new_track_in_the_other_teams_kit_is_not_the_missing_player(self):
+        first = self.see(0.0, (1, RED_TALL, 100))
+        self.see(0.5)
+        self.assertNotIn(self.see(1.0, (7, BLUE, 110))[7], first.values())
+
+    def test_opponents_who_come_apart_are_told_apart_by_their_kit(self):
+        # A player and their marker covered each other and both tracks were lost. Both
+        # new tracks are within reach of both players; place alone could not decide.
+        first = self.see(0.0, (1, RED_TALL, 100), (2, BLUE, 120))
+        self.see(0.5)
+        back = self.see(1.0, (8, BLUE, 105), (9, RED_TALL, 115))
+        self.assertEqual(back[9], first[1])
+        self.assertEqual(back[8], first[2])
 
     def test_after_a_few_seconds_place_no_longer_says_who_it_is(self):
         first = self.see(0.0, (1, RED_TALL, 100))

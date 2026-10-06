@@ -141,6 +141,7 @@ class PlayerIdentities:
             return {}
 
         margin = self._setting("min_margin", 0.25)
+        kit_limit = self._setting("max_kit_distance", 60.0)
 
         # Cost of a match: how far the new track is from where the player was expected,
         # as a share of how far from there they can have got
@@ -153,7 +154,7 @@ class PlayerIdentities:
                 off = np.hypot(
                     observation.position[0] - expected[0], observation.position[1] - expected[1]
                 )
-                if off <= reach:
+                if off <= reach and not self._other_kit(profile, observation, kit_limit):
                     cost[row, column] = off / reach
 
         matches = {}
@@ -168,6 +169,18 @@ class PlayerIdentities:
                 continue
             matches[candidates[row]] = missing[column]
         return matches
+
+    @staticmethod
+    def _other_kit(profile: Profile, observation: Observation, kit_limit: float) -> bool:
+        """Whether a track wears another kit than a player: then it is not that player.
+
+        Two players of different teams who come apart after covering each other are both
+        within reach of both new tracks; the kit tells which is which.
+        """
+        if profile.feature is None or observation.feature is None:
+            return False
+        difference = np.asarray(observation.feature, dtype=np.float32) - profile.feature
+        return float(np.linalg.norm(difference)) > kit_limit
 
     def _reachable(self, profile: Profile, gone_s: float) -> Tuple[Tuple[float, float], float]:
         """Where a missing player is expected, and how far from there they can be (pixels).

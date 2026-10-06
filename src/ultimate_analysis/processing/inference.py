@@ -409,6 +409,16 @@ def _load_role_model(
         return None
 
 
+def player_image_size(trained_size: int) -> int:
+    """Image size the player model runs at in the pipeline.
+
+    The detectors are trained at the size the disc needs, 11 pixels wide in a frame of
+    1280. A player is 90 pixels tall there and found as well in a smaller picture, which
+    takes less time (models.player_detection.image_size; 0 = the size it was trained at).
+    """
+    return int(get_setting("models.player_detection.image_size", 0)) or trained_size
+
+
 def set_player_model(model_path: str) -> bool:
     """Set the player detection model (a path to .pt weights or a model name).
 
@@ -424,6 +434,9 @@ def set_player_model(model_path: str) -> bool:
         return False
     _player_model, _player_model_imgsz = loaded
     _player_model_path = model_path
+    # One model in both roles runs once, at the size the disc needs
+    if _player_model is not _disc_model:
+        _player_model_imgsz = player_image_size(_player_model_imgsz)
     return True
 
 

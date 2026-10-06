@@ -1,4 +1,4 @@
-"""DeepSORT tracking state and class handling."""
+"""Tracking state and class handling, with the DeepSORT backend."""
 
 import unittest
 from unittest.mock import Mock, patch
@@ -11,6 +11,9 @@ class TrackingTests(unittest.TestCase):
     def setUp(self):
         self.module = load_module("processing.tracking")
         self.module._track_histories.clear()
+        backend = patch.object(self.module, "_uses_bytetrack", return_value=False)
+        backend.start()
+        self.addCleanup(backend.stop)
 
     def test_reset_preserves_loaded_embedder_and_discards_identity_state(self):
         tracker = Mock()

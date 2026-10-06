@@ -56,7 +56,7 @@ DEFAULT_PATHS = {
 # Fallback defaults (used when configuration is not available)
 FALLBACK_DEFAULTS = {
     "model_player_detection": "data/models/detection/20261005_1_detection_yolo26s_players_merged.v2.yolov8/finetune_20261005_010313/weights/best.pt",
-    "model_disc_detection": "data/models/detection/20261004_1_detection_yolo26s_discs_merged.v2.yolov8/finetune_20261004_231958/weights/best.pt",
+    "model_disc_detection": "data/models/detection/20261006_1_detection_yolo26s_combined_discs_v3/finetune_20261006_070123/weights/best.pt",
     "model_segmentation": "data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt",
 }
 

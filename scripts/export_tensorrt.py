@@ -22,7 +22,10 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
 from ultimate_analysis.config.settings import get_setting  # noqa: E402
-from ultimate_analysis.processing.inference import disc_window_image_size  # noqa: E402
+from ultimate_analysis.processing.inference import (  # noqa: E402
+    disc_window_image_size,
+    player_image_size,
+)
 from ultimate_analysis.processing.tensorrt_engines import (  # noqa: E402
     engine_path,
     export_engine,
@@ -57,8 +60,11 @@ def main() -> None:
         Path(default_model_path("disc_detection")),
     ]
     disc_weights = Path(default_model_path("disc_detection"))
+    player_weights = Path(default_model_path("player_detection"))
     for weights in detection_weights:
         imgsz = get_training_image_size(weights)
+        if weights == player_weights and weights != disc_weights:
+            imgsz = player_image_size(imgsz)  # The pipeline runs the player model smaller
         jobs.append((weights, network_input_shape(frame_shape, imgsz), half))
         # The disc model also searches a small window around a disc it is following
         window = disc_window_image_size(frame_shape, imgsz)
