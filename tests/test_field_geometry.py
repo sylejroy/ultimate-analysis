@@ -35,6 +35,20 @@ class SegmentationTests(unittest.TestCase):
 
 
 class FieldGeometryTests(unittest.TestCase):
+    def test_main_outline_survives_alternating_warped_masks(self):
+        module = load_module("rendering.field")
+        module._mask_outline_cache.clear()
+        mask = np.zeros((40, 40), dtype=np.uint8)
+        mask[10:30, 10:30] = 1
+        original_find = module.cv2.findContours
+        with patch.object(module.cv2, "findContours", wraps=original_find) as find:
+            first = module._get_mask_outline(mask)
+            for _ in range(5):
+                module._get_mask_outline(mask.copy())  # A new warped mask each frame.
+                self.assertIs(module._get_mask_outline(mask), first)
+        self.assertEqual(find.call_count, 6)
+        self.assertEqual(len(module._mask_outline_cache), 2)
+
     def test_numpy_ransac_fits_vertical_line_and_rejects_outliers(self):
         module = load_module("processing.field_analysis")
         line = np.column_stack([np.full(50, 100.0), np.linspace(0, 490, 50)])

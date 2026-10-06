@@ -4,10 +4,102 @@ Shared by live player identification and the EasyOCR tuning tab, so a setting tu
 the tab behaves the same during analysis.
 """
 
-from typing import Any, Dict, List, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
+
+
+@dataclass
+class _CropWindow:
+    crop: Optional[np.ndarray] = None
+    score: float = 0.0
+    crop_frame: int = -1
+    observed_frame: int = -1
+    next_read_frame: int = 0
+    failures: int = 0
+    interval: int = 1
+
+
+class JerseyCropSelector:
+    """Keep one promising crop per player, and back off after unreadable windows."""
+
+    def __init__(self) -> None:
+        self._windows: Dict[int, _CropWindow] = {}
+        self._frame_index = -1
+
+    def reset(self) -> None:
+        self._windows.clear()
+        self._frame_index = -1
+
+    def begin_frame(self, frame_index: int, active_ids: Set[int]) -> None:
+        if frame_index < self._frame_index:
+            self.reset()
+        self._frame_index = frame_index
+        for track_id in self._windows.keys() - active_ids:
+            del self._windows[track_id]
+
+    def observe(
+        self,
+        track_id: int,
+        crop: np.ndarray,
+        frame_index: int,
+        interval: int,
+        score: float,
+    ) -> None:
+        window = self._windows.setdefault(track_id, _CropWindow())
+        if frame_index <= window.observed_frame:
+            return
+        window.observed_frame = frame_index
+        window.interval = max(1, interval)
+        if frame_index - window.crop_frame >= interval:
+            window.crop = None
+            window.score = 0.0
+        if score > 0 and score >= window.score:
+            window.crop = crop.copy()
+            window.score = score
+            window.crop_frame = frame_index
+
+    def take(self, track_id: int, frame_index: int) -> Optional[np.ndarray]:
+        window = self._windows.get(track_id)
+        if window is None or frame_index < window.next_read_frame:
+            return None
+        if frame_index - window.crop_frame >= window.interval:
+            window.crop = None
+        crop, window.crop = window.crop, None
+        window.score = 0.0
+        return crop
+
+    def record_read(
+        self, track_id: int, frame_index: int, readable: bool, interval: int, max_backoff: int
+    ) -> None:
+        window = self._windows[track_id]
+        window.failures = 0 if readable else min(window.failures + 1, 8)
+        multiplier = min(2**window.failures, max(1, max_backoff))
+        window.next_read_frame = frame_index + max(1, interval) * multiplier
+
+
+def crop_quality(
+    crop: np.ndarray, top_fraction: float, occlusion: float, min_sharpness: float
+) -> float:
+    """Rank upper-body crops with a small sharpness image, native size, and box overlap."""
+    torso = crop_top_fraction(crop, {"crop_top_fraction": top_fraction})
+    if torso.size == 0 or occlusion >= 1.0:
+        return 0.0
+    height, width = torso.shape[:2]
+    scale = min(1.0, 64.0 / max(height, width))
+    if scale < 1.0:
+        torso = cv2.resize(
+            torso,
+            (max(1, round(width * scale)), max(1, round(height * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+    gray = cv2.cvtColor(torso, cv2.COLOR_BGR2GRAY)
+    sharpness = float(cv2.Laplacian(gray, cv2.CV_32F).var())
+    if sharpness < min_sharpness:
+        return 0.0
+    return float(min(sharpness, 1000.0) * np.sqrt(height * width) * (1.0 - occlusion) ** 2)
 
 
 def crop_top_fraction(image: np.ndarray, preprocess_config: Dict[str, Any]) -> np.ndarray:

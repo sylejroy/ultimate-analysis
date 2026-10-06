@@ -16,7 +16,9 @@ from ..config.settings import get_setting
 from ..constants import JERSEY_NUMBER_MAX, JERSEY_NUMBER_MIN
 from ..utils.logger import get_logger
 from .jersey_crops import (
+    JerseyCropSelector,
     best_number,
+    crop_quality,
     crop_top_fraction,
     easyocr_readtext_parameters,
     preprocess_crop,
@@ -83,6 +85,7 @@ def run_player_id_on_tracks(
     tracks: List[Any],
     frame_index: int = 0,
     finalized_tracks: Optional[Set[int]] = None,
+    crop_selector: Optional[JerseyCropSelector] = None,
 ) -> Tuple[Dict[int, Tuple[str, Any]], Dict[str, float], Set[int]]:
     """Run player identification on tracked objects using batch EasyOCR with probabilistic tracking.
 
@@ -93,6 +96,7 @@ def run_player_id_on_tracks(
     Args:
         frame_index: Current global frame index (for interval/stagger logic)
         finalized_tracks: Set of track_ids whose jersey number is finalized (probability >= threshold)
+        crop_selector: Pipeline-owned recent crop cache; None keeps fixed-frame sampling
 
     Returns:
         Tuple of (player_identifications, timing_info, finalized_tracks)
@@ -129,9 +133,19 @@ def run_player_id_on_tracks(
     stagger_enabled = get_setting("models.player_id.ocr_frame_interval_stagger", True)
     finalized_threshold = get_setting("models.player_id.finalized_certainty_threshold", 0.999)
     verbose_debug = get_setting("models.player_id.verbose_debug", False)
+    selection_enabled = crop_selector is not None and get_setting(
+        "models.player_id.crop_selection.enabled", False
+    )
+    selection_start = time.perf_counter()
+    crop_config = _load_easyocr_config().get("preprocessing", {}) if selection_enabled else {}
     total_timing = {"preprocessing_ms": 0.0, "ocr_ms": 0.0, "filtering_ms": 0.0}
     batch_timing: Dict[str, float] = {"preprocessing_ms": 0.0, "ocr_ms": 0.0, "filtering_ms": 0.0}
 
+    if crop_selector is not None:
+        active_ids = {
+            getattr(track, "track_id", getattr(track, "id", None)) for track in tracks
+        } - finalized_tracks
+        crop_selector.begin_frame(frame_index, active_ids)
     if not tracks:
         return player_identifications, total_timing, finalized_tracks
 
@@ -179,17 +193,21 @@ def run_player_id_on_tracks(
                 skipped_finalized += 1
                 continue
 
-            # Interval / stagger decision: only process a subset of tracks this frame
+            # Collect every observed crop, but keep the existing staggered OCR cadence.
+            due = True
             if ocr_frame_interval > 1:
                 if stagger_enabled:
                     # Stagger by track_id so load is distributed; each track processed every N frames
                     if (frame_index + track_id) % ocr_frame_interval != 0:
-                        skipped_interval += 1
-                        continue
+                        due = False
                 else:
                     if frame_index % ocr_frame_interval != 0:
-                        skipped_interval += 1
-                        continue
+                        due = False
+            if not selection_enabled and not due:
+                skipped_interval += 1
+                continue
+            if selection_enabled and getattr(track, "time_since_update", 0) > 0:
+                continue
 
             # Ensure bbox is within frame bounds
             h, w = frame.shape[:2]
@@ -201,10 +219,50 @@ def run_player_id_on_tracks(
             # Crop the tracked object
             crop = frame[y1:y2, x1:x2]
 
+            if selection_enabled:
+                top_fraction = crop_config.get("crop_top_fraction", 0.33)
+                torso_y2 = y1 + max(1, int((y2 - y1) * top_fraction)) if top_fraction > 0 else y2
+                torso_area = (x2 - x1) * (torso_y2 - y1)
+                overlap = 0.0
+                for other in tracks:
+                    if other is track or getattr(other, "time_since_update", 0) > 0:
+                        continue
+                    if getattr(other, "class_name", "player").lower() == "disc":
+                        continue
+                    other_box = (
+                        other.to_tlbr()
+                        if hasattr(other, "to_tlbr")
+                        else getattr(other, "bbox", None)
+                    )
+                    if other_box is None:
+                        continue
+                    ox1, oy1, ox2, oy2 = other_box
+                    intersection = max(0, min(x2, ox2) - max(x1, ox1)) * max(
+                        0, min(torso_y2, oy2) - max(y1, oy1)
+                    )
+                    overlap = max(overlap, intersection / torso_area)
+                score = 0.0
+                if crop.shape[1] >= crop_config.get("min_crop_width", 20) and crop.shape[
+                    0
+                ] >= crop_config.get("min_crop_height", 30):
+                    score = crop_quality(
+                        crop,
+                        top_fraction,
+                        overlap,
+                        float(get_setting("models.player_id.crop_selection.min_sharpness", 5.0)),
+                    )
+                crop_selector.observe(track_id, crop, frame_index, ocr_frame_interval, score)
+                if not due:
+                    skipped_interval += 1
+                    continue
+                crop = crop_selector.take(track_id, frame_index)
+                if crop is None:
+                    continue
+
             if crop.size > 0:
                 player_crops.append(crop)
                 track_metadata.append(
-                    {"track_id": track_id, "bbox": (x1, y1, x2, y2), "crop_width": x2 - x1}
+                    {"track_id": track_id, "bbox": (x1, y1, x2, y2), "crop_width": crop.shape[1]}
                 )
                 tracks_for_ocr.append(track_id)
             else:
@@ -214,6 +272,7 @@ def run_player_id_on_tracks(
             logger.error(f"Error preparing track: {e}")
             continue
 
+    selection_ms = (time.perf_counter() - selection_start) * 1000
     # Run batch OCR processing if we have crops
     if player_crops:
         batch_results, batch_timing = _read_jersey_numbers(player_crops)
@@ -224,6 +283,14 @@ def run_player_id_on_tracks(
                 track_id = metadata["track_id"]
                 crop_width = metadata["crop_width"]
                 jersey_number, details, timing = batch_results[i]
+                if selection_enabled:
+                    crop_selector.record_read(
+                        track_id,
+                        frame_index,
+                        jersey_number != "Unknown",
+                        ocr_frame_interval,
+                        int(get_setting("models.player_id.crop_selection.max_backoff", 4)),
+                    )
 
                 # Add single-frame result to tracking history if valid
                 if jersey_number and jersey_number != "Unknown" and details:
@@ -302,6 +369,9 @@ def run_player_id_on_tracks(
 
     # Add batch timing to totals
     total_timing["preprocessing_ms"] += batch_timing.get("preprocessing_ms", 0.0)
+    if selection_enabled:
+        # Include crop scoring and collection, excluding the batch's separately timed work.
+        total_timing["preprocessing_ms"] += selection_ms
     total_timing["ocr_ms"] += batch_timing.get("ocr_ms", 0.0)
     total_timing["filtering_ms"] += batch_timing.get("filtering_ms", 0.0)
 

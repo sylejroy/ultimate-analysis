@@ -79,6 +79,9 @@ Modules that are still too large and should be split when they are next worked o
   - `scripts/benchmark_detectors.py` — players and discs
   - `scripts/benchmark_segmentation.py` — field area and outline
   - `scripts/benchmark_jersey_readers.py` — jersey numbers
+  - `scripts/benchmark_player_id_scheduling.py` — temporal crop selection, votes and OCR work
+  - `scripts/benchmark_homography_optimizer.py` — coverage sampling speed and candidate agreement
+  - `scripts/benchmark_pipeline.py` — analysis/rendering throughput, stage costs and track-output comparison
 - GUI code is checked by starting the app, visiting every tab, playing a video, and
   closing it without an error in the log.
 - A bug that got through gets a test that would have caught it.
@@ -92,6 +95,8 @@ Modules that are still too large and should be split when they are next worked o
 - Nothing slow on the GUI thread of the main tab.
 - Measure before and after, with nothing else using the GPU; record the numbers, not an
   estimate. The Performance panel of the main tab shows the time per stage.
+- Use unprofiled pipeline runs for throughput; cProfile is for locating costs and adds
+  overhead. Warm up models first and compare saved outputs as well as frame times.
 
 ## Workflow
 

@@ -160,6 +160,7 @@ class HomographyOptimizer:
         frame: np.ndarray,
         ransac_lines: List[Tuple[np.ndarray, np.ndarray]],
         confidences: List[float],
+        coverage_frame: Optional[np.ndarray] = None,
     ) -> float:
         """Calculate fitness score for an individual based on multiple criteria.
 
@@ -168,6 +169,7 @@ class HomographyOptimizer:
             frame: Original video frame
             ransac_lines: List of (start_point, end_point) tuples for detected lines
             confidences: Confidence scores for each line
+            coverage_frame: Shared grayscale source, prepared once when scoring a population
 
         Returns:
             Fitness score (higher is better)
@@ -191,8 +193,22 @@ class HomographyOptimizer:
                 output_height = int(np.sqrt(target_area * aspect_ratio))
                 output_width = int(output_height / aspect_ratio)
 
-            # Apply transformation
-            warped = cv2.warpPerspective(frame, h_matrix, (output_width, output_height))
+            # Only coverage needs pixels; the other objectives transform line endpoints.
+            # Population evaluation supplies one shared grayscale source for all candidates.
+            if coverage_frame is None:
+                coverage_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            scale = min(1.0, max(0.05, float(get_setting("optimization.ga_coverage_scale", 1.0))))
+            coverage_width = max(1, round(output_width * scale))
+            coverage_height = max(1, round(output_height * scale))
+            coverage_matrix = h_matrix
+            if scale != 1.0:
+                coverage_matrix = (
+                    np.diag([coverage_width / output_width, coverage_height / output_height, 1.0])
+                    @ h_matrix
+                )
+            warped = cv2.warpPerspective(
+                coverage_frame, coverage_matrix, (coverage_width, coverage_height)
+            )
 
             # Calculate fitness components
             alignment_score = self._evaluate_line_alignment(
@@ -346,7 +362,11 @@ class HomographyOptimizer:
         )
 
         # Convert to grayscale and count non-black pixels
-        gray_warped = cv2.cvtColor(warped_frame, cv2.COLOR_BGR2GRAY)
+        gray_warped = (
+            cv2.cvtColor(warped_frame, cv2.COLOR_BGR2GRAY)
+            if warped_frame.ndim == 3
+            else warped_frame
+        )
         non_black_pixels = np.count_nonzero(gray_warped > black_threshold)
         total_pixels = gray_warped.shape[0] * gray_warped.shape[1]
 
@@ -493,8 +513,9 @@ class HomographyOptimizer:
             ransac_lines: List of detected lines
             confidences: Line detection confidence scores
         """
+        coverage_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         for individual in self.population:
-            self.calculate_fitness(individual, frame, ransac_lines, confidences)
+            self.calculate_fitness(individual, frame, ransac_lines, confidences, coverage_frame)
 
         # Sort population by fitness (descending)
         self.population.sort(key=lambda ind: ind.fitness, reverse=True)

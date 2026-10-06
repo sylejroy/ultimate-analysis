@@ -34,6 +34,7 @@ models:
     nms_threshold: 0.45
     adaptive_skip: true          # Skip disc model when no disc detected recently
     skip_threshold: 30           # Frames without disc before skipping disc model
+    retry_interval: 5            # While absent, search every fifth frame (was every thirtieth)
     follow_window: 0             # Side of the area searched around a followed disc, in frame pixels (0 = always the whole frame). Off: with a TensorRT engine for the window the app crashed during playback, without one the window is slower than the whole frame
     follow_max_missing: 5        # Frames the followed disc may be missing before the whole frame is searched again
     full_search_interval: 15     # Search the whole frame at least this often, so a wrong lock does not last
@@ -136,6 +137,10 @@ models:
     ocr_frame_interval_stagger: true # Stagger per track using track_id % interval to spread load
     finalized_certainty_threshold: 0.9 # Probability at which jersey number is considered final (skip future OCR) - reduced from 0.999 for faster finalization
     verbose_debug: false           # Enable extra per-crop debug logging when troubleshooting
+    crop_selection:
+      enabled: true                   # Best recent crop; validated by benchmark_player_id_scheduling.py
+      min_sharpness: 5.0               # Upper-body Laplacian variance below this is unreadable
+      max_backoff: 4                   # At most this many OCR intervals after unreadable crops
     
     # Jersey number tracking settings
     tracking:
@@ -163,6 +168,7 @@ homography:
 optimization:
   # Population Parameters
   ga_population_size: 20
+  ga_coverage_scale: 0.5          # Half-resolution grayscale coverage; line geometry stays full size
   ga_elite_size: 2              # Number of best individuals to preserve
   ga_mutation_rate: 0.2         # Probability of parameter mutation
   ga_crossover_rate: 0.7        # Probability of crossover between parents

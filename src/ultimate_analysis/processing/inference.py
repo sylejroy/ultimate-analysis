@@ -255,9 +255,16 @@ def _predict_detections(
         # Process results
         for result in results:
             if hasattr(result, "boxes") and result.boxes is not None:
-                boxes = result.boxes.xyxy.cpu().numpy()
-                confidences = result.boxes.conf.cpu().numpy()
-                classes = result.boxes.cls.cpu().numpy()
+                if hasattr(result.boxes, "data"):
+                    # Ultralytics stores xyxy first and confidence/class last (an optional
+                    # track ID sits between them). Transfer the packed tensor only once.
+                    packed = result.boxes.data.cpu().numpy()
+                    boxes, confidences, classes = packed[:, :4], packed[:, -2], packed[:, -1]
+                else:
+                    # Custom box providers may expose only the public coordinate properties.
+                    boxes = result.boxes.xyxy.cpu().numpy()
+                    confidences = result.boxes.conf.cpu().numpy()
+                    classes = result.boxes.cls.cpu().numpy()
 
                 for i in range(len(boxes)):
                     x1, y1, x2, y2 = boxes[i]
@@ -606,7 +613,7 @@ def run_inference(
         and _frames_since_last_disc > get_setting("models.disc_detection.skip_threshold", 30)
         # Periodically probe so a disc entering the frame can be detected again.
         and _frames_since_last_disc
-        % max(1, int(get_setting("models.disc_detection.retry_interval", 30)))
+        % max(1, int(get_setting("models.disc_detection.retry_interval", 5)))
         != 0
     )
 

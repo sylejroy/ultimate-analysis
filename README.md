@@ -114,6 +114,7 @@ Everything under `data/` is local and not tracked by Git.
   | --- | --- | --- |
   | `labelled_players_discs_v1` | Frames labelled in the Labelling tab, full resolution | Future training |
   | `labelled_discs_v1` | Frames labelled from the phone, discs only, full resolution | Future training |
+  | `combined_discs_v1` | `roboflow_merged_discs_v2` plus the disc boxes of both `labelled_` sets, built by `scripts/build_combined_disc_dataset.py` | Trial retraining of the disc model |
   | `roboflow_merged_players_v2` | Built from the Roboflow exports: 1,442 images at 1280×720, players only | The default player model, benchmarks |
   | `roboflow_merged_discs_v2` | The same images, discs only | The default disc model, benchmarks |
   | `roboflow_object_detection_v3i` | Roboflow export as downloaded: players and discs, 960×960 | Source of the merged sets |
@@ -201,7 +202,7 @@ Behaviour worth knowing when changing the pipeline:
   `models.possession.confirm_frames` frames in a row (10), so a disc flying past someone
   does not change it. Frames without a detected disc leave the holder as it is.
 - The disc model is skipped after a stretch with no disc and retried periodically
-  (`models.disc_detection.skip_threshold` and `retry_interval`, 30 frames each).
+  (`models.disc_detection.skip_threshold`: 30 frames; `retry_interval`: 5 frames).
 
 ### Detection models
 
@@ -230,6 +231,22 @@ for players and 0.324 for discs.
 
 A disc is about 11 pixels wide in a 1280×720 frame, so it needs the full image size and
 is still the weak spot: the best model finds less than half of the discs.
+
+A trial with the frames labelled in this app: `scripts/build_combined_disc_dataset.py`
+adds them to the Roboflow disc data (`combined_discs_v1`: 166 of the 1,467 training
+images and 127 of the 982 training discs are own labels), and YOLO26s was trained on it
+with the settings of the default disc model.
+
+| Scored on | Discs | Default disc model: AP50 / recall | Trained on the combined data: AP50 / recall |
+| --- | --- | --- | --- |
+| Old validation and test images (as the table above) | 98 | 0.505 / 0.449 | 0.559 / 0.449 |
+| Old test images only | 44 | 0.522 / 0.432 | 0.588 / 0.432 |
+| Own labels, validation and test | 49 | 0.629 / 0.551 | 0.640 / 0.551 |
+| Own labels, test only | 25 | 0.664 / 0.640 | 0.654 / 0.560 |
+
+AP50 rises a little on the old images, and the number of discs found at the app's
+threshold stays the same; with this few discs neither is more than a hint. The default
+model was not changed.
 
 To train a detector for one class, build a single-class copy of a dataset with
 `scripts/build_single_class_dataset.py` and select it in the Model Training tab.
@@ -341,6 +358,50 @@ for the players without one.
   name (train one in the Model Training tab; `roboflow_digits_v1i` is house numbers, a rough
   starting point). Until one exists the app falls back to EasyOCR, as it does for any
   reader that fails to load.
+
+### Jersey reading schedule
+
+Between two readings of a player the app keeps that player's best crop: the sharpest
+upper body at the largest size with the least overlap with other players. That crop is
+read instead of whatever the frame of the reading happens to show. A player whose crop
+could not be read is tried again after two, then four reading intervals; a successful
+reading brings back the normal rhythm. Players with a final number are skipped as before.
+`models.player_id.crop_selection.enabled: false` gives the previous fixed schedule.
+
+`scripts/benchmark_player_id_scheduling.py` replays the labelled jersey crops through the
+voting of the live app (five clips, 23 players with a number, 14 without):
+
+| Schedule | Players right / wrong / unread | Numbers given to players without one | Crops read |
+| --- | --- | --- | --- |
+| Fixed frame | 12 / 0 / 11 | 0 | 592 |
+| Best recent crop, waiting longer after unreadable ones (default) | 12 / 0 / 11 | 0 | 229 |
+
+The same numbers are found with 61% fewer readings. The benchmark replays stored crops, so
+it does not show how tracking errors or real overlap between players affect the result.
+
+### Field calibration search
+
+The genetic search of the Field Calibration tab warps the frame once per candidate to see
+how much of the top-down view it fills. It now warps a grey image at half size
+(`optimization.ga_coverage_scale`; 1.0 is full size). `scripts/benchmark_homography_optimizer.py`,
+on 20 frames from five games with 20 candidates each:
+
+| Warped image | Time per generation of 20 | Same best candidate as before |
+| --- | --- | --- |
+| Colour, full size (before) | 142 ms | |
+| Grey, full size | 99 ms | 20 of 20 |
+| Grey, half size (default) | 28 ms | 20 of 20 |
+
+### Measuring the whole pipeline
+
+`scripts/benchmark_pipeline.py` runs detection, tracking, jersey reading, segmentation and
+both views on frames decoded beforehand, reports the time per stage, and can store the
+tracks, numbers and disc holder of every frame to compare a change against:
+
+```bash
+python scripts/benchmark_pipeline.py --output before.json
+python scripts/benchmark_pipeline.py --compare before.json
+```
 
 ### TensorRT engines (optional)
 

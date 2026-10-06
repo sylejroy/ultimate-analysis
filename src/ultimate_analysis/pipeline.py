@@ -20,6 +20,7 @@ from .processing.field_analysis import create_unified_field_mask, fit_lines_from
 from .processing.field_segmentation import reset_segmentation_cache, run_field_segmentation
 from .processing.homography import output_canvas_size
 from .processing.inference import reset_inference_state, run_inference
+from .processing.jersey_crops import JerseyCropSelector
 from .processing.jersey_tracker import (
     get_best_jersey_number,
     merge_jersey_readings,
@@ -99,6 +100,7 @@ class AnalysisPipeline:
     FPS_WINDOW = 30  # Frames the displayed processing rate is averaged over
 
     def __init__(self):
+        self._jersey_crop_selector = JerseyCropSelector()
         # Camera-to-top-down homography as calibrated; without one there is no top-down
         # view. The camera has moved since the frame it was calibrated on (taken to be the
         # first frame after a reset), which is undone before it is applied.
@@ -160,6 +162,7 @@ class AnalysisPipeline:
 
     def reset(self) -> None:
         """Forget everything derived from earlier frames."""
+        self._jersey_crop_selector.reset()
         reset_tracker()
         reset_inference_state()
         reset_segmentation_cache()
@@ -180,6 +183,7 @@ class AnalysisPipeline:
 
     def reset_player_ids(self) -> None:
         """Forget the jersey numbers read so far (e.g. after switching the reader)."""
+        self._jersey_crop_selector.reset()
         reset_jersey_tracker()
         self.player_ids.clear()
         self._player_id_last_seen.clear()
@@ -310,6 +314,7 @@ class AnalysisPipeline:
             self.tracks,
             frame_index=frame_index,
             finalized_tracks=self._finalized_player_ids,
+            crop_selector=self._jersey_crop_selector,
         )
         if timing["preprocessing_ms"] > 0 or timing["ocr_ms"] > 0:
             self._timings["Player ID - Preprocessing"] = timing["preprocessing_ms"]
@@ -448,33 +453,7 @@ class AnalysisPipeline:
                 self.ransac_lines = self._geometry_lines
                 self.ransac_confidences = self._geometry_confidences
 
-                frame, _, self._lines_for_display = draw_unified_field_mask(
-                    frame,
-                    mask,
-                    get_primary_field_color(),
-                    alpha=0.3,
-                    fill_mask=False,
-                    ransac_fit=self._ransac_fit,
-                    field_contour=self._field_contour,
-                    in_place=True,
-                )
-                if self._lines_for_display:
-                    frame = draw_all_field_lines(
-                        frame,
-                        self._lines_for_display,
-                        scale_factor=1.0,
-                        draw_raw_lines_only=True,
-                        in_place=True,
-                    )
-                if self.ransac_lines:
-                    frame = draw_ransac_field_lines(
-                        frame,
-                        self.ransac_lines,
-                        self.ransac_confidences,
-                        transformation_matrix=None,
-                        scale_factor=1.0,
-                        in_place=True,
-                    )
+                frame = self._draw_field_overlay(frame, mask)
             else:
                 self.ransac_lines = []
                 self.ransac_confidences = []
@@ -500,6 +479,37 @@ class AnalysisPipeline:
         # Geometry is reported under its own stages
         total_ms = (time.perf_counter() - start) * 1000
         self._timings["Visualization"] = max(0.0, total_ms - geometry_ms)
+        return frame
+
+    def _draw_field_overlay(self, frame: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """The field outline and lines, drawn before the players."""
+        frame, _, self._lines_for_display = draw_unified_field_mask(
+            frame,
+            mask,
+            get_primary_field_color(),
+            alpha=0.3,
+            fill_mask=False,
+            ransac_fit=self._ransac_fit,
+            field_contour=self._field_contour,
+            in_place=True,
+        )
+        if self._lines_for_display:
+            frame = draw_all_field_lines(
+                frame,
+                self._lines_for_display,
+                scale_factor=1.0,
+                draw_raw_lines_only=True,
+                in_place=True,
+            )
+        if self.ransac_lines:
+            frame = draw_ransac_field_lines(
+                frame,
+                self.ransac_lines,
+                self.ransac_confidences,
+                transformation_matrix=None,
+                scale_factor=1.0,
+                in_place=True,
+            )
         return frame
 
     def _draw_top_down_view(

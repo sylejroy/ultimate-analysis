@@ -1,6 +1,7 @@
 """Jersey number reading: configuration and reader selection."""
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -8,6 +9,42 @@ from support import load_module
 
 
 class PlayerIdConfigTests(unittest.TestCase):
+    def test_live_selection_reads_a_previous_sharp_crop_and_backs_off(self):
+        module = load_module("processing.player_id")
+        selector = module.JerseyCropSelector()
+        sharp = np.zeros((80, 40, 3), dtype=np.uint8)
+        sharp[:, ::4] = 255
+        blank = np.zeros_like(sharp)
+        track = SimpleNamespace(
+            track_id=7, class_name="player", bbox=[0, 0, 40, 80], time_since_update=0
+        )
+        settings = {
+            "models.player_id.crop_selection.enabled": True,
+            "models.player_id.ocr_frame_interval": 3,
+            "models.player_id.ocr_frame_interval_stagger": False,
+        }
+        with (
+            patch.object(
+                module,
+                "get_setting",
+                side_effect=lambda key, default=None: settings.get(key, default),
+            ),
+            patch.object(module, "_load_easyocr_config", return_value={}),
+            patch.object(module, "_easyocr_reader", Mock()),
+            patch.object(
+                module, "_read_jersey_numbers", return_value=([("Unknown", None, {})], {})
+            ) as read,
+            patch.object(module, "get_jersey_probabilities", return_value=[]),
+            patch.object(module, "get_best_jersey_number", return_value=(None, 0)),
+        ):
+            for frame_index, image in ((1, sharp), (2, blank), (3, blank)):
+                module.run_player_id_on_tracks(image, [track], frame_index, crop_selector=selector)
+            read.assert_called_once()
+            np.testing.assert_array_equal(read.call_args.args[0][0], sharp)
+            for frame_index in range(4, 7):
+                module.run_player_id_on_tracks(sharp, [track], frame_index, crop_selector=selector)
+            read.assert_called_once()  # An unreadable batch defers the next due frame.
+
     def test_easyocr_config_is_reparsed_only_when_the_file_changes(self):
         module = load_module("processing.player_id")
         module._easyocr_config_mtime_ns = None

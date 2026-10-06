@@ -118,6 +118,13 @@ class PipelineTests(unittest.TestCase):
         self.pipeline.process(self.frame, 5, self.options)
         self.assertEqual(self.mocks["create_unified_field_mask"].call_count, 2)
 
+    def test_video_and_reader_resets_discard_player_crop_snapshots(self):
+        for reset in (self.pipeline.reset, self.pipeline.reset_player_ids):
+            with self.subTest(reset=reset.__name__):
+                self.pipeline._jersey_crop_selector.observe(7, self.frame, 3, 5, 100)
+                reset()
+                self.assertIsNone(self.pipeline._jersey_crop_selector.take(7, 3))
+
     def test_jersey_numbers_persist_fall_back_to_the_tracker_and_follow_the_tracks(self):
         self.pipeline.process(self.frame, 0, self.options)
 

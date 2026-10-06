@@ -31,11 +31,41 @@ class InferenceTests(unittest.TestCase):
             patch.object(module, "_run_single_model_inference", side_effect=predict),
             patch.object(module, "get_setting", side_effect=lambda key, default=None: default),
         ):
-            for _ in range(61):
+            for _ in range(36):
                 detections = module.run_inference(frame)
         self.assertEqual(detections, [disc])
         self.assertEqual(disc_calls, 32)
         self.assertEqual(module._frames_since_last_disc, 0)
+
+    def test_short_disc_appearance_is_recovered_by_five_frame_retries(self):
+        module = self.module
+        frame = np.zeros((8, 8, 3), dtype=np.uint8)
+        disc = {"class_name": "disc", "bbox": [2, 2, 4, 4], "confidence": 0.9}
+        for interval, expected in ((30, False), (5, True)):
+            with self.subTest(interval=interval):
+                module.reset_inference_state()
+                frame_index = 0
+
+                def predict(image, model, size, prefix, target):
+                    return ([disc] if target == "disc" and 34 <= frame_index <= 39 else []), {}
+
+                with (
+                    patch.multiple(
+                        module, YOLO_AVAILABLE=True, _player_model=Mock(), _disc_model=Mock()
+                    ),
+                    patch.object(module, "_run_single_model_inference", side_effect=predict),
+                    patch.object(
+                        module,
+                        "get_setting",
+                        side_effect=lambda key, default=None: interval
+                        if key.endswith("retry_interval")
+                        else default,
+                    ),
+                ):
+                    found = False
+                    for frame_index in range(61):
+                        found |= bool(module.run_inference(frame))
+                self.assertEqual(found, expected)
 
     def test_a_followed_disc_is_searched_in_a_window_around_where_it_is_heading(self):
         module = self.module
@@ -167,6 +197,29 @@ class InferenceTests(unittest.TestCase):
             )
         self.assertEqual(model.predict.call_args.kwargs["classes"], [1])
         self.assertEqual([d["class_name"] for d in detections], ["player"])
+
+    def test_packed_boxes_transfer_once_and_keep_optional_track_ids_out_of_classes(self):
+        for packed in ([[1, 2, 8, 9, 0.9, 1]], [[1, 2, 8, 9, 42, 0.9, 1]]):
+            with self.subTest(columns=len(packed[0])):
+                data = Mock()
+                data.cpu.return_value.numpy.return_value = np.array(packed, dtype=np.float32)
+                model = Mock(names={0: "disc", 1: "player"})
+                model.predict.return_value = [SimpleNamespace(boxes=SimpleNamespace(data=data))]
+                with patch.object(
+                    self.module, "get_setting", side_effect=lambda key, default=None: default
+                ):
+                    found, _ = self.module._run_single_model_inference(
+                        np.zeros((8, 8, 3), dtype=np.uint8),
+                        model,
+                        640,
+                        "models.player_detection",
+                        "player",
+                    )
+                data.cpu.assert_called_once()
+                self.assertEqual(len(found), 1)
+                self.assertEqual(found[0]["bbox"], [1, 2, 8, 9])
+                self.assertEqual(found[0]["class_id"], 1)
+                self.assertAlmostEqual(found[0]["confidence"], 0.9)
 
 
 if __name__ == "__main__":

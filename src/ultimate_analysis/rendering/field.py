@@ -1,6 +1,7 @@
 """Drawing the field segmentation: masks, outline, and simplified contour."""
 
-from typing import Any, Dict, List, Optional, Tuple
+from collections import deque
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -13,18 +14,21 @@ from .field_lines import draw_field_lines_ransac_with_outliers
 logger = get_logger("RENDERING")
 
 
-# Outline of the most recently drawn field mask: (mask, contours). The mask only changes
-# when segmentation runs again, so the frames in between reuse its outline.
-_mask_outline_cache: Tuple[Optional[np.ndarray], tuple] = (None, ())
+# The main and top-down views alternate. A single entry evicts the unchanged main mask
+# every frame; two entries keep it while the warped mask changes with camera motion.
+_mask_outline_cache: Deque[Tuple[np.ndarray, tuple]] = deque(maxlen=2)
 
 
 def _get_mask_outline(unified_mask: np.ndarray) -> tuple:
     """External contours of a field mask, computed once per mask object."""
-    global _mask_outline_cache
-    if _mask_outline_cache[0] is not unified_mask:
-        contours, _ = cv2.findContours(unified_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        _mask_outline_cache = (unified_mask, contours)
-    return _mask_outline_cache[1]
+    for index, (mask, contours) in enumerate(_mask_outline_cache):
+        if mask is unified_mask:
+            del _mask_outline_cache[index]
+            _mask_outline_cache.append((mask, contours))
+            return contours
+    contours, _ = cv2.findContours(unified_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    _mask_outline_cache.append((unified_mask, contours))
+    return contours
 
 
 def get_segmentation_colors() -> Dict[int, Tuple[int, int, int]]:
