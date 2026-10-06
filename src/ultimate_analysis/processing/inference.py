@@ -333,193 +333,117 @@ def detect_discs(frame: np.ndarray, model: Any, model_imgsz: int) -> List[Dict[s
 
 
 def _resolve_model_path(model_path: str) -> Optional[str]:
-    """Resolve a model path to an absolute file path.
+    """The file a model path stands for, or None if there is none.
 
-    Args:
-        model_path: Model path (absolute, relative, or just filename)
-
-    Returns:
-        Absolute path to model file or None if not found
+    A path is taken as it is; a bare file name is looked for among the pretrained and
+    the detection models.
     """
-    # Handle different model path formats
-    model_file_path = None
-
-    # If it's an absolute path or contains path separators, use it directly
     if Path(model_path).is_absolute() or "/" in model_path or "\\" in model_path:
-        if Path(model_path).exists():
-            model_file_path = model_path
-        else:
-            logger.warning(f"Absolute path does not exist: {model_path}")
-            return None
+        candidates = [Path(model_path)]
     else:
-        # If it's just a filename, try to find it in the models directory
         models_path = Path(get_setting("models.base_path", "data/models"))
-
-        # Try pretrained models first
-        pretrained_path = models_path / "pretrained" / model_path
-        if pretrained_path.exists():
-            model_file_path = str(pretrained_path)
-        else:
-            # Try detection models
-            detection_path = models_path / "detection" / model_path
-            if detection_path.exists():
-                model_file_path = str(detection_path)
-
-    # Validate model path exists
-    if model_file_path is None or not Path(model_file_path).exists():
-        logger.warning(f"Model file not found: {model_path}")
-        return None
-
-    return model_file_path
+        candidates = [
+            models_path / "pretrained" / model_path,
+            models_path / "detection" / model_path,
+        ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    logger.warning(f"Model file not found: {model_path}")
+    return None
 
 
 def warmup_models() -> None:
-    """Warmup YOLO models with a dummy inference to avoid cold-start penalty.
-
-    Should be called after loading models and before first actual inference.
-    This reduces first-frame latency by pre-allocating GPU memory and
-    initializing CUDA kernels.
-    """
-
+    """Run each model once on an empty frame, so the first real frame is not the slow one."""
     if not YOLO_AVAILABLE:
         return
-
-    # Ensure models are loaded
     if _player_model is None or _disc_model is None:
         _load_default_models()
 
     try:
-        # Create dummy frame matching model input size
-        player_size = _player_model_imgsz if _player_model_imgsz else 640
-        disc_size = _disc_model_imgsz if _disc_model_imgsz else 640
-
         logger.info("Warming up inference models...")
-
-        # Warmup player model
-        if _player_model is not None:
-            dummy_frame = np.zeros((player_size, player_size, 3), dtype=np.uint8)
-            _ = _player_model.predict(dummy_frame, verbose=False, imgsz=player_size)
-            logger.info("Player model warmed up")
-
-        # Warmup disc model
-        if _disc_model is not None:
-            dummy_frame = np.zeros((disc_size, disc_size, 3), dtype=np.uint8)
-            _ = _disc_model.predict(dummy_frame, verbose=False, imgsz=disc_size)
-            logger.info("Disc model warmed up")
-
+        for name, model, size in (
+            ("Player", _player_model, _player_model_imgsz or 640),
+            ("Disc", _disc_model, _disc_model_imgsz or 640),
+        ):
+            if model is not None:
+                model.predict(np.zeros((size, size, 3), dtype=np.uint8), verbose=False, imgsz=size)
+                logger.info(f"{name} model warmed up")
         logger.info("Model warmup complete")
-
     except Exception as e:
         logger.warning(f"Model warmup failed (non-critical): {e}")
 
 
 def _load_default_models() -> None:
     """Load the default player and disc detection models if none are loaded."""
-    global _player_model, _disc_model
-
     if not YOLO_AVAILABLE:
         return
-
-    # Load default player model
     if _player_model is None:
-        default_player_model = default_model_path("player_detection")
-        logger.debug(f"Loading default player model: {default_player_model}")
-        set_player_model(default_player_model)
-
-    # Load default disc model
+        set_player_model(default_model_path("player_detection"))
     if _disc_model is None:
-        default_disc_model = default_model_path("disc_detection")
-        logger.debug(f"Loading default disc model: {default_disc_model}")
-        set_disc_model(default_disc_model)
+        set_disc_model(default_model_path("disc_detection"))
+
+
+def _load_role_model(
+    role: str, model_path: str, other_model: Any, other_path: Optional[str]
+) -> Optional[Tuple[Any, int]]:
+    """Load the weights for the player or the disc role: (model, image size) or None.
+
+    The same weights in both roles are loaded once and run in a single pass.
+    """
+    if not YOLO_AVAILABLE:
+        logger.error(f"YOLO not available, cannot load {role} model")
+        return None
+    logger.info(f"Setting {role} detection model: {model_path}")
+    model_file_path = _resolve_model_path(model_path)
+    if model_file_path is None:
+        return None
+    try:
+        model = other_model if model_path == other_path else YOLO(model_file_path)
+        imgsz = get_training_image_size(model_file_path)
+        logger.info(f"{role.capitalize()} model loaded successfully: {model_path}")
+        logger.debug(f"{role.capitalize()} model image size: {imgsz}")
+        return model, imgsz
+    except Exception as e:
+        logger.exception(f"Failed to load {role} model {model_path}: {e}")
+        return None
 
 
 def set_player_model(model_path: str) -> bool:
-    """Set the player detection model to use for inference.
-
-    Args:
-        model_path: Path to the YOLO model file (.pt) or model name
+    """Set the player detection model (a path to .pt weights or a model name).
 
     Returns:
-        True if model loaded successfully, False otherwise
+        True if the model is loaded, False otherwise
     """
     global _player_model, _player_model_path, _player_model_imgsz
 
     if _player_model is not None and model_path == _player_model_path:
         return True
-
-    if not YOLO_AVAILABLE:
-        logger.error("YOLO not available, cannot load player model")
+    loaded = _load_role_model("player", model_path, _disc_model, _disc_model_path)
+    if loaded is None:
         return False
-
-    logger.info(f"Setting player detection model: {model_path}")
-
-    model_file_path = _resolve_model_path(model_path)
-    if model_file_path is None:
-        return False
-
-    try:
-        logger.debug(f"Loading player YOLO model from: {model_file_path}")
-        # The same weights in both roles are loaded once and run in a single pass
-        _player_model = _disc_model if model_path == _disc_model_path else YOLO(model_file_path)
-        _player_model_path = model_path
-
-        _player_model_imgsz = get_training_image_size(model_file_path)
-
-        logger.info(f"Player model loaded successfully: {model_path}")
-        logger.debug(f"Player model image size: {_player_model_imgsz}")
-        if hasattr(_player_model, "names"):
-            logger.debug(f"Player model classes: {dict(_player_model.names)}")
-
-        return True
-
-    except Exception as e:
-        logger.exception(f"Failed to load player model {model_path}: {e}")
-        return False
+    _player_model, _player_model_imgsz = loaded
+    _player_model_path = model_path
+    return True
 
 
 def set_disc_model(model_path: str) -> bool:
-    """Set the disc detection model to use for inference.
-
-    Args:
-        model_path: Path to the YOLO model file (.pt) or model name
+    """Set the disc detection model (a path to .pt weights or a model name).
 
     Returns:
-        True if model loaded successfully, False otherwise
+        True if the model is loaded, False otherwise
     """
     global _disc_model, _disc_model_path, _disc_model_imgsz
 
     if _disc_model is not None and model_path == _disc_model_path:
         return True
-
-    if not YOLO_AVAILABLE:
-        logger.error("YOLO not available, cannot load disc model")
+    loaded = _load_role_model("disc", model_path, _player_model, _player_model_path)
+    if loaded is None:
         return False
-
-    logger.info(f"Setting disc detection model: {model_path}")
-
-    model_file_path = _resolve_model_path(model_path)
-    if model_file_path is None:
-        return False
-
-    try:
-        logger.debug(f"Loading disc YOLO model from: {model_file_path}")
-        # The same weights in both roles are loaded once and run in a single pass
-        _disc_model = _player_model if model_path == _player_model_path else YOLO(model_file_path)
-        _disc_model_path = model_path
-        reset_inference_state()
-
-        _disc_model_imgsz = get_training_image_size(model_file_path)
-
-        logger.info(f"Disc model loaded successfully: {model_path}")
-        logger.debug(f"Disc model image size: {_disc_model_imgsz}")
-        if hasattr(_disc_model, "names"):
-            logger.debug(f"Disc model classes: {dict(_disc_model.names)}")
-
-        return True
-
-    except Exception as e:
-        logger.exception(f"Failed to load disc model {model_path}: {e}")
-        return False
+    _disc_model, _disc_model_imgsz = loaded
+    _disc_model_path = model_path
+    reset_inference_state()
+    return True
 
 
 def run_inference(
