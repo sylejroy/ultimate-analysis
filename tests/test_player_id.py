@@ -32,7 +32,7 @@ class PlayerIdConfigTests(unittest.TestCase):
             patch.object(module, "_load_easyocr_config", return_value={}),
             patch.object(module, "_easyocr_reader", Mock()),
             patch.object(
-                module, "_read_jersey_numbers", return_value=([("Unknown", None, {})], {})
+                module, "_read_jersey_numbers", return_value=([("Unknown", None)], {})
             ) as read,
             patch.object(module, "get_jersey_probabilities", return_value=[]),
             patch.object(module, "get_best_jersey_number", return_value=(None, 0)),

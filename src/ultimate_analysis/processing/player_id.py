@@ -282,7 +282,7 @@ def run_player_id_on_tracks(
             if i < len(batch_results):
                 track_id = metadata["track_id"]
                 crop_width = metadata["crop_width"]
-                jersey_number, details, timing = batch_results[i]
+                jersey_number, details = batch_results[i]
                 if selection_enabled:
                     crop_selector.record_read(
                         track_id,
@@ -383,208 +383,130 @@ def run_player_id_on_tracks(
     return player_identifications, total_timing, finalized_tracks
 
 
+MIN_READING_CONFIDENCE = 0.5  # Readings the reader is less sure of are dropped
+
+
 def _read_jersey_numbers(
     crop_images: List[np.ndarray],
-) -> Tuple[List[Tuple[str, Optional[Dict], Dict[str, float]]], Dict[str, float]]:
-    """Run EasyOCR detection on a batch of cropped player images.
+) -> Tuple[List[Tuple[str, Optional[Dict]]], Dict[str, float]]:
+    """Read the jersey number on each player crop.
 
     Args:
-        crop_images: List of cropped player images
+        crop_images: Player crops as cut from the frame
 
     Returns:
-        Tuple of (batch_results, total_timing)
-        - batch_results: List of (jersey_number, result_details, individual_timing) for each crop
-        - total_timing: Dict with 'preprocessing_ms' and 'ocr_ms' totals for the batch
-
-    Performance Features:
-        - Batch preprocessing to reduce setup overhead
-        - Shared EasyOCR parameters across all crops
+        (results, timing). `results` holds (jersey number or "Unknown", details or None)
+        for each crop; the details carry the confidence, the readings, and the sizes of
+        the crop before and after preprocessing. `timing` gives the milliseconds spent
+        on preprocessing, reading ("ocr_ms") and picking the number ("filtering_ms").
 
     Crops are read one after another: they all share a single GPU model, so a
     thread pool measured no faster than this loop and gave identical results.
     """
-    batch_timing = {"preprocessing_ms": 0.0, "ocr_ms": 0.0, "filtering_ms": 0.0}
-    batch_results = []
-
+    timing = {"preprocessing_ms": 0.0, "ocr_ms": 0.0, "filtering_ms": 0.0}
+    unread: List[Tuple[str, Optional[Dict]]] = [("Unknown", None) for _ in crop_images]
     if not crop_images:
-        return batch_results, batch_timing
+        return unread, timing
 
     if _easyocr_reader is None:
         _initialize_easyocr()
-
     if not EASYOCR_AVAILABLE or _easyocr_reader is None:
         logger.debug("EasyOCR not available for batch processing")
-        # Return empty results for all crops
-        for _ in crop_images:
-            individual_timing = {"preprocessing_ms": 0.0, "ocr_ms": 0.0, "filtering_ms": 0.0}
-            batch_results.append(("Unknown", None, individual_timing))
-        return batch_results, batch_timing
+        return unread, timing
 
     try:
-        logger.debug(f"Starting batch OCR processing for {len(crop_images)} crops")
-
-        # Start preprocessing timer for batch
-        prep_start_time = time.perf_counter()
-
-        # Load user configuration (same as individual processing)
         user_config = _load_easyocr_config()
-
+        crop_config = user_config.get("preprocessing", {})
+        verbose = get_setting("models.player_id.verbose_debug", False)
         # A reader other than EasyOCR takes the upper-body crop as it is; the contrast
-        # and scaling steps below are tuned for EasyOCR.
+        # and scaling steps are tuned for EasyOCR.
         reader = _get_active_reader()
 
-        # Preprocess all crops in batch
-        processed_crops = []
-        crop_metadata = []  # Store metadata for each crop
-
+        # Upper body of each crop, prepared for the reader; None for crops left out
+        start = time.perf_counter()
+        prepared: List[Optional[np.ndarray]] = []
+        metadata: List[Optional[Dict]] = []
         for i, crop_image in enumerate(crop_images):
             try:
-                # Check minimum crop size
-                crop_config = user_config.get("preprocessing", {})
-                min_crop_width = crop_config.get("min_crop_width", 20)
-                min_crop_height = crop_config.get("min_crop_height", 30)
-
                 crop_height, crop_width = crop_image.shape[:2]
-                if crop_width < min_crop_width or crop_height < min_crop_height:
-                    if get_setting("models.player_id.verbose_debug", False):
-                        logger.debug(
-                            f"Batch crop {i} too small ({crop_width}x{crop_height}), skipping"
-                        )
-                    processed_crops.append(None)  # Placeholder for skipped crop
-                    crop_metadata.append(None)
-                    continue
-
-                # Apply preprocessing pipeline
-                processed_crop = crop_top_fraction(crop_image, crop_config)
-                final_processed_crop = (
-                    preprocess_crop(processed_crop, crop_config)
-                    if reader is None
-                    else processed_crop
-                )
-
-                processed_crops.append(final_processed_crop)
-                crop_metadata.append(
+                if crop_width < crop_config.get(
+                    "min_crop_width", 20
+                ) or crop_height < crop_config.get("min_crop_height", 30):
+                    if verbose:
+                        logger.debug(f"Crop {i} too small ({crop_width}x{crop_height}), skipping")
+                    raise ValueError("crop too small")
+                upper_body = crop_top_fraction(crop_image, crop_config)
+                final = preprocess_crop(upper_body, crop_config) if reader is None else upper_body
+                prepared.append(final)
+                metadata.append(
                     {
                         "original_width": crop_width,
                         "original_height": crop_height,
-                        "crop_width": processed_crop.shape[1],
-                        "crop_height": processed_crop.shape[0],
-                        "final_width": final_processed_crop.shape[1],
-                        "final_height": final_processed_crop.shape[0],
+                        "crop_width": upper_body.shape[1],
+                        "crop_height": upper_body.shape[0],
+                        "final_width": final.shape[1],
+                        "final_height": final.shape[0],
                         "crop_fraction": crop_config.get("crop_top_fraction", 0.33),
                     }
                 )
-
             except Exception as e:
-                if get_setting("models.player_id.verbose_debug", False):
-                    logger.debug(f"Error preprocessing batch crop {i}: {e}")
-                processed_crops.append(None)
-                crop_metadata.append(None)
+                if verbose:
+                    logger.debug(f"Crop {i} not prepared: {e}")
+                prepared.append(None)
+                metadata.append(None)
+        timing["preprocessing_ms"] = (time.perf_counter() - start) * 1000
 
-        # End preprocessing timer
-        batch_timing["preprocessing_ms"] = (time.perf_counter() - prep_start_time) * 1000
-
-        # Start OCR timer for batch
-        ocr_start_time = time.perf_counter()
-
-        readtext_params = easyocr_readtext_parameters(user_config.get("easyocr", {}))
-
-        # Process valid crops
-        valid_crops = [crop for crop in processed_crops if crop is not None]
-        batch_ocr_results = []
-
+        start = time.perf_counter()
+        valid_crops = [crop for crop in prepared if crop is not None]
+        readings: List[list] = []
         if valid_crops and reader is not None:
             try:
-                batch_ocr_results = reader.read(valid_crops)
+                readings = reader.read(valid_crops)
             except Exception as e:
                 logger.error(f"Error reading jersey numbers with {get_player_id_method()}: {e}")
-                batch_ocr_results = [[] for _ in valid_crops]
+                readings = [[] for _ in valid_crops]
         elif valid_crops:
-            logger.debug(f"Running batch OCR on {len(valid_crops)} valid crops")
+            readtext_params = easyocr_readtext_parameters(user_config.get("easyocr", {}))
             for crop_index, crop in enumerate(valid_crops):
                 try:
-                    batch_ocr_results.append(_easyocr_reader.readtext(crop, **readtext_params))
+                    readings.append(_easyocr_reader.readtext(crop, **readtext_params))
                 except Exception as e:
                     logger.error(f"Error processing crop {crop_index}: {e}")
-                    batch_ocr_results.append([])
+                    readings.append([])
+        timing["ocr_ms"] = (time.perf_counter() - start) * 1000
 
-        # End OCR timer
-        batch_timing["ocr_ms"] = (time.perf_counter() - ocr_start_time) * 1000
-
-        # Process results for each original crop
-        valid_crop_index = 0
-        for i, crop in enumerate(processed_crops):
-            individual_timing = {
-                "preprocessing_ms": batch_timing["preprocessing_ms"]
-                / len(crop_images),  # Distribute batch time
-                "ocr_ms": batch_timing["ocr_ms"] / max(1, len(valid_crops)) if valid_crops else 0.0,
-                "filtering_ms": 0.0,  # Will set per-crop below
-            }
-
-            if crop is None or crop_metadata[i] is None:
-                # Skipped crop
-                batch_results.append(("Unknown", None, individual_timing))
+        start = time.perf_counter()
+        results: List[Tuple[str, Optional[Dict]]] = []
+        readings_left = iter(readings)
+        for details in metadata:
+            crop_readings = next(readings_left, None) if details is not None else None
+            if crop_readings is None:
+                results.append(("Unknown", None))
                 continue
-
-            # Get OCR results for this crop
-            if valid_crop_index < len(batch_ocr_results):
-                ocr_results = batch_ocr_results[valid_crop_index]
-                valid_crop_index += 1
-
-                # Filter low confidence detections (same as individual processing)
-                per_crop_filter_start = time.perf_counter()
-                min_confidence = 0.5
-                filtered_ocr_results = []
-                for bbox, text, confidence in ocr_results:
-                    if confidence >= min_confidence:
-                        filtered_ocr_results.append((bbox, text, confidence))
-
-                best_text, best_confidence = best_number(filtered_ocr_results)
-
-                # Prepare result
-                if best_text and _validate_jersey_number(best_text):
-                    jersey_number = best_text
-                    result_details = {
-                        "confidence": best_confidence,
-                        "ocr_results": filtered_ocr_results,
-                        "best_text": best_text,
-                        **crop_metadata[i],  # Include preprocessing metadata
-                    }
-                else:
-                    jersey_number = "Unknown"
-                    result_details = {
-                        "confidence": 0.0,
-                        "ocr_results": filtered_ocr_results,
-                        "best_text": None,
-                        **crop_metadata[i],  # Include preprocessing metadata
-                    }
-
-                # End per-crop filtering timer and accumulate
-                filtering_ms = (time.perf_counter() - per_crop_filter_start) * 1000
-                individual_timing["filtering_ms"] = filtering_ms
-                batch_timing["filtering_ms"] += filtering_ms
-
-                batch_results.append((jersey_number, result_details, individual_timing))
-            else:
-                # No OCR results available
-                batch_results.append(("Unknown", None, individual_timing))
-
-        logger.debug(f"Batch OCR processing complete: {len(batch_results)} results")
-        logger.debug(
-            f"Batch timing - Preprocessing: {batch_timing['preprocessing_ms']:.1f}ms, OCR: {batch_timing['ocr_ms']:.1f}ms, Filtering: {batch_timing['filtering_ms']:.1f}ms"
-        )
-
-        return batch_results, batch_timing
+            confident = [
+                (bbox, text, confidence)
+                for bbox, text, confidence in crop_readings
+                if confidence >= MIN_READING_CONFIDENCE
+            ]
+            best_text, best_confidence = best_number(confident)
+            readable = bool(best_text) and _validate_jersey_number(best_text)
+            results.append(
+                (
+                    best_text if readable else "Unknown",
+                    {
+                        "confidence": best_confidence if readable else 0.0,
+                        "ocr_results": confident,
+                        "best_text": best_text if readable else None,
+                        **details,
+                    },
+                )
+            )
+        timing["filtering_ms"] = (time.perf_counter() - start) * 1000
+        return results, timing
 
     except Exception as e:
         logger.exception(f"Error in batch OCR processing: {e}")
-
-        # Return empty results for all crops on error
-        for _ in crop_images:
-            individual_timing = {"preprocessing_ms": 0.0, "ocr_ms": 0.0, "filtering_ms": 0.0}
-            batch_results.append(("Unknown", None, individual_timing))
-
-        return batch_results, batch_timing
+        return unread, timing
 
 
 def _load_easyocr_config() -> Dict[str, Any]:

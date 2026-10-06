@@ -57,7 +57,7 @@ def read_numbers(method, crops):
         results, _ = player_id._read_jersey_numbers(crops)
     return [
         (None if number == "Unknown" else number, (details or {}).get("confidence", 0.0))
-        for number, details, _ in results
+        for number, details in results
     ]
 
 
