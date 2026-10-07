@@ -1,11 +1,13 @@
 """Drawing detections, tracks, trails, and jersey numbers on a frame."""
 
+import colorsys
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 
 from ..constants import VISUALIZATION_COLORS
+from ..processing.tracking import DISC_ID_OFFSET, team_of_player, team_shirt_colour
 from ..utils.logger import get_logger
 
 logger = get_logger("RENDERING")
@@ -459,47 +461,69 @@ def draw_possession(frame: np.ndarray, tracks: List[Any], holder_id: Optional[in
         )
 
 
+# The colours used while the shirts of the teams are not known: blue and pink, as hues in
+# degrees. Apart from each other, from the grass, and from the yellow that marks who has
+# the disc.
+TEAM_HUES = (210.0, 330.0)
+# How far a player's colour may lie from the team's, as a hue in degrees
+TEAM_HUE_SPREAD = 20.0
+# Teammates differ in how strong and how bright their colour is, as shares of the team's
+SATURATIONS = (1.0, 0.7, 0.85)
+BRIGHTNESSES = (1.0, 0.78, 0.9)
+GOLDEN_STEP = 0.6180339887
+# A shirt less colourful than this (white, grey, black) has no hue to vary: its players
+# get faint tints of all hues instead
+MIN_SHIRT_SATURATION = 0.25
+TINT = (0.12, 0.32)  # Saturation of those tints, from and to
+# Colours are kept at least this bright and this strong to stand out on the grass
+MIN_BRIGHTNESS = 0.55
+MIN_SATURATION = 0.5
+# A dark shirt without colour is drawn in greys no brighter than this, a light one no darker
+DARK_SHIRT = 0.5
+
+
 def get_track_color(track_id: int) -> Tuple[int, int, int]:
-    """Generate a consistent, distinct color for a track ID.
+    """The colour a player is drawn in: the colour of their team's shirts, varied a little.
+
+    Teammates share the colour their shirts have and differ in shade and tint, so the
+    teams are told apart at a glance and a player still keeps a colour of their own.
+    Dark shirts are drawn brighter than they are, to show on the grass. Until the shirts
+    are known a team is blue or pink; a player whose team is not known (yet) is grey, a
+    disc white.
 
     Args:
-        track_id: Unique track identifier
+        track_id: The player's ID (or a disc's)
 
     Returns:
-        BGR color tuple
+        BGR colour
     """
-    # Predefined distinct colors for better visual separation
-    distinct_colors = [
-        (0, 255, 255),  # Cyan
-        (255, 0, 255),  # Magenta
-        (255, 255, 0),  # Yellow
-        (0, 255, 0),  # Green
-        (255, 0, 0),  # Blue
-        (0, 165, 255),  # Orange
-        (128, 0, 128),  # Purple
-        (255, 20, 147),  # Deep Pink
-        (0, 255, 127),  # Spring Green
-        (255, 69, 0),  # Red Orange
-        (30, 144, 255),  # Dodger Blue
-        (255, 215, 0),  # Gold
-        (50, 205, 50),  # Lime Green
-        (255, 105, 180),  # Hot Pink
-        (0, 206, 209),  # Dark Turquoise
-        (255, 140, 0),  # Dark Orange
-    ]
+    if track_id >= DISC_ID_OFFSET:
+        return (255, 255, 255)
+    step = track_id * GOLDEN_STEP % 1.0  # Spread evenly however many IDs there are
+    weaker = SATURATIONS[track_id % len(SATURATIONS)]
+    darker = BRIGHTNESSES[(track_id // len(SATURATIONS)) % len(BRIGHTNESSES)]
+    team = team_of_player(track_id)
+    if team is None:
+        grey = int(255 * (0.55 + 0.4 * step))
+        return (grey, grey, grey)
 
-    # Use modulo to cycle through distinct colors
-    color_index = track_id % len(distinct_colors)
-    base_color = distinct_colors[color_index]
-
-    # Add slight variation based on track_id for uniqueness when cycling
-    if track_id >= len(distinct_colors):
-        variation = (track_id // len(distinct_colors)) * 30
-        r, g, b = base_color
-        # Apply variation while keeping colors bright
-        r = max(50, min(255, r + (variation % 100)))
-        g = max(50, min(255, g + ((variation * 2) % 100)))
-        b = max(50, min(255, b + ((variation * 3) % 100)))
-        return (int(b), int(g), int(r))  # Return as BGR
-
-    return base_color
+    shirt = team_shirt_colour(team)
+    if shirt is None:
+        hue, saturation, brightness = TEAM_HUES[team] / 360.0, 0.95, 1.0
+    else:
+        hue, saturation, brightness = colorsys.rgb_to_hsv(*(value / 255.0 for value in shirt[::-1]))
+    if shirt is not None and saturation < MIN_SHIRT_SATURATION:
+        # White, grey or black: every hue as a faint tint, light or dark as the shirt is
+        hue = step
+        saturation = TINT[0] + (TINT[1] - TINT[0]) * (1.0 - weaker) / (1.0 - min(SATURATIONS))
+        brightness = (
+            (0.35 + (DARK_SHIRT - 0.35) * darker)
+            if brightness < DARK_SHIRT
+            else max(MIN_BRIGHTNESS + 0.15, brightness) * darker
+        )
+    else:
+        hue = (hue + (step - 0.5) * 2.0 * TEAM_HUE_SPREAD / 360.0) % 1.0
+        saturation = max(MIN_SATURATION, saturation) * weaker
+        brightness = min(1.0, max(MIN_BRIGHTNESS / min(BRIGHTNESSES), brightness)) * darker
+    red, green, blue = colorsys.hsv_to_rgb(hue, min(1.0, saturation), min(1.0, brightness))
+    return (int(blue * 255), int(green * 255), int(red * 255))

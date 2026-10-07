@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Build a disc dataset from the Roboflow data and the frames labelled with this app.
+"""Build a disc or a player dataset from the Roboflow data and the frames labelled with this app.
 
-The merged Roboflow disc dataset keeps its images and its splits, so a model trained on
-the result can be scored on the old test set like the models before it. The frames
-labelled in the Labelling tab and from the phone are added with their disc boxes only.
+The merged Roboflow dataset keeps its images and its splits, so a model trained on the
+result can be scored on the old test set like the models before it. The frames labelled
+in the Labelling tab and from the phone are added with their boxes of that one class
+(the phone frames hold discs only and go into disc datasets only).
 
 A labelled frame goes to the split its name gives it, unless it lies within a few seconds
 of a frame of the old dataset in the same game: then it follows that frame's split. A
@@ -11,6 +12,7 @@ frame next to an old test frame would otherwise let a model train on what it is 
 on. Frames close to old frames of different splits are left out.
 
     python scripts/build_combined_disc_dataset.py combined_discs_v1
+    python scripts/build_combined_disc_dataset.py combined_players_v1 --object player
 
 The sources are read-only; the result is written to a new dataset directory.
 """
@@ -30,7 +32,7 @@ sys.path.insert(0, str(REPO / "src"))
 from ultimate_analysis.utils import label_files  # noqa: E402
 
 TRAINING_DATA = REPO / "data" / "raw" / "training_data"
-ROBOFLOW_SOURCE = "roboflow_merged_discs_v2"
+ROBOFLOW_SOURCES = {"disc": "roboflow_merged_discs_v2", "player": "roboflow_merged_players_v2"}
 LABELLED_SOURCES = ("labelled_players_discs_v1", "labelled_discs_v1")
 # The old frames whose names carry no game are all from this one
 UNNAMED_VIDEO = "portland_vs_san_francisco_2024"
@@ -67,7 +69,9 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("name", help="Name of the new dataset folder in data/raw/training_data")
+    parser.add_argument("--object", choices=sorted(ROBOFLOW_SOURCES), default="disc")
     args = parser.parse_args()
+    kind = args.object
 
     output_dir = TRAINING_DATA / args.name
     if output_dir.exists():
@@ -78,7 +82,7 @@ def main() -> None:
 
     # The Roboflow data: as it is
     old_frames: Dict[str, List[Frame]] = {}
-    source = TRAINING_DATA / ROBOFLOW_SOURCE
+    source = TRAINING_DATA / ROBOFLOW_SOURCES[kind]
     for split in SPLITS:
         images = sorted((source / split / "images").glob("*"))
         old_frames[split] = [frame for image in images if (frame := old_frame(image.name))]
@@ -86,13 +90,15 @@ def main() -> None:
             shutil.copy2(image, output_dir / split / "images" / image.name)
             label = source / split / "labels" / f"{image.stem}.txt"
             shutil.copy2(label, output_dir / split / "labels" / label.name)
-        print(f"{ROBOFLOW_SOURCE} {split}: {len(images)} images")
+        print(f"{ROBOFLOW_SOURCES[kind]} {split}: {len(images)} images")
 
-    # The frames labelled here: disc boxes only
+    # The frames labelled here: boxes of the one class only
     for name in LABELLED_SOURCES:
         source = TRAINING_DATA / name
-        disc_id = str(label_files.dataset_classes(source).index("disc"))
-        counts = {split: [0, 0] for split in SPLITS}  # images, discs
+        if kind not in label_files.dataset_classes(source):
+            continue  # No such boxes were drawn there: its frames do not say "none here"
+        disc_id = str(label_files.dataset_classes(source).index(kind))
+        counts = {split: [0, 0] for split in SPLITS}  # images, boxes
         moved = left_out = 0
         for stem in label_files.labelled_frames(source):
             video, index = stem.rsplit("_frame_", 1)
@@ -118,7 +124,8 @@ def main() -> None:
             counts[split][0] += 1
             counts[split][1] += len(discs)
         summary = ", ".join(
-            f"{split} {images} images / {discs} discs" for split, (images, discs) in counts.items()
+            f"{split} {images} images / {discs} {kind}s"
+            for split, (images, discs) in counts.items()
         )
         print(f"{name}: {summary}; {moved} followed an old frame nearby, {left_out} left out")
 
@@ -128,7 +135,7 @@ def main() -> None:
         "val": "valid/images",
         "test": "test/images",
         "nc": 1,
-        "names": ["disc"],
+        "names": [kind],
     }
     (output_dir / "data.yaml").write_text(yaml.safe_dump(data, sort_keys=False))
     print(f"Written to {output_dir}")

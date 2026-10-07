@@ -227,11 +227,32 @@ class MainTab(QWidget):
         )
         self.homography_checkbox.stateChanged.connect(self._on_homography_toggled)
 
+        self.top_down_source_combo = compact_combo(QComboBox())
+        self.top_down_source_combo.addItem("Top-down from the calibration", "calibration")
+        self.top_down_source_combo.addItem("Top-down from the field model", "field")
+        self.top_down_source_combo.setToolTip(
+            "Calibration: the mapping set by hand in the Homography tab, moved with the camera.\n"
+            "Field model: where the field model sees the field in each frame; needs field "
+            "segmentation."
+        )
+        self.top_down_source_combo.setCurrentIndex(
+            max(
+                0,
+                self.top_down_source_combo.findData(
+                    get_setting("homography.source", "calibration")
+                ),
+            )
+        )
+        self.top_down_source_combo.currentIndexChanged.connect(
+            lambda _: self._request_display_update(immediate=True)
+        )
+
         processing_layout.addWidget(self.inference_checkbox)
         processing_layout.addWidget(self.tracking_checkbox)
         processing_layout.addWidget(self.player_id_checkbox)
         processing_layout.addWidget(self.field_segmentation_checkbox)
         processing_layout.addWidget(self.homography_checkbox)
+        processing_layout.addWidget(self.top_down_source_combo)
 
         processing_group.setLayout(processing_layout)
         layout.addWidget(processing_group)
@@ -504,6 +525,7 @@ class MainTab(QWidget):
             player_id=self.player_id_checkbox.isChecked(),
             field_segmentation=self.field_segmentation_checkbox.isChecked(),
             top_down_view=self.homography_enabled,
+            top_down_source=self.top_down_source_combo.currentData(),
         )
 
     def _request_frame(self, mode: str) -> None:

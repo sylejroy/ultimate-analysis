@@ -48,7 +48,6 @@ VISUALIZATION_COLORS = {
 # File system paths (relative to project root)
 DEFAULT_PATHS = {
     "MODELS": "data/models",
-    "DEV_DATA": "data/processed/dev_data",
     "RAW_VIDEOS": "data/raw/videos",
     "TRAINING_DATA": "data/raw/training_data",
 }

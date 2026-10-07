@@ -11,16 +11,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
-    QButtonGroup,
     QCheckBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
-    QRadioButton,
     QShortcut,
     QSlider,
     QSpinBox,
@@ -29,9 +27,11 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from ...config.settings import get_setting
 from ...constants import DEFAULT_PATHS
 from ...processing.inference import detect_discs, detect_players, load_detection_model
 from ...processing.model_lock import MODEL_LOCK
+from ...processing.team_tracker import observers_in_frame
 from ...utils import label_files
 from ...utils.label_files import CLASS_NAMES, LabelBox
 from ...utils.logger import get_logger
@@ -45,17 +45,41 @@ logger = get_logger("LABELLING")
 DEFAULT_DATASET = "labelled_players_discs_v1"
 RANDOM_FRAME_TRIES = 20
 HELP_TEXT = (
-    "Drag: new box (also across other boxes)\n"
+    "Left drag: new disc box, right drag: new player\n"
+    "    box (also across other boxes)\n"
     "Click a box: select it\n"
     "Drag the selected box: move, a grip: resize\n"
     "Delete: remove the selected box\n"
-    "1 / 2: disc / player\n"
-    "Wheel: zoom, right drag: move view, 0: whole frame\n"
+    "1 / 2: make the selected box a disc / a player\n"
+    "Wheel: zoom, middle button drag: move view,\n"
+    "    0: whole frame\n"
     "Enter: save and go on\n"
     "Left / Right: step without saving\n"
     "R: random frame of a random video;\n"
     "    saving then goes on at random too"
 )
+
+
+# How often a suggestion that had to wait for the models is tried again
+SUGGESTION_RETRY_MS = 300
+
+# A point is played by seven a side with one disc: no more are suggested, and the count
+# of boxes shows red beyond
+MOST_ON_THE_FIELD = {"player": 14, "disc": 1}
+COUNT_FULL, COUNT_SHORT, COUNT_OVER = "#4caf50", "#d0d0d0", "#ff5252"
+
+
+def most_certain(detections: List[dict], most: int) -> List[dict]:
+    """The detections the model is surest of, at most so many."""
+    return sorted(detections, key=lambda detection: -detection["confidence"])[:most]
+
+
+def count_colour(name: str, number: int) -> str:
+    """Colour for the number of boxes of a class on a frame."""
+    most = MOST_ON_THE_FIELD.get(name)
+    if most is None or number < most:
+        return COUNT_SHORT
+    return COUNT_FULL if number == most else COUNT_OVER
 
 
 class LabellingTab(QWidget):
@@ -72,6 +96,8 @@ class LabellingTab(QWidget):
         self._saved = False  # The shown frame is in the dataset
         self._edited = False  # ... and its boxes were changed since
         # (model, image size) for players and discs; loaded when first needed
+        # (video, frame) shown without its suggestion because the models were busy
+        self._awaiting_suggestion: Optional[Tuple[str, int]] = None
         self._detectors: Optional[Tuple[Any, Any]] = None
 
         self._init_ui()
@@ -147,18 +173,20 @@ class LabellingTab(QWidget):
 
         boxes = QGroupBox("Boxes")
         boxes_layout = QVBoxLayout(boxes)
-        class_row = QHBoxLayout()
-        self.class_buttons = QButtonGroup(self)
-        for class_id, name in enumerate(CLASS_NAMES):
-            button = QRadioButton(f"{name.capitalize()} ({class_id + 1})")
-            button.setChecked(class_id == 0)
-            self.class_buttons.addButton(button, class_id)
-            class_row.addWidget(button)
-        self.class_buttons.idClicked.connect(self._set_class)
-        boxes_layout.addLayout(class_row)
+        self.buttons_label = QLabel("")
+        boxes_layout.addWidget(self.buttons_label)
         self.prelabel_check = QCheckBox("Suggest boxes with the current models")
         self.prelabel_check.setChecked(True)
         boxes_layout.addWidget(self.prelabel_check)
+        # How many of each are boxed, large: too many or too few shows at a glance
+        self.count_label = QLabel("")
+        self.count_label.setTextFormat(Qt.RichText)
+        self.count_label.setAlignment(Qt.AlignCenter)
+        self.count_label.setToolTip(
+            "Boxes on this frame. Green: as many as a point has on the field (14 players, "
+            "1 disc). Red: more than that."
+        )
+        boxes_layout.addWidget(self.count_label)
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
         boxes_layout.addWidget(self.status_label)
@@ -253,8 +281,8 @@ class LabellingTab(QWidget):
     def _go_to_random_frame(self) -> None:
         """Open a frame that is not labelled yet, anywhere in any video.
 
-        Every frame is equally likely, so a full game is drawn far more often than a
-        short clip. From here on, saving goes on to another random frame.
+        Videos with few labels for their length are drawn more often, so the labels
+        spread evenly over the footage. From here on, saving goes on to another random frame.
         """
         self.random_check.setChecked(True)
         videos = self.video_list.video_files
@@ -263,13 +291,18 @@ class LabellingTab(QWidget):
                 capture = cv2.VideoCapture(video)
                 self._frame_counts[video] = max(0, int(capture.get(cv2.CAP_PROP_FRAME_COUNT)))
                 capture.release()
-        weights = [self._frame_counts[video] for video in videos]
-        if not any(weights):
+        counts = [self._frame_counts[video] for video in videos]
+        if not any(counts):
             return
+        # Videos with few labels for their length come up more often
+        labelled = [
+            len(label_files.labelled_frames(self._dataset_dir(), video)) for video in videos
+        ]
+        weights = label_files.random_video_weights(counts, labelled)
 
         for _ in range(RANDOM_FRAME_TRIES):
             row = random.choices(range(len(videos)), weights=weights)[0]
-            index = random.randrange(weights[row])
+            index = random.randrange(counts[row])
             name = label_files.frame_name(videos[row], index)
             if (self._dataset_dir() / "labels" / f"{name}.txt").exists():
                 continue
@@ -339,15 +372,27 @@ class LabellingTab(QWidget):
         boxes = label_files.load_boxes(self._dataset_dir(), name, (frame.shape[1], frame.shape[0]))
         self._saved = boxes is not None
         self._edited = False
+        self._awaiting_suggestion = None
         if boxes is None:
             boxes = self._suggest(frame) if self.prelabel_check.isChecked() else []
+            if boxes is None:
+                # The models are busy: the frame shows now, the suggestion follows
+                boxes = []
+                self._awaiting_suggestion = (self._video_path, self._frame_index)
+                QTimer.singleShot(SUGGESTION_RETRY_MS, self._suggest_when_free)
         self.canvas.set_frame(frame, boxes, unconfirmed=not self._saved)
         self._update_status()
 
     # ------------------------------------------------------------------ boxes
 
-    def _suggest(self, frame: np.ndarray) -> List[LabelBox]:
-        """Boxes the current default models find on a frame."""
+    def _suggest(self, frame: np.ndarray) -> Optional[List[LabelBox]]:
+        """Boxes the current default models find on a frame; None while the models are busy.
+
+        The Main Analysis tab holds the models while it loads them at startup, for some
+        ten seconds. Waiting for that here would freeze the window.
+        """
+        if not MODEL_LOCK.acquire(blocking=False):
+            return None
         try:
             with MODEL_LOCK:
                 if self._detectors is None:
@@ -358,12 +403,21 @@ class LabellingTab(QWidget):
                 players, discs = self._detectors
                 detections = []
                 if players is not None:
-                    detections += detect_players(frame, *players)
+                    found = detect_players(frame, *players)
+                    # Observers are no players: left out, as the tracker leaves them out
+                    if get_setting("models.tracking.hide_non_players", True):
+                        observers = observers_in_frame(frame, [d["bbox"] for d in found])
+                        found = [d for d, observer in zip(found, observers) if not observer]
+                    detections += most_certain(found, MOST_ON_THE_FIELD["player"])
                 if discs is not None:
-                    detections += detect_discs(frame, *discs)
+                    detections += most_certain(
+                        detect_discs(frame, *discs), MOST_ON_THE_FIELD["disc"]
+                    )
         except Exception as e:
             logger.exception(f"Could not suggest boxes: {e}")
             return []
+        finally:
+            MODEL_LOCK.release()
         classes = label_files.dataset_classes(self._dataset_dir())
         return [
             LabelBox(CLASS_NAMES.index(detection["class_name"]), *map(float, detection["bbox"]))
@@ -378,25 +432,48 @@ class LabellingTab(QWidget):
         in it, and its frames must not be read as "no players here".
         """
         classes = label_files.dataset_classes(self._dataset_dir())
-        for class_id, name in enumerate(CLASS_NAMES):
-            self.class_buttons.button(class_id).setEnabled(name in classes)
-        if CLASS_NAMES[self.canvas.current_class] not in classes:
-            self._set_class(CLASS_NAMES.index(classes[0]))
+        self.canvas.classes = {CLASS_NAMES.index(name) for name in classes}
+        self.buttons_label.setText(
+            "Left drag: disc    Right drag: player"
+            if "player" in classes
+            else "Left drag: disc (this dataset holds discs only)"
+        )
 
     def _set_class(self, class_id: int) -> None:
-        if not self.class_buttons.button(class_id).isEnabled():
-            return
-        self.class_buttons.button(class_id).setChecked(True)
+        """Change the selected box to another class."""
         self.canvas.set_class(class_id)
 
     def _on_boxes_changed(self) -> None:
         self._edited = True
         self._update_status()
 
+    def _suggest_when_free(self) -> None:
+        """Add the suggestion a frame was shown without, unless the user has moved on."""
+        if (
+            self._awaiting_suggestion != (self._video_path, self._frame_index)
+            or self._saved
+            or self._edited
+            or self.canvas.boxes
+        ):
+            self._awaiting_suggestion = None
+            return
+        boxes = self._suggest(self._frame)
+        if boxes is None:
+            QTimer.singleShot(SUGGESTION_RETRY_MS, self._suggest_when_free)
+            return
+        self._awaiting_suggestion = None
+        self.canvas.set_frame(self._frame, boxes, unconfirmed=True)
+        self._update_status()
+
     def _suggest_again(self) -> None:
-        if self._frame is not None:
-            self.canvas.set_frame(self._frame, self._suggest(self._frame), self.canvas.unconfirmed)
-            self._on_boxes_changed()
+        if self._frame is None:
+            return
+        boxes = self._suggest(self._frame)
+        if boxes is None:
+            self.status_label.setText("The models are busy; try again in a moment")
+            return
+        self.canvas.set_frame(self._frame, boxes, self.canvas.unconfirmed)
+        self._on_boxes_changed()
 
     def _clear_boxes(self) -> None:
         if self._frame is not None:
@@ -440,14 +517,23 @@ class LabellingTab(QWidget):
         count = {name: 0 for name in CLASS_NAMES}
         for box in self.canvas.boxes:
             count[CLASS_NAMES[box.class_id]] += 1
-        found = ", ".join(
-            f"{number} {name}{'s' if number != 1 else ''}" for name, number in count.items()
+        classes = label_files.dataset_classes(self._dataset_dir())
+        self.count_label.setText(
+            "&nbsp;&nbsp;&nbsp;".join(
+                f"<span style='font-size:26px; font-weight:600; color:{count_colour(name, number)}'>"
+                f"{number}</span> <span style='font-size:14px'>{name}"
+                f"{'s' if number != 1 else ''}</span>"
+                for name, number in count.items()
+                if name in classes
+            )
         )
-        if self._saved:
+        if self._awaiting_suggestion is not None:
+            state = "Not saved yet: the models are loading, suggestions follow"
+        elif self._saved:
             state = "In the dataset" + (" (changes are kept)" if self._edited else "")
         else:
             state = "Not saved yet: boxes are suggestions" if self.canvas.boxes else "Not saved yet"
-        self.status_label.setText(f"{state}\n{found}")
+        self.status_label.setText(state)
         self.remove_button.setEnabled(self._saved)
 
         totals = label_files.summary(self._dataset_dir())

@@ -1,6 +1,6 @@
 """Drawing on the top-down (homography-warped) view."""
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -315,3 +315,35 @@ def draw_tracks_top_down(
             continue
 
     return result_frame
+
+
+def hide_behind_camera(view: np.ndarray, frame_to_view: np.ndarray) -> None:
+    """Black out the part of a warped view that lies behind the camera.
+
+    Warping fills it with a mirror image of what is in front. In place.
+    """
+    view_to_frame = np.linalg.inv(frame_to_view)
+    height, width = view.shape[:2]
+    depth = (
+        view_to_frame[2, 0] * np.arange(width)[None, :]
+        + view_to_frame[2, 1] * np.arange(height)[:, None]
+        + view_to_frame[2, 2]
+    )
+    # What the frame shows is in front: the sign of its pixels says which side that is
+    in_front = np.sign(np.linalg.det(view_to_frame))
+    behind = depth * in_front <= 0
+    if behind.any():
+        view[behind] = 0
+
+
+def draw_field_template(
+    view: np.ndarray,
+    lines: Sequence[Tuple[Tuple[float, float], Tuple[float, float]]],
+    field_to_view: np.ndarray,
+    colour: Tuple[int, int, int] = (255, 255, 255),
+) -> None:
+    """Draw the lines of the field (in field units) on a top-down view. In place."""
+    for start, end in lines:
+        ends = np.array([[*start, 1.0], [*end, 1.0]]) @ field_to_view.T
+        (x1, y1), (x2, y2) = np.rint(ends[:, :2] / ends[:, 2:3]).astype(int)
+        cv2.line(view, (int(x1), int(y1)), (int(x2), int(y2)), colour, 1, cv2.LINE_AA)

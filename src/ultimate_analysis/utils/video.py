@@ -15,16 +15,15 @@ logger = get_logger("VIDEO")
 
 
 def find_video_files() -> List[str]:
-    """Paths of the videos in the development and raw video folders, sorted."""
-    video_files = []
-    for folder in (Path(DEFAULT_PATHS["DEV_DATA"]), Path(DEFAULT_PATHS["RAW_VIDEOS"])):
-        if folder.exists():
-            video_files.extend(
-                str(path)
-                for path in folder.glob("*")
-                if path.is_file() and path.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS
-            )
-    return sorted(video_files)
+    """Paths of the videos in the video folder, sorted."""
+    folder = Path(DEFAULT_PATHS["RAW_VIDEOS"])
+    if not folder.exists():
+        return []
+    return sorted(
+        str(path)
+        for path in folder.glob("*")
+        if path.is_file() and path.suffix.lower() in SUPPORTED_VIDEO_EXTENSIONS
+    )
 
 
 def get_video_duration(video_path: str) -> str:

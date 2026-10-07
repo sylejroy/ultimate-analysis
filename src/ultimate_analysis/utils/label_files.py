@@ -15,7 +15,7 @@ The name of a frame says where it comes from, so it can always be found in its v
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -127,6 +127,36 @@ def remove_frame(dataset_dir: Path, name: str) -> None:
     (dataset_dir / "images" / f"{name}.jpg").unlink(missing_ok=True)
     (dataset_dir / "labels" / f"{name}.txt").unlink(missing_ok=True)
     write_splits(dataset_dir)
+
+
+# Share of the labels so far by which the random draw of a video goes by its length alone
+EVEN_SHARE = 0.1
+
+
+def random_video_weights(frame_counts: Sequence[int], labelled: Sequence[int]) -> List[float]:
+    """How likely each video should be drawn for the next frame to label.
+
+    The labels are to end up spread evenly over the footage: as many per frame in every
+    video. A video is weighted by how many labels it is short of the video labelled most
+    densely, so the ones with few labels for their length are drawn first. A small part
+    goes by length alone, so no video is ever shut out, and once all are even it is
+    length that decides.
+
+    Args:
+        frame_counts: Frames of each video
+        labelled: Labelled frames of each video
+
+    Returns:
+        A weight per video (all zero if there are no frames)
+    """
+    frames = np.asarray(frame_counts, dtype=np.float64)
+    have = np.asarray(labelled, dtype=np.float64)
+    if frames.sum() <= 0:
+        return [0.0] * len(frames)
+    densest = float(np.max(have[frames > 0] / frames[frames > 0]))
+    short = np.clip(densest * frames - have, 0.0, None)
+    by_length = frames / frames.sum() * max(1.0, EVEN_SHARE * have.sum())
+    return (short + by_length).tolist()
 
 
 def labelled_frames(dataset_dir: Path, video_path: Optional[str] = None) -> List[str]:

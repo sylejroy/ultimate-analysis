@@ -76,6 +76,15 @@ class TeamTrackerTests(unittest.TestCase):
             ids = self.see(*people, (780, orange))
         self.assertEqual(self.tracker.outsiders(), {ids[6]})
 
+    def test_an_observer_is_told_from_the_players_in_a_single_frame(self):
+        orange = (30, 130, 250)
+        people = [(20 + 95 * place, WHITE if place < 4 else DARK) for place in range(8)]
+        frame, boxes = frame_with(*people, (800, orange))
+        self.assertEqual(team_tracker.observers_in_frame(frame, boxes), [False] * 8 + [True])
+        # Too few people to tell the teams: nobody is taken for an observer
+        frame, boxes = frame_with((100, WHITE), (300, DARK), (500, orange))
+        self.assertEqual(team_tracker.observers_in_frame(frame, boxes), [False] * 3)
+
     def test_feet_distances_are_in_body_heights(self):
         tracks = np.array([box(0)], dtype=np.float64)
         detections = np.array([box(0), box(0, 200 + SIZE[1] / 2), box(500)], dtype=np.float64)

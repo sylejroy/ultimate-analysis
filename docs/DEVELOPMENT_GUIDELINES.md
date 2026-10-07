@@ -78,6 +78,7 @@ Modules that are still too large and should be split when they are next worked o
   record the result in the README:
   - `scripts/benchmark_detectors.py` — players and discs
   - `scripts/benchmark_segmentation.py` — field area and outline
+  - `scripts/benchmark_field_registration.py` — where the field lies, against the labelled field frames
   - `scripts/benchmark_jersey_readers.py` — jersey numbers
   - `scripts/benchmark_player_id_scheduling.py` — temporal crop selection, votes and OCR work
   - `scripts/benchmark_homography_optimizer.py` — coverage sampling speed and candidate agreement

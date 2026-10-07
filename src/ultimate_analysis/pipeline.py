@@ -18,6 +18,7 @@ from .processing.camera_motion import CameraMotionEstimator
 from .processing.camera_motion import is_enabled as camera_motion_enabled
 from .processing.field_analysis import create_unified_field_mask, fit_lines_from_mask
 from .processing.field_line_filter import FieldLineFilter
+from .processing.field_registration import FieldFollower, field_to_canvas
 from .processing.field_segmentation import reset_segmentation_cache, run_field_segmentation
 from .processing.homography import output_canvas_size
 from .processing.inference import reset_inference_state, run_inference
@@ -46,13 +47,19 @@ from .rendering.field import (
 )
 from .rendering.field_lines import draw_ransac_field_lines
 from .rendering.overlays import draw_fps_overlay, draw_jersey_table
-from .rendering.top_down import apply_segmentation_to_warped_frame, draw_tracks_top_down
+from .rendering.top_down import (
+    apply_segmentation_to_warped_frame,
+    draw_field_template,
+    draw_tracks_top_down,
+    hide_behind_camera,
+)
 from .rendering.tracks import (
     draw_detections,
     draw_possession,
     draw_tracks,
     draw_tracks_with_player_ids,
 )
+from .utils.field_template import DEFAULT_RULESET, TEMPLATES
 from .utils.logger import get_logger
 
 logger = get_logger("PIPELINE")
@@ -69,6 +76,10 @@ class PipelineOptions:
     player_id: bool = True
     field_segmentation: bool = True
     top_down_view: bool = True
+    # What the top-down view is made from: "calibration" (the mapping set by hand in the
+    # Homography tab, moved with the camera) or "field" (where the field model sees the
+    # field in each frame)
+    top_down_source: str = "calibration"
 
     @property
     def analysis_key(self) -> Tuple[bool, bool, bool, bool]:
@@ -107,6 +118,13 @@ class AnalysisPipeline:
         # first frame after a reset), which is undone before it is applied.
         self._homography_matrix: Optional[np.ndarray] = None
         self._camera_since_calibration = np.eye(3)
+        # Where the field model sees the field, for a top-down view without calibration
+        self._field_follower = FieldFollower(
+            TEMPLATES.get(
+                get_setting("homography.ruleset", DEFAULT_RULESET), TEMPLATES[DEFAULT_RULESET]
+            )
+        )
+        self._follow_field = False
 
         # Results for the current frame
         self.detections: List[Dict[str, Any]] = []
@@ -162,8 +180,15 @@ class AnalysisPipeline:
             return None
         return self._homography_matrix @ np.linalg.inv(self._camera_since_calibration)
 
+    def new_video(self) -> None:
+        """Start on another video: nothing of the last one holds, its camera included."""
+        self.reset()
+        self.reset_fps()
+        self._field_follower.new_video()
+
     def reset(self) -> None:
         """Forget everything derived from earlier frames."""
+        self._field_follower.reset()
         self._jersey_crop_selector.reset()
         discard_pending_readings()
         reset_tracker()
@@ -227,6 +252,7 @@ class AnalysisPipeline:
         """
         start = time.perf_counter()
         self._timings = {}
+        self._follow_field = options.top_down_view and options.top_down_source == "field"
 
         analysis_key = (frame_index, *options.analysis_key)
         if analysis_key != self._analysed_key:
@@ -289,6 +315,7 @@ class AnalysisPipeline:
                 apply_camera_motion(motion)
                 self._line_filter.move(motion)
                 self._camera_since_calibration = motion @ self._camera_since_calibration
+                self._field_follower.move(motion)
             self._record("Camera Motion", start)
 
         if options.tracking:
@@ -431,6 +458,10 @@ class AnalysisPipeline:
             self._geometry_lines = lines
             self._geometry_confidences = confidences
             self._line_filter.update(lines, confidences)
+            if self._follow_field:
+                start = time.perf_counter()
+                self._field_follower.update(self.field_results, frame_shape, lines)
+                self._record("Field Estimate", start)
 
         return self._field_mask
 
@@ -521,14 +552,26 @@ class AnalysisPipeline:
         Returns:
             (view, "") or (None, reason there is no view)
         """
-        top_down_matrix = self._top_down_matrix()
-        if top_down_matrix is None:
-            return None, "Homography matrix not available"
+        height, width = frame.shape[:2]
+        output_width, output_height = output_canvas_size(width, height)
+        from_field = options.top_down_source == "field"
+        if from_field:
+            if not options.field_segmentation:
+                return None, "The top-down view from the field needs field segmentation"
+            self._field_geometry(frame.shape[:2])
+            if self._field_follower.image_to_field is None:
+                return None, "The field has not been found in this view yet"
+            on_canvas = field_to_canvas(
+                self._field_follower.template, (output_width, output_height)
+            )
+            top_down_matrix = on_canvas @ self._field_follower.image_to_field
+        else:
+            top_down_matrix = self._top_down_matrix()
+            if top_down_matrix is None:
+                return None, "Homography matrix not available"
 
         try:
             start = time.perf_counter()
-            height, width = frame.shape[:2]
-            output_width, output_height = output_canvas_size(width, height)
 
             # The panel is far smaller than the full canvas, so render it at a reduced
             # scale; warp cost is proportional to the output pixel count.
@@ -541,6 +584,13 @@ class AnalysisPipeline:
                 matrix = np.diag([scale, scale, 1.0]) @ top_down_matrix
 
             view = cv2.warpPerspective(frame, matrix, (output_width, output_height))
+            if from_field:
+                hide_behind_camera(view, matrix)
+                draw_field_template(
+                    view,
+                    list(self._field_follower.template.lines.values()),
+                    np.diag([scale, scale, 1.0]) @ on_canvas,
+                )
             warp_ms = self._record("Homography Calculation", start)
 
             if self.field_results and options.field_segmentation:

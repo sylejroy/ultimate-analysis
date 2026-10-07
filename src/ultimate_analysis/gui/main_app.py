@@ -146,9 +146,9 @@ class UltimateAnalysisApp(QMainWindow):
 
     def _create_labelling_tab(self) -> QWidget:
         """Factory method to create labelling tab."""
-        from .labelling.labelling_tab import LabellingTab
+        from .labelling.labelling_modes import LabellingModes
 
-        return LabellingTab()
+        return LabellingModes()
 
     def _init_ui(self):
         """Initialize the user interface."""

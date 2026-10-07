@@ -7,18 +7,21 @@ tracking, OCR-based player identification, and a top-down field view.
 
 - **Object detection**: players and discs, with separately selectable models.
 - **Tracking**: consistent player and disc identities across frames (ByteTrack with a team rule), with
-  trails and foot-level positions.
+  trails and foot-level positions. Each team is drawn in the colour of its shirts, every
+  player in a shade of their own.
 - **Possession**: the player holding the disc is highlighted in both views.
 - **Player identification**: jersey numbers read by a selectable reader (PARSeq,
   Florence-2, a YOLO digit detector, or EasyOCR) and aggregated over time, plus a tuning
   tab for the EasyOCR and crop-preprocessing parameters.
 - **Field segmentation**: field mask, contour, and RANSAC boundary lines.
 - **Field calibration**: interactive perspective correction with a genetic-algorithm
-  assistant; the result drives the top-down view in the main tab.
+  assistant; the result drives the top-down view in the main tab. The top-down view can
+  also be made from where the field model sees the field, without calibration.
 - **Model training**: train YOLO11/YOLO26 detection and segmentation models from the
   GUI with live output, progress, and metric plots against a baseline.
 - **Labelling**: mark players and discs on frames of your videos, starting from what the
-  current models find, and train on the result without leaving the app.
+  current models find, and train on the result without leaving the app. A second mode
+  lays the field itself on a frame, for a model that is to find it.
 - **Performance monitoring**: per-stage timings while analysis runs.
 
 ## Screenshots
@@ -31,6 +34,10 @@ field outline, and the top-down view:
 **Labelling** — correcting the models' suggestions to build a training dataset:
 
 ![Labelling tab](docs/gui_example_labelling.png)
+
+**Labelling the field** — the drawing of the field pulled onto a frame by its corners:
+
+![Field labelling](docs/gui_example_field_labelling.png)
 
 **Model Training** — live output and metric plots:
 
@@ -135,19 +142,55 @@ Everything under `data/` is local and not tracked by Git.
 
 The Labelling tab builds a dataset from your own videos at full resolution.
 
-1. Pick a video and a frame. The boxes the current default models find are shown dashed,
-   as suggestions.
+1. Pick a video and a frame, or let "Random frame" pick: it favours the videos with few
+   labels for their length, so the labels spread evenly over the footage. The boxes the
+   current default models find are shown dashed, as suggestions: at most 14 players and
+   one disc, the ones the models are surest of, without the observers.
 2. Correct them: drag a box to move it, drag a grip to resize it, press Delete to remove
-   it, and drag on free space to draw a new one (press 1 for a disc, 2 for a player
-   first). Zoom in with the mouse wheel for the disc.
-3. Press Enter to save the frame and move on by the step size. Left and Right step
-   without saving, so frames you skip do not end up in the dataset.
+   it. Drag on free space to draw a new one: with the left button a disc, with the right
+   button a player (1 and 2 turn the selected box into one or the other). Zoom with the
+   mouse wheel, move the view with the middle button. The number of players and discs on
+   the frame is shown large: green at 14 and 1, red above.
+3. Press Enter to save the frame and move on by the step size, or to another random
+   frame. Left and Right step without saving, so frames you skip do not end up in the
+   dataset.
 
 Saved frames go to `data/raw/training_data/<dataset name>` as images and YOLO labels,
 named after the video and frame number. Each stretch of 300 frames belongs as a whole to
 training, validation (one in ten), or testing (one in ten), so near-identical frames never
 land on both sides. The dataset is listed in the Model Training tab as soon as it has
 frames.
+
+### Labelling the field
+
+Under "Field lines" in the Labelling tab the whole field is drawn over the frame in
+perspective, and that drawing is pulled onto the real field:
+
+- drag a corner dot (the four outer corners and where the goal lines meet the sidelines):
+  the corner moves. Only corners placed in this frame stay where they were put (drawn
+  filled); the rest of the field follows the way the video's camera would see it, so
+  with the camera's focal length known three corners are usually enough. From the fourth
+  corner on, the three placed last stay
+- mouse wheel: zoom, also out past the frame, to reach corners outside it
+- drag anywhere else: the picture moves
+
+The drawing always remains a view of a flat field of the right proportions
+(USA Ultimate or WFDF, `utils/field_template.py`). A label is right when the drawing lies
+on the real lines. The near end of the field may lie behind the camera, as with a drone
+above the end zone; it is then not drawn. The two sidelines and the far back line alone do not fix how far the
+field reaches towards the camera: a line across the field at a known distance must fit as
+well, best the near goal line or a brick mark, since the far goal line is only some 40
+pixels from the back line.
+
+A frame starts from the field of the frame just left (moved the way the camera moved),
+else from where the field model sees the field ("Start from the field model", see "Where
+the field lies" below), else from the nearest labelled frame of the video, else from a
+first guess. "Place from the field model" puts the drawing there again, and the lines the
+field model sees are drawn faintly under it ("Show the field model's lines"). Frames go to
+`labelled_field_v1` (`utils/field_label_files.py`): the picture, the lines and corners of
+the drawing that lie in or near it, and the mapping from picture to field they give. Each
+saved frame is a verified calibration; together they are what a model that finds the field
+by itself would be trained on and measured against.
 
 ### Labelling discs from a phone
 
@@ -169,6 +212,19 @@ through the Windows firewall for private networks when asked). From anywhere els
 Tailscale on the PC and the phone and sign in with the same account; the script then
 prints a second address that works over that private link. Do not forward the port on
 your router.
+
+## Demo video and more footage
+
+`python scripts/render_demo.py VIDEO --start 24:37 --seconds 70 --output data/demo/demo.mp4`
+runs a stretch of a game through the analysis, every frame, and writes one video of the
+camera view, the top-down view, and who holds the disc. With `imageio-ffmpeg` installed
+(`pip install --no-deps imageio-ffmpeg`) the file is compressed to a size that can be
+passed on.
+
+`python scripts/download_videos.py` fetches games from a YouTube channel into
+`data/raw/videos`: the newest, some picked at random (`--random`), or by title
+(`--title "Truck Stop VS Chain Lightning"`). It needs `yt-dlp`
+(`pip install --no-deps yt-dlp`).
 
 ## Development
 
@@ -416,6 +472,42 @@ line moves against the field from one frame to the next:
 
 In about one frame in a hundred a line still jumps by more than 5 pixels, by up to 60:
 the fit has then found another line than before, which no blending covers.
+
+### Where the field lies
+
+`processing/field_registration.py` estimates the mapping between a frame and the field
+without calibration by hand. The field model marks the central field and the end zones:
+the outline gives the sidelines and the far back line, and where an end zone meets the
+central field is a goal line. A camera is then placed so that the field's lines lie on
+these (`utils/field_camera.py`).
+
+It is a camera and not a free mapping because lines at the far end alone leave a free
+mapping open on how far the field reaches towards the viewer. The games are filmed by a
+drone that flies along the field about 9 yards up and does not zoom, so the focal length
+is the same for a whole video (the labels of a game give it to within 2 to 3 percent:
+1691 to 1748 pixels for six frames of one game). With the focal length known, labelled
+corners two pixels off put the near goal line some 20 pixels off instead of 70 to 170.
+The main tab learns the focal length from the frames as they play; the labelling takes it
+from the frames of the video labelled so far.
+
+In the main tab, "Top-down from the field model" makes the top-down view from this
+estimate instead of the calibration (`homography.source`). The field is estimated each
+time the field model runs, moved with the camera in between, and evened out; the lines of
+the field are drawn on the view. It costs about 2 ms per frame.
+
+Against the 18 labelled frames (`scripts/benchmark_field_registration.py`; median
+distance from the label over the part of the field in the frame):
+
+| Focal length | Frames estimated | In the picture | On the field | Within 1 / 2 / 5 yd |
+|---|---:|---:|---:|---:|
+| unknown | 16 of 18 | 10.3 px | 1.46 yd | 6 / 10 / 13 |
+| from the game's other labels | 15 of 18 | 8.6 px | 0.54 yd | 11 / 12 / 13 |
+
+The frames it gets wrong or not at all are mostly those of the one game on a painted
+stadium field, which the field model has never seen and where it mixes up the end zones
+and the central field. Frames in which a sideline is out of view give no estimate. The
+labelled frames are few and were also what the estimate was developed on, so the numbers
+say where it stands, not how it will do on new games.
 
 ### Jersey number readers
 

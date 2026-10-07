@@ -24,6 +24,14 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
+# The clip the timings in the README were taken on; without it, the app's default video
+BENCHMARK_CLIP = (
+    REPO
+    / "data"
+    / "processed"
+    / "benchmark_clips"
+    / "portland_vs_san_francisco_2024_snippet_4_40912.mp4"
+)
 sys.path.insert(0, str(REPO / "src"))
 
 import cv2  # noqa: E402
@@ -54,9 +62,9 @@ def main():
         parser.error("--frames must exceed --warmup, which must be nonnegative")
     if args.threads is not None:
         cv2.setNumThreads(args.threads)
-    video = args.video or next(
-        (REPO / "data" / "processed" / "dev_data").glob(get_setting("video.default_video"))
-    )
+    video = args.video or BENCHMARK_CLIP
+    if not video.exists():
+        video = REPO / "data" / "raw" / "videos" / get_setting("video.default_video")
     capture = cv2.VideoCapture(str(video))
     frames = []
     try:

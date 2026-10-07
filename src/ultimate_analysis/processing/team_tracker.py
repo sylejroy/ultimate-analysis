@@ -22,7 +22,7 @@ red nearly every time it is seen, without that being a team colour, can be left 
 """
 
 from types import SimpleNamespace
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import cv2
 import numpy as np
@@ -63,6 +63,51 @@ OBSERVER_MIN_YELLOW = 146
 OUTSIDER_DISTANCE = 18.0
 OUTSIDER_MIN_SIGHTINGS = 20
 OUTSIDER_SHARE = 0.85
+# A single frame tells the two team colours if it shows at least this many shirts
+MIN_SHIRTS_IN_FRAME = 8
+
+
+def team_colours_of(shirts: Sequence[np.ndarray]) -> Optional[np.ndarray]:
+    """Shirt colours split into two groups: the two team colours, or None if they are one."""
+    samples = np.array(shirts, dtype=np.float32)
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.5)
+    # The same samples must give the same teams: fixed starting points
+    cv2.setRNGSeed(0)
+    _, _, colours = cv2.kmeans(samples, 2, None, criteria, 3, cv2.KMEANS_PP_CENTERS)
+    if np.linalg.norm(colours[0] - colours[1]) < MIN_TEAM_DISTANCE:
+        return None
+    return colours
+
+
+def off_team_colours(
+    shirt: Optional[np.ndarray], team_colours: Optional[np.ndarray]
+) -> Optional[bool]:
+    """Whether a shirt is orange or red without that being a team colour."""
+    if team_colours is None or shirt is None:
+        return None
+    if shirt[1] < OBSERVER_MIN_RED or shirt[2] < OBSERVER_MIN_YELLOW:
+        return False
+    along = team_colours[1] - team_colours[0]
+    along = along / np.linalg.norm(along)
+    offset = shirt - team_colours[0]
+    return bool(np.linalg.norm(offset - (offset @ along) * along) > OUTSIDER_DISTANCE)
+
+
+def observers_in_frame(frame: np.ndarray, boxes: Sequence[Sequence[float]]) -> List[bool]:
+    """Which of the player boxes of one frame show an observer rather than a player.
+
+    The tracker decides this over many frames; here one frame must do. Its shirts give
+    the two team colours, and a box counts as an observer's if its shirt is orange or
+    red without that being a team colour. With too few shirts to tell the teams, nobody
+    is taken for an observer.
+    """
+    kits = appearance.encode(frame, boxes)
+    shirts = [None if kit is None else kit[:3] for kit in kits]
+    seen = [shirt for shirt in shirts if shirt is not None]
+    if len(seen) < MIN_SHIRTS_IN_FRAME:
+        return [False] * len(shirts)
+    team_colours = team_colours_of(seen)
+    return [bool(off_team_colours(shirt, team_colours)) for shirt in shirts]
 
 
 class DetectionBoxes:
@@ -195,12 +240,8 @@ class TeamTracker(BYTETracker):
         """Split the shirt colours seen so far into two groups."""
         self._frames_since_fit = 0
         del self._shirt_samples[:-MAX_SAMPLES]
-        samples = np.array(self._shirt_samples, dtype=np.float32)
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.5)
-        # The same samples must give the same teams: fixed starting points
-        cv2.setRNGSeed(0)
-        _, _, colours = cv2.kmeans(samples, 2, None, criteria, 3, cv2.KMEANS_PP_CENTERS)
-        if np.linalg.norm(colours[0] - colours[1]) < MIN_TEAM_DISTANCE:
+        colours = team_colours_of(self._shirt_samples)
+        if colours is None:
             self.team_colours = None
             return
         # Team 0 stays team 0: the tracks have counted their sightings by these numbers
@@ -222,14 +263,15 @@ class TeamTracker(BYTETracker):
 
     def _off_team_colours(self, shirt: Optional[np.ndarray]) -> Optional[bool]:
         """Whether a shirt is orange or red without that being a team colour."""
-        if self.team_colours is None or shirt is None:
-            return None
-        if shirt[1] < OBSERVER_MIN_RED or shirt[2] < OBSERVER_MIN_YELLOW:
-            return False
-        along = self.team_colours[1] - self.team_colours[0]
-        along = along / np.linalg.norm(along)
-        offset = shirt - self.team_colours[0]
-        return bool(np.linalg.norm(offset - (offset @ along) * along) > OUTSIDER_DISTANCE)
+        return off_team_colours(shirt, self.team_colours)
+
+    def teams(self) -> Dict[int, int]:
+        """Track ID -> team (0 or 1) of the tracks whose team is known."""
+        return {
+            int(track.track_id): int(track.team)
+            for track in self.tracked_stracks + self.lost_stracks
+            if getattr(track, "team", None) is not None
+        }
 
     def outsiders(self) -> set:
         """IDs of the tracks that are followed but are no player of either team."""

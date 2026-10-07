@@ -29,17 +29,20 @@ GRIPS: Dict[str, str] = {
     "left": "l",
 }
 
+# What a drag on free space draws, by mouse button: a disc (class 0) or a player (class 1)
+BUTTON_CLASS = {Qt.LeftButton: 0, Qt.RightButton: 1}
+
 
 class BoxCanvas(QWidget):
     """Shows a frame and lets the user edit the boxes on it.
 
-    - Drag: draw a new box of the current class, also across existing boxes (a disc in
-      front of a player lies inside the player's box)
+    - Drag: draw a new box, a disc with the left button and a player with the right,
+      also across existing boxes (a disc in front of a player lies inside the player's box)
     - Click a box: select it (the smallest one under the mouse)
     - Drag the selected box: move it; drag one of its grips: resize it
     - Click on free space or Escape: select nothing
     - Delete or Backspace: remove the selected box
-    - Mouse wheel: zoom at the mouse; right or middle button drag: move the view
+    - Mouse wheel: zoom at the mouse; middle button drag: move the view
     """
 
     boxes_changed = pyqtSignal()
@@ -48,7 +51,9 @@ class BoxCanvas(QWidget):
         super().__init__()
         self.boxes: List[LabelBox] = []
         self.selected: Optional[int] = None
-        self.current_class = 0
+        # The classes boxes may have here; a disc-only dataset takes no player boxes
+        self.classes = set(BUTTON_CLASS.values())
+        self._button = Qt.LeftButton  # The button the drag under way began with
         self.unconfirmed = False  # Boxes are a suggestion that has not been saved
 
         self._pixmap: Optional[QPixmap] = None
@@ -85,9 +90,8 @@ class BoxCanvas(QWidget):
         self.update()
 
     def set_class(self, class_id: int) -> None:
-        """Class of new boxes; a selected box is changed to it as well."""
-        self.current_class = class_id
-        if self.selected is not None:
+        """Change the selected box to another class."""
+        if self.selected is not None and class_id in self.classes:
             self.boxes[self.selected].class_id = class_id
             self._changed()
 
@@ -176,11 +180,12 @@ class BoxCanvas(QWidget):
 
     def mousePressEvent(self, event):
         self.setFocus()
-        if event.button() in (Qt.RightButton, Qt.MiddleButton):
+        if event.button() == Qt.MiddleButton:
             self._pan_from = QPointF(event.pos())
             return
-        if event.button() != Qt.LeftButton or self._pixmap is None:
+        if event.button() not in BUTTON_CLASS or self._pixmap is None or self._drag is not None:
             return
+        self._button = event.button()
 
         position = QPointF(event.pos())
         x, y = self.to_frame(position)
@@ -219,9 +224,14 @@ class BoxCanvas(QWidget):
         if mode == "undecided":
             if (position - start).manhattanLength() <= CLICK_SLACK:
                 return
-            # Dragging draws a new box from where the button went down
+            # Dragging draws a new box from where the button went down: a disc with the
+            # left button, a player with the right
+            new_class = BUTTON_CLASS[self._button]
+            if new_class not in self.classes:
+                self._drag = None
+                return
             start_x, start_y = self.to_frame(start)
-            self.boxes.append(LabelBox(self.current_class, start_x, start_y, start_x, start_y))
+            self.boxes.append(LabelBox(new_class, start_x, start_y, start_x, start_y))
             self.selected = len(self.boxes) - 1
             mode = "rb"
             self._drag = (mode, start, None)
@@ -250,10 +260,10 @@ class BoxCanvas(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, event):
-        if event.button() in (Qt.RightButton, Qt.MiddleButton):
+        if event.button() == Qt.MiddleButton:
             self._pan_from = None
             return
-        if self._drag is None:
+        if self._drag is None or event.button() != self._button:
             return
         if self._drag[0] == "undecided":
             # A click: select the box under the mouse, or nothing on free space

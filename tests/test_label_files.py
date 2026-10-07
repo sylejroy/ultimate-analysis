@@ -81,6 +81,19 @@ class LabelFileTests(unittest.TestCase):
         self.assertEqual(module.labelled_frames(self.dataset, "x/a.mp4"), names[1:])
         self.assertEqual(module.labelled_frames(self.dataset, "x/b.mp4"), [])
 
+    def test_random_draw_favours_videos_with_few_labels_for_their_length(self):
+        weights = self.module.random_video_weights([1000, 1000, 2000], [40, 0, 10])
+        # The unlabelled video before the thinly labelled long one, the densest last
+        self.assertGreater(weights[2], weights[1])
+        self.assertGreater(weights[1], 10 * weights[0])
+        self.assertGreater(weights[0], 0)
+        # Evenly labelled, or not labelled at all: by length
+        even = self.module.random_video_weights([1000, 3000], [10, 30])
+        self.assertAlmostEqual(even[1] / even[0], 3.0)
+        fresh = self.module.random_video_weights([1000, 3000], [0, 0])
+        self.assertAlmostEqual(fresh[1] / fresh[0], 3.0)
+        self.assertEqual(self.module.random_video_weights([0, 0], [0, 0]), [0.0, 0.0])
+
     def test_a_disc_only_dataset_keeps_its_single_class(self):
         module = self.module
         first = module.frame_name("a.mp4", 10)

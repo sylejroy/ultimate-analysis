@@ -10,7 +10,7 @@ app:
 # Video Processing Settings
 video:
   default_fps: 25                # Used when a video file reports no valid frame rate
-  default_video: "portland_vs_san_francisco_2024_snippet_4_40912.mp4"  # Opened at startup if present
+  default_video: "portland_vs_san_francisco_2024.mp4"  # Opened at startup if present
 
 # Model Configuration
 models:
@@ -161,6 +161,8 @@ logging:
 
 # Homography Estimation Settings
 homography:
+  source: "calibration"                      # Top-down view from: "calibration" (set by hand in the Homography tab) or "field" (where the field model sees the field)
+  ruleset: "usau"                            # The field the field model's view is laid on: "usau" or "wfdf"
   save_directory: "configs"
   default_params_file: "configs/homography_params.yaml"
   slider_range_main: [-100.0, 100.0]          # Range for H00, H01, H10, H11 (scale/skew/extreme) - expanded from [-50.0, 50.0]
