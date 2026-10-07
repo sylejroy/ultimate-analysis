@@ -9,11 +9,16 @@ In Ultimate most of these meetings are between a player and the opponent marking
 and the two teams wear different colours. The tracker here learns the two shirt colours
 of the game while it runs, gives each track the team its player's shirt mostly looked
 like, and never continues a track with a detection that clearly wears the other colour.
+It also matches by where the feet are, which tells apart two players at different depths
+whose boxes cover each other.
 A track that ended up on the wrong player is thereby cut off when the two come apart;
 reconnecting the player with their own track is left to the identity layer
 (player_identity.py), which knows where they can have got to.
 
 Swaps between teammates are not prevented by this.
+
+The same colours tell the observers from the players: a track whose shirt is orange or
+red nearly every time it is seen, without that being a team colour, can be left out.
 """
 
 from types import SimpleNamespace
@@ -39,9 +44,25 @@ MIN_TEAM_DISTANCE = 40.0
 # A shirt belongs to a team if it is nearer to its colour than to the other by this share
 # of the distance between the two
 MIN_COLOUR_MARGIN = 0.3
+# How much the place of the feet counts in matching a detection to a track, next to how
+# much the boxes overlap. Two players whose boxes cover each other mostly stand at
+# different depths: their feet are apart when their boxes are not.
+FEET_WEIGHT = 0.5
 # A track has a team once this many clear sightings, and this share of them, agree
 MIN_VOTES = 3
 MIN_VOTE_SHARE = 0.75
+# Observers wear orange or red. A track is one if nearly all its clear sightings show a
+# shirt that is (1) orange or red: in Lab, where 128 is grey, clearly on the red and on
+# the yellow side, and (2) not a team colour: the two team colours differ mostly in how
+# light they are, and light and shadow move a shirt along the line between them, so a
+# team in red lies on that line and an observer far off it. Without (1), players of teams
+# in purple or green were taken for outsiders; the five observers in the 21 clips had
+# shirts of (a, b) between (138, 152) and (177, 164) and were 22 to 54 off the line.
+OBSERVER_MIN_RED = 134
+OBSERVER_MIN_YELLOW = 146
+OUTSIDER_DISTANCE = 18.0
+OUTSIDER_MIN_SIGHTINGS = 20
+OUTSIDER_SHARE = 0.85
 
 
 class DetectionBoxes:
@@ -99,16 +120,39 @@ def largest_overlaps(boxes: np.ndarray) -> np.ndarray:
     return overlap.max(axis=1)
 
 
+def feet_distances(tracks: np.ndarray, detections: np.ndarray) -> np.ndarray:
+    """How far the feet of each detection are from where each track expects its player's.
+
+    The feet are the bottom centre of a box (x1, y1, x2, y2). The distance is given in
+    body heights, and 1 from one body height on.
+    """
+    track_feet = np.column_stack([(tracks[:, 0] + tracks[:, 2]) / 2, tracks[:, 3]])
+    detection_feet = np.column_stack([(detections[:, 0] + detections[:, 2]) / 2, detections[:, 3]])
+    apart = np.linalg.norm(track_feet[:, None, :] - detection_feet[None, :, :], axis=2)
+    height = np.maximum(
+        (tracks[:, 3] - tracks[:, 1])[:, None], (detections[:, 3] - detections[:, 1])[None, :]
+    )
+    return np.clip(apart / (height + 1e-9), 0.0, 1.0)
+
+
 class TeamTrack(STrack):
     """A track that keeps count of which team its player's shirt looked like."""
 
     clear = False  # As a detection: no other box covers it
     shirt_team: Optional[int] = None  # As a detection: the team its shirt colour says
+    off_colours: Optional[bool] = None  # As a detection: an observer's orange or red shirt
     team: Optional[int] = None  # As a track: the team most of its clear sightings said
+    outsider = False  # As a track: an observer's shirt nearly every time
 
     def _count(self, detection: "TeamTrack") -> None:
         if not hasattr(self, "votes"):
             self.votes = [0, 0]
+            self.colour_sightings = [0, 0]  # All with a known shirt colour, those off the teams'
+        if detection.clear and detection.off_colours is not None:
+            self.colour_sightings[0] += 1
+            self.colour_sightings[1] += detection.off_colours
+            seen, off = self.colour_sightings
+            self.outsider = seen >= OUTSIDER_MIN_SIGHTINGS and off >= OUTSIDER_SHARE * seen
         if detection.clear and detection.shirt_team is not None:
             self.votes[detection.shirt_team] += 1
             best = int(self.votes[1] > self.votes[0])
@@ -176,6 +220,25 @@ class TeamTracker(BYTETracker):
             return None
         return int(distance[1] < distance[0])
 
+    def _off_team_colours(self, shirt: Optional[np.ndarray]) -> Optional[bool]:
+        """Whether a shirt is orange or red without that being a team colour."""
+        if self.team_colours is None or shirt is None:
+            return None
+        if shirt[1] < OBSERVER_MIN_RED or shirt[2] < OBSERVER_MIN_YELLOW:
+            return False
+        along = self.team_colours[1] - self.team_colours[0]
+        along = along / np.linalg.norm(along)
+        offset = shirt - self.team_colours[0]
+        return bool(np.linalg.norm(offset - (offset @ along) * along) > OUTSIDER_DISTANCE)
+
+    def outsiders(self) -> set:
+        """IDs of the tracks that are followed but are no player of either team."""
+        return {
+            int(track.track_id)
+            for track in self.tracked_stracks + self.lost_stracks
+            if getattr(track, "outsider", False)
+        }
+
     def init_track(self, results: Any, img: Optional[np.ndarray] = None) -> List[STrack]:
         detections = super().init_track(results, img)
         if img is None or not detections:
@@ -186,6 +249,7 @@ class TeamTracker(BYTETracker):
             shirt = None if kit is None else kit[:3]
             detection.clear = bool(overlap < CLEAR_OVERLAP)
             detection.shirt_team = self._team_of(shirt)
+            detection.off_colours = self._off_team_colours(shirt)
             if (
                 shirt is not None
                 and overlap < SAMPLE_OVERLAP
@@ -196,6 +260,11 @@ class TeamTracker(BYTETracker):
 
     def get_dists(self, tracks: List[STrack], detections: List[STrack]) -> np.ndarray:
         distances = super().get_dists(tracks, detections)
+        if len(tracks) and len(detections):
+            distances = (1 - FEET_WEIGHT) * distances + FEET_WEIGHT * feet_distances(
+                np.array([track.xyxy for track in tracks], dtype=np.float64),
+                np.array([detection.xyxy for detection in detections], dtype=np.float64),
+            )
         for row, track in enumerate(tracks):
             team = getattr(track, "team", None)
             if team is None:

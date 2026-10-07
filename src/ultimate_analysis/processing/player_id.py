@@ -5,6 +5,7 @@ or by one of the readers in jersey_readers.py (models.player_id.method), and com
 over time by probabilistic tracking.
 """
 
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -15,6 +16,7 @@ import yaml
 from ..config.settings import get_setting
 from ..constants import JERSEY_NUMBER_MAX, JERSEY_NUMBER_MIN
 from ..utils.logger import get_logger
+from . import facing
 from .jersey_crops import (
     JerseyCropSelector,
     best_number,
@@ -30,6 +32,7 @@ from .jersey_tracker import (
     get_jersey_probabilities,
     get_jersey_tracker,
 )
+from .model_lock import GPU_SETUP_LOCK
 
 logger = get_logger("PLAYER_ID")
 
@@ -42,6 +45,7 @@ except ImportError:
     logger.warning("EasyOCR not available; jersey numbers will not be read")
 
 # Global player ID state
+_easyocr_config_checked = 0.0  # When the settings file was last looked at (monotonic s)
 _easyocr_reader = None
 # Reader chosen in the GUI; None means the configured one (models.player_id.method)
 _method_override: Optional[str] = None
@@ -86,6 +90,7 @@ def run_player_id_on_tracks(
     frame_index: int = 0,
     finalized_tracks: Optional[Set[int]] = None,
     crop_selector: Optional[JerseyCropSelector] = None,
+    background: bool = False,
 ) -> Tuple[Dict[int, Tuple[str, Any]], Dict[str, float], Set[int]]:
     """Run player identification on tracked objects using batch EasyOCR with probabilistic tracking.
 
@@ -97,6 +102,9 @@ def run_player_id_on_tracks(
         frame_index: Current global frame index (for interval/stagger logic)
         finalized_tracks: Set of track_ids whose jersey number is finalized (probability >= threshold)
         crop_selector: Pipeline-owned recent crop cache; None keeps fixed-frame sampling
+        background: Read the numbers on another thread instead of waiting for them here.
+            The readings of a call are then recorded, and returned, by a later call.
+            Needs the crop selector.
 
     Returns:
         Tuple of (player_identifications, timing_info, finalized_tracks)
@@ -146,6 +154,31 @@ def run_player_id_on_tracks(
             getattr(track, "track_id", getattr(track, "id", None)) for track in tracks
         } - finalized_tracks
         crop_selector.begin_frame(frame_index, active_ids)
+    background = background and selection_enabled
+
+    def record(metadata: Dict[str, Any], jersey_number: str, details: Optional[Dict]) -> tuple:
+        return _record_reading(
+            metadata,
+            jersey_number,
+            details,
+            frame_index,
+            crop_selector if selection_enabled else None,
+            ocr_frame_interval,
+            finalized_tracks,
+            finalized_threshold,
+            verbose_debug,
+        )
+
+    reader_idle = True
+    if background:
+        # What the reader finished since the last call
+        finished, reader_idle = _background_reader.collect()
+        for read_metadata, read_results in finished:
+            for metadata, (jersey_number, details) in zip(read_metadata, read_results):
+                player_identifications[metadata["track_id"]] = record(
+                    metadata, jersey_number, details
+                )
+
     if not tracks:
         return player_identifications, total_timing, finalized_tracks
 
@@ -203,6 +236,10 @@ def run_player_id_on_tracks(
                 else:
                     if frame_index % ocr_frame_interval != 0:
                         due = False
+            if background:
+                # The reader takes the next crops when it is done with the last ones; each
+                # player's own rhythm is kept by the crop selector
+                due = reader_idle and len(player_crops) < MAX_BACKGROUND_CROPS
             if not selection_enabled and not due:
                 skipped_interval += 1
                 continue
@@ -273,99 +310,14 @@ def run_player_id_on_tracks(
             continue
 
     selection_ms = (time.perf_counter() - selection_start) * 1000
-    # Run batch OCR processing if we have crops
-    if player_crops:
+    if player_crops and background:
+        # The reader works on these while the next frames are analysed; what it finds is
+        # recorded at the start of a later call
+        _background_reader.submit(player_crops, track_metadata)
+    elif player_crops:
         batch_results, batch_timing = _read_jersey_numbers(player_crops)
-
-        # Process batch results
-        for i, metadata in enumerate(track_metadata):
-            if i < len(batch_results):
-                track_id = metadata["track_id"]
-                crop_width = metadata["crop_width"]
-                jersey_number, details = batch_results[i]
-                if selection_enabled:
-                    crop_selector.record_read(
-                        track_id,
-                        frame_index,
-                        jersey_number != "Unknown",
-                        ocr_frame_interval,
-                        int(get_setting("models.player_id.crop_selection.max_backoff", 4)),
-                    )
-
-                # Add single-frame result to tracking history if valid
-                if jersey_number and jersey_number != "Unknown" and details:
-                    # Try to get OCR detection position, otherwise use bbox center
-                    bbox_center_x = 0.5  # Default to center
-                    if details and "ocr_results" in details and details["ocr_results"]:
-                        # Calculate average x position of detected text
-                        total_x = 0
-                        count = 0
-                        for ocr_result in details["ocr_results"]:
-                            if len(ocr_result) >= 2:  # [bbox, text, confidence]
-                                ocr_bbox = ocr_result[0]
-                                if isinstance(ocr_bbox, (list, tuple)) and len(ocr_bbox) >= 4:
-                                    # Calculate center x of OCR detection
-                                    if isinstance(ocr_bbox[0], (list, tuple)):
-                                        # Polygon format: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-                                        xs = [point[0] for point in ocr_bbox]
-                                        center_x = sum(xs) / len(xs)
-                                    else:
-                                        # Box format: [x1, y1, x2, y2]
-                                        center_x = (ocr_bbox[0] + ocr_bbox[2]) / 2
-
-                                    # Normalize to 0-1 within crop
-                                    bbox_center_x = center_x / crop_width
-                                    total_x += bbox_center_x
-                                    count += 1
-
-                        if count > 0:
-                            bbox_center_x = total_x / count
-                            # Clamp to [0, 1]
-                            bbox_center_x = max(0.0, min(1.0, bbox_center_x))
-
-                    # Add measurement to tracker
-                    confidence = details.get("confidence", 0.0)
-                    add_jersey_measurement(track_id, jersey_number, confidence, bbox_center_x)
-
-                # Get tracking history and best tracked result
-                tracking_history = get_jersey_probabilities(track_id, top_k=3)
-                best_tracked_number, best_tracked_prob = get_best_jersey_number(track_id)
-
-                # Finalization check
-                is_finalized = False
-                if best_tracked_number and best_tracked_prob >= finalized_threshold:
-                    finalized_tracks.add(track_id)
-                    is_finalized = True
-
-                # Prepare enhanced details
-                enhanced_details = details.copy() if details else {}
-                enhanced_details.update(
-                    {
-                        "single_frame": {
-                            "jersey_number": jersey_number,
-                            "confidence": details.get("confidence", 0.0) if details else 0.0,
-                        },
-                        "tracking_history": tracking_history,
-                        "best_tracked": {
-                            "jersey_number": best_tracked_number,
-                            "probability": best_tracked_prob,
-                        },
-                        "finalized": is_finalized,
-                        # Only attach tracker object for debugging (it is large)
-                        **({"jersey_tracker": get_jersey_tracker()} if verbose_debug else {}),
-                    }
-                )
-
-                # A number is shown once the readings so far add up to one; a single
-                # reading is too often wrong to be shown on its own
-                primary_result = best_tracked_number or "Unknown"
-
-                player_identifications[track_id] = (primary_result, enhanced_details)
-
-                if verbose_debug:
-                    logger.debug(
-                        f"Track {track_id}: single='{jersey_number}' tracked='{best_tracked_number}' ({best_tracked_prob:.2%}) primary='{primary_result}' finalized={'yes' if track_id in finalized_tracks else 'no'}"
-                    )
+        for metadata, (jersey_number, details) in zip(track_metadata, batch_results):
+            player_identifications[metadata["track_id"]] = record(metadata, jersey_number, details)
 
     # Add batch timing to totals
     total_timing["preprocessing_ms"] += batch_timing.get("preprocessing_ms", 0.0)
@@ -381,6 +333,149 @@ def run_player_id_on_tracks(
     total_timing["tracks_skipped_interval"] = skipped_interval
     total_timing["tracks_skipped_finalized"] = skipped_finalized
     return player_identifications, total_timing, finalized_tracks
+
+
+def _record_reading(
+    metadata: Dict[str, Any],
+    jersey_number: str,
+    details: Optional[Dict],
+    frame_index: int,
+    crop_selector: Optional[JerseyCropSelector],
+    ocr_frame_interval: int,
+    finalized_tracks: Set[int],
+    finalized_threshold: float,
+    verbose_debug: bool,
+) -> Tuple[str, Dict[str, Any]]:
+    """Take one reading of a player into account; returns (number to show, details).
+
+    The reading is added to the player's votes, the crop selector learns whether the crop
+    was readable, and the player is finalized once the votes are certain enough.
+    """
+    track_id = metadata["track_id"]
+    if crop_selector is not None:
+        crop_selector.record_read(
+            track_id,
+            frame_index,
+            jersey_number != "Unknown",
+            ocr_frame_interval,
+            int(get_setting("models.player_id.crop_selection.max_backoff", 4)),
+        )
+
+    if jersey_number and jersey_number != "Unknown" and details:
+        # Where across the crop the number was read (0 = left edge, 1 = right edge)
+        centres = []
+        for reading in details.get("ocr_results") or []:
+            box = reading[0] if len(reading) >= 2 else None
+            if not isinstance(box, (list, tuple)) or len(box) < 4:
+                continue
+            if isinstance(box[0], (list, tuple)):  # Corner points
+                centre = sum(point[0] for point in box) / len(box)
+            else:  # x1, y1, x2, y2
+                centre = (box[0] + box[2]) / 2
+            centres.append(centre / metadata["crop_width"])
+        position = max(0.0, min(1.0, sum(centres) / len(centres))) if centres else 0.5
+        add_jersey_measurement(track_id, jersey_number, details.get("confidence", 0.0), position)
+
+    tracking_history = get_jersey_probabilities(track_id, top_k=3)
+    best_number, best_probability = get_best_jersey_number(track_id)
+    is_finalized = bool(best_number) and best_probability >= finalized_threshold
+    if is_finalized:
+        finalized_tracks.add(track_id)
+
+    enhanced_details = details.copy() if details else {}
+    enhanced_details.update(
+        {
+            "single_frame": {
+                "jersey_number": jersey_number,
+                "confidence": details.get("confidence", 0.0) if details else 0.0,
+            },
+            "tracking_history": tracking_history,
+            "best_tracked": {"jersey_number": best_number, "probability": best_probability},
+            "finalized": is_finalized,
+            # Only attach tracker object for debugging (it is large)
+            **({"jersey_tracker": get_jersey_tracker()} if verbose_debug else {}),
+        }
+    )
+    if verbose_debug:
+        logger.debug(
+            f"Track {track_id}: single='{jersey_number}' tracked='{best_number}' "
+            f"({best_probability:.3f})"
+        )
+    # A number is shown once the readings so far add up to one; a single reading is too
+    # often wrong to be shown on its own
+    return best_number or "Unknown", enhanced_details
+
+
+class _BackgroundReader:
+    """Reads jersey numbers on a thread of its own, one batch of crops at a time."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._job: Optional[tuple] = None  # (generation, crops, metadata) being read
+        self._finished: List[tuple] = []  # (metadata, results) not yet collected
+        self._generation = 0
+        self._thread: Optional[threading.Thread] = None
+
+    def collect(self) -> Tuple[List[tuple], bool]:
+        """What was read since the last call, and whether the reader is free for more."""
+        with self._lock:
+            finished, self._finished = self._finished, []
+            return finished, self._job is None
+
+    def submit(self, crops: List[np.ndarray], metadata: List[Dict[str, Any]]) -> None:
+        """Hand over crops to read. Only call when collect() said the reader is free."""
+        with self._lock:
+            self._job = (self._generation, crops, metadata)
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run, name="jersey-reader", daemon=True)
+                self._thread.start()
+        self._wake.set()
+
+    def discard(self) -> None:
+        """Forget what is being read and what was read (another video, a seek)."""
+        with self._lock:
+            self._generation += 1
+            self._finished = []
+
+    def wait(self, timeout: float = 10.0) -> None:
+        """Block until the reader is free (for tests and benchmarks)."""
+        deadline = time.perf_counter() + timeout
+        while time.perf_counter() < deadline:
+            with self._lock:
+                if self._job is None:
+                    return
+            time.sleep(0.001)
+
+    def _run(self) -> None:
+        while True:
+            self._wake.wait()
+            self._wake.clear()
+            with self._lock:
+                job = self._job
+            if job is None:
+                continue
+            generation, crops, metadata = job
+            try:
+                results, _ = _read_jersey_numbers(crops)
+            except Exception as e:
+                logger.exception(f"Error reading jersey numbers in the background: {e}")
+                results = None
+            with self._lock:
+                if results is not None and generation == self._generation:
+                    self._finished.append((metadata, results))
+                self._job = None
+
+
+_background_reader = _BackgroundReader()
+# A batch for the background reader is kept small: while it is read, the GPU is shared
+# with the detection of the frames that go on
+MAX_BACKGROUND_CROPS = 4
+
+
+def discard_pending_readings() -> None:
+    """Drop the readings the background reader has not delivered yet (seek, new video)."""
+    _background_reader.discard()
 
 
 MIN_READING_CONFIDENCE = 0.5  # Readings the reader is less sure of are dropped
@@ -408,6 +503,17 @@ def _read_jersey_numbers(
     if not crop_images:
         return unread, timing
 
+    # One read at a time: the reader models are shared with the background reader. And
+    # never while a GPU engine is being set up on another thread.
+    with GPU_SETUP_LOCK:
+        return _read_crops(crop_images, unread, timing)
+
+
+def _read_crops(
+    crop_images: List[np.ndarray],
+    unread: List[Tuple[str, Optional[Dict]]],
+    timing: Dict[str, float],
+) -> Tuple[List[Tuple[str, Optional[Dict]]], Dict[str, float]]:
     if _easyocr_reader is None:
         _initialize_easyocr()
     if not EASYOCR_AVAILABLE or _easyocr_reader is None:
@@ -424,10 +530,16 @@ def _read_jersey_numbers(
 
         # Upper body of each crop, prepared for the reader; None for crops left out
         start = time.perf_counter()
+        # The number is on the back: a player seen from the front or the side is not read
+        seen_from = [facing.BACK] * len(crop_images)
+        if get_setting("models.player_id.only_from_behind", False) and facing.available():
+            seen_from = facing.facings(crop_images)
         prepared: List[Optional[np.ndarray]] = []
         metadata: List[Optional[Dict]] = []
         for i, crop_image in enumerate(crop_images):
             try:
+                if seen_from[i] != facing.BACK:
+                    raise ValueError(f"seen from the {seen_from[i] or 'unknown side'}")
                 crop_height, crop_width = crop_image.shape[:2]
                 if crop_width < crop_config.get(
                     "min_crop_width", 20
@@ -536,6 +648,14 @@ def _load_easyocr_config() -> Dict[str, Any]:
             _easyocr_config_path = project_root / "configs" / "easyocr_params.yaml"
 
         config_path = _easyocr_config_path
+
+        # Asking the file system costs half a millisecond; once a second is enough to
+        # notice a save from the tuning tab
+        global _easyocr_config_checked
+        now = time.monotonic()
+        if _easyocr_config_mtime_ns is not None and now - _easyocr_config_checked < 1.0:
+            return _easyocr_config_cache
+        _easyocr_config_checked = now
 
         try:
             mtime_ns = config_path.stat().st_mtime_ns

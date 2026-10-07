@@ -278,11 +278,11 @@ def draw_tracks_with_player_ids(
             history = track_histories[track_id]
             if len(history) > 1:
                 # Draw trajectory line
-                points = np.array(history, dtype=np.int32)
+                points = np.asarray(history, dtype=np.int32)
                 cv2.polylines(vis_frame, [points], False, color, 2)
 
                 # Draw trajectory points
-                for point in history[-10:]:  # Show last 10 points
+                for point in points[-10:].tolist():  # Show last 10 points
                     cv2.circle(vis_frame, tuple(point), 3, color, -1)
 
     return vis_frame
@@ -408,7 +408,10 @@ def draw_tracks(
 
         # Draw track history if available (tracks are at foot level)
         if track_histories and track_id in track_histories:
-            history = track_histories[track_id]
+            history = [
+                tuple(point)
+                for point in np.asarray(track_histories[track_id], dtype=np.int32).tolist()
+            ]
             if len(history) > 1:
                 # Draw trajectory lines with decreasing opacity for older points
                 for i in range(1, len(history)):

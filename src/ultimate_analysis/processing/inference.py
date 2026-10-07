@@ -412,9 +412,9 @@ def _load_role_model(
 def player_image_size(trained_size: int) -> int:
     """Image size the player model runs at in the pipeline.
 
-    The detectors are trained at the size the disc needs, 11 pixels wide in a frame of
-    1280. A player is 90 pixels tall there and found as well in a smaller picture, which
-    takes less time (models.player_detection.image_size; 0 = the size it was trained at).
+    By default the size it was trained at (models.player_detection.image_size: 0). A
+    player is 90 pixels tall at 1280 and found as well at 960, in less time; but the boxes
+    are then less steady from frame to frame, and the tracker changes more IDs.
     """
     return int(get_setting("models.player_detection.image_size", 0)) or trained_size
 
@@ -525,6 +525,16 @@ def run_inference(
     # One model in both roles: a single pass finds players and discs
     shared_model = _player_model is not None and _player_model is _disc_model
 
+    # Skip disc model if no disc detected in recent frames (optimization)
+    global _frames_since_last_disc
+    skip_disc = (
+        get_setting("models.disc_detection.adaptive_skip", True)
+        and _frames_since_last_disc > get_setting("models.disc_detection.skip_threshold", 30)
+        # Periodically probe so a disc entering the frame can be detected again.
+        and _frames_since_last_disc
+        % max(1, int(get_setting("models.disc_detection.retry_interval", 5)))
+        != 0
+    )
     # Run player detection
     if shared_model:
         all_detections, player_timing = _predict_detections(
@@ -541,18 +551,6 @@ def run_inference(
         all_detections.extend(player_detections)
     else:
         logger.warning("Player model not loaded")
-
-    # Run disc detection with adaptive skipping
-    # Skip disc model if no disc detected in recent frames (optimization)
-    global _frames_since_last_disc
-    skip_disc = (
-        get_setting("models.disc_detection.adaptive_skip", True)
-        and _frames_since_last_disc > get_setting("models.disc_detection.skip_threshold", 30)
-        # Periodically probe so a disc entering the frame can be detected again.
-        and _frames_since_last_disc
-        % max(1, int(get_setting("models.disc_detection.retry_interval", 5)))
-        != 0
-    )
 
     if shared_model:
         disc_timing = {"preprocessing": 0.0, "inference": 0.0, "postprocessing": 0.0, "total": 0.0}

@@ -68,6 +68,21 @@ class TeamTrackerTests(unittest.TestCase):
             now = self.see((100, WHITE), (300 + 3 * step, WHITE), (500, DARK), (700, DARK))
         self.assertEqual(now, ids)
 
+    def test_someone_in_neither_teams_colours_is_an_outsider(self):
+        orange = (30, 130, 250)
+        # Three players a side and one observer, as few as the observers are in a game
+        people = [(40 + 120 * place, WHITE if place < 3 else DARK) for place in range(6)]
+        for _ in range(60):
+            ids = self.see(*people, (780, orange))
+        self.assertEqual(self.tracker.outsiders(), {ids[6]})
+
+    def test_feet_distances_are_in_body_heights(self):
+        tracks = np.array([box(0)], dtype=np.float64)
+        detections = np.array([box(0), box(0, 200 + SIZE[1] / 2), box(500)], dtype=np.float64)
+        np.testing.assert_allclose(
+            team_tracker.feet_distances(tracks, detections), [[0.0, 0.5, 1.0]], atol=1e-6
+        )
+
     def test_largest_overlaps(self):
         boxes = np.array([box(0), box(20), box(500)], dtype=np.float32)
         overlaps = team_tracker.largest_overlaps(boxes)

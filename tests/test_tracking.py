@@ -27,7 +27,7 @@ class TrackingTests(unittest.TestCase):
     def test_empty_frame_ages_tracker_and_prunes_retired_histories(self):
         tracker = Mock()
         tracker.update_tracks.return_value = []
-        self.module._track_histories[7] = [(1, 2)]
+        self.module._track_histories[7] = np.array([(1, 2)], dtype=np.float32)
         frame = np.zeros((8, 8, 3))
         with patch.multiple(self.module, _deepsort_tracker=tracker, DEEPSORT_AVAILABLE=True):
             self.assertEqual(self.module.run_tracking(frame, []), [])
@@ -91,14 +91,16 @@ class TrackingTests(unittest.TestCase):
         track = SimpleNamespace(mean=np.array([400.0, 300.0, 0.4, 100.0, 5.0, 0.0, 0.0, 1.0]))
         tracker = Mock()
         tracker.tracker.tracks = [track]
-        self.module._track_histories[1] = [(400, 350), (410, 350)]
+        self.module._track_histories[1] = np.array([(400, 350), (410, 350)], dtype=np.float32)
 
         with patch.object(self.module, "_deepsort_tracker", tracker):
             # The camera pans: the picture moves 20 px left and 4 px up
             pan = np.array([[1.0, 0, -20], [0, 1, -4], [0, 0, 1]])
             self.module.apply_camera_motion(pan)
             np.testing.assert_allclose(track.mean, [380, 296, 0.4, 100, 5, 0, 0, 1])
-            self.assertEqual(self.module._track_histories[1], [(380, 346), (390, 346)])
+            np.testing.assert_allclose(
+                self.module.get_track_histories()[1], [(380, 346), (390, 346)]
+            )
 
             # The camera zooms in by 10% around the picture's corner
             zoom = np.diag([1.1, 1.1, 1.0])

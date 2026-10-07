@@ -19,9 +19,6 @@ detection:
   weight_decay: 0.0005
   workers: 8
 output:
-  save_models: true
-  save_plots: true
-  save_results: true
   verbose: true
 segmentation:
   augment: true

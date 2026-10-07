@@ -25,14 +25,14 @@ models:
   # Separate player and disc detection models
   player_detection:
     default_model: "data/models/detection/20261005_1_detection_yolo26s_players_merged.v2.yolov8/finetune_20261005_010313/weights/best.pt"
-    image_size: 960              # The player model runs at this size (0 = as trained, 1280); players are found as well, in less time
+    image_size: 0                # Size the player model runs at; 0 = as trained (1280). 960 finds the players as well and saves 1.5 ms, but tracking gets worse (see README)
     confidence_threshold: 0.5
-    nms_threshold: 0.45
+    nms_threshold: 0.45          # Only for models that need it; YOLO26 removes double boxes itself
     
   disc_detection:
     default_model: "data/models/detection/20261006_1_detection_yolo26s_combined_discs_v3/finetune_20261006_070123/weights/best.pt"
     confidence_threshold: 0.3
-    nms_threshold: 0.45
+    nms_threshold: 0.45          # Only for models that need it; YOLO26 removes double boxes itself
     adaptive_skip: true          # Skip disc model when no disc detected recently
     skip_threshold: 30           # Frames without disc before skipping disc model
     retry_interval: 5            # While absent, search every fifth frame (was every thirtieth)
@@ -61,7 +61,7 @@ models:
       point_color: [0, 255, 255] # BGR color for contour points (cyan)
       line_thickness: 3          # Thickness of contour lines
       point_radius: 5            # Radius of contour points
-      draw_points: true          # Whether to draw individual contour points
+      draw_points: false         # Dots on the corners of the simplified outline (for checking the outline)
       
       # Contour interpolation parameters
       interpolation:
@@ -76,14 +76,15 @@ models:
         distance_threshold: 5.0 # Maximum distance from point to line for inliers
         min_samples: 2          # Minimum number of points needed to fit a line
         max_trials: 100         # Point pairs tried per line (all at once, so they are cheap)
+        smooth_lines: true      # Move the lines with the camera between fits and blend each new fit in, instead of jumping
         min_line_length: 60     # Pixels; anything shorter is a corner or dent, not a field line
         line_color: [0, 255, 0] # BGR color for RANSAC lines (green)
         outlier_color: [0, 165, 255] # BGR color for RANSAC outlier points (orange)
         outlier_radius: 6       # Radius for outlier point visualization (increased for visibility)
-        show_outliers: true     # Whether to visualize RANSAC outliers (enabled)
+        show_outliers: false    # Dots on outline points that are on no line (for checking the fit)
         inlier_color: [0, 255, 0] # BGR color for RANSAC inlier points (green)
         inlier_radius: 5        # Radius for inlier point visualization (increased for visibility)
-        show_inliers: true      # Whether to visualize RANSAC inliers (enabled)
+        show_inliers: false     # Dots on the outline points each line was fitted to (for checking the fit)
         
         # Edge filtering parameters
         edge_filtering:
@@ -91,14 +92,14 @@ models:
           margin: 15           # Distance from edge in pixels to consider as "near edge"
           edge_point_color: [0, 0, 255] # BGR color for filtered edge points (red)
           edge_point_radius: 6  # Radius for edge point visualization (increased for visibility)
-          show_edge_points: true # Whether to visualize filtered edge points
+          show_edge_points: false # Dots on outline points left out at the frame border
   
   tracking:
     backend: bytetrack           # "bytetrack": by motion, each track within its team; "deepsort": by appearance
+    hide_non_players: true       # Leave out observers: orange or red shirts that are not a team colour; backend "bytetrack" only
     track_history_length: 300
     camera_motion_compensation: true   # Keep trails on the ground when the camera pans or zooms
     
-    # DeepSORT specific settings (optimized for performance)
     max_age_seconds: 3.0         # How long a player who is not detected is remembered and can return as the same track
 
     # Player identities: a player who was lost and comes back as a new track is recognised
@@ -113,6 +114,7 @@ models:
       max_kit_distance: 60.0              # Kit colours further apart than this (Lab units) are different teams
       appearance_interval: 10             # Frames between looks at a player's kit colour
       number_certainty: 0.6               # Certainty of a jersey number from which it identifies a missing player
+    # Only for backend "deepsort"
     n_init: 3                    # Frames needed to confirm a track
     nms_overlap: 0.7             # Non-maximum suppression overlap threshold
     max_cosine_distance: 0.5     # Feature similarity threshold (tighter for faster matching)
@@ -135,9 +137,11 @@ models:
 
     # Performance optimization: only run OCR on a subset of frames per track
     ocr_frame_interval: 5          # Run OCR for a given track every N frames (>=1)
-    ocr_frame_interval_stagger: true # Stagger per track using track_id % interval to spread load
-    finalized_certainty_threshold: 0.9 # Probability at which jersey number is considered final (skip future OCR) - reduced from 0.999 for faster finalization
+    ocr_frame_interval_stagger: true # Read different players on different frames (only when frames wait for the reading)
+    finalized_certainty_threshold: 0.9 # Certainty from which a number is final and the player is no longer read
     verbose_debug: false           # Enable extra per-crop debug logging when troubleshooting
+    only_from_behind: false        # Read a number only where a pose model sees the player from behind (42% of the crops, 92% of the right readings). Off: telling costs as much as it saves, see README
+    background_reading: true       # Read numbers on a second thread; a frame never waits for the reader (false: exactly repeatable runs)
     crop_selection:
       enabled: true                   # Best recent crop; validated by benchmark_player_id_scheduling.py
       min_sharpness: 5.0               # Upper-body Laplacian variance below this is unreadable

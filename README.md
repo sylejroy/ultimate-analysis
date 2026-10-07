@@ -272,6 +272,12 @@ The own frames favour models trained on frames labelled the same way, and with t
 discs a difference of 0.03 is noise; that one way of training leads on both sets is what
 counts. A larger model, the extra head for small objects, and YOLO11 bring nothing.
 
+Neither does training on tiles of the full-resolution frames (`tiles_discs_v4`), so that
+the model sees a disc at its 17 pixels instead of 11, and running it on the whole frame
+at 1920: 0.688 / 0.59 on the own frames, the same as the default model at 1280, at about
+twice the work per frame. On the old images, which only exist shrunk, it does worse
+(0.472 / 0.33).
+
 To train a detector for one class, build a single-class copy of a dataset with
 `scripts/build_single_class_dataset.py` and select it in the Model Training tab.
 
@@ -318,7 +324,9 @@ IDs for 14 players.
 which follows a box by where it was heading, with a rule on top: it learns the two shirt
 colours of the game while it runs, gives every track the team its player's shirt mostly
 looked like, and never continues a track with a box that clearly wears the other colour
-(`processing/team_tracker.py`). A track cut off from the wrong player that way gets its
+(`processing/team_tracker.py`). In matching a box to a track, where the feet are counts
+as much as how far the boxes overlap: two players who cover each other mostly stand at
+different depths. (Without that: 13 swaps, 29 changed IDs, 1.39 IDs per player.) A track cut off from the wrong player that way gets its
 player back from the identity layer: a new track in the player's kit, where they can
 have got to within 1.5 seconds, is that player. DeepSORT, the tracker before
 (`backend: deepsort`), matches by looks, and between two players who cover each other
@@ -331,14 +339,24 @@ teammates cannot be seen this way.
 
 | | DeepSORT | ByteTrack with the team rule |
 | --- | --- | --- |
-| Swaps between opponents | 69 | 12 |
-| A player who is clearly the same from one frame to the next gets another ID | 23 | 29 |
-| Player IDs per player on screen | 1.30 | 1.38 |
+| Swaps between opponents | 69 | 10 |
+| A player who is clearly the same from one frame to the next gets another ID | 23 | 27 |
+| Player IDs per player on screen | 1.30 | 1.34 |
 
 The rule and the count of swaps both rest on shirt colour, so the count favours the rule
 somewhat; `data/cache/tracking_old_vs_new.mp4`, if rendered, shows both trackers side by
 side. Without the team rule ByteTrack had 48 swaps, with the rule but without giving
-players back their IDs 1.7 IDs per player.
+players back their IDs 1.7 IDs per player. The other trackers that come with Ultralytics
+are no better without the rule: against ByteTrack's 60 swaps and 20 changed IDs (these
+with the player model at 960), OC-SORT had 67 and 41, FastTrack 57 and 13, TrackTrack 53
+and 28. The measure itself is exactly repeatable.
+
+**Observers.** The people in orange or red shirts on the field are followed like players
+but left out of what is shown, read, and counted (`models.tracking.hide_non_players`): a
+track whose shirt is orange or red in nearly all its clear sightings, without that being
+one of the two team colours. On the 21 clips this hides 8 tracks, all of them observers,
+from about half a second after they appear. A first rule without the colour, "in neither
+team's colours", also hid players of teams in purple and green.
 
 Recognising a lost player again by looks does not work on this footage. Players are about
 90 pixels tall and teammates wear the same kit: a network trained to re-identify people
@@ -383,6 +401,22 @@ from the games:
 | Before (20 random pairs per line, always 4 lines) | 96.2% | 2.0 px (worst tenth 5.5 px) | 6.6% | 4.8 ms |
 | Now (100 pairs at once, fixed seed, refined fit) | 96.7% | 0 px | 5.7% | 5.6 ms |
 
+The lines shown are filtered over time (`processing/field_line_filter.py`,
+`models.segmentation.contour.ransac.smooth_lines`): between two fits they are moved with
+the camera, a new fit is blended in by 40%, a line that was not shown before appears
+once two fits in a row have it, and a line one fit misses is kept once. How far a shown
+line moves against the field from one frame to the next:
+
+| | Before | Filtered |
+| --- | --- | --- |
+| Seven short clips: on average / in the worst twentieth of the frames | 0.41 / 1.7 px | 0.10 / 0.2 px |
+| The same: frames in which the number of lines changes | 2.4% | 1.0% |
+| A stretch of a 60 fps game: on average | 0.61 px | 0.28 px |
+| The same: frames in which the number of lines changes | 0.4% | 2.2% |
+
+In about one frame in a hundred a line still jumps by more than 5 pixels, by up to 60:
+the fit has then found another line than before, which no blending covers.
+
 ### Jersey number readers
 
 The reader is chosen with "Jersey Number Reader" in the Main Analysis tab or
@@ -408,6 +442,18 @@ for the players without one.
   name (train one in the Model Training tab; `roboflow_digits_v1i` is house numbers, a rough
   starting point). Until one exists the app falls back to EasyOCR, as it does for any
   reader that fails to load.
+
+### Reading only players seen from behind
+
+The number is on the back. A pose model (`yolo11n-pose.pt`) tells which way a player
+faces from the order of the shoulders (`processing/facing.py`): of the 1,532 labelled
+crops it sees 46% from behind, and those hold 94% of the numbers the reader gets right.
+Reading only those (`models.player_id.only_from_behind`) halves the reader's work per
+batch of crops, from 35 to 19 ms, but the pose model takes 14 ms a batch itself, most of
+it Python that holds up the analysis of the frames: the pipeline ran at 36 instead of 38
+frames per second and found the same numbers. So it is off. It would pay with a model
+that tells front from back in a millisecond or two, which could be trained on what the
+pose model says.
 
 ### Jersey reading schedule
 
@@ -450,19 +496,35 @@ frames of the default clip after 30 to warm up, decoding and display not counted
 | | Frames per second | Tracking | Detection |
 | --- | --- | --- | --- |
 | DeepSORT, player model at 1280 | 23 | 12 ms | 7.5 ms |
-| ByteTrack with the team rule, player model at 1280 | 28 | 2.4 ms | 7.8 ms |
-| ByteTrack with the team rule, player model at 960 (default) | 30 | 2.3 ms | 6.2 ms |
+| ByteTrack with the team rule, player model at 1280 (default) | 28 | 2.4 ms | 7.8 ms |
+| ByteTrack with the team rule, player model at 960 | 30 | 2.3 ms | 6.2 ms |
 
 ByteTrack runs no network of its own. The player model is trained at 1280 like the disc
-model, but players are 90 pixels tall and found as well at 960
+model, and players are 90 pixels tall and found as well at 960
 (`models.player_detection.image_size`): AP50 0.985 and recall 0.973, against 0.982 and
-0.977 at 1280, in 4.6 instead of 6.1 ms. Runs differ by about one frame per second.
+0.977 at 1280, in 4.6 instead of 6.1 ms. It stays at 1280 all the same, because the
+tracker does worse with the boxes found at 960: on the 21 clips, before feet were used in
+matching, 15 instead of 13 swaps between opponents, and 40 instead of 29 players who are clearly the same from one frame
+to the next getting another ID. Whether a player is found says nothing about how steady
+the box is. Runs of the speed measurement differ by about one frame per second.
 
-What is left: reading jersey numbers takes 8 ms per frame on average, in bursts of 25 ms
-and more on the frames it runs on, most of it in the text detector that finds the number
-on the crop. Running that detector on smaller crops loses players (17 of 23 identified
-at the present size, 16 at three quarters, 15 at half); one run for all crops of a frame
-and half precision gain under a tenth.
+Reading jersey numbers takes 8 ms per frame on average, in bursts of 25 ms and more on
+the frames it runs on, most of it in the text detector that finds the number on the crop.
+Running that detector on smaller crops loses players (17 of 23 identified at the present
+size, 16 at three quarters, 15 at half); one run for all crops of a frame and half
+precision gain under a tenth. So the reading itself is as it was, but no frame waits for
+it any more (`models.player_id.background_reading`): a second thread reads up to four
+crops at a time and the numbers are taken into the vote when they are ready, a frame or
+two later. Over the whole default clip (380 frames after 30 to warm up):
+
+| Jersey reading | Frames per second | Slowest twentieth of the frames takes over |
+| --- | --- | --- |
+| Each frame waits for it | 26 to 27 | 65 to 71 ms |
+| In the background (default) | 31 to 34 | 46 to 50 ms |
+
+The same six numbers were found, the first at the same frame, in two runs of three; the
+third found five. With the reading in the background a run is no longer exactly
+repeatable; set the setting to false to compare two versions of the code frame by frame.
 
 ### Measuring the whole pipeline
 

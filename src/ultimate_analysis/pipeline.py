@@ -17,6 +17,7 @@ from .config.settings import get_setting
 from .processing.camera_motion import CameraMotionEstimator
 from .processing.camera_motion import is_enabled as camera_motion_enabled
 from .processing.field_analysis import create_unified_field_mask, fit_lines_from_mask
+from .processing.field_line_filter import FieldLineFilter
 from .processing.field_segmentation import reset_segmentation_cache, run_field_segmentation
 from .processing.homography import output_canvas_size
 from .processing.inference import reset_inference_state, run_inference
@@ -26,7 +27,7 @@ from .processing.jersey_tracker import (
     merge_jersey_readings,
     reset_jersey_tracker,
 )
-from .processing.player_id import run_player_id_on_tracks
+from .processing.player_id import discard_pending_readings, run_player_id_on_tracks
 from .processing.possession import PossessionTracker
 from .processing.tracking import (
     apply_camera_motion,
@@ -121,6 +122,8 @@ class AnalysisPipeline:
 
         self._possession = PossessionTracker()
         self._camera_motion = CameraMotionEstimator()
+        # The field lines shown: moved with the camera between fits, smoothed over fits
+        self._line_filter = FieldLineFilter()
 
         # Redrawing the frame that was just analysed (pause, toggling an overlay) must not
         # advance the tracker again, so its results are reused.
@@ -162,11 +165,13 @@ class AnalysisPipeline:
     def reset(self) -> None:
         """Forget everything derived from earlier frames."""
         self._jersey_crop_selector.reset()
+        discard_pending_readings()
         reset_tracker()
         reset_inference_state()
         reset_segmentation_cache()
         self._possession.reset()
         self._camera_motion.reset()
+        self._line_filter.reset()
         self._camera_since_calibration = np.eye(3)
         self.invalidate()
         self.detections = []
@@ -183,6 +188,7 @@ class AnalysisPipeline:
     def reset_player_ids(self) -> None:
         """Forget the jersey numbers read so far (e.g. after switching the reader)."""
         self._jersey_crop_selector.reset()
+        discard_pending_readings()
         reset_jersey_tracker()
         self.player_ids.clear()
         self._player_id_last_seen.clear()
@@ -202,6 +208,7 @@ class AnalysisPipeline:
         self._field_mask = None
         self._field_contour = None
         self._ransac_fit = None
+        self._line_filter.reset()
         self._geometry_lines = []
         self._geometry_confidences = []
 
@@ -280,6 +287,7 @@ class AnalysisPipeline:
             motion = self._camera_motion.update(frame, boxes)
             if motion is not None:
                 apply_camera_motion(motion)
+                self._line_filter.move(motion)
                 self._camera_since_calibration = motion @ self._camera_since_calibration
             self._record("Camera Motion", start)
 
@@ -313,6 +321,7 @@ class AnalysisPipeline:
             frame_index=frame_index,
             finalized_tracks=self._finalized_player_ids,
             crop_selector=self._jersey_crop_selector,
+            background=bool(get_setting("models.player_id.background_reading", False)),
         )
         if timing["preprocessing_ms"] > 0 or timing["ocr_ms"] > 0:
             self._timings["Player ID - Preprocessing"] = timing["preprocessing_ms"]
@@ -421,6 +430,7 @@ class AnalysisPipeline:
             self._ransac_fit = ransac_fit
             self._geometry_lines = lines
             self._geometry_confidences = confidences
+            self._line_filter.update(lines, confidences)
 
         return self._field_mask
 
@@ -448,8 +458,7 @@ class AnalysisPipeline:
             )
 
             if mask is not None:
-                self.ransac_lines = self._geometry_lines
-                self.ransac_confidences = self._geometry_confidences
+                self.ransac_lines, self.ransac_confidences = self._line_filter.current()
 
                 frame = self._draw_field_overlay(frame, mask)
             else:
@@ -486,7 +495,10 @@ class AnalysisPipeline:
             get_primary_field_color(),
             alpha=0.3,
             fill_mask=False,
-            ransac_fit=self._ransac_fit,
+            # The fitted lines as shown: filtered
+            ransac_fit=(
+                (self.ransac_lines, *self._ransac_fit[1:]) if self._ransac_fit is not None else None
+            ),
             field_contour=self._field_contour,
             in_place=True,
         )

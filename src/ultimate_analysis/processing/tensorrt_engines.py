@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from ..config.settings import get_setting
 from ..utils.logger import get_logger
+from .model_lock import GPU_SETUP_LOCK
 
 logger = get_logger("TENSORRT")
 
@@ -77,7 +78,10 @@ def get_engine(
     input_shape = network_input_shape(frame_shape[:2], imgsz)
     key = (str(weights), input_shape, half)
     if key not in _engines:
-        _engines[key] = _load_engine(Path(weights), input_shape, half, getattr(model, "task", None))
+        with GPU_SETUP_LOCK:
+            _engines[key] = _load_engine(
+                Path(weights), input_shape, half, getattr(model, "task", None)
+            )
 
     engine = _engines[key]
     return (engine, input_shape) if engine is not None else None

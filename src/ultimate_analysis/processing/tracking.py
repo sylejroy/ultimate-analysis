@@ -11,7 +11,6 @@ On top of either, the identity layer keeps a player's ID when the tracker loses 
 and picks them up again as a new track.
 """
 
-from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
@@ -21,7 +20,6 @@ from ..config.settings import get_setting
 from ..constants import TRACK_HISTORY_MAX_LENGTH
 from ..utils.logger import get_logger
 from . import appearance
-from .camera_motion import move_points
 from .player_identity import Observation, PlayerIdentities
 from .team_tracker import BYTETracker, DetectionBoxes, TeamTracker, tracker_settings
 
@@ -47,7 +45,10 @@ _disc_tracker: Optional[BYTETracker] = None  # and discs, which have no team
 # (embedder, network) - the embedder's network compiled for inference, or the network
 # itself when compiling is not possible
 _compiled_embedder: Tuple[Any, Any] = (None, None)
-_track_histories = defaultdict(list)
+# Track ID -> the trail of its feet, an array (N, 2) of picture positions. Kept as
+# fractions of a pixel: the camera motion moves every stored point every frame, and
+# rounding each time would let a trail drift.
+_track_histories: Dict[int, np.ndarray] = {}
 # Frames per second of the video; how long a lost track is kept is set in seconds
 _frame_rate = 30.0
 
@@ -273,7 +274,16 @@ def _run_bytetrack_tracking(frame: np.ndarray, detections: List[Dict[str, Any]])
             [detection["confidence"] for detection in found],
         )
         # A row is x1, y1, x2, y2, track ID, confidence, class, index of the detection
-        for row in tracker.update(boxes, frame):
+        rows = tracker.update(boxes, frame)
+        # Observers and others in neither team's colours are followed but not shown
+        hidden = (
+            tracker.outsiders()
+            if tracker is _player_tracker and get_setting("models.tracking.hide_non_players", True)
+            else ()
+        )
+        for row in rows:
+            if int(row[4]) in hidden:
+                continue
             tracks.append(
                 Track(
                     track_id=int(row[4]),
@@ -588,13 +598,17 @@ def reset_tracker() -> None:
     logger.info("Tracker reset complete")
 
 
-def get_track_histories() -> Dict[int, List[Tuple[int, int]]]:
-    """Get track history for all tracked objects.
+def get_track_histories() -> Dict[int, np.ndarray]:
+    """The trail of every tracked object.
 
     Returns:
-        Dictionary mapping track_id to list of (center_x, center_y) positions
+        Track ID -> positions of the feet in the picture, oldest first, as an integer
+        array of shape (N, 2)
     """
-    return dict(_track_histories)
+    return {
+        track_id: np.rint(history).astype(np.int32)
+        for track_id, history in _track_histories.items()
+    }
 
 
 def apply_camera_motion(camera_motion: np.ndarray) -> None:
@@ -616,10 +630,11 @@ def apply_camera_motion(camera_motion: np.ndarray) -> None:
     _identities.apply_camera_motion(camera_motion)
     # All tracks in one call; there are thousands of stored positions
     track_ids = list(_track_histories)
+    if not track_ids:
+        return
     lengths = [len(_track_histories[track_id]) for track_id in track_ids]
-    moved = move_points(
-        [point for track_id in track_ids for point in _track_histories[track_id]], camera_motion
-    )
+    stacked = np.concatenate([_track_histories[track_id] for track_id in track_ids])
+    moved = cv2.perspectiveTransform(stacked.reshape(-1, 1, 2), camera_motion).reshape(-1, 2)
     start = 0
     for track_id, length in zip(track_ids, lengths):
         _track_histories[track_id] = moved[start : start + length]
@@ -667,10 +682,10 @@ def _update_track_history(track_id: int, center_point: Tuple[int, int]) -> None:
         track_id: Unique track identifier
         center_point: Center point (x, y) of the tracked object
     """
-    # Add center point to history
-    _track_histories[track_id].append(center_point)
-
-    # Limit history length
     max_length = get_setting("models.tracking.track_history_length", TRACK_HISTORY_MAX_LENGTH)
-    if len(_track_histories[track_id]) > max_length:
-        _track_histories[track_id] = _track_histories[track_id][-max_length:]
+    point = np.array([center_point], dtype=np.float32)
+    history = _track_histories.get(track_id)
+    if history is None:
+        _track_histories[track_id] = point
+    else:
+        _track_histories[track_id] = np.concatenate((history[-(max_length - 1) :], point))

@@ -74,7 +74,9 @@ class JerseyCropSelector:
     def record_read(
         self, track_id: int, frame_index: int, readable: bool, interval: int, max_backoff: int
     ) -> None:
-        window = self._windows[track_id]
+        window = self._windows.get(track_id)
+        if window is None:
+            return  # The player has left since the crop was taken
         window.failures = 0 if readable else min(window.failures + 1, 8)
         multiplier = min(2**window.failures, max(1, max_backoff))
         window.next_read_frame = frame_index + max(1, interval) * multiplier
