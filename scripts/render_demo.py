@@ -200,7 +200,7 @@ def main() -> None:
     # The processing rate shown in the app says nothing here: every frame is waited for
     pipeline_module.draw_fps_overlay = lambda *_, **__: None
     pipeline = AnalysisPipeline()
-    pipeline.new_video()
+    pipeline.new_video(str(args.video))
     pipeline.set_frame_rate(frames_per_second)
     if args.top_down == "calibration":
         pipeline.homography_matrix = load_default_matrix()

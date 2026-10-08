@@ -35,7 +35,6 @@ from ...processing.field_registration import estimate_field, found_lines
 from ...processing.field_segmentation import reset_segmentation_cache, run_field_segmentation
 from ...processing.model_lock import MODEL_LOCK
 from ...utils import field_label_files, field_template, label_files
-from ...utils.field_camera import fit_camera
 from ...utils.field_label_files import FieldLabel
 from ...utils.logger import get_logger
 from ...utils.painted_lines import painted_line_mask
@@ -433,14 +432,7 @@ class FieldLabellingWidget(QWidget):
         known = self._focals.get(self._video_path)
         if known is not None and known[0] == names:
             return known[1]
-        size = (self._frame.shape[1], self._frame.shape[0])
-        focals = []
-        for name in names:
-            label = field_label_files.load_label(self._dataset_dir(), name)
-            fit = fit_camera(self._template, {}, label.points, size) if label else None
-            if fit is not None:
-                focals.append(fit.focal)
-        focal = float(np.median(focals)) if focals else None
+        focal = field_label_files.video_focal(self._dataset_dir(), self._video_path, self._template)
         self._focals[self._video_path] = (names, focal)
         return focal
 

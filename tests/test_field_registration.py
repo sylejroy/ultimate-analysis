@@ -7,9 +7,11 @@ import cv2
 import numpy as np
 
 from ultimate_analysis.processing.field_registration import (
+    FieldEstimate,
     FieldFollower,
     estimate_field,
     field_to_canvas,
+    implausible,
 )
 from ultimate_analysis.utils.field_camera import (
     camera_mapping,
@@ -172,6 +174,41 @@ class FieldEstimateTest(unittest.TestCase):
         np.testing.assert_allclose(after[:2] / after[2], before[:2] / before[2], atol=1e-6)
         follower.reset()
         self.assertIsNone(follower.image_to_field)
+
+    def as_estimate(self, mapping: np.ndarray) -> FieldEstimate:
+        return FieldEstimate(mapping, np.linalg.inv(mapping), {}, 0.0, FOCAL, np.array(POSITION))
+
+    def test_an_estimate_that_puts_the_players_off_the_field_cannot_be_right(self):
+        places = [(x, y) for x in (8.0, 20.0, 32.0) for y in (60.0, 75.0, 95.0)]
+        feet = np.array([pixel_of(self.mapping, place) for place in places])
+        mask = np.asarray(self.results[0].masks.data).max(axis=0)
+        mask = cv2.resize(mask, SIZE, interpolation=cv2.INTER_NEAREST).astype(np.uint8)
+        self.assertEqual(implausible(self.as_estimate(self.mapping), self.template, mask, feet), "")
+
+        # The same view taken for a field 45 yards to the side
+        aside = self.mapping @ np.array([[1.0, 0.0, 45.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        self.assertIn("players", implausible(self.as_estimate(aside), self.template, None, feet))
+        self.assertIn("field model", implausible(self.as_estimate(aside), self.template, mask))
+
+    def test_one_estimate_far_from_the_followed_field_is_not_taken_two_are(self):
+        follower = FieldFollower(self.template)
+        follower.new_video(FOCAL)
+        follower.update(self.results, self.shape)
+        first = follower.image_to_field.copy()
+
+        elsewhere = camera_mapping(FOCAL, looking_down_the_field(), (18.0, 5.0, 9.0), SIZE)
+        other = masks_as_the_field_model_gives_them(self.template, elsewhere)
+        follower.update(other, self.shape)
+        np.testing.assert_allclose(follower.image_to_field, first)
+        self.assertIn("waiting", follower.left_out)
+
+        follower.update(other, self.shape)
+        self.assertGreater(np.abs(follower.image_to_field - first).max(), 1e-6)
+        self.assertEqual(follower.left_out, "")
+
+        # A lone outlier between two estimates that agree with the followed field is forgotten
+        follower.update(self.results, self.shape)
+        self.assertIn("waiting", follower.left_out)
 
     def test_canvas_shows_the_whole_field_with_the_far_end_on_top(self):
         on_canvas = field_to_canvas(self.template, (400, 1200))

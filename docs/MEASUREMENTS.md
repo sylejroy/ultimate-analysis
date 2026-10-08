@@ -274,19 +274,47 @@ estimate instead of the calibration (`homography.source`). The field is estimate
 time the field model runs, moved with the camera in between, and evened out; the lines of
 the field are drawn on the view. It costs about 2 ms per frame.
 
-Against the 18 labelled frames (`scripts/benchmark_field_registration.py`; median
-distance from the label over the part of the field in the frame):
+An estimate is checked against what else the frame shows before it is used
+(`implausible`): it is left out if fewer than 90% of the detected players stand on the
+field as estimated, or if the field as estimated and the field the model sees share less
+than 85% of what either covers. An estimate more than 8 yards from where the field was
+followed to must be given twice in a row before it replaces it. The main tab takes the
+focal length from the video's field labels where it has any.
 
-| Focal length | Frames estimated | In the picture | On the field | Within 1 / 2 / 5 yd |
-|---|---:|---:|---:|---:|
-| unknown | 16 of 18 | 10.3 px | 1.46 yd | 6 / 10 / 13 |
-| from the game's other labels | 15 of 18 | 8.6 px | 0.54 yd | 11 / 12 / 13 |
+Against the 63 labelled frames of ten games (`scripts/benchmark_field_registration.py`),
+measured only at the corners that were put on the picture by hand, with the focal length
+of the game's other labels:
 
-The frames it gets wrong or not at all are mostly those of the one game on a painted
-stadium field, which the field model has never seen and where it mixes up the end zones
-and the central field. Frames in which a sideline is out of view give no estimate. The
-labelled frames are few and were also what the estimate was developed on, so the numbers
-say where it stands, not how it will do on new games.
+| | Frames |
+|---|---:|
+| Labelled | 63 |
+| No estimate (a sideline or the far end not found, or the lines do not agree) | 22 |
+| Left out by the check; all four were more than 2 yd off | 4 |
+| Estimate given | 37 |
+| ... within 5 / 10 / 20 px at the worst labelled corner | 7 / 18 / 30 |
+| ... more than 2 yd off at the worst labelled corner | 21 |
+
+Of the estimates given, the worst corner is off by 10.3 px or 2.2 yd at the median, and
+by 38 px or 7.7 yd at the 90th percentile. At the far end, where nearly all labelled
+corners are, a pixel is about half a yard along the field, so a few pixels are yards.
+
+What this says:
+
+- The estimate from the masks is a rough one. Under a third of the frames come out within
+  10 px. It serves as a start for labelling and for a top-down view that shows where
+  players are roughly; it is not a measurement of positions.
+- The check removes the estimates that are far off (four, none of them usable) and none
+  of the good ones. It cannot tell an estimate that is some yards off: on those, the
+  players stand on the field and the masks agree. Neither the lines' misfit nor where
+  the camera comes to stand separates them either (tried on these frames).
+- An earlier table here gave 0.54 yd at the median. It compared with the label refitted
+  as a camera of the same focal length the estimate used, over the whole field, and only
+  on frames with an estimate; a focal length that was off cancelled out.
+- The thresholds of the check were chosen on these same frames.
+- The labels themselves: a camera of the game's focal length fits the corners in a frame
+  to under 2 px. What a label says beyond its corners follows from the camera and is not
+  measured; two labels 395 frames apart that agree at the far corners differ by tens of
+  pixels near the camera (see `docs/REVIEW_2026-10-08.md`).
 
 ## Jersey number readers
 

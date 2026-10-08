@@ -62,7 +62,7 @@ class PipelineWorker(QObject):
         info: Dict[str, Any] = {"loaded": False, "path": video_path}
         try:
             with MODEL_LOCK:
-                self.pipeline.new_video()
+                self.pipeline.new_video(video_path)
                 self.pipeline.homography_matrix = homography_matrix
 
                 if self.video_player.load_video(video_path):

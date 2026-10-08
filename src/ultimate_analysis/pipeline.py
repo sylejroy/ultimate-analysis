@@ -8,12 +8,14 @@ this module: the GUI owns one AnalysisPipeline and runs it on a worker thread.
 
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 
 from .config.settings import get_setting
+from .constants import DEFAULT_PATHS
 from .processing import health
 from .processing.camera_motion import CameraMotionEstimator
 from .processing.camera_motion import is_enabled as camera_motion_enabled
@@ -52,12 +54,15 @@ from .rendering.tracks import (
     draw_tracks,
     draw_tracks_with_player_ids,
 )
+from .utils.field_label_files import video_focal
 from .utils.field_template import DEFAULT_RULESET, TEMPLATES
 from .utils.logger import get_logger
 
 logger = get_logger("PIPELINE")
 
 Line = Tuple[np.ndarray, np.ndarray]
+# The dataset of field labels that a video's focal length is taken from
+FIELD_LABELS = "labelled_field_v1"
 
 
 @dataclass(frozen=True)
@@ -187,11 +192,20 @@ class AnalysisPipeline:
             return None
         return self._homography_matrix @ np.linalg.inv(self._camera_since_calibration)
 
-    def new_video(self) -> None:
-        """Start on another video: nothing of the last one holds, its camera included."""
+    def new_video(self, video_path: Optional[str] = None) -> None:
+        """Start on another video: nothing of the last one holds, its camera included.
+
+        Args:
+            video_path: The video, if it is one; its field labels then give the camera's
+                focal length, which makes the field's place in a frame much more certain
+        """
         self.reset()
         self.reset_fps()
-        self._field_follower.new_video()
+        focal = None
+        if video_path:
+            dataset = Path(DEFAULT_PATHS["TRAINING_DATA"]) / FIELD_LABELS
+            focal = video_focal(dataset, video_path, self._field_follower.template)
+        self._field_follower.new_video(focal)
 
     def reset(self) -> None:
         """Forget everything derived from earlier frames."""
@@ -396,7 +410,14 @@ class AnalysisPipeline:
             self._line_filter.update(lines, confidences)
             if self._follow_field:
                 start = time.perf_counter()
-                self._field_follower.update(self.field_results, frame_shape, lines)
+                feet = np.array(
+                    [
+                        [(d["bbox"][0] + d["bbox"][2]) / 2.0, d["bbox"][3]]
+                        for d in self.detections
+                        if d["class_name"] == "player"
+                    ]
+                ).reshape(-1, 2)
+                self._field_follower.update(self.field_results, frame_shape, lines, mask, feet)
                 self._record("Field Estimate", start)
 
     # ------------------------------------------------------------------ rendering
