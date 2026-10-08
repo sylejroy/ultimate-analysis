@@ -13,6 +13,7 @@ import numpy as np
 from ..config.settings import get_setting
 from ..utils.logger import get_logger
 from ..utils.model_files import default_model_path, get_training_image_size
+from . import health
 from .tensorrt_engines import get_engine
 
 logger = get_logger("FIELD_SEG")
@@ -144,6 +145,7 @@ def run_field_segmentation(frame: np.ndarray, frame_index: int = 0) -> List[Any]
 
     except Exception as e:
         logger.exception(f"Error during field segmentation: {e}")
+        health.report("Field", f"failed ({type(e).__name__}); see the log")
         return []
 
 

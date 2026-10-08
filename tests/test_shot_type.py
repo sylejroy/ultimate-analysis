@@ -28,6 +28,14 @@ class ShotWatcherTest(unittest.TestCase):
         self.assertFalse(kinds[0])
         self.assertTrue(kinds[-1])
 
+    def test_after_a_pause_one_frame_with_players_is_not_the_drone_yet(self):
+        self.watcher.update(14)
+        self.watcher.reset()  # What a pipeline reset does on the way into a pause
+        self.watcher.pause()
+        self.assertFalse(self.watcher.update(14))
+        kinds = [self.watcher.update(14) for _ in range(20)]
+        self.assertTrue(kinds[-1])
+
 
 if __name__ == "__main__":
     unittest.main()

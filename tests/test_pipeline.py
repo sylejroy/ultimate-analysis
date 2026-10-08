@@ -40,6 +40,7 @@ DRAWING = (
     "draw_tracks_with_player_ids",
     "draw_possession",
     "draw_fps_overlay",
+    "draw_notice",
     "draw_jersey_table",
     "apply_segmentation_to_warped_frame",
     "draw_tracks_top_down",
@@ -136,6 +137,25 @@ class PipelineTests(unittest.TestCase):
         ]
         self.assertTrue(results[-1].wide_shot)
         self.assertEqual([track.track_id for track in results[-1].tracks], [7])
+
+    def test_a_failed_stage_is_shown_and_is_not_taken_for_a_close_up(self):
+        health = sys.modules[self.module.health.__name__]
+        self.pipeline.process(self.frame, 0, self.options)
+
+        def failing(frame):
+            health.report("Detection", "failed (RuntimeError); see the log")
+            return []
+
+        self.mocks["run_inference"].side_effect = failing
+        results = [self.pipeline.process(self.frame, index, self.options) for index in range(1, 40)]
+        self.assertTrue(results[-1].wide_shot)
+        self.assertEqual(
+            list(results[-1].problems), ["Detection: failed (RuntimeError); see the log"]
+        )
+
+        # Working again: nothing is shown any more
+        self.mocks["run_inference"].side_effect = None
+        self.assertEqual(list(self.pipeline.process(self.frame, 40, self.options).problems), [])
 
     def test_field_geometry_is_computed_once_per_segmentation_result(self):
         # Segmentation returns the same result object for the frames in its interval

@@ -110,7 +110,13 @@ In the app, a TensorRT engine that is first loaded after frames have been analys
 crashes the process with an access violation inside TensorRT. It showed when field
 segmentation was switched on only after playing, and when a video began with a close-up
 so that the field model was first needed after a seek. Without the window the same
-sequence runs; loading on another thread is not the cause (tried). The cause is not known.
+sequence runs. The cause is not known. Ruled out, each by switching it off and still
+crashing, or by doing it without the app and not crashing: loading on another thread,
+the thread that decodes the next frame ahead, the warm-up of the PyTorch models, the
+jersey reader and its background thread, and drawing in a real window (it crashes
+offscreen too). Not tried: the three OpenCV packages that share one folder in the
+environment. A crash now leaves the stacks of all threads in
+`data/cache/crash_traces.log`.
 The engines of all three models are therefore loaded one after the other when a video is
 opened (`gui/main/pipeline_worker.py`). Choosing another model from a dropdown later
 still loads an engine late and has not been tried since.

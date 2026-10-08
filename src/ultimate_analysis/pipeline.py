@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 
 from .config.settings import get_setting
+from .processing import health
 from .processing.camera_motion import CameraMotionEstimator
 from .processing.camera_motion import is_enabled as camera_motion_enabled
 from .processing.field_analysis import create_unified_field_mask, fit_lines_from_mask
@@ -93,6 +94,7 @@ class FrameResult:
     holder_id: Optional[int]  # Track ID of the player holding the disc, if any
     timings: Dict[str, float]  # Milliseconds per stage, in the order they ran
     wide_shot: bool = True  # False on a close-up or title card, where nothing is analysed
+    problems: Tuple[str, ...] = ()  # Stages that failed on this frame, for showing
 
 
 @dataclass
@@ -247,10 +249,14 @@ class AnalysisPipeline:
 
         analysis_key = (frame_index, *options.analysis_key)
         if analysis_key != self._analysed_key:
+            health.start_frame()
             self._analyse(frame, frame_index, options)
             self._analysed_key = analysis_key
 
         main_view = self._draw_main_view(frame.copy(), options)
+        problems = health.problems()
+        for line, problem in enumerate(problems):
+            draw_notice(main_view, problem, line=line + 1, alarm=True)
 
         top_down_view, top_down_message = None, "Homography view disabled"
         if options.top_down_view:
@@ -269,6 +275,7 @@ class AnalysisPipeline:
             holder_id=self._possession.holder_id,
             timings=self._timings,
             wide_shot=self._shot.wide,
+            problems=problems,
         )
 
     def _record(self, stage: str, start: float) -> float:
@@ -348,6 +355,8 @@ class AnalysisPipeline:
         After a cut away, the players are others or elsewhere when the drone is back, and
         the camera has moved in between.
         """
+        if health.failed("Detection"):
+            return self._shot.wide  # No detections because of a failure say nothing
         was_wide = self._shot.wide
         players = sum(1 for detection in self.detections if detection["class_name"] == "player")
         wide = self._shot.update(players)
@@ -355,7 +364,7 @@ class AnalysisPipeline:
             detections = self.detections
             self.reset()
             self.detections = detections
-            self._shot.wide = False
+            self._shot.pause()
         return wide
 
     def _update_field_geometry(self, frame_shape: Tuple[int, int]) -> None:

@@ -69,6 +69,13 @@ Modules that are still too large and should be split when they are next worked o
 `gui/homography/homography_tab.py` (1,600 lines), `gui/easyocr/easyocr_tab.py` and
 `gui/training/training_tab.py` (1,100 each), `processing/field_analysis.py` (800).
 
+## When a stage fails
+
+A stage that fails keeps the app running by returning what it can, and says so with
+`health.report(stage, problem)` (`processing/health.py`). The pipeline shows these on the
+frame in red. A failure that is only logged looks like a normal result: no detections
+read as "nobody there".
+
 ## Testing
 
 - Logic that carries state from frame to frame gets a unit test with synthetic input:

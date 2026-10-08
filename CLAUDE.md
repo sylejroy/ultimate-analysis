@@ -20,6 +20,8 @@ what they do not say.
   ```
 
   Tests are `unittest` (pytest is not installed) and need no videos, weights, or GPU.
+- `requirements-lock.txt` is the environment as it is known to work (`pip freeze`);
+  update it when a package changes.
 - PyTorch must stay at `2.7.1+cu128` and setuptools below 81. Newer setuptools removes
   `pkg_resources`, and DeepSORT then fails to load without an error: tracking silently
   falls back to a much worse tracker.

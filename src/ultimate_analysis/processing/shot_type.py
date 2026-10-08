@@ -26,6 +26,15 @@ class ShotWatcher:
         self.wide = True
         self._disagreeing = self._confirm_frames()
 
+    def pause(self) -> None:
+        """Hold that this is no drone footage, after whatever else was reset.
+
+        The way back needs its frames in a row like any change: one frame with enough
+        players in it is not the drone yet.
+        """
+        self.wide = False
+        self._disagreeing = 0
+
     @staticmethod
     def _confirm_frames() -> int:
         return max(1, int(get_setting("models.shot_type.confirm_frames", 15)))

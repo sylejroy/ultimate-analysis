@@ -19,7 +19,7 @@ import numpy as np
 from ..config.settings import get_setting
 from ..constants import TRACK_HISTORY_MAX_LENGTH
 from ..utils.logger import get_logger
-from . import appearance
+from . import appearance, health
 from .player_identity import Observation, PlayerIdentities
 from .team_tracker import BYTETracker, DetectionBoxes, TeamTracker, tracker_settings
 
@@ -240,6 +240,7 @@ def run_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) -> List[Tr
             return _run_bytetrack_tracking(frame, detections)
         except Exception as e:
             logger.exception(f"Error in ByteTrack tracking: {e}")
+            health.report("Tracking", f"failed ({type(e).__name__}); players are not followed")
             return _run_simple_tracking(detections)
 
     if not detections and _deepsort_tracker is None:

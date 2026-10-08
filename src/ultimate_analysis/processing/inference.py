@@ -13,6 +13,7 @@ import numpy as np
 from ..config.settings import get_setting
 from ..utils.logger import get_logger
 from ..utils.model_files import default_model_path, get_training_image_size
+from . import health
 from .tensorrt_engines import get_engine
 
 logger = get_logger("INFERENCE")
@@ -290,6 +291,7 @@ def _predict_detections(
 
     except Exception as e:
         logger.exception(f"Error during {'/'.join(roles)} model inference: {e}")
+        health.report("Detection", f"failed ({type(e).__name__}); see the log")
 
     timing["total"] = time.perf_counter() - total_start
 
