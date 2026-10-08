@@ -29,8 +29,9 @@ CENTRAL_FIELD, END_ZONE = 0, 1  # Classes of the field model
 # A line counts as running across the field if it is this flat in the picture
 ACROSS_MAX_DEGREES = 20.0
 # Rows between the two pixels compared to find where one area ends and the next begins,
-# in pixels of the masks
-BOUNDARY_STEP = 3
+# as a share of the masks' height (and at least 3): the areas may leave a seam of some
+# rows between them
+BOUNDARY_SHARE = 1.0 / 100.0
 # A goal line must be found over at least this share of the picture's width
 MIN_GOAL_LINE_SHARE = 0.12
 # Pixels of a boundary count towards a line up to this far from it, in mask pixels
@@ -432,13 +433,14 @@ def _goal_lines(
     height, width = frame_shape
     to_frame = np.array([width / areas.shape[1], height / areas.shape[0]])
 
-    above, below = areas[:-BOUNDARY_STEP], areas[BOUNDARY_STEP:]
+    step = max(3, int(round(areas.shape[0] * BOUNDARY_SHARE)))
+    above, below = areas[:-step], areas[step:]
     rows, columns = np.nonzero((above != below) & (above > 0) & (below > 0))
     found: List[Tuple[float, Line, int, int]] = []  # (length, line, class above, class below)
     pairs = above[rows, columns].astype(np.int64) * (len(classes) + 1) + below[rows, columns]
     for pair in np.unique(pairs):
         chosen = pairs == pair
-        points = np.column_stack([columns[chosen], rows[chosen] + BOUNDARY_STEP / 2.0])
+        points = np.column_stack([columns[chosen], rows[chosen] + step / 2.0])
         line = _fit_line(points)
         if line is None:
             continue

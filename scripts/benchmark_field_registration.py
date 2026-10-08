@@ -19,6 +19,7 @@ nothing of a frame's own label goes into its estimate.
 Usage:
     python scripts/benchmark_field_registration.py
     python scripts/benchmark_field_registration.py --save-pictures out/
+    python scripts/benchmark_field_registration.py --games Pacmen colorado --model best.pt
 """
 
 import argparse
@@ -46,6 +47,7 @@ from ultimate_analysis.processing.field_registration import (  # noqa: E402
 from ultimate_analysis.processing.field_segmentation import (  # noqa: E402
     reset_segmentation_cache,
     run_field_segmentation,
+    set_field_model,
 )
 from ultimate_analysis.processing.inference import (  # noqa: E402
     detect_players,
@@ -94,6 +96,10 @@ def main() -> None:
     parser.add_argument("--dataset", default="labelled_field_v1")
     parser.add_argument("--wrong", type=float, default=2.0, help="Field units that count as wrong")
     parser.add_argument("--save-pictures", type=Path, help="Folder for the frames as estimated")
+    parser.add_argument(
+        "--games", nargs="+", help="Only games called like this, e.g. those a model has not seen"
+    )
+    parser.add_argument("--model", type=Path, help="Field model to use instead of the default")
     args = parser.parse_args()
 
     dataset = REPO / DEFAULT_PATHS["TRAINING_DATA"] / args.dataset
@@ -101,6 +107,8 @@ def main() -> None:
     players = load_detection_model(default_model_path("player_detection"))
     if args.save_pictures:
         args.save_pictures.mkdir(parents=True, exist_ok=True)
+    if args.model and not set_field_model(str(args.model)):
+        sys.exit(f"Cannot load {args.model}")
 
     # The corners of each label that lie in the frame, and the focal length it gives
     labels = {}
@@ -120,6 +128,8 @@ def main() -> None:
 
     rows = []  # (name, game, state, pixels, units)
     for name, (frame, corners, _) in labels.items():
+        if args.games and not any(part in game_of(name) for part in args.games):
+            continue
         others = [
             focal
             for other, (_, _, focal) in labels.items()

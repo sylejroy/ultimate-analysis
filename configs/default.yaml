@@ -89,7 +89,7 @@ models:
         # Edge filtering parameters
         edge_filtering:
           enabled: true         # Whether to filter points near image edges
-          margin: 15           # Distance from edge in pixels to consider as "near edge"
+          margin: 45           # Outline this near the frame's edge is where the frame cuts the field off, not a field line; masks stop up to some 40 px short of the edge
           edge_point_color: [0, 0, 255] # BGR color for filtered edge points (red)
           edge_point_radius: 6  # Radius for edge point visualization (increased for visibility)
           show_edge_points: false # Dots on outline points left out at the frame border

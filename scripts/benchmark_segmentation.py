@@ -8,6 +8,15 @@ well the predicted area and its outline match the labelled ones:
 - outline error: the average distance between the predicted and the labelled field
   outline, in pixels of a 1920x1080 frame. Outline along the image border is left out,
   since no field line runs there.
+- field seen where there is none: the share of the picture outside the labelled field
+  that the model takes for field, and the same for the grass there alone. A model that
+  has learned "grass is field" marks the grass beside the field and the neighbouring
+  fields; this is where it shows.
+- areas: how many separate areas the model gives per image against how many are
+  labelled. The app fits lines to every area, so one too many is a wrong line.
+
+With --negatives, pictures that show no field from above (close-ups, title cards) are
+scored as well: how many get any area at all.
 
 The model runs through the app's own segmentation code. The Roboflow export stores the
 16:9 frames stretched to a square; by default they are stretched back first, which is how
@@ -15,6 +24,7 @@ the app sees a video frame. --as-stored scores the square images the model was t
 
     python scripts/benchmark_segmentation.py
     python scripts/benchmark_segmentation.py path/to/best.pt --splits test
+    python scripts/benchmark_segmentation.py best.pt --dataset rendered_field_v1 --negatives folder/
 """
 
 import argparse
@@ -46,6 +56,7 @@ FRAME_SIZE = (1920, 1080)  # (width, height) the outline error is reported at
 # line; labels and predictions stop at slightly different distances from the border
 BORDER = 30
 SEAM_KERNEL = np.ones((25, 25), dtype=np.uint8)
+EDGE_KERNEL = np.ones((21, 21), dtype=np.uint8)
 
 
 def labelled_masks(
@@ -61,18 +72,27 @@ def labelled_masks(
     return masks
 
 
+def grass(frame: np.ndarray) -> np.ndarray:
+    """Where a frame (BGR) is green like grass."""
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    return cv2.inRange(hsv, (25, 40, 40), (95, 255, 255)) > 0
+
+
 def predicted_masks(
     frame: np.ndarray, names: List[str]
-) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
-    """({class name: predicted mask}, unified field mask) from the app's segmentation."""
+) -> Tuple[Dict[str, np.ndarray], np.ndarray, int]:
+    """({class name: predicted mask}, unified field mask, number of areas) from the app's
+    segmentation."""
     height, width = frame.shape[:2]
     reset_segmentation_cache()
     results = run_field_segmentation(frame, 0)
 
     masks = {name: np.zeros((height, width), dtype=np.uint8) for name in names}
+    areas = 0
     for result in results:
         if result.masks is None:
             continue
+        areas += len(result.masks.data)
         for mask, class_id in zip(np.asarray(result.masks.data), result.boxes.cls.cpu().numpy()):
             mask = cv2.resize(
                 mask.astype(np.float32), (width, height), interpolation=cv2.INTER_LINEAR
@@ -82,7 +102,9 @@ def predicted_masks(
                 np.maximum(masks[name], (mask > 0.5).view(np.uint8), out=masks[name])
 
     unified = create_unified_field_mask(results, (height, width))
-    return masks, unified if unified is not None else np.zeros((height, width), dtype=np.uint8)
+    if unified is None:
+        unified = np.zeros((height, width), dtype=np.uint8)
+    return masks, unified, areas
 
 
 def iou(first: np.ndarray, second: np.ndarray) -> Optional[float]:
@@ -141,9 +163,12 @@ def main() -> None:
     )
     parser.add_argument("--splits", nargs="+", default=["valid", "test"])
     parser.add_argument("--as-stored", action="store_true", help="do not stretch images to 16:9")
+    parser.add_argument("--negatives", type=Path, help="folder of pictures without a field")
     args = parser.parse_args()
 
     dataset = args.dataset or Path(get_training_args(args.weights)["data"]).parent
+    if not dataset.exists():
+        dataset = REPO / "data" / "raw" / "training_data" / dataset
     names = yaml.safe_load((dataset / "data.yaml").read_text())["names"]
     names = list(names.values()) if isinstance(names, dict) else names
     if not set_field_model(str(args.weights)):
@@ -152,6 +177,10 @@ def main() -> None:
     field_iou: List[Optional[float]] = []
     error: List[Optional[float]] = []
     class_iou: Dict[str, List[Optional[float]]] = {name: [] for name in names}
+    beside: List[Optional[float]] = []  # Share of what is no field that is taken for field
+    grass_beside: List[Optional[float]] = []  # The same for the grass there
+    missed: List[Optional[float]] = []  # Share of the field that is not found
+    area_counts: List[Tuple[int, int]] = []  # (predicted, labelled) per image
     count = 0
     for split in args.splits:
         for image_path in sorted((dataset / split / "images").glob("*")):
@@ -161,13 +190,24 @@ def main() -> None:
             labelled = labelled_masks(
                 dataset / split / "labels" / f"{image_path.stem}.txt", names, size
             )
-            predicted, predicted_field = predicted_masks(frame, names)
+            predicted, predicted_field, areas = predicted_masks(frame, names)
             # The class polygons of a label do not always touch; close the seam between them
             labelled_field = cv2.morphologyEx(
                 np.maximum.reduce(list(labelled.values())), cv2.MORPH_CLOSE, SEAM_KERNEL
             )
 
             field_iou.append(iou(predicted_field, labelled_field))
+            outside = labelled_field == 0
+            # A margin around the label is left out: its edge is not exact to the pixel
+            outside &= cv2.dilate(labelled_field, EDGE_KERNEL) == 0
+            green = outside & grass(frame)
+            found = predicted_field > 0
+            beside.append(float(found[outside].mean()) if outside.any() else None)
+            grass_beside.append(float(found[green].mean()) if green.sum() > 500 else None)
+            on_field = labelled_field > 0
+            missed.append(float((~found)[on_field].mean()) if on_field.any() else None)
+            label_file = dataset / split / "labels" / f"{image_path.stem}.txt"
+            area_counts.append((areas, len(label_file.read_text().splitlines())))
             for name in names:
                 class_iou[name].append(iou(predicted[name], labelled[name]))
             # Reported at the size of a video frame, whatever size was scored
@@ -185,6 +225,26 @@ def main() -> None:
     for name in names:
         print(summarize(f"{name} IoU", class_iou[name], "", worst_is_high=False))
     print(summarize("Field outline error", error, " px", worst_is_high=True))
+    print(summarize("Field not found (share of the field)", missed, "", worst_is_high=True))
+    print(summarize("Taken for field beside it (share)", beside, "", worst_is_high=True))
+    print(summarize("... of the grass beside it (share)", grass_beside, "", worst_is_high=True))
+    more = sum(1 for predicted, labelled in area_counts if predicted > labelled)
+    fewer = sum(1 for predicted, labelled in area_counts if predicted < labelled)
+    print(f"Areas: more than labelled in {more} images, fewer in {fewer}, of {count}")
+
+    if args.negatives:
+        shares = []
+        for image_path in sorted(args.negatives.glob("*")):
+            image = cv2.imread(str(image_path))
+            if image is None:
+                continue
+            _, field, _ = predicted_masks(image, names)
+            shares.append(float((field > 0).mean()))
+        marked = [share for share in shares if share > 0]
+        print(
+            f"Pictures without a field: {len(marked)} of {len(shares)} get an area"
+            + (f", covering {np.median(marked):.0%} of the picture at the median" if marked else "")
+        )
 
 
 if __name__ == "__main__":
