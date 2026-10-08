@@ -105,13 +105,6 @@ class TrainingResultsWidget(QWidget):
         self.reference_name = name
         self.update_plots()
 
-    def show_run(self, results_path: str) -> None:
-        """Show a finished run."""
-        self.update_timer.stop()
-        self.results_path = Path(results_path)
-        self._planned_epochs = self._patience = None
-        self.update_plots()
-
     # ------------------------------------------------------------------ reading
 
     def _read(self, path: Optional[Path]) -> Optional[pd.DataFrame]:

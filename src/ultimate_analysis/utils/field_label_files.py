@@ -34,9 +34,6 @@ class FieldLabel:
     lines: Dict[str, List[Point]] = field(default_factory=dict)  # Name -> two pixels on the line
     points: Dict[str, Point] = field(default_factory=dict)  # Name -> the pixel of the mark
 
-    def is_empty(self) -> bool:
-        return not self.lines and not self.points
-
     def copy(self) -> "FieldLabel":
         return FieldLabel(
             {name: [tuple(pixel) for pixel in pixels] for name, pixels in self.lines.items()},

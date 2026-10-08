@@ -22,7 +22,7 @@ red nearly every time it is seen, without that being a team colour, can be left 
 """
 
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 
 import cv2
 import numpy as np
@@ -264,14 +264,6 @@ class TeamTracker(BYTETracker):
     def _off_team_colours(self, shirt: Optional[np.ndarray]) -> Optional[bool]:
         """Whether a shirt is orange or red without that being a team colour."""
         return off_team_colours(shirt, self.team_colours)
-
-    def teams(self) -> Dict[int, int]:
-        """Track ID -> team (0 or 1) of the tracks whose team is known."""
-        return {
-            int(track.track_id): int(track.team)
-            for track in self.tracked_stracks + self.lost_stracks
-            if getattr(track, "team", None) is not None
-        }
 
     def outsiders(self) -> set:
         """IDs of the tracks that are followed but are no player of either team."""

@@ -56,7 +56,6 @@ _frame_rate = 30.0
 # new track. The IDs handed out below are those of the players, not of the tracks.
 _identities = PlayerIdentities()
 _history_last_frame: Dict[int, int] = {}
-_player_teams: Dict[int, int] = {}  # Player ID -> team (0 or 1), once known
 # Discs are not players; their track IDs are moved out of the way of the player IDs
 DISC_ID_OFFSET = 100000
 _frame_count = 0
@@ -81,7 +80,6 @@ class Track:
         self.class_name = class_name
         self.model_type = model_type  # Track which model detected this
         self.det_class = class_name  # For compatibility with existing code
-        self.team: Optional[int] = None  # 0 or 1 once the player's shirt has told
 
     def to_ltrb(self) -> List[float]:
         """Return bounding box in [x1, y1, x2, y2] format."""
@@ -283,20 +281,19 @@ def _run_bytetrack_tracking(frame: np.ndarray, detections: List[Dict[str, Any]])
             if tracker is _player_tracker and get_setting("models.tracking.hide_non_players", True)
             else ()
         )
-        teams = tracker.teams() if tracker is _player_tracker else {}
         for row in rows:
             if int(row[4]) in hidden:
                 continue
-            track = Track(
-                track_id=int(row[4]),
-                bbox=[float(value) for value in row[:4]],
-                class_id=class_id,
-                confidence=float(row[5]),
-                class_name=class_name,
-                model_type=f"{class_name}_model",
+            tracks.append(
+                Track(
+                    track_id=int(row[4]),
+                    bbox=[float(value) for value in row[:4]],
+                    class_id=class_id,
+                    confidence=float(row[5]),
+                    class_name=class_name,
+                    model_type=f"{class_name}_model",
+                )
             )
-            track.team = teams.get(track.track_id)
-            tracks.append(track)
     _finish_tracks(frame, tracks)
     return tracks
 
@@ -304,13 +301,6 @@ def _run_bytetrack_tracking(frame: np.ndarray, detections: List[Dict[str, Any]])
 def _finish_tracks(frame: np.ndarray, tracks: List[Track]) -> None:
     """Give the tracks of a frame their player IDs and add them to the trails."""
     _assign_player_identities(frame, tracks)
-
-    # A player keeps the team once known, also while a new track of theirs has none yet
-    for track in tracks:
-        if track.team is not None:
-            _player_teams[track.track_id] = track.team
-        else:
-            track.team = _player_teams.get(track.track_id)
 
     # The trail follows the player's feet (bottom centre of the box)
     for track in tracks:
@@ -594,7 +584,6 @@ def reset_tracker() -> None:
     # Clear track histories and reset frame count
     _track_histories.clear()
     _history_last_frame.clear()
-    _player_teams.clear()
     _identities.reset()
     _frame_count = 0
 
@@ -607,21 +596,6 @@ def reset_tracker() -> None:
         logger.debug("Jersey tracker not available for reset")
 
     logger.info("Tracker reset complete")
-
-
-def team_of_player(player_id: int) -> Optional[int]:
-    """The team (0 or 1) of a player, or None if it is not known (yet)."""
-    return _player_teams.get(player_id)
-
-
-def team_shirt_colour(team: int) -> Optional[Tuple[int, int, int]]:
-    """The shirt colour (BGR) the tracker has learned for a team, or None if it has none."""
-    colours = getattr(_player_tracker, "team_colours", None)
-    if colours is None or not 0 <= team < len(colours):
-        return None
-    lab = np.clip(colours[team], 0, 255).astype(np.uint8).reshape(1, 1, 3)
-    blue, green, red = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)[0, 0]
-    return int(blue), int(green), int(red)
 
 
 def get_track_histories() -> Dict[int, np.ndarray]:

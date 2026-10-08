@@ -10,8 +10,8 @@ this table; `tests/test_layering.py` fails when one does not.
 
 | Package | Contents |
 | --- | --- |
-| `config/`, `constants.py`, `utils/` | Settings (`get_setting("dot.path", default)`), fixed limits, logging, video files, model files, label files |
-| `processing/` | Analysis stages: detection, camera motion, tracking, possession, game state, jersey numbers, field segmentation and geometry, homography, TensorRT engines |
+| `config/`, `constants.py`, `utils/` | Settings (`get_setting("dot.path", default)`), fixed limits, logging, video files, model files, label files, the field's dimensions and the camera fitted to it |
+| `processing/` | Analysis stages: detection, camera motion, tracking, possession, jersey numbers, field segmentation and geometry, where the field lies (`field_registration.py`), homography, TensorRT engines |
 | `rendering/` | Drawing results on frames with OpenCV. No Qt. |
 | `pipeline.py` | `AnalysisPipeline`: one frame in, results and rendered views out. No Qt. |
 | `gui/` | Everything Qt. One package per tab (`main/`, `easyocr/`, `training/`, `homography/`, `labelling/`), shared widgets in `widgets/`, the window in `main_app.py` |

@@ -7,6 +7,7 @@ import numpy as np
 
 from ..config.settings import get_setting
 from ..processing.field_analysis import calculate_field_contour, create_unified_field_mask
+from ..processing.tracking import DISC_ID_OFFSET
 from ..utils.logger import get_logger
 from .field import draw_field_contour, draw_unified_field_mask, get_primary_field_color
 from .tracks import POSSESSION_COLOR, get_track_color
@@ -232,7 +233,7 @@ def draw_tracks_top_down(
                     )
 
                 # Draw track ID label with larger font for top-down view
-                label_text = f"ID:{track_id}"
+                label_text = "disc" if track_id >= DISC_ID_OFFSET else f"ID:{track_id}"
 
                 # Add player jersey number if available
                 if track_id in player_ids:

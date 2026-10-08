@@ -7,8 +7,7 @@ tracking, OCR-based player identification, and a top-down field view.
 
 - **Object detection**: players and discs, with separately selectable models.
 - **Tracking**: consistent player and disc identities across frames (ByteTrack with a team rule), with
-  trails and foot-level positions. Each team is drawn in the colour of its shirts, every
-  player in a shade of their own.
+  trails and foot-level positions.
 - **Possession**: the player holding the disc is highlighted in both views.
 - **Player identification**: jersey numbers read by a selectable reader (PARSeq,
   Florence-2, a YOLO digit detector, or EasyOCR) and aggregated over time, plus a tuning
@@ -121,8 +120,8 @@ Everything under `data/` is local and not tracked by Git.
   | --- | --- | --- |
   | `labelled_players_discs_v1` | Frames labelled in the Labelling tab, full resolution | Future training |
   | `labelled_discs_v1` | Frames labelled from the phone, discs only, full resolution | Future training |
-  | `combined_discs_v3` | `roboflow_merged_discs_v2` plus the disc boxes of both `labelled_` sets, built by `scripts/build_combined_disc_dataset.py` (v1 and v2: earlier, with fewer labels) | The default disc model |
-  | `tiles_discs_v4` | 960×960 tiles of the frames that exist at full resolution, built by `scripts/build_disc_tile_dataset.py` | Trial: a disc model that sees discs at their full size |
+  | `combined_discs_v4` | `roboflow_merged_discs_v2` plus the disc boxes of both `labelled_` sets, built by `scripts/build_combined_disc_dataset.py`. The default disc model was trained on v3, an earlier state with fewer labels that is no longer kept | Disc models |
+  | `combined_players_v1` | `roboflow_merged_players_v2` plus the player boxes of `labelled_players_discs_v1`, built by the same script with `--object player` | Player models |
   | `roboflow_merged_players_v2` | Built from the Roboflow exports: 1,442 images at 1280×720, players only | The default player model, benchmarks |
   | `roboflow_merged_discs_v2` | The same images, discs only | The default disc model, benchmarks |
   | `roboflow_object_detection_v3i` | Roboflow export as downloaded: players and discs, 960×960 | Source of the merged sets |
@@ -228,8 +227,7 @@ passed on.
 
 ## Development
 
-See `docs/DEVELOPMENT_GUIDELINES.md` for layout and conventions, and
-`docs/REBUILD_DESIGN_DOCUMENT.md` for a description of what each tab does.
+See `docs/DEVELOPMENT_GUIDELINES.md` for layout and conventions.
 
 ```bash
 python -m pip install -r requirements-dev.txt
