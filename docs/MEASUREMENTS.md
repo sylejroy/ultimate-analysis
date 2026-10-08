@@ -311,7 +311,8 @@ In the main tab, "Top-down from the field model" (the default) makes the top-dow
 from this estimate instead of the calibration (`homography.source`). The lines fitted to
 the field's outline are then not drawn: the view is not made from them. The field is estimated each
 time the field model runs, moved with the camera in between, and evened out; the lines of
-the field are drawn on the view. It costs about 2 ms per frame.
+the field are drawn on the view. It costs about 3 ms per frame on average (see the
+speed of the whole pipeline).
 
 An estimate is checked against what else the frame shows before it is used
 (`implausible`): it is left out if fewer than 90% of the detected players stand on the
@@ -469,6 +470,22 @@ frames of the default clip after 30 to warm up, decoding and display not counted
 | DeepSORT, player model at 1280 | 23 | 12 ms | 7.5 ms |
 | ByteTrack with the team rule, player model at 1280 (default) | 28 | 2.4 ms | 7.8 ms |
 | ByteTrack with the team rule, player model at 960 | 30 | 2.3 ms | 6.2 ms |
+
+Those rows were measured with the top-down view from the calibration. With the view from
+the field model, now the default, the same run gave 24 frames per second: blacking out
+what lies behind the camera tested every pixel of the view (3.4 ms a frame), and the
+field fit asked for its misfits element by element (another 3.4 ms). The first is now a
+polygon fill and the second works on arrays; the fits agree to a ten-thousandth of a
+yard and the tracks of the run are the same.
+
+| Top-down view from the field model | Frames per second | Field estimate | Warping the view |
+| --- | --- | --- | --- |
+| Before | 24 | 4.8 ms | 8.7 ms |
+| Now | 31 | 3.0 ms | 1.8 ms |
+
+The estimate runs on every fifth frame, so it costs about 15 ms there; the slowest
+twentieth of the frames takes over 70 ms. What possession, the sideline filter, the
+trails and the team colours add is 0.15 ms a frame together.
 
 ByteTrack runs no network of its own. The player model is trained at 1280 like the disc
 model, and players are 90 pixels tall and found as well at 960

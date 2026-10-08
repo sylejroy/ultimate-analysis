@@ -325,16 +325,34 @@ def hide_behind_camera(view: np.ndarray, frame_to_view: np.ndarray) -> None:
     """
     view_to_frame = np.linalg.inv(frame_to_view)
     height, width = view.shape[:2]
-    depth = (
-        view_to_frame[2, 0] * np.arange(width)[None, :]
-        + view_to_frame[2, 1] * np.arange(height)[:, None]
-        + view_to_frame[2, 2]
-    )
     # What the frame shows is in front: the sign of its pixels says which side that is
     in_front = np.sign(np.linalg.det(view_to_frame))
-    behind = depth * in_front <= 0
-    if behind.any():
-        view[behind] = 0
+    a, b, c = view_to_frame[2] * in_front  # Behind: a*x + b*y + c <= 0, one side of a line
+
+    def depth(point: Tuple[float, float]) -> float:
+        return a * point[0] + b * point[1] + c
+
+    # That side of the line within the view is a polygon: the view's rectangle cut along
+    # the line. Filling it costs nothing next to testing every pixel.
+    corners = [(0.0, 0.0), (width - 1.0, 0.0), (width - 1.0, height - 1.0), (0.0, height - 1.0)]
+    behind = []
+    for start, end in zip(corners, corners[1:] + corners[:1]):
+        from_depth, to_depth = depth(start), depth(end)
+        if from_depth <= 0:
+            behind.append(start)
+        if (from_depth <= 0) != (to_depth <= 0):
+            along = from_depth / (from_depth - to_depth)
+            behind.append(
+                (start[0] + along * (end[0] - start[0]), start[1] + along * (end[1] - start[1]))
+            )
+    if len(behind) >= 3:
+        # Rounded outwards by the pixel the line passes through
+        polygon = np.array(behind)
+        outwards = -np.sign([a, b]) * 0.5
+        cv2.fillConvexPoly(view, np.int32(np.rint(polygon + outwards)), (0, 0, 0))
+    elif len(behind) > 0:
+        for x, y in behind:
+            view[int(round(y)), int(round(x))] = 0
 
 
 def draw_field_template(
