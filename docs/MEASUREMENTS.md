@@ -227,6 +227,44 @@ away (mostly the far end zone) in 38 frames, and 0.4 in 17; the scores above are
 for both. The model has not been trained on the low side-line camera of
 `raleigh_vs_portland_2024` and finds no usable field in about a quarter of its frames.
 
+### Retrained on masks drawn from the field labels
+
+The Roboflow outlines are from five short clips. `scripts/build_field_mask_dataset.py`
+draws the field and its end zones from the field labels of whole games
+(`rendered_field_v2`: 303 such frames and the 461 Roboflow images to train on, 100
+frames of one game to validate, 190 frames of three other games to test). Close-ups
+from edited games are added as pictures in which nothing is labelled (76 to train on,
+113 of the test games to test): without them a model learns that grass is field. No
+game is in two of the three parts. On the test part, at the app's settings:
+
+| | Default (YOLO11s-seg, Roboflow) | YOLO11s-seg, labels | YOLO26s-seg, labels | YOLO26s-seg, labels and close-ups |
+|---|---:|---:|---:|---:|
+| Field IoU, mean | 0.921 | 0.942 | 0.945 | 0.944 |
+| End zone IoU, mean | 0.500 | 0.754 | 0.709 | 0.742 |
+| Outline error, median / mean | 12.4 / 25.3 px | 30.5 / 33.8 px | 15.7 / 25.7 px | 3.4 / 21.5 px |
+| Share of the field not found, mean | 5.8% | 3.6% | 2.3% | 4.5% |
+| Grass beside the field taken for field, mean | 2.6% | 3.7% | 3.5% | 3.1% |
+| Images with more areas than labelled / fewer | 25 / 84 | 24 / 20 | 8 / 25 | 0 / 40 |
+| Close-ups given a field, of 113 | 17 | 65 | 32 | 0 |
+
+And the field estimate made from each model's masks, on the 26 hand-labelled frames of
+the three test games (`scripts/benchmark_field_registration.py --games ... --model ...`):
+
+| | Default | YOLO26s-seg, labels | YOLO26s-seg, labels and close-ups |
+|---|---:|---:|---:|
+| Estimate given | 10 | 12 | 13 |
+| Within 5 / 10 / 20 px at the worst labelled corner | 1 / 3 / 5 | 6 / 6 / 7 | 3 / 8 / 10 |
+| Worst corner of those given: median, 90% | 22 px, 215 px | 9 px, 160 px | 7 px, 24 px |
+| Given and more than 2 yd off | 8 | 6 | 6 |
+
+The model trained with close-ups gives no field on any close-up and never an area too
+many, and its estimates are no longer far off (90% under 24 px, from 160). It pays for
+that with areas it does not give: fewer than labelled in 40 images, mostly an end zone,
+and no estimate at all in 10 of 26 frames. 26 frames and 190 images are few; the
+differences between the two YOLO26s models within 10 px are noise. It is not the
+default: that needs a TensorRT engine (`scripts/export_tensorrt.py`) and a look at
+whole games in the app.
+
 The line fit (RANSAC on the field outline) gives the same lines for the same mask, and
 stops when what is left of the outline is shorter than a field line. Measured on 79 masks
 from the games:
