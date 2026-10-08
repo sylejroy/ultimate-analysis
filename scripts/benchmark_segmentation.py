@@ -15,8 +15,9 @@ well the predicted area and its outline match the labelled ones:
 - areas: how many separate areas the model gives per image against how many are
   labelled. The app fits lines to every area, so one too many is a wrong line.
 
-With --negatives, pictures that show no field from above (close-ups, title cards) are
-scored as well: how many get any area at all.
+Pictures that show no field from above (close-ups, title cards) are scored apart: how
+many get any area at all. These are the images of the splits called `negative_...`, and
+those of a folder given with --negatives.
 
 The model runs through the app's own segmentation code. The Roboflow export stores the
 16:9 frames stretched to a square; by default they are stretched back first, which is how
@@ -181,9 +182,13 @@ def main() -> None:
     grass_beside: List[Optional[float]] = []  # The same for the grass there
     missed: List[Optional[float]] = []  # Share of the field that is not found
     area_counts: List[Tuple[int, int]] = []  # (predicted, labelled) per image
+    without_field: List[Path] = []  # Pictures in which nothing is labelled on purpose
     count = 0
     for split in args.splits:
         for image_path in sorted((dataset / split / "images").glob("*")):
+            if image_path.name.startswith("negative_"):
+                without_field.append(image_path)
+                continue
             image = cv2.imread(str(image_path))
             frame = image if args.as_stored else cv2.resize(image, FRAME_SIZE)
             size = (frame.shape[1], frame.shape[0])
@@ -233,11 +238,15 @@ def main() -> None:
     print(f"Areas: more than labelled in {more} images, fewer in {fewer}, of {count}")
 
     if args.negatives:
+        without_field += sorted(args.negatives.glob("*"))
+    if without_field:
         shares = []
-        for image_path in sorted(args.negatives.glob("*")):
+        for image_path in without_field:
             image = cv2.imread(str(image_path))
             if image is None:
                 continue
+            if not args.as_stored:
+                image = cv2.resize(image, FRAME_SIZE)
             _, field, _ = predicted_masks(image, names)
             shares.append(float((field > 0).mean()))
         marked = [share for share in shares if share > 0]

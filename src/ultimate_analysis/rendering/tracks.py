@@ -11,7 +11,9 @@ from ..utils.logger import get_logger
 
 logger = get_logger("RENDERING")
 
-POSSESSION_COLOR = VISUALIZATION_COLORS["POSSESSION"]
+# Who has the disc is marked in the team's colour; this is for a team not yet known.
+# Grey: white is a team's colour often enough.
+UNKNOWN_TEAM_COLOUR = (175, 175, 175)
 
 
 def draw_detections(
@@ -444,17 +446,46 @@ def draw_tracks(
     return vis_frame
 
 
+# A shirt less saturated than this (of 255) is white, grey or black: it has no colour
+# to exaggerate, and what little hue it has comes from the light
+COLOURLESS_SATURATION = 45
+
+
+def team_display_colour(shirt: Tuple[int, int, int]) -> Tuple[int, int, int]:
+    """A team's average shirt colour (BGR) made vivid, to mark the team on the frame.
+
+    The average of a shirt is dull: shadow, folds and the print pull it towards grey.
+    The hue is kept and made saturated and bright. A shirt without a colour stays white
+    or becomes dark, so that a team in white and one in black remain apart.
+    """
+    hue, saturation, value = (
+        int(part) for part in cv2.cvtColor(np.uint8([[shirt]]), cv2.COLOR_BGR2HSV)[0, 0]
+    )
+    if saturation < COLOURLESS_SATURATION:
+        return (255, 255, 255) if value >= 128 else (40, 40, 40)
+    vivid = np.uint8([[(hue, max(200, min(255, saturation * 2)), max(230, value))]])
+    return tuple(int(part) for part in cv2.cvtColor(vivid, cv2.COLOR_HSV2BGR)[0, 0])
+
+
+def possession_colour(track: Any) -> Tuple[int, int, int]:
+    """The colour that marks a track as holding the disc: its team's, or grey without one."""
+    shirt = getattr(track, "team_colour", None)
+    return UNKNOWN_TEAM_COLOUR if shirt is None else team_display_colour(shirt)
+
+
 def draw_possession(frame: np.ndarray, tracks: List[Any], holder_id: Optional[int]) -> None:
-    """Mark the player holding the disc with a thick box (drawn in place)."""
+    """Mark the player holding the disc with a thick box in the team's colour (in place)."""
     for track in tracks:
         if holder_id is None or getattr(track, "track_id", None) != holder_id:
             continue
         x1, y1, x2, y2 = map(int, track.to_ltrb())
-        cv2.rectangle(frame, (x1 - 3, y1 - 3), (x2 + 3, y2 + 3), POSSESSION_COLOR, 3)
+        # A dark rim keeps the box apart from grass and from a white shirt
+        cv2.rectangle(frame, (x1 - 4, y1 - 4), (x2 + 4, y2 + 4), (20, 20, 20), 6)
+        cv2.rectangle(frame, (x1 - 4, y1 - 4), (x2 + 4, y2 + 4), possession_colour(track), 3)
 
 
 # The colours tracks are drawn in, as RGB: far apart from each other, from the grass, and
-# from the gold that marks who has the disc. Neighbouring IDs get a cool and a warm one.
+# Neighbouring IDs get a cool and a warm one.
 TRACK_COLOURS = (
     (56, 189, 248),  # Sky
     (251, 113, 133),  # Rose

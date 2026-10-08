@@ -97,7 +97,9 @@ models:
   tracking:
     backend: bytetrack           # "bytetrack": by motion, each track within its team; "deepsort": by appearance
     hide_non_players: true       # Leave out observers: orange or red shirts that are not a team colour; backend "bytetrack" only
-    track_history_length: 300
+    hide_off_field: true         # Leave out those standing beside the field, going by where the field model sees the field (top-down from the field model only)
+    track_history_length: 300    # Most points a trail is kept for
+    trail_seconds: 4.0           # How far back a trail reaches, however many frames playback skips to keep up
     camera_motion_compensation: true   # Keep trails on the ground when the camera pans or zooms
     
     max_age_seconds: 3.0         # How long a player who is not detected is remembered and can return as the same track
@@ -128,7 +130,12 @@ models:
 
   # Possession: the disc belongs to the player whose box it is in
   possession:
-    confirm_frames: 10           # Frames the disc must be seen at another player (or at none) before the holder changes
+    confirm_seconds: 0.33        # How long the disc must be seen at another player (or at none) before the holder changes
+    beside_holder_seconds: 1.5   # The same for a player standing right by the holder: the mark, who has not been passed the disc
+    holder_memory_seconds: 2.0   # A holder who is not found (covered by the mark) keeps the disc where they were last seen for this long
+    other_team_seconds: 1.0      # The same for a player of the team that does not have the disc: a defender at the catch far more often than an interception
+    reach: 0.35                  # A disc at no player this near to the holder (share of their height) is held out at arm's length, not thrown
+    ground_seconds: 1.5          # A disc lying still at no player for this long is on the ground: a turnover, the other team has it
     box_margin: 0.15             # Player boxes are widened by this fraction; a held disc is often just outside
 
   player_id:
@@ -167,7 +174,7 @@ logging:
 
 # Homography Estimation Settings
 homography:
-  source: "calibration"                      # Top-down view from: "calibration" (set by hand in the Homography tab) or "field" (where the field model sees the field)
+  source: "field"                      # Top-down view from: "calibration" (set by hand in the Homography tab) or "field" (where the field model sees the field)
   ruleset: "usau"                            # The field the field model's view is laid on: "usau" or "wfdf"
   save_directory: "configs"
   default_params_file: "configs/homography_params.yaml"

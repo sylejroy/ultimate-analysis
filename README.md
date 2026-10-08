@@ -10,7 +10,8 @@ Built with PyQt5 and YOLO; runs at about 30 frames per second on an RTX 5060 Ti.
 
 - **Detection and tracking** of players and the disc, with a trail per player. Observers
   in orange are left out.
-- **Possession**: the player holding the disc is marked in gold.
+- **Possession**: the player holding the disc is marked in their team's colour, and a
+  bar under the video shows which team had the disc over the last half minute.
 - **Jersey numbers**, read in the background and collected per player over time.
 - **Field**: the field's outline and lines, and a top-down view, either from a
   calibration set by hand or from where the field model sees the field.
@@ -55,7 +56,8 @@ place weights under `data/models/`; see [docs/DATA.md](docs/DATA.md).
    like every player jumping. Close-ups and title cards of an edited game are noticed
    and left out.
 3. **Tracking**: stable IDs per player, kept within their team.
-4. **Possession**: whose box holds the disc, confirmed over several frames.
+4. **Possession**: whose box holds the disc, confirmed over time; the mark standing
+   in front of the thrower does not take it.
 5. **Jersey numbers**: a few players are read per frame; the readings add up per player.
 6. **Field**: every fifth frame, the field's outline and lines.
 7. **Drawing**: the camera view with overlays, and the top-down view.

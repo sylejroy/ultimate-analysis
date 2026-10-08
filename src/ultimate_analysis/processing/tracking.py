@@ -56,6 +56,11 @@ _frame_rate = 30.0
 # new track. The IDs handed out below are those of the players, not of the tracks.
 _identities = PlayerIdentities()
 _history_last_frame: Dict[int, int] = {}
+# The video frame analysed last, and how many video frames lie between two analysed ones.
+# Live playback skips frames to keep up, so a trail of a fixed number of points would
+# reach back the further the slower the analysis runs.
+_video_frame: Optional[int] = None
+_frames_per_step = 1
 # Discs are not players; their track IDs are moved out of the way of the player IDs
 DISC_ID_OFFSET = 100000
 _frame_count = 0
@@ -80,6 +85,10 @@ class Track:
         self.class_name = class_name
         self.model_type = model_type  # Track which model detected this
         self.det_class = class_name  # For compatibility with existing code
+        # The player's team (0 or 1) and its average shirt colour (BGR), once the tracker
+        # knows them
+        self.team: Optional[int] = None
+        self.team_colour: Optional[Tuple[int, int, int]] = None
 
     def to_ltrb(self) -> List[float]:
         """Return bounding box in [x1, y1, x2, y2] format."""
@@ -216,12 +225,16 @@ def _embed_detections(frame: np.ndarray, deepsort_detections: List[tuple]) -> Op
     return embeds
 
 
-def run_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) -> List[Track]:
+def run_tracking(
+    frame: np.ndarray, detections: List[Dict[str, Any]], frame_index: Optional[int] = None
+) -> List[Track]:
     """Run object tracking on detected objects.
 
     Args:
         frame: Input video frame as numpy array (H, W, C) in BGR format
         detections: List of detection dictionaries from inference
+        frame_index: The frame's number in the video, if known: frames may be skipped
+            between calls, and the trails are kept for a time, not a number of calls
 
     Returns:
         List of Track objects with consistent IDs across frames
@@ -232,8 +245,13 @@ def run_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) -> List[Tr
             track_id = track.track_id
             x1, y1, x2, y2 = track.to_ltrb()
     """
-    global _frame_count
+    global _frame_count, _video_frame, _frames_per_step
     _frame_count += 1
+    if frame_index is not None:
+        skipped = frame_index - _video_frame if _video_frame is not None else 1
+        # Anything else is a seek, after which the caller resets the tracker anyway
+        _frames_per_step = skipped if 0 < skipped <= _frame_rate else 1
+        _video_frame = frame_index
 
     if _uses_bytetrack():
         try:
@@ -282,6 +300,8 @@ def _run_bytetrack_tracking(frame: np.ndarray, detections: List[Dict[str, Any]])
             if tracker is _player_tracker and get_setting("models.tracking.hide_non_players", True)
             else ()
         )
+        teams = tracker.teams_of_tracks() if tracker is _player_tracker else {}
+        team_colours = tracker.shirt_colours() if tracker is _player_tracker else {}
         for row in rows:
             if int(row[4]) in hidden:
                 continue
@@ -295,8 +315,15 @@ def _run_bytetrack_tracking(frame: np.ndarray, detections: List[Dict[str, Any]])
                     model_type=f"{class_name}_model",
                 )
             )
+            tracks[-1].team = teams.get(int(row[4]))
+            tracks[-1].team_colour = team_colours.get(tracks[-1].team)
     _finish_tracks(frame, tracks)
     return tracks
+
+
+def team_shirt_colours() -> Dict[int, Tuple[int, int, int]]:
+    """{team (0 or 1): its average shirt colour (BGR)}; empty until the teams are known."""
+    return _player_tracker.shirt_colours() if _player_tracker is not None else {}
 
 
 def _finish_tracks(frame: np.ndarray, tracks: List[Track]) -> None:
@@ -569,7 +596,7 @@ def reset_tracker() -> None:
 
     This should be called when switching videos or when tracking quality degrades.
     """
-    global _deepsort_tracker, _track_histories, _frame_count
+    global _deepsort_tracker, _track_histories, _frame_count, _video_frame, _frames_per_step
 
     logger.info("Resetting tracker state")
 
@@ -587,6 +614,7 @@ def reset_tracker() -> None:
     _history_last_frame.clear()
     _identities.reset()
     _frame_count = 0
+    _video_frame, _frames_per_step = None, 1
 
     # Reset jersey tracking as well
     try:
@@ -684,6 +712,9 @@ def _update_track_history(track_id: int, center_point: Tuple[int, int]) -> None:
         center_point: Center point (x, y) of the tracked object
     """
     max_length = get_setting("models.tracking.track_history_length", TRACK_HISTORY_MAX_LENGTH)
+    # As many points as cover the trail's time at the rate frames are analysed at
+    seconds = float(get_setting("models.tracking.trail_seconds", 4.0))
+    max_length = max(2, min(max_length, round(seconds * _frame_rate / _frames_per_step)))
     point = np.array([center_point], dtype=np.float32)
     history = _track_histories.get(track_id)
     if history is None:

@@ -22,7 +22,12 @@ Outside `src/`:
 
 - `configs/` — `default.yaml`, `easyocr_params.yaml`, `training.yaml`,
   `homography_params.yaml`
-- `scripts/` — dataset building, TensorRT export, benchmarks, profiling
+- `scripts/` — dataset building, TensorRT export, benchmarks, profiling. Each script
+  says in its first lines what it reads and writes. The dataset builders
+  (`build_*.py`, `collect_field_negatives.py`) only read their sources and write a new
+  folder; which dataset comes from which is in `docs/DATA.md`. `build_disc_tile_dataset.py`
+  and `build_native_disc_dataset.py` belong to two disc experiments that did not beat
+  the default model (see `docs/MEASUREMENTS.md`) and are kept to repeat them.
 - `tests/` — one file per area; synthetic frames and mocked models
 - `data/` — local videos, datasets, and trained models. Not tracked by Git, so anything
   deleted there is gone; leave it alone during cleanups.

@@ -10,7 +10,7 @@ from ..processing.field_analysis import calculate_field_contour, create_unified_
 from ..processing.tracking import DISC_ID_OFFSET
 from ..utils.logger import get_logger
 from .field import draw_field_contour, draw_unified_field_mask, get_primary_field_color
-from .tracks import POSSESSION_COLOR, get_track_color
+from .tracks import get_track_color, possession_colour
 
 logger = get_logger("RENDERING")
 
@@ -228,7 +228,7 @@ def draw_tracks_top_down(
                         result_frame,
                         (transformed_x, transformed_y),
                         px(20),
-                        POSSESSION_COLOR,
+                        possession_colour(track),
                         px(4),
                     )
 

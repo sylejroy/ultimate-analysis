@@ -225,7 +225,7 @@ class PipelineTests(unittest.TestCase):
         self.mocks["merge_players"].assert_called_once()
 
     def test_top_down_view_needs_a_homography(self):
-        options = self.module.PipelineOptions()
+        options = self.module.PipelineOptions(top_down_source="calibration")
         result = self.pipeline.process(self.frame, 0, options)
         self.assertIsNone(result.top_down_view)
         self.assertEqual(result.top_down_message, "Homography matrix not available")

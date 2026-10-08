@@ -22,6 +22,11 @@ Everything under `data/` is local and not tracked by Git.
   | `roboflow_player_disc_detection_v4i` | Roboflow export: players and discs of one game, stretched to 1280×1280 | Source of the merged sets |
   | `roboflow_object_detection_disc_v1i` | Roboflow export: discs only, 1920×1080 | Source of the merged sets |
   | `roboflow_field_finder_v8i` | Roboflow export: field and end zones, stretched to a square | The field segmentation model |
+  | `labelled_field_v1` | Frames with the field's corners placed in the Labelling tab ("Field lines") | The field estimate's benchmark, source of the sets below |
+  | `propagated_field_v1` | Those labels carried to neighbouring frames with the camera's motion, built by `scripts/build_field_registration_dataset.py` | Source of the rendered sets |
+  | `rendered_field_v1` | Field and end zone areas drawn from the field labels, plus the Roboflow outlines, split by game; built by `scripts/build_field_mask_dataset.py` | Field segmentation models |
+  | `field_negatives_v1` | Close-ups from edited games in which no field is seen from above, found by `scripts/collect_field_negatives.py` and looked through by hand (`excluded.txt`) | Pictures without a field for the set below |
+  | `rendered_field_v2` | `rendered_field_v1` plus the pictures of `field_negatives_v1` with nothing labelled in them (`--negatives`) | Field segmentation models |
   | `roboflow_digits_v1i` | Roboflow export: house-number digits | A rough start for a jersey digit detector |
 
   `labelled_` is labelled with this app, `roboflow_` is a Roboflow export exactly as

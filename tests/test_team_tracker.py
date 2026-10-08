@@ -53,6 +53,41 @@ class TeamTrackerTests(unittest.TestCase):
         teams = [track.team for track in self.tracker.tracked_stracks]
         self.assertEqual(sorted(teams), [0, 0, 1, 1])
 
+    def test_tracks_are_given_the_shirt_colour_of_their_team(self):
+        ids = self.learn_the_teams()
+        teams, colours = self.tracker.teams_of_tracks(), self.tracker.shirt_colours()
+        self.assertEqual(teams[ids[0]], teams[ids[1]])
+        self.assertEqual(teams[ids[2]], teams[ids[3]])
+        self.assertNotEqual(teams[ids[0]], teams[ids[2]])
+        for track_id, shirt in ((ids[0], WHITE), (ids[2], DARK)):
+            self.assertLess(np.abs(np.subtract(colours[teams[track_id]], shirt)).max(), 12)
+
+    def test_the_colour_a_team_is_shown_in_is_held_once_enough_shirts_were_seen(self):
+        self.learn_the_teams()
+        for _ in range(260):
+            self.see((100, WHITE), (300, WHITE), (500, DARK), (700, DARK))
+        shown = dict(self.tracker.shirt_colours())
+        # The light changes: shirts are seen darker from now on
+        for _ in range(60):
+            self.see((100, (200, 200, 200)), (300, (200, 200, 200)), (500, DARK), (700, DARK))
+        self.assertEqual(self.tracker.shirt_colours(), shown)
+        self.tracker.reset()
+        self.assertEqual(self.tracker.shirt_colours(), {})
+
+    def test_the_grass_beside_a_player_is_not_in_the_colour_a_team_is_shown_in(self):
+        # A slim player: much of what counts as the shirt in the box is grass
+        frame, boxes = frame_with((100, WHITE))
+        x1, y1, x2, y2 = (int(value) for value in boxes[0])
+        frame[y1:y2, x1 : x1 + 14] = GRASS
+        frame[y1:y2, x2 - 14 : x2] = GRASS
+        colour = team_tracker.appearance.shirt_colour(frame, boxes[0])
+        self.assertLess(np.abs(colour - WHITE).max(), 12)
+        with_grass = team_tracker.appearance.encode(frame, boxes)[0][:3]
+        self.assertGreater(abs(float(with_grass[1]) - 128), 5)  # Greenish, in Lab
+        # Nothing but grass tells no shirt
+        frame[y1:y2, x1:x2] = GRASS
+        self.assertIsNone(team_tracker.appearance.shirt_colour(frame, boxes[0]))
+
     def test_a_track_is_not_continued_by_a_player_of_the_other_team(self):
         ids = self.learn_the_teams()
         # The white player at 300 vanishes and a dark one stands exactly there instead:

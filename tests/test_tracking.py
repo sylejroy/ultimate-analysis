@@ -84,6 +84,24 @@ class TrackingTests(unittest.TestCase):
             self.module.set_frame_rate(0)
             self.assertEqual(tracker.tracker.max_age, 90)
 
+    def test_a_trail_reaches_back_a_time_however_many_frames_are_skipped(self):
+        settings = {
+            "models.tracking.track_history_length": 300,
+            "models.tracking.trail_seconds": 4.0,
+        }
+        self.module.set_frame_rate(60.0)
+        for step, points in ((1, 240), (10, 24)):
+            self.module._track_histories.clear()
+            self.module._frames_per_step = step
+            with patch.object(
+                self.module, "get_setting", side_effect=lambda key, default=None: settings[key]
+            ):
+                for index in range(400):
+                    self.module._update_track_history(1, (index, 0))
+            self.assertEqual(len(self.module._track_histories[1]), points)
+        self.module._frames_per_step = 1
+        self.module._track_histories.clear()
+
     def test_camera_motion_moves_trails_and_where_tracks_expect_their_players(self):
         from types import SimpleNamespace
 

@@ -4,7 +4,9 @@ A painted line is a thin streak that is whiter than the grass on both sides of i
 pixel gets a strength for being the middle of such a streak (at three widths: lines far
 from the camera are a pixel or two wide, near ones ten), held against the strength the
 grass around it gives, since grass in the sun is streaky too. What is left is kept where
-it forms long thin pieces: lines, and not shirts, tents, or lettering.
+it forms long thin pieces: lines, and not shirts, tents, or lettering. A player's arm,
+leg or shirt stripe is long and thin as well, so a piece that lies mostly on players is
+left out when the players' boxes are given.
 
 Faint lines far away are found in parts or not at all, and the edge of a road or the sky
 line above the trees comes out as well. It is a guide for the eye, not a measurement.
@@ -17,12 +19,19 @@ import numpy as np
 
 # Widths looked for, as the blur (in pixels) at which a line of that width stands out most
 LINE_SCALES = (1.2, 2.5, 4.5)
-# A streak counts if it is this many times stronger than the average around it
-MIN_CONTRAST = 3.5
+# A streak counts if it is this many times stronger than the average around it. Lower
+# finds more of the faint far lines and more that is no line: on the labelled field
+# frames, 3.5 found 40% of the field's lines, 3.0 finds 47% and marks 1.7 times as much
+# elsewhere; 2.4 with shorter pieces finds 64% and marks five times as much.
+MIN_CONTRAST = 3.0
 # The size of "around it", in pixels
 SURROUNDINGS = 61
 # Pieces shorter than this are not lines
 MIN_LENGTH = 70
+# A piece with more than this share of it on players is part of a player. Their boxes are
+# widened by a share of their height: an arm or a foot reaches out of the box.
+MAX_ON_PLAYERS = 0.5
+PLAYER_PAD = 0.1
 # A line drawn through two points snaps onto a painted line only if that many of its
 # pixels lie on painted ones, and that share of what the frame shows of it: a long line
 # that is found along much of its length, not a few stray streaks
@@ -42,8 +51,28 @@ def _ridge_strength(white: np.ndarray, scale: float) -> np.ndarray:
     return np.maximum(-lower, 0) * scale**2
 
 
-def painted_line_mask(frame: np.ndarray) -> np.ndarray:
-    """Where a frame (BGR) shows painted lines: a mask of the frame's size, 255 on a line."""
+def painted_line_mask(
+    frame: np.ndarray, players: Optional[Sequence[Sequence[float]]] = None
+) -> np.ndarray:
+    """Where a frame (BGR) shows painted lines: a mask of the frame's size, 255 on a line.
+
+    Args:
+        frame: The picture
+        players: Boxes (x1, y1, x2, y2) of the players in it, if known. A piece that lies
+            mostly within them is part of a player and no line. A line that runs past a
+            player's feet lies mostly outside and stays, with a gap where the player is:
+            a leg or a stripe that touches the line there would count as part of it.
+    """
+    on_players = np.zeros(frame.shape[:2], dtype=np.uint8)
+    for x1, y1, x2, y2 in players or ():
+        pad = PLAYER_PAD * (y2 - y1)
+        cv2.rectangle(
+            on_players,
+            (int(x1 - pad), int(y1 - pad)),
+            (int(x2 + pad), int(y2 + pad)),
+            1,
+            -1,
+        )
     # White is high in all three colours; grass is not
     white = frame.min(axis=2).astype(np.float32)
     found = np.zeros(frame.shape[:2], dtype=np.uint8)
@@ -56,8 +85,12 @@ def painted_line_mask(frame: np.ndarray) -> np.ndarray:
         longer = np.maximum(width, height)
         # Long, and thin: little of the box it spans, or just a strip along it
         is_line = (longer >= MIN_LENGTH) & (area <= 0.3 * width * height + (2 + 2 * scale) * longer)
+        if players:
+            inside = np.bincount(pieces.ravel(), weights=on_players.ravel(), minlength=len(area))
+            is_line &= inside <= MAX_ON_PLAYERS * area
         is_line[0] = False  # The background
         found[is_line[pieces]] = 255
+    found[on_players > 0] = 0
     return found
 
 

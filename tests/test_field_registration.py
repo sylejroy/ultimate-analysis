@@ -210,6 +210,41 @@ class FieldEstimateTest(unittest.TestCase):
         follower.update(self.results, self.shape)
         self.assertIn("waiting", follower.left_out)
 
+    def test_someone_standing_beside_the_field_is_told_from_one_who_steps_out(self):
+        from types import SimpleNamespace
+
+        from ultimate_analysis.processing.field_registration import OffFieldWatcher
+
+        watcher = OffFieldWatcher(self.template)
+        mapping = np.eye(3)  # A pixel is a field unit: feet at (x, y) stand at (x, y)
+
+        def player(track_id, x, y):
+            return SimpleNamespace(
+                track_id=track_id, class_name="player", to_ltrb=lambda: [x - 1, y - 4, x + 1, y]
+            )
+
+        middle = self.template.width / 2
+        for frame in range(60):
+            # 1 on the field, 2 five units beside it, 3 on the field and out for a moment,
+            # 4 a unit over the line: within the margin
+            steps_out = -5.0 if 30 <= frame < 40 else 5.0
+            off = watcher.update(
+                mapping,
+                [
+                    player(1, middle, 30),
+                    player(2, -5, 30),
+                    player(3, steps_out, 50),
+                    player(4, -1, 60),
+                ],
+            )
+        self.assertEqual(off, {2})
+        # Without knowing where the field is, what was learned holds
+        self.assertEqual(watcher.update(None, [player(2, middle, 30)]), {2})
+        # Coming on to play, a track is on the field again after a while
+        for frame in range(300):
+            off = watcher.update(mapping, [player(2, middle, 30)])
+        self.assertEqual(off, set())
+
     def test_canvas_shows_the_whole_field_with_the_far_end_on_top(self):
         on_canvas = field_to_canvas(self.template, (400, 1200))
         near_left = pixel_of(on_canvas, (0.0, 0.0))

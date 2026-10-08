@@ -269,8 +269,9 @@ corners two pixels off put the near goal line some 20 pixels off instead of 70 t
 The main tab learns the focal length from the frames as they play; the labelling takes it
 from the frames of the video labelled so far.
 
-In the main tab, "Top-down from the field model" makes the top-down view from this
-estimate instead of the calibration (`homography.source`). The field is estimated each
+In the main tab, "Top-down from the field model" (the default) makes the top-down view
+from this estimate instead of the calibration (`homography.source`). The lines fitted to
+the field's outline are then not drawn: the view is not made from them. The field is estimated each
 time the field model runs, moved with the camera in between, and evened out; the lines of
 the field are drawn on the view. It costs about 2 ms per frame.
 
@@ -280,6 +281,21 @@ field as estimated, or if the field as estimated and the field the model sees sh
 than 85% of what either covers. An estimate more than 8 yards from where the field was
 followed to must be given twice in a row before it replaces it. The main tab takes the
 focal length from the video's field labels where it has any.
+
+Each new estimate goes into the followed field by a fifth (`NEW_ESTIMATE_WEIGHT`); it was
+two fifths. Replayed on 40 seconds each of three games (1,220 estimates), how far the
+field moves in the view when an estimate comes in, and how far the followed field was
+from that estimate, both in yards at the worst of four places in the picture:
+
+| Weight of a new estimate | Moves by: median / 90% | Was off the estimate by: median / 90% |
+|---|---:|---:|
+| 0.4 (before) | 0.04 / 0.27 | 0.11 / 0.69 |
+| 0.3 | 0.03 / 0.23 | 0.12 / 0.77 |
+| 0.2 (now) | 0.03 / 0.18 | 0.13 / 0.90 |
+| 0.1 | 0.02 / 0.13 | 0.16 / 1.33 |
+
+The field was steady before; the larger moves are a third smaller now. Whether the
+followed field or the single estimate is nearer the truth is not known from this.
 
 Against the 63 labelled frames of ten games (`scripts/benchmark_field_registration.py`),
 measured only at the corners that were put on the picture by hand, with the focal length
@@ -315,6 +331,24 @@ What this says:
   to under 2 px. What a label says beyond its corners follows from the camera and is not
   measured; two labels 395 frames apart that agree at the far corners differ by tens of
   pixels near the camera (see `docs/REVIEW_2026-10-08.md`).
+
+## Painted lines as a labelling aid
+
+The field labelling shows thin white streaks found in the picture
+(`utils/painted_lines.py`). Against the lines of the 76 labelled field frames: the share
+of a frame's labelled lines with a found pixel within 4 px, and what is marked more than
+8 px from any of them (other fields' lines are among that, so not all of it is clutter).
+
+| Contrast needed / shortest piece | Labelled lines found | Marked on players | Marked elsewhere |
+|---|---:|---:|---:|
+| 3.5 / 70 px, as before | 40% | 460 px | 13,300 px |
+| 3.5 / 70 px, players left out | 40% | 0 | 13,300 px |
+| 3.0 / 70 px, players left out (now) | 47% | 0 | 22,100 px |
+| 2.7 / 50 px, players left out | 56% | 0 | 40,300 px |
+| 2.4 / 45 px, players left out | 64% | 0 | 63,300 px |
+
+Pieces that lie mostly in the boxes of detected players are dropped, and the boxes are
+blanked, so a line has a gap where a player stands.
 
 ## Jersey number readers
 
@@ -482,7 +516,50 @@ Performance panel in the Main Analysis tab shows the time per pipeline stage.
   detections by class. A model only reports the classes it is selected for.
 - Possession goes to the player whose box contains the detected disc. The holder only
   changes after the disc has been seen at another player, or at no player, for
-  `models.possession.confirm_frames` frames in a row (10), so a disc flying past someone
-  does not change it. Frames without a detected disc leave the holder as it is.
+  `models.possession.confirm_seconds` without a break (a third of a second), so a disc
+  flying past someone does not change it. Frames without a detected disc leave the
+  holder as it is.
+- The mark stands right in front of the holder and often covers them. A disc in the
+  holder's box, or at no player within arm's reach of it, stays the holder's however
+  near it is to someone else; a holder who is not found keeps the disc where they were
+  last seen (`holder_memory_seconds`); and a player whose box touches the holder's must
+  have the disc for `beside_holder_seconds` before they are taken for the holder. A
+  player of the team that does not have the disc needs `other_team_seconds`.
+- Being sure of a new holder takes a moment, but the change is dated back to the frame
+  the disc was first seen there (`FrameResult.possession_since`); the possession bar
+  under the video and the strip of the demo are put right back to that frame. The box
+  around the holder on the picture cannot be: it appears when the holder is confirmed.
+- Live playback skips frames when the analysis is slower than the video. A frame then
+  counts for the frames skipped before it in possession, and a trail holds as many
+  points as cover `models.tracking.trail_seconds`: with a fixed number of points the
+  trails reached back most of a minute at 6 frames per second.
+- The colour a team is shown in is its average shirt colour made vivid. It is taken
+  from the shirts without the grass that the middle of a box also shows (the colours
+  the tracker matches by have the grass in them), and is held once 400 shirts of the
+  team have been seen. A holder's jersey number, once read, is written on their
+  stretch of the possession bar.
+- With the top-down view from the field model, a track whose feet are more than 2 yards
+  outside the field as estimated on 85% of its recent sightings is left out
+  (`models.tracking.hide_off_field`): the players standing along the sidelines. A
+  player who steps out of bounds stays. Not measured against labels: there are none of
+  who is in the point.
+- A disc that lies still at no player for `ground_seconds` is on the ground: a turnover,
+  and the other team is in possession from then on. Something white and round on the
+  grass that the disc model takes for a disc (a brick mark) looks the same; it counts
+  once at most until a player has the disc again, and that player's team then decides.
+- There is no ground truth for possession. Replayed on 80 seconds each of three games
+  (what the possession tracker was fed, recorded once), the logic before and now:
+
+  | Stretch | Holder changes | Taken back within 2 s | Holders for under 1 s | Team changes now |
+  |---|---:|---:|---:|---:|
+  | San Francisco v Colorado, 24:27 | 20 → 11 | 2 → 0 | 4 → 0 | 0 |
+  | Chicago v New York, 10:00 | 13 → 10 | 0 → 0 | 0 → 0 | 3 |
+  | Portland v San Francisco, 11:00 | 21 → 9 | 0 → 0 | 1 → 1 | 2 |
+
+  A player is named as holder for less of the time (72% → 45%, 51% → 46%, 58% → 38%):
+  the disc is found in about half the frames, and where it is seen only now and then
+  (between points, when players walk to the line) the logic before named someone from a
+  few frames. Fewer changes is what was aimed at; whether each holder is the right one
+  has not been checked against labels.
 - The disc model is skipped after a stretch with no disc and retried periodically
   (`models.disc_detection.skip_threshold`: 30 frames; `retry_interval`: 5 frames).

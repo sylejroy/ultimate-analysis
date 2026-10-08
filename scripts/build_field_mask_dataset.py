@@ -17,12 +17,17 @@ the stretching does not change them.
     python scripts/build_field_mask_dataset.py rendered_field_v1 \\
         --validation chicago_vs_new_york --test san_francisco_vs_colorado Truck_Stop_VS_Revolver
 
+With --negatives, pictures that show no field from above (close-ups; see
+`collect_field_negatives.py`) are added with nothing labelled in them, split by game
+like the rest and named `negative_...`. Without them a model learns that grass is field.
+
 The sources are read-only; the result is written to a new dataset directory in YOLO
 segmentation format, with `data.yaml` for the Model Training tab.
 """
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -102,6 +107,7 @@ def main() -> None:
     parser.add_argument(
         "--without-roboflow", action="store_true", help="Leave the hand-drawn outlines out"
     )
+    parser.add_argument("--negatives", help="Folder of pictures without a field to add")
     args = parser.parse_args()
 
     source = TRAINING_DATA / args.source
@@ -144,6 +150,24 @@ def main() -> None:
         counts[split][0] += 1
         counts[split][1] += len(areas)
 
+    negatives = {split: 0 for split in counts}
+    if args.negatives:
+        folder = TRAINING_DATA / args.negatives
+        excluded = set((folder / "excluded.txt").read_text().split())
+        for image in sorted((folder / "images").glob("*.jpg")):
+            if image.stem in excluded:
+                continue
+            game = re.sub(r"_snippet_\d+_\d+$", "", image.stem.rsplit("_frame_", 1)[0])
+            split = split_of(game)
+            frame = cv2.imread(str(image))
+            cv2.imwrite(
+                str(output / split / "images" / f"negative_{image.name}"),
+                cv2.resize(frame, (args.size, args.size), interpolation=cv2.INTER_AREA),
+                [cv2.IMWRITE_JPEG_QUALITY, 92],
+            )
+            (output / split / "labels" / f"negative_{image.stem}.txt").write_text("")
+            negatives[split] += 1
+
     roboflow = 0
     if not args.without_roboflow:
         # Hand-drawn outlines of one game (Portland v San Francisco), all into the training
@@ -174,7 +198,10 @@ def main() -> None:
     )
     for split, (images, areas) in counts.items():
         named = [game for game, where in splits.items() if where == split]
-        print(f"{split}: {images} frames, {areas} areas, games: {', '.join(named)}")
+        print(
+            f"{split}: {images} frames, {areas} areas, {negatives[split]} pictures without a "
+            f"field, games: {', '.join(named)}"
+        )
     print(f"plus {roboflow} hand-outlined images of {ROBOFLOW_SOURCE} in train")
     print(f"Written to {output}")
 

@@ -35,7 +35,6 @@ VISUALIZATION_COLORS = {
     # Class-specific colors
     "DISC": (0, 255, 255),  # Bright cyan - easy to spot
     "PLAYER": (128, 128, 128),  # Subtle gray
-    "POSSESSION": (0, 215, 255),  # Gold - the player holding the disc
     # Model-specific colors for differentiation
     "PLAYER_MODEL": (0, 200, 0),  # Bright green for player model detections
     "DISC_MODEL": (

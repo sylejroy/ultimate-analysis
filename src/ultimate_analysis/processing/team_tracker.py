@@ -38,6 +38,10 @@ SAMPLE_OVERLAP = 0.05
 SAMPLE_MIN_CONFIDENCE = 0.5
 MIN_SAMPLES = 60
 MAX_SAMPLES = 3000
+# The colour a team is shown in is the average of this many of its shirts at least, and
+# is held from that many on
+MIN_SHOWN_COLOUR_SAMPLES = 20
+SHOWN_COLOUR_SAMPLES = 400
 REFIT_FRAMES = 30
 # Two colour clusters closer than this (Lab units) are not two teams
 MIN_TEAM_DISTANCE = 40.0
@@ -226,6 +230,9 @@ class TeamTracker(BYTETracker):
         super().__init__(args)
         self._shirt_samples: List[np.ndarray] = []
         self.team_colours: Optional[np.ndarray] = None  # (2, 3) shirt colours in Lab
+        # Per team: the sum of its shirts' colours without grass (BGR), and how many
+        self._shown_sums = np.zeros((2, 3))
+        self._shown_counts = [0, 0]
         self._frames_since_fit = 0
 
     def update(self, results: Any, img: Optional[np.ndarray] = None, *args, **kwargs):
@@ -273,6 +280,39 @@ class TeamTracker(BYTETracker):
             if getattr(track, "outsider", False)
         }
 
+    def shirt_colours(self) -> dict:
+        """{team (0 or 1): its average shirt colour (BGR)}; empty until the teams are known.
+
+        For showing a team by its colour: the average over the shirts of its players
+        without the grass around them (the colours the tracker matches by have grass in
+        them, and are fitted again and again). It is held once enough shirts have been
+        seen, so a team does not change colour on the screen. Until a team has a few
+        such shirts, it is the colour the tracker matches by.
+        """
+        if self.team_colours is None:
+            return {}
+        lab = np.clip(self.team_colours, 0, 255).astype(np.uint8).reshape(1, 2, 3)
+        matched = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)[0]
+        return {
+            team: tuple(
+                int(round(value))
+                for value in (
+                    self._shown_sums[team] / self._shown_counts[team]
+                    if self._shown_counts[team] >= MIN_SHOWN_COLOUR_SAMPLES
+                    else matched[team]
+                )
+            )
+            for team in (0, 1)
+        }
+
+    def teams_of_tracks(self) -> dict:
+        """{track ID: team (0 or 1)} for the tracks whose team is known."""
+        return {
+            int(track.track_id): track.team
+            for track in self.tracked_stracks
+            if getattr(track, "team", None) is not None
+        }
+
     def init_track(self, results: Any, img: Optional[np.ndarray] = None) -> List[STrack]:
         detections = super().init_track(results, img)
         if img is None or not detections:
@@ -290,6 +330,12 @@ class TeamTracker(BYTETracker):
                 and confidence >= SAMPLE_MIN_CONFIDENCE
             ):
                 self._shirt_samples.append(shirt)
+                team = detection.shirt_team
+                if team is not None and self._shown_counts[team] < SHOWN_COLOUR_SAMPLES:
+                    shown = appearance.shirt_colour(img, detection.xyxy)
+                    if shown is not None:
+                        self._shown_sums[team] += shown
+                        self._shown_counts[team] += 1
         return detections
 
     def get_dists(self, tracks: List[STrack], detections: List[STrack]) -> np.ndarray:
@@ -313,4 +359,6 @@ class TeamTracker(BYTETracker):
         super().reset()
         self._shirt_samples = []
         self.team_colours = None
+        self._shown_sums = np.zeros((2, 3))
+        self._shown_counts = [0, 0]
         self._frames_since_fit = 0

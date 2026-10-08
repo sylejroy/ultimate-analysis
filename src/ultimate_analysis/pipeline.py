@@ -21,7 +21,7 @@ from .processing.camera_motion import CameraMotionEstimator
 from .processing.camera_motion import is_enabled as camera_motion_enabled
 from .processing.field_analysis import create_unified_field_mask, fit_lines_from_mask
 from .processing.field_line_filter import FieldLineFilter
-from .processing.field_registration import FieldFollower, field_to_canvas
+from .processing.field_registration import FieldFollower, OffFieldWatcher, field_to_canvas
 from .processing.field_segmentation import reset_segmentation_cache, run_field_segmentation
 from .processing.homography import output_canvas_size
 from .processing.inference import reset_inference_state, run_inference
@@ -34,6 +34,7 @@ from .processing.tracking import (
     reset_tracker,
     run_tracking,
     set_frame_rate,
+    team_shirt_colours,
 )
 from .rendering.field import (
     draw_field_segmentation,
@@ -53,6 +54,7 @@ from .rendering.tracks import (
     draw_possession,
     draw_tracks,
     draw_tracks_with_player_ids,
+    team_display_colour,
 )
 from .utils.field_label_files import video_focal
 from .utils.field_template import DEFAULT_RULESET, TEMPLATES
@@ -77,7 +79,7 @@ class PipelineOptions:
     # What the top-down view is made from: "calibration" (the mapping set by hand in the
     # Homography tab, moved with the camera) or "field" (where the field model sees the
     # field in each frame)
-    top_down_source: str = "calibration"
+    top_down_source: str = "field"
 
     @property
     def analysis_key(self) -> Tuple[bool, bool, bool, bool]:
@@ -100,6 +102,12 @@ class FrameResult:
     timings: Dict[str, float]  # Milliseconds per stage, in the order they ran
     wide_shot: bool = True  # False on a close-up or title card, where nothing is analysed
     problems: Tuple[str, ...] = ()  # Stages that failed on this frame, for showing
+    # The colour (BGR) of the team in possession, None while it is not known, and where
+    # the disc is: "held", "air" (also: not seen) or "ground"
+    possession_colour: Optional[Tuple[int, int, int]] = None
+    disc_state: str = "air"
+    # The frame from which that is so: a change is confirmed some frames after it happened
+    possession_since: int = 0
 
 
 @dataclass
@@ -137,6 +145,7 @@ class AnalysisPipeline:
                 get_setting("homography.ruleset", DEFAULT_RULESET), TEMPLATES[DEFAULT_RULESET]
             )
         )
+        self._off_field = OffFieldWatcher(self._field_follower.template)
         self._follow_field = False
 
         # Results for the current frame
@@ -210,6 +219,7 @@ class AnalysisPipeline:
     def reset(self) -> None:
         """Forget everything derived from earlier frames."""
         self._field_follower.reset()
+        self._off_field.reset()
         self._numbers.reset()
         self._shot.reset()
         reset_tracker()
@@ -227,6 +237,8 @@ class AnalysisPipeline:
     def set_frame_rate(self, frames_per_second: float) -> None:
         """Tell the pipeline the frame rate of the video; durations are set in seconds."""
         set_frame_rate(frames_per_second)
+        if frames_per_second and frames_per_second > 0:
+            self._possession.frame_rate = float(frames_per_second)
 
     def reset_player_ids(self) -> None:
         """Forget the jersey numbers read so far (e.g. after switching the reader)."""
@@ -287,6 +299,9 @@ class AnalysisPipeline:
             tracks=self.tracks,
             player_ids=dict(self.player_ids),
             holder_id=self._possession.holder_id,
+            possession_colour=self._possession_colour(),
+            disc_state=self._possession.disc_state,
+            possession_since=self._possession.since,
             timings=self._timings,
             wide_shot=self._shot.wide,
             problems=problems,
@@ -297,6 +312,11 @@ class AnalysisPipeline:
         duration_ms = (time.perf_counter() - start) * 1000
         self._timings[stage] = self._timings.get(stage, 0.0) + duration_ms
         return duration_ms
+
+    def _possession_colour(self) -> Optional[Tuple[int, int, int]]:
+        """The colour that stands for the team in possession, None while it is not known."""
+        shirt = team_shirt_colours().get(self._possession.team)
+        return None if shirt is None else team_display_colour(shirt)
 
     def _update_fps(self, frame_time_ms: float) -> None:
         self._frame_times_ms.append(frame_time_ms)
@@ -328,6 +348,7 @@ class AnalysisPipeline:
             motion = self._camera_motion.update(frame, boxes)
             if motion is not None:
                 apply_camera_motion(motion)
+                self._possession.move(motion)
                 self._line_filter.move(motion)
                 self._camera_since_calibration = motion @ self._camera_since_calibration
                 self._field_follower.move(motion)
@@ -335,8 +356,12 @@ class AnalysisPipeline:
 
         if options.tracking:
             start = time.perf_counter()
-            self.tracks = run_tracking(frame, self.detections)
-            self._possession.update(self.detections, self.tracks)
+            self.tracks = run_tracking(frame, self.detections, frame_index)
+            if self._follow_field and get_setting("models.tracking.hide_off_field", True):
+                # Those standing along the sidelines are followed but not shown or counted
+                off_field = self._off_field.update(self._field_follower.image_to_field, self.tracks)
+                self.tracks = [track for track in self.tracks if track.track_id not in off_field]
+            self._possession.update(self.detections, self.tracks, frame_index)
             self._record("Tracking", start)
         else:
             self._possession.reset()
@@ -348,7 +373,9 @@ class AnalysisPipeline:
             self._record("Field Segmentation", start)
             if self.field_results:
                 self._update_field_geometry(frame.shape[:2])
-                if self._geometry.mask is not None:
+                # The lines fitted to the outline are shown where they are what the view
+                # is made from; with the field model's own estimate they are only clutter
+                if self._geometry.mask is not None and not self._follow_field:
                     self.ransac_lines, self.ransac_confidences = self._line_filter.current()
 
         if options.player_id and self.tracks:
@@ -360,6 +387,7 @@ class AnalysisPipeline:
                 self._timings["Player ID - Jersey Number Filtering"] = timing["filtering_ms"]
             for was, now in renamed:
                 self._possession.rename(was, now)
+                self._off_field.rename(was, now)
         elif not options.player_id:
             self._numbers.numbers.clear()
 
@@ -468,6 +496,7 @@ class AnalysisPipeline:
             mask,
             get_primary_field_color(),
             alpha=0.3,
+            draw_contour=not self._follow_field,
             fill_mask=False,
             # The fitted lines as shown: filtered
             ransac_fit=(

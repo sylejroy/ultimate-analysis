@@ -42,6 +42,7 @@ from ..widgets.model_selection import (
 )
 from ..widgets.panels import PANEL_WIDTH, collapsible, compact_combo, side_panel
 from ..widgets.performance_widget import PerformanceWidget
+from ..widgets.possession_bar import PossessionBar
 from ..widgets.video_list import VideoListWidget
 from ..widgets.zoomable_image_label import ZoomableImageLabel
 from .pipeline_worker import PipelineWorker, ProcessedFrame
@@ -236,9 +237,7 @@ class MainTab(QWidget):
         self.top_down_source_combo.setCurrentIndex(
             max(
                 0,
-                self.top_down_source_combo.findData(
-                    get_setting("homography.source", "calibration")
-                ),
+                self.top_down_source_combo.findData(get_setting("homography.source", "field")),
             )
         )
         self.top_down_source_combo.currentIndexChanged.connect(
@@ -380,6 +379,10 @@ class MainTab(QWidget):
         )
         self.video_scroll_area.setWidget(self.video_label)
         layout.addWidget(self.video_scroll_area, 1)  # Takes most space
+
+        # Which team had the disc over the last seconds
+        self.possession_bar = PossessionBar()
+        layout.addWidget(self.possession_bar)
 
         # Progress bar
         self.progress_bar = QSlider(Qt.Horizontal)
@@ -579,6 +582,16 @@ class MainTab(QWidget):
             self.homography_display_label.setText(result.top_down_message)
         if processed.mode == "next":
             self.progress_bar.setValue(processed.video_position)
+        if self.tracking_checkbox.isChecked() and result.wide_shot:
+            number = result.player_ids.get(result.holder_id, ("", None))[0]
+            self.possession_bar.add(
+                result.frame_index,
+                result.possession_colour,
+                result.disc_state,
+                result.possession_since,
+                result.holder_id,
+                number if str(number).isdigit() else "",
+            )
         display_ms = (time.perf_counter() - display_start) * 1000
 
         if self.performance_widget.isVisible():
@@ -638,6 +651,8 @@ class MainTab(QWidget):
 
         self.video_info = info
         self._frame_interval_ms = 1000.0 / info["fps"] if info["fps"] > 0 else 40.0
+        self.possession_bar.clear()
+        self.possession_bar.set_frame_rate(info["fps"])
         self.progress_bar.setMaximum(max(1, info["total_frames"] - 1))
         self.progress_bar.setValue(0)
         self._request_frame("current")
@@ -697,6 +712,7 @@ class MainTab(QWidget):
     def _reset_tracker(self):
         """Reset the object tracker and everything derived from earlier frames."""
         self._run_on_worker(lambda worker: worker.pipeline.reset())
+        self.possession_bar.clear()
         logger.info("Tracker reset")
 
     def hideEvent(self, event):

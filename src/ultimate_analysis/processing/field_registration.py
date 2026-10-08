@@ -47,8 +47,17 @@ MIN_FOCAL_SAMPLES = 15
 FOCAL_SAMPLE_EVERY = 6
 MAX_FOCAL_SAMPLES = 300
 # How much of a new estimate goes into the field as followed; the rest is where the field
-# was, moved with the camera. Evens out the estimates' jitter.
-NEW_ESTIMATE_WEIGHT = 0.4
+# was, moved with the camera. Evens out the estimates' jitter. Less makes the field in the
+# top-down view steadier and slower to follow an estimate that has moved for good; the
+# numbers for 0.4 to 0.1 are in docs/MEASUREMENTS.md.
+NEW_ESTIMATE_WEIGHT = 0.2
+# A track is off the field if its feet were further outside it than the margin (field
+# units) on this share of its recent sightings. Older sightings count less and less: one
+# hundred frames back, a third. A track seen fewer times than this is not judged.
+OFF_FIELD_MARGIN = 2.0
+OFF_FIELD_SHARE = 0.85
+OFF_FIELD_MEMORY = 0.99
+OFF_FIELD_MIN_SIGHTINGS = 20.0
 # An estimate further than this from where the field was followed to, in field units,
 # replaces it outright: a cut, or the following has drifted
 JUMP_DISTANCE = 8.0
@@ -275,6 +284,66 @@ class FieldFollower:
         return cv2.getPerspectiveTransform(
             np.float32(self._probes(frame_shape)), np.float32(places)
         ).astype(np.float64)
+
+
+class OffFieldWatcher:
+    """Which tracks stand beside the field nearly every time they are seen.
+
+    The players of both teams who are not in the point stand along the sidelines, and
+    the player model finds them like the others. Where the field lies tells them apart:
+    their feet are outside it. A player in the point steps out of bounds now and then,
+    and the field's estimate is off by a yard or two at times, so a track only counts as
+    off the field once it has been outside, by more than a margin, on nearly all of its
+    recent sightings; it counts as on the field again some seconds after stepping on.
+    """
+
+    def __init__(self, template: FieldTemplate):
+        self.template = template
+        self._sightings: Dict[int, List[float]] = {}  # Track ID -> [seen, of these outside]
+
+    def reset(self) -> None:
+        self._sightings.clear()
+
+    def rename(self, track_id: int, new_track_id: int) -> None:
+        """A player turned out to be another one known earlier."""
+        if track_id in self._sightings:
+            self._sightings[new_track_id] = self._sightings.pop(track_id)
+
+    def update(self, image_to_field: Optional[np.ndarray], tracks: Sequence[Any]) -> set:
+        """Take in the player tracks of a frame; returns the IDs of those off the field.
+
+        Args:
+            image_to_field: Where the field lies in this frame, or None if it is not
+                known: nothing is learned then, and what was learned holds
+            tracks: The frame's tracks (track_id, class_name, to_ltrb())
+        """
+        players = [track for track in tracks if getattr(track, "class_name", None) == "player"]
+        if image_to_field is not None and players:
+            boxes = np.array([track.to_ltrb() for track in players], dtype=np.float64)
+            feet = np.column_stack(
+                [(boxes[:, 0] + boxes[:, 2]) / 2.0, boxes[:, 3], np.ones(len(boxes))]
+            )
+            places = feet @ image_to_field.T
+            to_image = np.linalg.inv(image_to_field)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                x, y = places[:, 0] / places[:, 2], places[:, 1] / places[:, 2]
+                in_front = x * to_image[2, 0] + y * to_image[2, 1] + to_image[2, 2] > 0
+            outside = ~(
+                in_front
+                & (x >= -OFF_FIELD_MARGIN)
+                & (x <= self.template.width + OFF_FIELD_MARGIN)
+                & (y >= -OFF_FIELD_MARGIN)
+                & (y <= self.template.length + OFF_FIELD_MARGIN)
+            )
+            for track, is_outside in zip(players, outside):
+                seen = self._sightings.setdefault(int(track.track_id), [0.0, 0.0])
+                seen[0] = seen[0] * OFF_FIELD_MEMORY + 1.0
+                seen[1] = seen[1] * OFF_FIELD_MEMORY + float(is_outside)
+        return {
+            track_id
+            for track_id, (seen, outside) in self._sightings.items()
+            if seen >= OFF_FIELD_MIN_SIGHTINGS and outside >= OFF_FIELD_SHARE * seen
+        }
 
 
 def field_to_canvas(template: FieldTemplate, canvas_size: Tuple[int, int]) -> np.ndarray:
