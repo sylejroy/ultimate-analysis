@@ -335,6 +335,21 @@ from that estimate, both in yards at the worst of four places in the picture:
 The field was steady before; the larger moves are a third smaller now. Whether the
 followed field or the single estimate is nearer the truth is not known from this.
 
+The goal lines are looked for on the masks at half their size where the model runs at
+960: 11.6 instead of 15.0 ms per estimate, and on the 76 labelled frames the same result
+within what two runs differ by (53 estimates given both times; within 10 px 39 and 38;
+more than 2 yd off 12 and 13).
+
+An estimate needs a goal line besides both sidelines and the far back line. With the
+focal length known, the three would do; allowing that gave 57 estimates instead of 53 on
+the 76 frames, 16 instead of 13 of them more than 2 yd off, and on the held-out frames
+17 instead of 13 with 9 instead of 6 far off. It is not done.
+
+The table below was measured with the model that was the default until 8 October 2026.
+With the present default, on the 76 frames labelled by now: 53 estimates given, 39
+within 10 px, 12 more than 2 yd off, median 6.5 px. Most of these frames are from games
+that model was trained on, so the held-out numbers further up are the ones to go by.
+
 Against the 63 labelled frames of ten games (`scripts/benchmark_field_registration.py`),
 measured only at the corners that were put on the picture by hand, with the focal length
 of the game's other labels:
@@ -622,22 +637,25 @@ Performance panel in the Main Analysis tab shows the time per pipeline stage.
   who is in the point.
 - A disc that lies still at no player for `ground_seconds` is on the ground: a turnover,
   and the other team is in possession from then on. Something white and round on the
-  grass that the disc model takes for a disc (a brick mark) looks the same; it counts
-  once at most until a player has the disc again, and that player's team then decides.
+  grass that the disc model takes for a disc (a brick mark) looks the same. So only the
+  disc that was followed there from a player's hands counts: from one sighting to the
+  next no further than a disc flies in that time, and not unseen for more than a second
+  and a half. On the Chicago stretch below that leaves one of four "on the ground"
+  episodes; two of the other three were followed by the same team picking the disc up.
 - There is no ground truth for possession. Replayed on 80 seconds each of three games
   (what the possession tracker was fed, recorded once), the logic before and now:
 
   | Stretch | Holder changes | Taken back within 2 s | Holders for under 1 s | Named as holder | Team changes now |
   |---|---:|---:|---:|---:|---:|
   | San Francisco v Colorado, 24:27 | 20 → 13 | 2 → 0 | 4 → 1 | 72% → 51% | 3 |
-  | Chicago v New York, 10:00 | 13 → 12 | 0 → 0 | 0 → 0 | 51% → 53% | 7 |
+  | Chicago v New York, 10:00 | 13 → 11 | 0 → 0 | 0 → 0 | 51% → 50% | 5 |
   | Portland v San Francisco, 11:00 | 21 → 16 | 0 → 0 | 1 → 2 | 58% → 75% | 2 |
 
   Where the disc is seen only now and then (between points, when players walk to the
   line) the logic before named someone from a few frames, hence the first row. Whether
-  each holder is the right one has not been checked against labels, and seven changes
-  of team in 80 seconds are more than a game has: some holders are still of the wrong
-  team.
+  each holder is the right one has not been checked against labels. The Chicago
+  stretch holds the end of one point, the line-up and the pull of the next, so not all
+  of its five changes of team are wrong; how many are is not known.
 - What was tried on these stretches and how it came out: a new holder is confirmed after
   a quarter of a second (a third gave one holder change fewer per stretch at most). A
   player of the other team needs a second only with a player of the team in possession
@@ -659,7 +677,14 @@ Performance panel in the Main Analysis tab shows the time per pipeline stage.
   each team be joined into one.
 - A cut within drone footage (the camera's motion cannot be told, and fewer than three in
   ten of the players have a detection where they stood) starts everything again, as a
-  close-up does.
+  close-up does. On 150 seconds of drone footage of an edited game (Pacmen v Chain
+  Lightning from frame 70,909) the camera's motion was lost three times, all three were
+  cuts to another drone view, and all three started the analysis again. A cut after
+  which the motion is still told would go unnoticed; none was seen.
+- On the same footage the sideline filter left 13.5 of the 14.0 players detected per
+  frame; in 4% of the frames fewer than 10 were shown, in 25% more than 14.
+- A new track of the other team is not taken for a missing player returning, where the
+  tracker says a team for both (for a young track: the team its first sightings lean to).
 - A trail ends where the ground it lies on has left the picture; such points were drawn
   as streaks and wedges across the frame.
 - The disc model is skipped after a stretch with no disc and retried periodically

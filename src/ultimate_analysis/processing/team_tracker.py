@@ -42,6 +42,9 @@ MAX_SAMPLES = 3000
 # is held from that many on
 MIN_SHOWN_COLOUR_SAMPLES = 20
 SHOWN_COLOUR_SAMPLES = 400
+# If less than this share of a team's shirts is left without what is green like grass,
+# the shirts are green themselves, and their colour is taken with it
+MIN_SHIRT_LEFT = 0.6
 REFIT_FRAMES = 30
 # Two colour clusters closer than this (Lab units) are not two teams
 MIN_TEAM_DISTANCE = 40.0
@@ -49,7 +52,16 @@ MIN_TEAM_DISTANCE = 40.0
 # of the distance between the two
 MIN_COLOUR_MARGIN = 0.3
 # Two team colours this far apart in colour alone (Lab a and b, without lightness) are
-# told apart by colour; lightness then counts by this much only
+# told apart by colour; lightness then counts by this much only. Sun on a dark shirt
+# makes it lighter, not another colour.
+# In the four drone games the teams are no further apart in colour than 13 (dark green
+# against white: the middle of a box has grass in it), so there lightness decides.
+# Tried on them and not done: lightness counting less everywhere (a sighting says
+# another team than the rest of its track on 20 to 26% with colour alone, against 1 to
+# 3% as it is), and learning per game how shirts vary within a team (fewer such
+# sightings on crops, 3.3% -> 2.3% for green against white, but in the running tracker,
+# which goes by many sightings, a player's team changed no less often: 0, 0, 1 and 2
+# times in four stretches before, 2, 0, 0 and 2 with it).
 MIN_COLOUR_GAP = 15.0
 LIGHTNESS_WEIGHT = 0.3
 # How much the place of the feet counts in matching a detection to a track, next to how
@@ -237,6 +249,9 @@ class TeamTracker(BYTETracker):
         # Per team: the sum of its shirts' colours without grass (BGR), and how many
         self._shown_sums = np.zeros((2, 3))
         self._shown_counts = [0, 0]
+        # ... and how much of those shirts was left once the grass was taken out
+        self._shown_left = [0.0, 0.0]
+        self._shown_looks = [0, 0]
         self._frames_since_fit = 0
 
     def update(self, results: Any, img: Optional[np.ndarray] = None, *args, **kwargs):
@@ -266,10 +281,6 @@ class TeamTracker(BYTETracker):
         """The team a shirt colour clearly belongs to, if any."""
         if self.team_colours is None or shirt is None:
             return None
-        # Sun on a dark shirt makes it lighter, not another colour. Where the two teams
-        # differ in colour (green against white), the colour decides and how light a
-        # shirt is counts for little; where they do not (black against white), lightness
-        # is all there is to go by.
         between = self.team_colours[0] - self.team_colours[1]
         by_colour = float(np.hypot(between[1], between[2])) >= MIN_COLOUR_GAP
         weights = np.array([LIGHTNESS_WEIGHT if by_colour else 1.0, 1.0, 1.0])
@@ -298,7 +309,9 @@ class TeamTracker(BYTETracker):
         without the grass around them (the colours the tracker matches by have grass in
         them, and are fitted again and again). It is held once enough shirts have been
         seen, so a team does not change colour on the screen. Until a team has a few
-        such shirts, it is the colour the tracker matches by.
+        such shirts, it is the colour the tracker matches by. So it is for a team that
+        plays in green: taking out what is green like grass takes out its shirts, and
+        what is left is the print on them, grey.
         """
         if self.team_colours is None:
             return {}
@@ -310,6 +323,7 @@ class TeamTracker(BYTETracker):
                 for value in (
                     self._shown_sums[team] / self._shown_counts[team]
                     if self._shown_counts[team] >= MIN_SHOWN_COLOUR_SAMPLES
+                    and self._shown_left[team] >= MIN_SHIRT_LEFT * self._shown_looks[team]
                     else matched[team]
                 )
             )
@@ -323,6 +337,18 @@ class TeamTracker(BYTETracker):
             for track in self.tracked_stracks
             if getattr(track, "team", None) is not None
         }
+
+    def leanings_of_tracks(self) -> dict:
+        """{track ID: team (0 or 1)} as far as anything says: the team of a track that
+        has one, and for a young track the team its few clear sightings lean to."""
+        leanings = {}
+        for track in self.tracked_stracks:
+            team, votes = getattr(track, "team", None), getattr(track, "votes", (0, 0))
+            if team is None and votes[0] != votes[1]:
+                team = int(votes[1] > votes[0])
+            if team is not None:
+                leanings[int(track.track_id)] = team
+        return leanings
 
     def init_track(self, results: Any, img: Optional[np.ndarray] = None) -> List[STrack]:
         detections = super().init_track(results, img)
@@ -343,7 +369,9 @@ class TeamTracker(BYTETracker):
                 self._shirt_samples.append(shirt)
                 team = detection.shirt_team
                 if team is not None and self._shown_counts[team] < SHOWN_COLOUR_SAMPLES:
-                    shown = appearance.shirt_colour(img, detection.xyxy)
+                    shown, left = appearance.shirt_colour(img, detection.xyxy)
+                    self._shown_left[team] += left
+                    self._shown_looks[team] += 1
                     if shown is not None:
                         self._shown_sums[team] += shown
                         self._shown_counts[team] += 1
@@ -372,4 +400,6 @@ class TeamTracker(BYTETracker):
         self.team_colours = None
         self._shown_sums = np.zeros((2, 3))
         self._shown_counts = [0, 0]
+        self._shown_left = [0.0, 0.0]
+        self._shown_looks = [0, 0]
         self._frames_since_fit = 0

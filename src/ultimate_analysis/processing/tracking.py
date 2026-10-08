@@ -93,6 +93,8 @@ class Track:
         # knows them
         self.team: Optional[int] = None
         self.team_colour: Optional[Tuple[int, int, int]] = None
+        # The team a young track's few sightings lean to, before the tracker settles it
+        self.team_leaning: Optional[int] = None
 
     def to_ltrb(self) -> List[float]:
         """Return bounding box in [x1, y1, x2, y2] format."""
@@ -305,6 +307,7 @@ def _run_bytetrack_tracking(frame: np.ndarray, detections: List[Dict[str, Any]])
             else ()
         )
         teams = tracker.teams_of_tracks() if tracker is _player_tracker else {}
+        leanings = tracker.leanings_of_tracks() if tracker is _player_tracker else {}
         team_colours = tracker.shirt_colours() if tracker is _player_tracker else {}
         for row in rows:
             if int(row[4]) in hidden:
@@ -320,6 +323,7 @@ def _run_bytetrack_tracking(frame: np.ndarray, detections: List[Dict[str, Any]])
                 )
             )
             tracks[-1].team = teams.get(int(row[4]))
+            tracks[-1].team_leaning = leanings.get(int(row[4]))
             tracks[-1].team_colour = team_colours.get(tracks[-1].team)
     _finish_tracks(frame, tracks)
     return tracks
@@ -525,6 +529,7 @@ def _assign_player_identities(frame: np.ndarray, tracks: List[Track]) -> None:
             position=((track.bbox[0] + track.bbox[2]) / 2, track.bbox[3]),
             height=track.bbox[3] - track.bbox[1],
             feature=feature,
+            team=track.team if track.team is not None else track.team_leaning,
         )
         for track, feature in zip(players, features)
     ]

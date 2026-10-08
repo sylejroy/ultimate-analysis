@@ -8,7 +8,7 @@ same kit. Kit colour separates the two teams better than that network did, and c
 almost nothing.
 """
 
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -55,19 +55,21 @@ def encode(frame: np.ndarray, boxes: Sequence[Sequence[float]]) -> List[Optional
     return signatures
 
 
-def shirt_colour(frame: np.ndarray, box: Sequence[float]) -> Optional[np.ndarray]:
-    """The colour of the shirt in a box (BGR), going only by what is not grass.
+def shirt_colour(frame: np.ndarray, box: Sequence[float]) -> Tuple[Optional[np.ndarray], float]:
+    """(the colour of the shirt in a box (BGR), going only by what is not grass; the
+    share of the shirt that is left without the grass).
 
     The middle of a box shows grass beside a slim player and between the arms, and the
     average of shirt and grass is a greenish shirt. For showing a team by its colour the
     grass is left out. None for a box that is too small, or where hardly anything but
-    grass is left (which also happens to a team that plays in green).
+    grass is left. That also happens to a team that plays in green; the share that is
+    left tells: of a white shirt nearly all, of a green one little.
     """
     frame_h, frame_w = frame.shape[:2]
     x1, y1 = max(0, int(box[0])), max(0, int(box[1]))
     x2, y2 = min(frame_w, int(box[2])), min(frame_h, int(box[3]))
     if x2 - x1 < MIN_BOX_SIZE[0] or y2 - y1 < MIN_BOX_SIZE[1]:
-        return None
+        return None, 0.0
     small = cv2.resize(frame[y1:y2, x1:x2], SIGNATURE_SIZE, interpolation=cv2.INTER_AREA)
     shirt = small[SHIRT_ROWS, MIDDLE_COLUMNS].reshape(-1, 1, 3)
     hsv = cv2.cvtColor(shirt, cv2.COLOR_BGR2HSV).reshape(-1, 3)
@@ -76,6 +78,7 @@ def shirt_colour(frame: np.ndarray, box: Sequence[float]) -> Optional[np.ndarray
         & (hsv[:, 0] <= GRASS_HUES[1])
         & (hsv[:, 1] >= GRASS_MIN_SATURATION)
     )
-    if (~grass).mean() < MIN_SHIRT_SHARE:
-        return None
-    return shirt.reshape(-1, 3)[~grass].astype(np.float64).mean(axis=0)
+    left = float((~grass).mean())
+    if left < MIN_SHIRT_SHARE:
+        return None, left
+    return shirt.reshape(-1, 3)[~grass].astype(np.float64).mean(axis=0), left

@@ -88,8 +88,9 @@ class PlayerNumbers:
 
         Place and looks could not decide who a new track was when it appeared; the jersey
         number can, once it has been read often enough. Both teams may have the same
-        number, so the two must be of the same team where the tracker knows their teams,
-        and wear the same kit.
+        number, so the two must be of the same team and wear the same kit. While the
+        tracker does not know the team of one of them, they are left apart: the number
+        is read again later, and two players joined wrongly cannot be parted.
         """
         certainty_needed = float(get_setting("models.tracking.identity.number_certainty", 0.6))
         max_distance = float(get_setting("models.tracking.identity.max_kit_distance", 60.0))
@@ -110,7 +111,7 @@ class PlayerNumbers:
             if earlier is None:
                 continue
             teams = team_of_player(player_id), team_of_player(earlier)
-            if None not in teams and teams[0] != teams[1]:
+            if None in teams or teams[0] != teams[1]:
                 continue
             distance = kit_distance(player_id, earlier)
             if distance is None or distance > max_distance:

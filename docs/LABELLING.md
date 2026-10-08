@@ -34,6 +34,12 @@ perspective, and that drawing is pulled onto the real field:
 - mouse wheel: zoom, also out past the frame, to reach corners outside it
 - drag anywhere else: the picture moves
 
+While a corner is dragged, a magnified piece of the picture is shown beside it. The
+painted lines found in the picture are marked in yellow ("Show the painted lines
+found"): thin white streaks on the grass, with what lies on a detected player left out,
+so a line has a gap where a player stands. A dragged corner snaps so that its line to
+a placed corner lies on a long painted line nearby; Shift switches that off.
+
 The drawing always remains a view of a flat field of the right proportions
 (USA Ultimate or WFDF, `utils/field_template.py`). A label is right when the drawing lies
 on the real lines. The near end of the field may lie behind the camera, as with a drone

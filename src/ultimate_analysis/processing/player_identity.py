@@ -41,6 +41,7 @@ class Observation:
     position: Tuple[float, float]  # Feet, in picture pixels
     height: float  # Of the box, in pixels
     feature: Optional[np.ndarray] = None  # Kit colour, if taken for this frame
+    team: Optional[int] = None  # The team (0 or 1) the tracker sees them in, if it says
 
 
 @dataclass
@@ -53,6 +54,7 @@ class Profile:
     last_seen: float  # Seconds
     samples: int = 0  # Observations averaged into the feature
     velocity: Tuple[float, float] = (0.0, 0.0)  # Picture pixels per second
+    team: Optional[int] = None  # The team the tracker last saw them in
 
 
 class PlayerIdentities:
@@ -154,7 +156,16 @@ class PlayerIdentities:
                 off = np.hypot(
                     observation.position[0] - expected[0], observation.position[1] - expected[1]
                 )
-                if off <= reach and not self._other_kit(profile, observation, kit_limit):
+                # A player of the other team is nobody's return, however near and
+                # however alike the kits look in this light
+                other_team = None not in (profile.team, observation.team) and (
+                    profile.team != observation.team
+                )
+                if (
+                    off <= reach
+                    and not other_team
+                    and not self._other_kit(profile, observation, kit_limit)
+                ):
                     cost[row, column] = off / reach
 
         matches = {}
@@ -218,6 +229,8 @@ class PlayerIdentities:
         profile.position = observation.position
         profile.height = observation.height
         profile.last_seen = time_s
+        if observation.team is not None:
+            profile.team = observation.team
         if observation.feature is not None:
             feature = np.asarray(observation.feature, dtype=np.float32)
             # A plain average at first, then one that slowly follows changes in lighting

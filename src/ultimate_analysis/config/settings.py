@@ -33,15 +33,15 @@ def get_setting(key_path: str, default: Any = None) -> Any:
     """Get a setting value using dot notation.
 
     Args:
-        key_path: Dot-separated path to the setting (e.g., "models.detection.confidence_threshold")
+        key_path: Dot-separated path to the setting (e.g., "models.tracking.trail_seconds")
         default: Default value if setting not found
 
     Returns:
         The setting value or default
 
     Example:
-        confidence = get_setting("models.detection.confidence_threshold")
-        video_formats = get_setting("video.supported_formats", [".mp4"])
+        seconds = get_setting("models.tracking.trail_seconds", 4.0)
+        tracker = get_setting("models.tracking.backend")
     """
     config = get_config()
 

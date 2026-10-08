@@ -6,6 +6,9 @@ Everything under `data/` is local and not tracked by Git.
   automatically when selected for training.
 - `data/models/detection/`, `data/models/segmentation/` — one folder per training run.
   The model dropdowns list each run's `weights/best.pt`.
+- `data/models/reid/` — the networks that tell players apart by their looks, one folder
+  per run of `scripts/train_reid.py` (`best.pt`, `training.json`). A prototype: the app
+  does not use them yet.
 - `data/raw/training_data/` — datasets in YOLO format, named
   `<origin>_<content>_<version>`. The origin says who made the labels and how far the
   folder can be trusted as a source:
@@ -27,6 +30,7 @@ Everything under `data/` is local and not tracked by Git.
   | `rendered_field_v1` | Field and end zone areas drawn from the field labels, plus the Roboflow outlines, split by game; built by `scripts/build_field_mask_dataset.py` | Field segmentation models |
   | `field_negatives_v1` | Close-ups from edited games in which no field is seen from above, found by `scripts/collect_field_negatives.py` and looked through by hand (`excluded.txt`) | Pictures without a field for the set below |
   | `rendered_field_v2` | `rendered_field_v1` plus the pictures of `field_negatives_v1` with nothing labelled in them (`--negatives`) | Field segmentation models |
+  | `reid_players_v2` | Crops of tracked players from 20 stretches of each of the four drone games, with the track and, where read, the jersey number of each; built by `scripts/build_reid_dataset.py`. `pictures_72x144.npy` holds all crops at one size and is made on first use | The re-identification networks |
   | `roboflow_digits_v1i` | Roboflow export: house-number digits | A rough start for a jersey digit detector |
 
   `labelled_` is labelled with this app, `roboflow_` is a Roboflow export exactly as

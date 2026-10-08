@@ -35,6 +35,7 @@ from ultimate_analysis.pipeline import AnalysisPipeline, PipelineOptions  # noqa
 from ultimate_analysis.processing.homography import load_default_matrix  # noqa: E402
 from ultimate_analysis.processing.player_id import discard_pending_readings  # noqa: E402
 from ultimate_analysis.rendering.tracks import UNKNOWN_TEAM_COLOUR  # noqa: E402
+from ultimate_analysis.utils.video import seconds_of  # noqa: E402
 
 WIDTH, HEIGHT = 1920, 1080
 CAMERA_SIZE = (1440, 810)  # The camera view, top left
@@ -42,14 +43,6 @@ STRIP_SECONDS = 20.0  # How far back the strip of who held the disc reaches
 BACKGROUND = (30, 30, 30)
 TEXT = (235, 235, 235)
 FAINT = (150, 150, 150)
-
-
-def seconds_of(text: str) -> float:
-    """Seconds from "90", "1:30" or "0:01:30"."""
-    seconds = 0.0
-    for part in text.split(":"):
-        seconds = seconds * 60.0 + float(part)
-    return seconds
 
 
 def put_text(picture, text, place, scale=0.7, colour=TEXT, thickness=1):

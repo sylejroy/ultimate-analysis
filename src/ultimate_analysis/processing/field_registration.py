@@ -57,6 +57,8 @@ NEW_ESTIMATE_WEIGHT = 0.2
 # sideline went missing. Those standing right at the line stay in for it. Older sightings count less and less: one
 # hundred frames back, a third. A track seen fewer times than this is not judged.
 OFF_FIELD_MARGIN = 4.0
+# Masks with more rows than this are halved before the goal lines are looked for
+GOAL_LINE_MASK_ROWS = 700
 OFF_FIELD_SHARE = 0.85
 OFF_FIELD_MEMORY = 0.99
 OFF_FIELD_MIN_SIGHTINGS = 20.0
@@ -399,6 +401,10 @@ def estimate_field(
     size = (frame_shape[1], frame_shape[0])
 
     def camera_for(tried: Dict[str, Line]) -> Optional[CameraFit]:
+        # Both sidelines and the far back line would place a camera whose focal length
+        # is known, without a goal line. Tried: of the four estimates that gives more
+        # on the labelled frames, three are more than 2 yd off. Three lines fix a camera
+        # with nothing left over to show that one of them is wrong.
         if len(tried) < 4:
             return None
         if (
@@ -514,6 +520,10 @@ def _goal_lines(
     areas, classes = _areas(segmentation_results)
     if areas is None:
         return {}, []
+    # A model that runs at 960 gives four times the pixels of one at 640, and a goal
+    # line is fitted to thousands of them either way: every second one will do
+    if areas.shape[0] > GOAL_LINE_MASK_ROWS:
+        areas = areas[::2, ::2]
     height, width = frame_shape
     to_frame = np.array([width / areas.shape[1], height / areas.shape[0]])
 

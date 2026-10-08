@@ -80,13 +80,34 @@ class TeamTrackerTests(unittest.TestCase):
         x1, y1, x2, y2 = (int(value) for value in boxes[0])
         frame[y1:y2, x1 : x1 + 14] = GRASS
         frame[y1:y2, x2 - 14 : x2] = GRASS
-        colour = team_tracker.appearance.shirt_colour(frame, boxes[0])
+        colour, left = team_tracker.appearance.shirt_colour(frame, boxes[0])
         self.assertLess(np.abs(colour - WHITE).max(), 12)
+        self.assertGreater(left, 0.3)
         with_grass = team_tracker.appearance.encode(frame, boxes)[0][:3]
         self.assertGreater(abs(float(with_grass[1]) - 128), 5)  # Greenish, in Lab
         # Nothing but grass tells no shirt
         frame[y1:y2, x1:x2] = GRASS
-        self.assertIsNone(team_tracker.appearance.shirt_colour(frame, boxes[0]))
+        self.assertIsNone(team_tracker.appearance.shirt_colour(frame, boxes[0])[0])
+
+    def test_a_team_in_green_is_shown_in_green_not_in_the_grey_of_its_print(self):
+        # Green like grass, with a grey number on the chest
+        def green_shirts(*places):
+            frame, boxes = frame_with(*[(x, WHITE if white else GRASS) for x, white in places])
+            for (x, white), shirt in zip(places, boxes):
+                if not white:
+                    x1, y1, x2, y2 = (int(value) for value in shirt)
+                    frame[y1 + 22 : y1 + 34, x1 + 14 : x1 + 26] = (120, 120, 120)
+                    frame[y1:y2, x1 - 3 : x1] = (20, 20, 20)  # Told from the grass around
+                    frame[y1:y2, x2 : x2 + 3] = (20, 20, 20)
+            return frame, boxes
+
+        for _ in range(140):
+            frame, boxes = green_shirts((100, True), (300, True), (500, False), (700, False))
+            self.tracker.update(team_tracker.DetectionBoxes(boxes, [0.9] * 4), frame)
+        colours = sorted(self.tracker.shirt_colours().values())
+        self.assertEqual(len(colours), 2)
+        blue, green, red = colours[0]  # The darker of the two
+        self.assertGreater(green, 1.3 * max(blue, red))
 
     def test_a_dark_green_shirt_in_the_sun_is_still_green_against_white(self):
         green, shining = (40, 90, 20), (125, 185, 105)

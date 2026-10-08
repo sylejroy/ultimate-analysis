@@ -11,7 +11,7 @@ this table; `tests/test_layering.py` fails when one does not.
 | Package | Contents |
 | --- | --- |
 | `config/`, `constants.py`, `utils/` | Settings (`get_setting("dot.path", default)`), fixed limits, logging, video files, model files, label files, the field's dimensions and the camera fitted to it |
-| `processing/` | Analysis stages: detection, camera motion, tracking, possession, jersey numbers, field segmentation and geometry, where the field lies (`field_registration.py`), homography, TensorRT engines |
+| `processing/` | Analysis stages: detection, camera motion, tracking, possession, jersey numbers, field segmentation and geometry, where the field lies (`field_registration.py`), homography, TensorRT. Not yet used by the pipeline: the phase of the game (`game_state.py`), telling players apart by their looks (`reid.py`) and the roster built on that (`player_roster.py`) engines |
 | `rendering/` | Drawing results on frames with OpenCV. No Qt. |
 | `pipeline.py` | `AnalysisPipeline`: one frame in, results and rendered views out. No Qt. |
 | `gui/` | Everything Qt. One package per tab (`main/`, `easyocr/`, `training/`, `homography/`, `labelling/`), shared widgets in `widgets/`, the window in `main_app.py` |
@@ -95,6 +95,10 @@ read as "nobody there".
   - `scripts/benchmark_player_id_scheduling.py` — temporal crop selection, votes and OCR work
   - `scripts/benchmark_homography_optimizer.py` — coverage sampling speed and candidate agreement
   - `scripts/benchmark_pipeline.py` — analysis/rendering throughput, stage costs and track-output comparison
+  - `scripts/benchmark_reid.py` — matching players by their looks, within a point and across points
+- Possession, the sideline filter and a flying disc's place have no labels to measure
+  against. What was used instead, and how each came out, is in `docs/MEASUREMENTS.md`;
+  a change to them needs the same kind of before and after.
 - GUI code is checked by starting the app, visiting every tab, playing a video, and
   closing it without an error in the log.
 - A bug that got through gets a test that would have caught it.

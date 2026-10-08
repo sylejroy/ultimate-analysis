@@ -6,6 +6,7 @@ app:
   name: "Ultimate Analysis"
   version: "0.1.0"
   log_level: "INFO"
+  legacy_tabs: false             # Show the Field Calibration and Jersey Number Tuning tabs: no longer needed for the analysis, kept until they are removed
 
 # Video Processing Settings
 video:
@@ -142,6 +143,7 @@ models:
     # Jersey number reader: easyocr, parseq, florence, or yolo_digits (also selectable in the GUI).
     # parseq read 18 of 23 test players with none wrong, at EasyOCR's speed; see README.
     method: "parseq"
+    show_reading_table: false      # Draw the table of jersey readings on the video: for tuning the reader
     florence:
       min_confidence: 0.7          # Below this the model is guessing; lower finds more numbers but more wrong ones
     yolo_digits:

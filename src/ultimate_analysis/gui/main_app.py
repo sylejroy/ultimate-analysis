@@ -179,18 +179,22 @@ class UltimateAnalysisApp(QMainWindow):
 
         # Create lazy loading tabs
         # After the analysis itself, in the order the work is done: label frames, train
-        # models on them, calibrate the top-down view, tune the jersey number reading
+        # models on them
         self.labelling_tab = LazyLoadingTab(self._create_labelling_tab, "Labelling")
         self.tab_widget.addTab(self.labelling_tab, "Labelling")
 
         self.model_training_tab = LazyLoadingTab(self._create_model_training_tab, "Model Training")
         self.tab_widget.addTab(self.model_training_tab, "Model Training")
 
-        self.homography_tab = LazyLoadingTab(self._create_homography_tab, "Field Calibration")
-        self.tab_widget.addTab(self.homography_tab, "Field Calibration")
+        # The two tuning tabs are on their way out: the top-down view comes from the field
+        # model and the numbers from a reader that needs no tuning. Shown only on request
+        # until they are removed.
+        if get_setting("app.legacy_tabs", False):
+            self.homography_tab = LazyLoadingTab(self._create_homography_tab, "Field Calibration")
+            self.tab_widget.addTab(self.homography_tab, "Field Calibration")
 
-        self.easyocr_tab = LazyLoadingTab(self._create_easyocr_tab, "Jersey Number Tuning")
-        self.tab_widget.addTab(self.easyocr_tab, "Jersey Number Tuning")
+            self.easyocr_tab = LazyLoadingTab(self._create_easyocr_tab, "Jersey Number Tuning")
+            self.tab_widget.addTab(self.easyocr_tab, "Jersey Number Tuning")
 
         # Status bar
         self.status_bar = self.statusBar()

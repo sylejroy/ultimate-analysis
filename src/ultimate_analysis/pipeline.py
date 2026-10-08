@@ -112,6 +112,12 @@ class FrameResult:
     possession_since: int = 0
     # How long the disc has been flying, in seconds; None if it is not seen to fly
     flight_seconds: Optional[float] = None
+    # For whoever keeps a record: the team in possession (0 or 1), where the field lies
+    # in this frame (pixel -> field units, 3x3; None if not known), and over which spot
+    # of the field a flying disc is
+    possession_team: Optional[int] = None
+    image_to_field: Optional[np.ndarray] = None
+    disc_place: Optional[Tuple[float, float]] = None
 
 
 @dataclass
@@ -317,6 +323,9 @@ class AnalysisPipeline:
             disc_state=self._possession.disc_state,
             possession_since=self._possession.since,
             flight_seconds=self._possession.flight_seconds,
+            possession_team=self._possession.team,
+            image_to_field=self._field_follower.image_to_field if self._follow_field else None,
+            disc_place=self.disc_place,
             timings=self._timings,
             wide_shot=self._shot.wide,
             problems=problems,

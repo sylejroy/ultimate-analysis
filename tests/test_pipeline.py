@@ -207,7 +207,13 @@ class PipelineTests(unittest.TestCase):
             player, (None, 0.0)
         )
 
-        # Player 3 is missing and looks like the new player 7: one and the same
+        numbers_module = sys.modules[self.module.PlayerNumbers.__module__]
+        teams = patch.object(numbers_module, "team_of_player", side_effect={7: 0, 3: 0, 5: 1}.get)
+        teams.start()
+        self.addCleanup(teams.stop)
+
+        # Player 3 is missing, of the same team as the new player 7 and looks like them:
+        # one and the same
         self.mocks["missing_players"].return_value = [3]
         self.mocks["kit_distance"].return_value = 5.0
         result = self.pipeline.process(self.frame, 0, self.options)
@@ -224,11 +230,16 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual([track.track_id for track in result.tracks], [7])
         self.mocks["merge_players"].assert_called_once()
 
-        # Nor does one whose kit looks alike, if the tracker has the two in different teams
+        # Nor does one whose kit looks alike: the tracker has the two in different teams
         self.mocks["kit_distance"].return_value = 5.0
-        numbers_module = sys.modules[self.module.PlayerNumbers.__module__]
-        with patch.object(numbers_module, "team_of_player", side_effect={7: 0, 5: 1}.get):
-            result = self.pipeline.process(self.frame, 2, self.options)
+        result = self.pipeline.process(self.frame, 2, self.options)
+        self.assertEqual([track.track_id for track in result.tracks], [7])
+        self.mocks["merge_players"].assert_called_once()
+
+        # Nor one whose team the tracker does not know yet
+        numbers[9] = ("17", 0.9)
+        self.mocks["missing_players"].return_value = [9]
+        result = self.pipeline.process(self.frame, 3, self.options)
         self.assertEqual([track.track_id for track in result.tracks], [7])
         self.mocks["merge_players"].assert_called_once()
 

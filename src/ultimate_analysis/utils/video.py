@@ -14,6 +14,14 @@ from .logger import get_logger
 logger = get_logger("VIDEO")
 
 
+def seconds_of(text: str) -> float:
+    """Seconds from "90", "1:30" or "0:01:30"."""
+    seconds = 0.0
+    for part in str(text).split(":"):
+        seconds = seconds * 60.0 + float(part)
+    return seconds
+
+
 def find_video_files() -> List[str]:
     """Paths of the videos in the video folder, sorted."""
     folder = Path(DEFAULT_PATHS["RAW_VIDEOS"])

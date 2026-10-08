@@ -34,7 +34,9 @@ what they do not say.
   write new datasets and runs to new folders.
 - Start model training through the app's Model Training tab so the progress is visible,
   not headless from a script. Dataset building, benchmarks, and TensorRT export are fine
-  from the terminal.
+  from the terminal. The tab only trains YOLO models: the network that tells players
+  apart by their looks (`scripts/train_reid.py`) is trained from the terminal, with its
+  progress printed per epoch.
 - Commit only when asked.
 - Source files use Windows line endings (CRLF); keep them.
 

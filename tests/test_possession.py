@@ -220,13 +220,13 @@ class PossessionTests(unittest.TestCase):
 
     def test_a_disc_picked_up_from_the_ground_is_off_it_from_then_not_from_before(self):
         self.see(disc(130, 150), frames=CONFIRM_FRAMES)
-        for frame in range(200, 200 + GROUND_FRAMES + 2):
+        for frame in range(3, 3 + GROUND_FRAMES + 2):
             self.tracker.update([disc(400, 400)], self.tracks, frame)
-        self.assertEqual((self.tracker.disc_state, self.tracker.since), ("ground", 200))
+        self.assertEqual((self.tracker.disc_state, self.tracker.since), ("ground", 3))
         # Someone stands over it: no longer lying free, from this frame on
         self.tracks.append(player(3, 380, 250, 440, 450, team=1))
-        self.tracker.update([disc(400, 400)], self.tracks, 300)
-        self.assertEqual((self.tracker.disc_state, self.tracker.since), ("air", 300))
+        self.tracker.update([disc(400, 400)], self.tracks, 30)
+        self.assertEqual((self.tracker.disc_state, self.tracker.since), ("air", 30))
 
     def test_a_holder_taken_for_the_other_team_for_a_moment_keeps_the_disc_for_theirs(self):
         self.see(disc(130, 150), frames=CONFIRM_FRAMES * 4)
@@ -251,6 +251,19 @@ class PossessionTests(unittest.TestCase):
         for frame in range(130, 140):
             self.tracker.update([], self.tracks, frame)
         self.assertIsNone(self.tracker.flight_seconds)
+
+    def test_something_lying_far_from_where_the_disc_was_is_no_turnover(self):
+        self.see(disc(130, 150), frames=CONFIRM_FRAMES)
+        # The disc is in the thrower's hands; the model finds a brick mark instead,
+        # across the field, from one frame to the next
+        self.see(disc(1500, 900), frames=GROUND_FRAMES * 3)
+        self.assertEqual((self.tracker.team, self.tracker.on_ground), (0, False))
+        # Nor after the disc was not seen for a while
+        self.tracker.reset()
+        self.see(disc(130, 150), frames=CONFIRM_FRAMES)
+        self.see(frames=30)
+        self.see(disc(300, 400), frames=GROUND_FRAMES * 3)
+        self.assertEqual((self.tracker.team, self.tracker.on_ground), (0, False))
 
     def test_a_resting_disc_is_followed_when_the_camera_moves(self):
         import numpy as np

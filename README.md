@@ -13,8 +13,11 @@ Built with PyQt5 and YOLO; runs at about 30 frames per second on an RTX 5060 Ti.
 - **Possession**: the player holding the disc is marked in their team's colour, and a
   bar under the video shows which team had the disc over the last half minute.
 - **Jersey numbers**, read in the background and collected per player over time.
-- **Field**: the field's outline and lines, and a top-down view, either from a
-  calibration set by hand or from where the field model sees the field.
+- **Field**: the field's outline, and a top-down view with the players' trails, from
+  where the field model sees the field or from a calibration set by hand. Those
+  standing beside the field are left out.
+- **Export**: players' boxes, teams, numbers and places on the field, and who has the
+  disc, frame by frame as tables (`scripts/export_analysis.py`).
 - **Labelling**: mark players, discs, and the field on frames of your own videos,
   starting from what the models already find. Also from a phone, for discs.
 - **Training**: train detection and segmentation models on those labels from the app,
@@ -55,11 +58,12 @@ place weights under `data/models/`; see [docs/DATA.md](docs/DATA.md).
 2. **Camera motion**: how the picture moved since the last frame, so a pan does not look
    like every player jumping. Close-ups and title cards of an edited game are noticed
    and left out.
-3. **Tracking**: stable IDs per player, kept within their team.
+3. **Tracking**: stable IDs per player, kept within their team. A cut to another view
+   starts it again.
 4. **Possession**: whose box holds the disc, confirmed over time; the mark standing
    in front of the thrower does not take it.
 5. **Jersey numbers**: a few players are read per frame; the readings add up per player.
-6. **Field**: every fifth frame, the field's outline and lines.
+6. **Field**: every fifth frame, the field's outline and where the field lies.
 7. **Drawing**: the camera view with overlays, and the top-down view.
 
 Every stage can be switched off. Settings are in `configs/default.yaml`.
@@ -74,6 +78,7 @@ Every stage can be switched off. Settings are in `configs/default.yaml`.
 | [docs/DEVELOPMENT_GUIDELINES.md](docs/DEVELOPMENT_GUIDELINES.md) | Code layout, conventions, tests, benchmark scripts |
 
 Handy scripts: `scripts/render_demo.py` renders a stretch of a game as the app shows it,
+`scripts/export_analysis.py` writes what the analysis finds to tables,
 `scripts/export_tensorrt.py` builds the engines that make the models about three times
 faster, and the `scripts/benchmark_*.py` scripts produce the numbers in the measurements.
 

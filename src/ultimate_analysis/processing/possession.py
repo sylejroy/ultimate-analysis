@@ -29,7 +29,8 @@ The team in possession is that of the last holder whose team is known. A player 
 other team takes longer to be taken for the holder: the disc changes teams far less often
 than a defender stands where it is caught. A disc that lies still at no player for a
 while is on the ground, and that is a turnover in nearly every case: the other team has
-it from then on, before anyone has picked it up.
+it from then on, before anyone has picked it up. Only the disc that was followed there
+from a player's hands counts: a brick mark on the grass lies still at no player too.
 """
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -48,6 +49,11 @@ GROUND_RADIUS_PIXELS = 12.0  # The same when no player is in the picture to meas
 # A disc on the ground counts as picked up or thrown again once it is this many times
 # further from where it lay: the detection of a lying disc wanders by more than the radius
 GROUND_LEFT = 4.0
+# The fastest a disc flies across the picture, in heights of a player per second (a
+# hard throw is some 30 m/s: 17 heights), and how long it may be unseen and still be
+# taken for the same disc when it is seen again
+MAX_DISC_SPEED = 25.0
+MAX_UNSEEN_SECONDS = 1.5
 # A disc not seen for this long is no longer said to be flying
 FLIGHT_UNSEEN_SECONDS = 0.5
 # A new track that covers this much (IoU) of where a lost holder stood is the holder
@@ -154,6 +160,10 @@ class PossessionTracker:
         self._known_tracks: set = set()  # Every player track seen so far
         self._disc_seen: Optional[int] = None  # The frame the disc was last seen in
         self._holder_teams = [0, 0]  # Frames the present holder was seen as of each team
+        # The last sighting of the disc (frame, pixel), and whether what is being seen
+        # is the disc of the game: followed from a player's hands without a break
+        self._last_sighting: Optional[Tuple[int, Tuple[float, float]]] = None
+        self._followed_from_a_player = False
 
     @property
     def disc_state(self) -> str:
@@ -187,6 +197,8 @@ class PossessionTracker:
             points += [self._holder_box[:2], self._holder_box[2:]]
         if self._resting_at is not None:
             points.append(self._resting_at)
+        if self._last_sighting is not None:
+            points.append(self._last_sighting[1])
         if not points:
             return
         moved = cv2.perspectiveTransform(
@@ -194,6 +206,9 @@ class PossessionTracker:
         ).reshape(-1, 2)
         if self._holder_box is not None:
             self._holder_box = (*moved[0], *moved[1])
+        if self._last_sighting is not None:
+            self._last_sighting = (self._last_sighting[0], tuple(moved[-1]))
+            moved = moved[:-1]
         if self._resting_at is not None:
             self._resting_at = tuple(moved[-1])
 
@@ -242,6 +257,31 @@ class PossessionTracker:
         they are not found (covered by the mark); None without a holder or a place."""
         return self._holder_box if self.holder_id is not None else None
 
+    def _follow_disc(
+        self, disc: Tuple[float, float], at_a_player: bool, player_height: float
+    ) -> None:
+        """Note whether what is seen is the disc of the game.
+
+        The disc model also finds things that are no disc: a brick mark painted on the
+        grass, a cone, a second disc beside the field. They lie still at no player,
+        which is what a turnover looks like. The disc of the game was in a player's
+        hands and got to where it is by flying there: from one sighting to the next it
+        is no further than a disc flies in that time. Something that shows far from the
+        last sighting, or after the disc was not seen for a while, is not known to be
+        the disc until a player has it.
+        """
+        if at_a_player:
+            self._followed_from_a_player = True
+        elif self._last_sighting is None:
+            self._followed_from_a_player = False
+        else:
+            seconds = (self._frame - self._last_sighting[0]) / self.frame_rate
+            flown = float(np.hypot(*np.subtract(disc, self._last_sighting[1])))
+            within_reach = MAX_DISC_SPEED * player_height * seconds + player_height
+            if seconds > MAX_UNSEEN_SECONDS or flown > within_reach:
+                self._followed_from_a_player = False
+        self._last_sighting = (self._frame, disc)
+
     def _watch_ground(self, disc: Optional[Tuple[float, float]], tracks: List[Any]) -> None:
         """Follow a disc that is at no player (None: it is at one): does it lie still?"""
         if disc is None:
@@ -259,8 +299,10 @@ class PossessionTracker:
             self._resting_at = disc
             self._resting_since = self._frame
             self._off_the_ground()
-        elif not self.on_ground and (
-            self._frame - self._resting_since >= self._frames("ground_seconds", 1.5)
+        elif (
+            not self.on_ground
+            and self._followed_from_a_player
+            and self._frame - self._resting_since >= self._frames("ground_seconds", 1.5)
         ):
             self.on_ground = True
             self.holder_id = None
@@ -347,6 +389,10 @@ class PossessionTracker:
             elif at_disc is None and _contains((x1 - arm, y1 - arm, x2 + arm, y2 + arm), *centre):
                 at_disc = self.holder_id  # Held out at arm's length
 
+        heights = [t.to_ltrb()[3] - t.to_ltrb()[1] for t in tracks if _is_player(t)]
+        self._follow_disc(
+            centre, at_disc is not None, float(np.median(heights)) if heights else 90.0
+        )
         self._watch_ground(centre if at_disc is None else None, tracks)
 
         # Count where the disc is seen. With nobody holding it, a disc at nobody is a
