@@ -7,7 +7,6 @@ when the drawing lies on the real lines. Saved frames are verified calibrations,
 training data for a model that finds the field by itself.
 """
 
-import random
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -48,18 +47,22 @@ from .field_diagram import FieldDiagram, title
 logger = get_logger("FIELD_LABELLING")
 
 DEFAULT_DATASET = "labelled_field_v1"
-RANDOM_FRAME_TRIES = 20
 # Labels are carried over to a frame at most this far away; further off, following the
 # camera through every frame in between takes too long and drifts
 MAX_CARRY_FRAMES = 150
 # How often the field model is asked again when it was busy
 MODEL_RETRY_MS = 300
+# How often a random frame is drawn again when it turns out to show no field
+RANDOM_FRAME_DRAWS = 6
 HELP_TEXT = (
     "Put the corner dots of the drawing on the\n"
     "corners of the field:\n"
     "Drag a dot: move that corner. Dots placed in\n"
     "    this frame (filled) stay where they are,\n"
     "    the rest follows; three or four are enough\n"
+    "The spot under a dot shows magnified beside it\n"
+    "A corner snaps so its line lies on a long painted\n"
+    "    line (turns yellow); Shift: no snapping\n"
     "Wheel: zoom, also out past the frame to reach\n"
     "    corners outside it\n"
     "Drag elsewhere: move the picture, 0: whole frame\n"
@@ -329,24 +332,26 @@ class FieldLabellingWidget(QWidget):
                 capture = cv2.VideoCapture(video)
                 self._frame_counts[video] = max(0, int(capture.get(cv2.CAP_PROP_FRAME_COUNT)))
                 capture.release()
-        counts = [self._frame_counts[video] for video in videos]
-        if not any(counts):
-            return
-        # Videos with few labels for their length come up more often
-        labelled = [
-            len(field_label_files.labelled_frames(self._dataset_dir(), video)) for video in videos
-        ]
-        weights = label_files.random_video_weights(counts, labelled)
-        for _ in range(RANDOM_FRAME_TRIES):
-            row = random.choices(range(len(videos)), weights=weights)[0]
-            index = random.randrange(counts[row])
-            name = label_files.frame_name(videos[row], index)
-            if field_label_files.load_label(self._dataset_dir(), name) is not None:
-                continue
+        # Edited games cut to close-ups; a few more draws find drone footage again
+        for _ in range(RANDOM_FRAME_DRAWS):
+            picked = label_files.random_unlabelled_frame(
+                videos,
+                [self._frame_counts[video] for video in videos],
+                [field_label_files.labelled_frames(self._dataset_dir(), video) for video in videos],
+            )
+            if picked is None:
+                return
+            row, index = picked
             if row != self.video_list.currentRow():
-                self.video_list.setCurrentRow(row)
+                self.video_list.setCurrentRow(row)  # Opens the video at its first frame
             self._go_to(index)
-            return
+            # A frame in which the field model sees no field at all is no drone footage.
+            # While the model is busy that cannot be told, and the frame is taken
+            if self._awaiting_model is not None or self._model_lines is None:
+                return
+            named, unnamed = self._model_lines
+            if named or unnamed:
+                return
 
     def _show_frame(self, carried: Optional[np.ndarray] = None) -> None:
         """Read the current frame and show it with its saved field, or one to start from."""

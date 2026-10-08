@@ -6,7 +6,7 @@ The tab only handles the interface. Decoding and analysis run on a worker thread
 
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List
 
 from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QKeySequence
@@ -73,8 +73,6 @@ class MainTab(QWidget):
 
         # Results of the frame on screen
         self.current_detections: List[Dict] = []
-        self.current_tracks: List[Any] = []
-        self.current_player_ids: Dict[int, Tuple[str, Any]] = {}
 
         # Frames in flight become stale when the video position or the models change;
         # their generation number then no longer matches and they are not shown.
@@ -572,8 +570,6 @@ class MainTab(QWidget):
     def _show_frame(self, processed: ProcessedFrame) -> None:
         result = processed.result
         self.current_detections = result.detections
-        self.current_tracks = result.tracks
-        self.current_player_ids = result.player_ids
 
         display_start = time.perf_counter()
         self.video_label.set_image(frame_to_pixmap(result.main_view))

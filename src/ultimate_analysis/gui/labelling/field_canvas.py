@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import QWidget
 from ...utils.field_camera import focal_of, move_camera
 from ...utils.field_label_files import FieldLabel
 from ...utils.field_template import FieldFit, FieldTemplate, field_segment_in_image
+from ...utils.painted_lines import snap_onto_line
 from ..widgets.images import frame_to_pixmap
 
 FIELD_DRAWING = QColor(0, 200, 255)
@@ -19,6 +20,13 @@ SAVED = QColor(0, 220, 90)
 HOVERED = QColor(255, 220, 0)
 HANDLE_RADIUS = 6  # Of the dots on the corners, in screen pixels
 REACH = 12  # How close the mouse must be to a corner dot to take it
+# The magnified view of what lies under a dot: its size on screen, and how many frame
+# pixels across it shows
+LOUPE_SIZE = 300
+LOUPE_FRAME_PIXELS = 50
+LOUPE_MARGIN = 36  # Between the dot and the magnified view
+# A dragged corner snaps onto a painted line that is this near, in screen pixels
+SNAP_REACH = 8
 MAX_ZOOM = 16.0
 # Zoomed out further than the whole frame, the corners that lie outside the picture show
 MIN_ZOOM = 0.3
@@ -65,6 +73,11 @@ class FieldCanvas(QWidget):
     - Drag a corner dot: move that corner. Only corners placed in this frame stay where
       they were put (drawn filled); the rest of the field follows as a camera would see
       it. From the fourth corner on, the three placed last stay
+    - While a dot is under the mouse or dragged, the spot beneath it is shown magnified
+      beside it, towards the middle of the picture, without the dot in the way
+    - A corner dragged while another corner of the same line is placed snaps so that the
+      line between the two lies on a long painted line nearby (shown yellow); Shift: no
+      snapping
     - Mouse wheel: zoom at the mouse, also out past the frame to reach corners outside it
     - Drag anywhere else: move the picture
     """
@@ -86,6 +99,7 @@ class FieldCanvas(QWidget):
         self._zoom = 1.0
         self._view_center: Optional[Tuple[float, float]] = None
         self._drag: Optional[str] = None  # The corner dot being dragged
+        self._dot_under_mouse = ""  # Shown magnified
         # Corner dots in the order they were last dragged, most recent first
         self._recent: List[str] = []
         # Where each of them was put, in frame pixels
@@ -97,6 +111,8 @@ class FieldCanvas(QWidget):
         self.model_lines: List[np.ndarray] = []
         self._frame_focal: Optional[float] = None
         self._painted: Optional[QPixmap] = None  # The painted lines found, as an overlay
+        self._painted_mask: Optional[np.ndarray] = None
+        self._snapped_lines: set = set()  # Lines of the field that a drag has snapped
         self._pan_from: Optional[QPointF] = None
 
         self.setMinimumSize(640, 360)
@@ -130,6 +146,7 @@ class FieldCanvas(QWidget):
 
     def set_painted_lines(self, mask: Optional[np.ndarray]) -> None:
         """Show where painted lines were found in the frame (a mask of its size), or not."""
+        self._painted_mask = mask
         if mask is None:
             self._painted = None
         else:
@@ -139,6 +156,53 @@ class FieldCanvas(QWidget):
             image = QImage(overlay.data, width, height, 4 * width, QImage.Format_RGBA8888)
             self._painted = QPixmap.fromImage(image.copy())
         self.update()
+
+    def _line_through(self, first: str, second: str) -> str:
+        """Name of the line of the field that two corners lie on, or ""."""
+        a, b = self.template.points[first], self.template.points[second]
+        for name, (start, end) in self.template.lines.items():
+            if all(
+                abs(
+                    (end[0] - start[0]) * (p[1] - start[1])
+                    - (end[1] - start[1]) * (p[0] - start[0])
+                )
+                < 1e-9
+                for p in (a, b)
+            ):
+                return name
+        return ""
+
+    def _snapped(self, name: str, pixel: Tuple[float, float]) -> Tuple[float, float]:
+        """Where a dragged corner goes: onto a painted line, if a placed corner fixes one.
+
+        The line from a corner placed in this frame to the dragged one is a line of the
+        field. If a long painted line runs nearly along it, the dragged corner moves
+        across onto it; with two such lines, to where they cross.
+        """
+        self._snapped_lines = set()
+        if self._painted_mask is None:
+            return pixel
+        reach = SNAP_REACH / self._scale()
+        found = []  # (line name, the placed corner, the dragged one moved onto the line)
+        for other, placed in self._placed.items():
+            line = self._line_through(name, other) if other != name else ""
+            if not line or any(line == taken for taken, _, _ in found):
+                continue
+            moved = snap_onto_line(self._painted_mask, placed, pixel, reach)
+            if moved is not None:
+                found.append((line, np.array(placed, dtype=np.float64), moved))
+        if not found:
+            return pixel
+        if len(found) >= 2:
+            (_, a1, b1), (_, a2, b2) = (found[0], found[1])
+            crossing = np.cross(np.cross([*a1, 1.0], [*b1, 1.0]), np.cross([*a2, 1.0], [*b2, 1.0]))
+            if abs(crossing[2]) > 1e-9:
+                corner = crossing[:2] / crossing[2]
+                if np.linalg.norm(corner - pixel) <= 2.0 * reach:
+                    self._snapped_lines = {found[0][0], found[1][0]}
+                    return float(corner[0]), float(corner[1])
+        self._snapped_lines = {found[0][0]}
+        return float(found[0][2][0]), float(found[0][2][1])
 
     def first_guess(self) -> np.ndarray:
         """Where the outer corners are in a typical view from behind an end zone."""
@@ -368,6 +432,10 @@ class FieldCanvas(QWidget):
         """Name the line under the mouse; a hand shows over a dot that can be dragged."""
         hovered = name if kind == "line" else ""
         self.setCursor(Qt.PointingHandCursor if kind == "corner" else Qt.ArrowCursor)
+        dot = name if kind == "corner" else ""
+        if dot != self._dot_under_mouse:
+            self._dot_under_mouse = dot
+            self.update()
         if hovered != self.hovered:
             self.hovered = hovered
             self.hovered_changed.emit(hovered)
@@ -413,13 +481,20 @@ class FieldCanvas(QWidget):
             self._pan_from = position
             self.update()
         elif self._drag is not None:
-            self._drag_corner(self._drag, self.to_frame(position))
+            pixel = self.to_frame(position)
+            if event.modifiers() & Qt.ShiftModifier:
+                self._snapped_lines = set()
+            else:
+                pixel = self._snapped(self._drag, pixel)
+            self._drag_corner(self._drag, pixel)
         else:
             self._set_hovered(*self._under_mouse(position))
 
     def mouseReleaseEvent(self, event):
         self._pan_from = None
         self._drag = None
+        self._snapped_lines = set()
+        self.update()
         self._set_hovered(*self._under_mouse(QPointF(event.pos())))
 
     # ------------------------------------------------------------------ drawing
@@ -456,10 +531,9 @@ class FieldCanvas(QWidget):
 
         colour = FIELD_DRAWING if self.unconfirmed else SAVED
         for name, parts in self._lines_on_screen(fit).items():
-            pen = QPen(
-                HOVERED if name == self.hovered else colour, 3 if name == self.hovered else 2
-            )
-            if self.unconfirmed and name != self.hovered:
+            marked = name == self.hovered or name in self._snapped_lines
+            pen = QPen(HOVERED if marked else colour, 3 if marked else 2)
+            if self.unconfirmed and not marked:
                 pen.setStyle(Qt.DashLine)
             painter.setPen(pen)
             for part in parts:
@@ -480,3 +554,67 @@ class FieldCanvas(QWidget):
             radius = HANDLE_RADIUS if name in staying else HANDLE_RADIUS - 1
             painter.drawEllipse(self.to_screen(*pixel), radius, radius)
         painter.setBrush(Qt.NoBrush)
+
+        magnified = self._drag or self._dot_under_mouse
+        if magnified in dots:
+            x, y = dots[magnified]
+            # Outside the picture there is nothing to magnify
+            if 0 <= x < width and 0 <= y < height:
+                self._draw_loupe(painter, fit, dots[magnified], colour)
+
+    def _draw_loupe(self, painter: QPainter, fit: FieldFit, centre: np.ndarray, colour: QColor):
+        """The spot under a dot, magnified, with the field's lines and a fine cross on it."""
+        # Beside the dot, on the side towards the middle of the picture, and above it
+        # where there is room: near enough to look at without leaving the corner
+        dot = self.to_screen(*centre)
+        middle_of_picture = self.to_screen(self._frame_size[0] / 2.0, 0.0).x()
+        left = (
+            dot.x() + LOUPE_MARGIN
+            if dot.x() < middle_of_picture
+            else dot.x() - LOUPE_MARGIN - LOUPE_SIZE
+        )
+        top = dot.y() - LOUPE_MARGIN - LOUPE_SIZE
+        if top < 0:
+            top = dot.y() + LOUPE_MARGIN
+        left = min(max(left, 0.0), max(0.0, self.width() - LOUPE_SIZE))
+        top = min(max(top, 0.0), max(0.0, self.height() - LOUPE_SIZE))
+        box = QRectF(left, top, LOUPE_SIZE, LOUPE_SIZE)
+        zoom = LOUPE_SIZE / LOUPE_FRAME_PIXELS
+        half = LOUPE_FRAME_PIXELS / 2.0
+
+        def in_loupe(x: float, y: float) -> QPointF:
+            return QPointF(
+                box.left() + (x - centre[0] + half) * zoom,
+                box.top() + (y - centre[1] + half) * zoom,
+            )
+
+        painter.save()
+        painter.setClipRect(box)
+        painter.fillRect(box, QColor(0, 0, 0))
+        # The frame's own pixels, not smoothed: what counts is which pixel the corner is on
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
+        painter.drawPixmap(
+            box,
+            self._pixmap,
+            QRectF(centre[0] - half, centre[1] - half, LOUPE_FRAME_PIXELS, LOUPE_FRAME_PIXELS),
+        )
+        thin = QColor(colour)
+        thin.setAlpha(200)
+        painter.setPen(QPen(thin, 1.2))
+        for parts in self._lines_on_screen(fit).values():
+            for part in parts:
+                painter.drawPolyline(QPolygonF([in_loupe(x, y) for x, y in part]))
+        # A cross that leaves the corner's own pixel free
+        middle = box.center()
+        gap, reach = 0.8 * zoom, 3.5 * zoom
+        # Dark under light, to show on grass and on a white line alike
+        for pen in (QPen(QColor(0, 0, 0, 200), 3), QPen(QColor(255, 255, 255), 1)):
+            painter.setPen(pen)
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                painter.drawLine(
+                    QPointF(middle.x() + dx * gap, middle.y() + dy * gap),
+                    QPointF(middle.x() + dx * reach, middle.y() + dy * reach),
+                )
+        painter.restore()
+        painter.setPen(QPen(colour, 2))
+        painter.drawRect(box)

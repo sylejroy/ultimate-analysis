@@ -10,6 +10,8 @@ Faint lines far away are found in parts or not at all, and the edge of a road or
 line above the trees comes out as well. It is a guide for the eye, not a measurement.
 """
 
+from typing import Optional, Sequence
+
 import cv2
 import numpy as np
 
@@ -21,6 +23,12 @@ MIN_CONTRAST = 3.5
 SURROUNDINGS = 61
 # Pieces shorter than this are not lines
 MIN_LENGTH = 70
+# A line drawn through two points snaps onto a painted line only if that many of its
+# pixels lie on painted ones, and that share of what the frame shows of it: a long line
+# that is found along much of its length, not a few stray streaks
+SNAP_MIN_OVERLAP = 150
+SNAP_MIN_SHARE = 0.25
+SNAP_STEP = 0.25  # Pixels between the positions tried
 
 
 def _ridge_strength(white: np.ndarray, scale: float) -> np.ndarray:
@@ -51,3 +59,53 @@ def painted_line_mask(frame: np.ndarray) -> np.ndarray:
         is_line[0] = False  # The background
         found[is_line[pieces]] = 255
     return found
+
+
+def snap_onto_line(
+    mask: np.ndarray, anchor: Sequence[float], point: Sequence[float], reach: float
+) -> Optional[np.ndarray]:
+    """Move a point sideways so that the line through it and an anchor lies on a painted line.
+
+    The anchor stays; the point keeps how far along the line it is and moves across it,
+    by at most `reach` pixels, to where the line covers the most painted pixels.
+
+    Args:
+        mask: Where the painted lines are (painted_line_mask)
+        anchor: A pixel the line goes through, which stays
+        point: The pixel that is being placed
+        reach: How far the point may be moved, in pixels
+
+    Returns:
+        The moved point, or None if no long painted line lies within reach
+    """
+    anchor, point = np.asarray(anchor, dtype=np.float64), np.asarray(point, dtype=np.float64)
+    length = float(np.linalg.norm(point - anchor))
+    if length < 5.0 or reach <= 0:
+        return None
+    along = (point - anchor) / length
+    across = np.array([-along[1], along[0]])
+    offsets = np.arange(-reach, reach + 1e-9, SNAP_STEP)
+    targets = point + offsets[:, None] * across
+    directions = (targets - anchor) / np.linalg.norm(targets - anchor, axis=1, keepdims=True)
+
+    # A pixel either side of a painted line still counts as on it
+    near_lines = cv2.dilate(mask, np.ones((3, 3), dtype=np.uint8)) > 0
+    height, width = mask.shape
+    steps = np.arange(-float(np.hypot(width, height)), float(np.hypot(width, height)), 1.0)
+    pixels = np.rint(anchor + steps[None, :, None] * directions[:, None, :]).astype(np.int64)
+    inside = (
+        (pixels[..., 0] >= 0)
+        & (pixels[..., 0] < width)
+        & (pixels[..., 1] >= 0)
+        & (pixels[..., 1] < height)
+    )
+    on_lines = np.zeros(inside.shape, dtype=bool)
+    on_lines[inside] = near_lines[pixels[..., 1][inside], pixels[..., 0][inside]]
+    overlap = on_lines.sum(axis=1)
+    shown = np.maximum(inside.sum(axis=1), 1)
+
+    # The most covered; of equally covered ones the nearest to where the point was put
+    best = int(np.argmax(overlap - 0.01 * np.abs(offsets)))
+    if overlap[best] < SNAP_MIN_OVERLAP or overlap[best] / shown[best] < SNAP_MIN_SHARE:
+        return None
+    return targets[best]

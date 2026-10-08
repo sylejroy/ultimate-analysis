@@ -94,6 +94,17 @@ class LabelFileTests(unittest.TestCase):
         self.assertAlmostEqual(fresh[1] / fresh[0], 3.0)
         self.assertEqual(self.module.random_video_weights([0, 0], [0, 0]), [0.0, 0.0])
 
+    def test_a_random_frame_to_label_is_one_that_has_no_label_yet(self):
+        videos = ["a.mp4", "b.mp4"]
+        # Every frame of the second video but one is labelled already
+        labelled = [[], [self.module.frame_name("b.mp4", index) for index in range(4)]]
+        for _ in range(30):
+            picked = self.module.random_unlabelled_frame(videos, [0, 5], labelled, tries=200)
+            self.assertEqual(picked, (1, 4))
+        self.assertIsNone(self.module.random_unlabelled_frame(videos, [0, 0], [[], []]))
+        full = [[], [self.module.frame_name("b.mp4", index) for index in range(5)]]
+        self.assertIsNone(self.module.random_unlabelled_frame(videos, [0, 5], full))
+
     def test_a_disc_only_dataset_keeps_its_single_class(self):
         module = self.module
         first = module.frame_name("a.mp4", 10)

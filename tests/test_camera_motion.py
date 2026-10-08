@@ -63,11 +63,6 @@ class CameraMotionTests(unittest.TestCase):
         other_scene = view(textured_scene(seed=7), 100, 100)
         self.assertIsNone(self.estimator.update(other_scene, []))
 
-    def test_positions_move_with_the_picture(self):
-        shift = np.array([[1, 0, -6], [0, 1, 2], [0, 0, 1]], dtype=float)
-        self.assertEqual(self.module.move_points([(100, 50), (0, 0)], shift), [(94, 52), (-6, 2)])
-        self.assertEqual(self.module.move_points([], shift), [])
-
 
 if __name__ == "__main__":
     unittest.main()

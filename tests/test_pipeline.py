@@ -1,5 +1,6 @@
 """The per-frame pipeline: result reuse, state resets, and jersey number bookkeeping."""
 
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -11,20 +12,23 @@ STAGES = (
     "run_inference",
     "run_tracking",
     "run_field_segmentation",
-    "run_player_id_on_tracks",
     "create_unified_field_mask",
     "fit_lines_from_mask",
     "get_track_histories",
     "apply_camera_motion",
+    "set_frame_rate",
+    "reset_tracker",
+    "reset_inference_state",
+    "reset_segmentation_cache",
+)
+# The stages the jersey numbers use (processing/player_numbers.py)
+NUMBER_STAGES = (
+    "run_player_id_on_tracks",
     "missing_players",
     "kit_distance",
     "merge_players",
     "merge_jersey_readings",
-    "set_frame_rate",
     "get_best_jersey_number",
-    "reset_tracker",
-    "reset_inference_state",
-    "reset_segmentation_cache",
     "reset_jersey_tracker",
 )
 DRAWING = (
@@ -46,10 +50,12 @@ class PipelineTests(unittest.TestCase):
     def setUp(self):
         self.module = load_module("pipeline")
         self.mocks = {}
-        for name in STAGES + DRAWING:
-            patcher = patch.object(self.module, name)
-            self.mocks[name] = patcher.start()
-            self.addCleanup(patcher.stop)
+        numbers = sys.modules[self.module.PlayerNumbers.__module__]
+        for owner, names in ((self.module, STAGES + DRAWING), (numbers, NUMBER_STAGES)):
+            for name in names:
+                patcher = patch.object(owner, name)
+                self.mocks[name] = patcher.start()
+                self.addCleanup(patcher.stop)
 
         # Drawing functions hand back the frame they were given
         for name in DRAWING:
@@ -57,7 +63,9 @@ class PipelineTests(unittest.TestCase):
         self.mocks["draw_unified_field_mask"].side_effect = lambda frame, *a, **k: frame
 
         self.track = SimpleNamespace(track_id=7, class_name="player", bbox=[1, 1, 5, 5])
-        self.mocks["run_inference"].return_value = [{"class_name": "player", "bbox": [1, 1, 5, 5]}]
+        # Drone footage: a team's worth of players in view
+        self.players = [{"class_name": "player", "bbox": [1, 1, 5, 5]}] * 7
+        self.mocks["run_inference"].return_value = self.players
         self.mocks["run_tracking"].return_value = [self.track]
         self.mocks["run_field_segmentation"].return_value = [object()]
         self.mocks["run_player_id_on_tracks"].return_value = (
@@ -106,6 +114,29 @@ class PipelineTests(unittest.TestCase):
         self.pipeline.process(self.frame, 3, self.options)
         self.assertEqual(self.mocks["run_inference"].call_count, 4)
 
+    def test_nothing_is_followed_during_a_close_up_and_tracking_starts_afresh_after_it(self):
+        self.pipeline.process(self.frame, 0, self.options)
+        tracked = self.mocks["run_tracking"].call_count
+        resets = self.mocks["reset_tracker"].call_count
+
+        # The footage cuts to a close-up: the detector finds nobody
+        self.mocks["run_inference"].return_value = []
+        results = [self.pipeline.process(self.frame, index, self.options) for index in range(1, 40)]
+        self.assertFalse(results[-1].wide_shot)
+        self.assertEqual(results[-1].tracks, [])
+        self.assertIsNone(results[-1].top_down_view)
+        # A few frames pass before the cut is believed; from then on nothing is tracked
+        self.assertLess(self.mocks["run_tracking"].call_count - tracked, 20)
+        self.assertEqual(self.mocks["reset_tracker"].call_count, resets + 1)
+
+        # Back on the drone
+        self.mocks["run_inference"].return_value = self.players
+        results = [
+            self.pipeline.process(self.frame, index, self.options) for index in range(40, 80)
+        ]
+        self.assertTrue(results[-1].wide_shot)
+        self.assertEqual([track.track_id for track in results[-1].tracks], [7])
+
     def test_field_geometry_is_computed_once_per_segmentation_result(self):
         # Segmentation returns the same result object for the frames in its interval
         for index in range(5):
@@ -120,9 +151,9 @@ class PipelineTests(unittest.TestCase):
     def test_video_and_reader_resets_discard_player_crop_snapshots(self):
         for reset in (self.pipeline.reset, self.pipeline.reset_player_ids):
             with self.subTest(reset=reset.__name__):
-                self.pipeline._jersey_crop_selector.observe(7, self.frame, 3, 5, 100)
+                self.pipeline._numbers.crops.observe(7, self.frame, 3, 5, 100)
                 reset()
-                self.assertIsNone(self.pipeline._jersey_crop_selector.take(7, 3))
+                self.assertIsNone(self.pipeline._numbers.crops.take(7, 3))
 
     def test_jersey_numbers_persist_fall_back_to_the_tracker_and_follow_the_tracks(self):
         self.pipeline.process(self.frame, 0, self.options)

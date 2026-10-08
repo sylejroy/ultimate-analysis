@@ -75,7 +75,7 @@ Modules that are still too large and should be split when they are next worked o
   tracking, possession, jersey number bookkeeping, caches, the pipeline's result reuse.
   Models are mocked; the tests need no videos, weights, or GPU.
 - How good a model is cannot be unit tested. Measure it with the benchmark scripts and
-  record the result in the README:
+  record the result in `docs/MEASUREMENTS.md`:
   - `scripts/benchmark_detectors.py` — players and discs
   - `scripts/benchmark_segmentation.py` — field area and outline
   - `scripts/benchmark_field_registration.py` — where the field lies, against the labelled field frames

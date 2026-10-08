@@ -120,6 +120,12 @@ models:
     max_cosine_distance: 0.5     # Feature similarity threshold (tighter for faster matching)
     nn_budget: 50                # Feature budget per class (reduced from 100 for speed)
     
+  # Edited games cut away from the drone to close-ups and title cards; nothing is analysed there
+  shot_type:
+    enabled: true
+    min_players: 6               # Drone footage shows at least this many players; a close-up shows the detector none or one or two
+    confirm_frames: 15           # Frames in a row that must look like the other kind before the analysis stops or starts again
+
   # Possession: the disc belongs to the player whose box it is in
   possession:
     confirm_frames: 10           # Frames the disc must be seen at another player (or at none) before the holder changes

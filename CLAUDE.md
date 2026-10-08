@@ -4,8 +4,8 @@ PyQt5 desktop app that analyses Ultimate Frisbee video: player and disc detectio
 tracking (DeepSORT), possession, jersey numbers, field segmentation, and a top-down view.
 
 Layout, code style, and how a frame flows through the app are in
-`docs/DEVELOPMENT_GUIDELINES.md`. The README has the pipeline overview and the measured
-accuracy and speed of every model. Read those instead of guessing; this file only holds
+`docs/DEVELOPMENT_GUIDELINES.md`. The README has the pipeline overview;
+`docs/MEASUREMENTS.md` has the measured accuracy and speed of every model. Read those instead of guessing; this file only holds
 what they do not say.
 
 ## Environment
@@ -57,4 +57,4 @@ what they do not say.
 Change a model, a threshold, or preprocessing only with a before and after number from
 the benchmark scripts listed under "Testing" in `docs/DEVELOPMENT_GUIDELINES.md`. The
 validation and test sets are small (98 discs, 48 field images), so small differences are
-noise. Record results in the README tables.
+noise. Record results in the tables of `docs/MEASUREMENTS.md`.

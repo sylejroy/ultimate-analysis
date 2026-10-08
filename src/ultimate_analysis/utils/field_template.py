@@ -75,28 +75,6 @@ TEMPLATES: Dict[str, FieldTemplate] = {
     "wfdf": FieldTemplate("wfdf", "m", 37.0, 100.0, 18.0, 18.0),
 }
 DEFAULT_RULESET = "usau"
-
-# Order in which the elements are asked for when labelling: the ones nearly every view
-# shows first, then what ties down the near part of the field
-LABELLING_ORDER: List[str] = [
-    "left_sideline",
-    "right_sideline",
-    "far_back_line",
-    "far_goal_line",
-    "near_goal_line",
-    "near_back_line",
-    "far_brick",
-    "midfield",
-    "near_brick",
-    "far_back_left",
-    "far_back_right",
-    "far_goal_left",
-    "far_goal_right",
-    "near_goal_left",
-    "near_goal_right",
-    "near_back_left",
-    "near_back_right",
-]
 MIN_STATEMENTS = 8  # What a homography needs
 
 

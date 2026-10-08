@@ -1,0 +1,32 @@
+# Data and models on disk
+
+Everything under `data/` is local and not tracked by Git.
+
+- `data/models/pretrained/` — base weights; missing YOLO11/YOLO26 weights download
+  automatically when selected for training.
+- `data/models/detection/`, `data/models/segmentation/` — one folder per training run.
+  The model dropdowns list each run's `weights/best.pt`.
+- `data/raw/training_data/` — datasets in YOLO format, named
+  `<origin>_<content>_<version>`. The origin says who made the labels and how far the
+  folder can be trusted as a source:
+
+  | Folder | What it is | Used for |
+  | --- | --- | --- |
+  | `labelled_players_discs_v1` | Frames labelled in the Labelling tab, full resolution | Future training |
+  | `labelled_discs_v1` | Frames labelled from the phone, discs only, full resolution | Future training |
+  | `combined_discs_v4` | `roboflow_merged_discs_v2` plus the disc boxes of both `labelled_` sets, built by `scripts/build_combined_disc_dataset.py`. The default disc model was trained on v3, an earlier state with fewer labels that is no longer kept | Disc models |
+  | `combined_players_v1` | `roboflow_merged_players_v2` plus the player boxes of `labelled_players_discs_v1`, built by the same script with `--object player` | Player models |
+  | `roboflow_merged_players_v2` | Built from the Roboflow exports: 1,442 images at 1280×720, players only | The default player model, benchmarks |
+  | `roboflow_merged_discs_v2` | The same images, discs only | The default disc model, benchmarks |
+  | `roboflow_object_detection_v3i` | Roboflow export as downloaded: players and discs, 960×960 | Source of the merged sets |
+  | `roboflow_player_disc_detection_v4i` | Roboflow export: players and discs of one game, stretched to 1280×1280 | Source of the merged sets |
+  | `roboflow_object_detection_disc_v1i` | Roboflow export: discs only, 1920×1080 | Source of the merged sets |
+  | `roboflow_field_finder_v8i` | Roboflow export: field and end zones, stretched to a square | The field segmentation model |
+  | `roboflow_digits_v1i` | Roboflow export: house-number digits | A rough start for a jersey digit detector |
+
+  `labelled_` is labelled with this app, `roboflow_` is a Roboflow export exactly as
+  downloaded, and `roboflow_merged_` is built from those exports by
+  `scripts/build_merged_detection_dataset.py` (1280×720, 16:9 restored) and
+  `scripts/build_single_class_dataset.py` (the labels of one class only). The version
+  counts up within one name; Roboflow's own version numbers end in `i`. The folders of
+  training runs made before the renaming still end in the old dataset names.

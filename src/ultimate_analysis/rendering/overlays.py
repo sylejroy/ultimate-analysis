@@ -9,6 +9,14 @@ from ..utils.logger import get_logger
 logger = get_logger("RENDERING")
 
 
+def draw_notice(frame: np.ndarray, text: str) -> None:
+    """Write a short notice at the top left of the frame (in place)."""
+    font, scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2
+    (width, height), _ = cv2.getTextSize(text, font, scale, thickness)
+    cv2.rectangle(frame, (12, 12), (12 + width + 20, 12 + height + 20), (0, 0, 0), -1)
+    cv2.putText(frame, text, (22, 22 + height), font, scale, (255, 255, 255), thickness)
+
+
 def draw_fps_overlay(frame: np.ndarray, fps: float) -> None:
     """Draw FPS overlay on the top right of the frame.
 

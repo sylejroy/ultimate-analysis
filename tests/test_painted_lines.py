@@ -26,6 +26,22 @@ class PaintedLinesTest(unittest.TestCase):
         cv2.circle(self.frame, (320, 240), 30, (235, 235, 235), -1)
         self.assertEqual(int(self.module.painted_line_mask(self.frame).max()), 0)
 
+    def test_a_point_snaps_so_that_its_line_lies_on_a_long_painted_line(self):
+        mask = np.zeros((480, 640), dtype=np.uint8)
+        cv2.line(mask, (40, 400), (600, 330), 255, 2)
+        anchor = (120.0, 390.0)  # On the line
+        # Put four pixels off the line: moved back onto it, the same way along
+        moved = self.module.snap_onto_line(mask, anchor, (440.0, 354.0), reach=8.0)
+        self.assertIsNotNone(moved)
+        on_line_y = 400 + (moved[0] - 40) * (330 - 400) / (600 - 40)
+        self.assertAlmostEqual(moved[1], on_line_y, delta=1.0)
+        self.assertAlmostEqual(moved[0], 440.0, delta=2.0)
+        # Too far from the line, and a line too short to go by: left alone
+        self.assertIsNone(self.module.snap_onto_line(mask, anchor, (440.0, 380.0), reach=8.0))
+        short = np.zeros((480, 640), dtype=np.uint8)
+        cv2.line(short, (120, 390), (200, 380), 255, 2)
+        self.assertIsNone(self.module.snap_onto_line(short, anchor, (440.0, 354.0), reach=8.0))
+
 
 if __name__ == "__main__":
     unittest.main()

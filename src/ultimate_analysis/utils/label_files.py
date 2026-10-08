@@ -12,6 +12,7 @@ frame size):
 The name of a frame says where it comes from, so it can always be found in its video again.
 """
 
+import random
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
@@ -157,6 +158,34 @@ def random_video_weights(frame_counts: Sequence[int], labelled: Sequence[int]) -
     short = np.clip(densest * frames - have, 0.0, None)
     by_length = frames / frames.sum() * max(1.0, EVEN_SHARE * have.sum())
     return (short + by_length).tolist()
+
+
+def random_unlabelled_frame(
+    videos: Sequence[str],
+    frame_counts: Sequence[int],
+    labelled: Sequence[Sequence[str]],
+    tries: int = 20,
+) -> Optional[Tuple[int, int]]:
+    """Pick a frame to label next: (position of the video in `videos`, frame index).
+
+    Args:
+        videos: Paths of the videos to choose among
+        frame_counts: Frames of each video
+        labelled: Names of the labelled frames of each video (frame_name)
+        tries: How often a labelled frame may be drawn before giving up
+
+    Returns:
+        A frame that is not labelled yet, or None if there are no frames or none was found
+    """
+    if not any(frame_counts):
+        return None
+    weights = random_video_weights(frame_counts, [len(names) for names in labelled])
+    for _ in range(tries):
+        row = random.choices(range(len(videos)), weights=weights)[0]
+        index = random.randrange(frame_counts[row])
+        if frame_name(videos[row], index) not in set(labelled[row]):
+            return row, index
+    return None
 
 
 def labelled_frames(dataset_dir: Path, video_path: Optional[str] = None) -> List[str]:
