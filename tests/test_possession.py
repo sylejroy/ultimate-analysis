@@ -190,6 +190,21 @@ class PossessionTests(unittest.TestCase):
         self.tracker.update([disc(130, 150)], self.tracks, 103)
         self.assertEqual(self.tracker.holder_id, 1)
 
+    def test_the_first_frame_after_a_reset_is_one_frame_wherever_in_the_video(self):
+        self.tracker.update([disc(130, 150)], self.tracks, 50000)
+        self.tracker.update([disc(130, 150)], self.tracks, 50001)
+        self.assertIsNone(self.tracker.holder_id)
+
+    def test_a_disc_picked_up_from_the_ground_is_off_it_from_then_not_from_before(self):
+        self.see(disc(130, 150), frames=CONFIRM_FRAMES)
+        for frame in range(200, 200 + GROUND_FRAMES + 2):
+            self.tracker.update([disc(400, 400)], self.tracks, frame)
+        self.assertEqual((self.tracker.disc_state, self.tracker.since), ("ground", 200))
+        # Someone stands over it: no longer lying free, from this frame on
+        self.tracks.append(player(3, 380, 250, 440, 450, team=1))
+        self.tracker.update([disc(400, 400)], self.tracks, 300)
+        self.assertEqual((self.tracker.disc_state, self.tracker.since), ("air", 300))
+
     def test_a_resting_disc_is_followed_when_the_camera_moves(self):
         import numpy as np
 

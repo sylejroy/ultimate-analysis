@@ -127,7 +127,7 @@ class PossessionTracker:
         self._step = 1  # Video frames from the frame before to this one
         self._holder_box: Optional[Box] = None  # Where the holder was last seen
         self._holder_unseen = 0  # Frames since then
-        self._frame = 0
+        self._frame: Optional[int] = None  # The frame taken in last
         self._resting_at: Optional[Tuple[float, float]] = None  # A disc at no player: where
         self._resting_since = 0  # and since which frame it has not moved from there
         self._turned_over = False  # The disc has lain on the ground since someone last held it
@@ -189,7 +189,7 @@ class PossessionTracker:
         """Follow a disc that is at no player (None: it is at one): does it lie still?"""
         if disc is None:
             self._resting_at = None
-            self.on_ground = False
+            self._off_the_ground()
             return
         heights = [t.to_ltrb()[3] - t.to_ltrb()[1] for t in tracks if _is_player(t)]
         radius = GROUND_RADIUS * float(np.median(heights)) if heights else GROUND_RADIUS_PIXELS
@@ -201,7 +201,7 @@ class PossessionTracker:
         if moved > (GROUND_LEFT * radius if self.on_ground else radius):
             self._resting_at = disc
             self._resting_since = self._frame
-            self.on_ground = False
+            self._off_the_ground()
         elif not self.on_ground and (
             self._frame - self._resting_since >= self._frames("ground_seconds", 1.5)
         ):
@@ -216,6 +216,12 @@ class PossessionTracker:
             if self.team is not None and not self._turned_over:
                 self.team = 1 - self.team
             self._turned_over = True
+
+    def _off_the_ground(self) -> None:
+        """The disc is not lying where it lay: picked up, or seen elsewhere."""
+        if self.on_ground:
+            self.on_ground = False
+            self.since = self._frame
 
     def _frames_needed(self, at_disc: Optional[int], tracks: List[Any]) -> int:
         """How long the disc must be seen at a place before the holder changes to it."""
@@ -245,9 +251,13 @@ class PossessionTracker:
             frame_index: The frame's number in the video, if frames may have been skipped
         """
         previous = self._frame
-        self._frame = previous + 1 if frame_index is None else frame_index
+        if frame_index is not None:
+            self._frame = frame_index
+        else:
+            self._frame = 0 if previous is None else previous + 1
         # A jump back or far ahead is a seek, after which the caller resets anyway
-        self._step = min(max(1, self._frame - previous), max(1, round(self.frame_rate / 4)))
+        skipped = 1 if previous is None else self._frame - previous
+        self._step = min(max(1, skipped), max(1, round(self.frame_rate / 4)))
         self._follow_holder(tracks)
         discs = [detection for detection in detections if detection.get("class_name") == "disc"]
         if not discs:

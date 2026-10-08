@@ -271,7 +271,9 @@ class AnalysisPipeline:
         """
         start = time.perf_counter()
         self._timings = {}
-        self._follow_field = options.top_down_view and options.top_down_source == "field"
+        # Also without the top-down view shown: who stands beside the field, and whether
+        # the fitted lines are drawn, should not depend on a view being switched on
+        self._follow_field = options.field_segmentation and options.top_down_source == "field"
 
         analysis_key = (frame_index, *options.analysis_key)
         if analysis_key != self._analysed_key:

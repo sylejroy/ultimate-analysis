@@ -238,6 +238,11 @@ class FieldEstimateTest(unittest.TestCase):
                 ],
             )
         self.assertEqual(off, {2})
+        # A mapping says the same whatever its sign
+        again = OffFieldWatcher(self.template)
+        for frame in range(60):
+            off = again.update(-mapping, [player(1, middle, 30), player(2, -5, 30)])
+        self.assertEqual(off, {2})
         # Without knowing where the field is, what was learned holds
         self.assertEqual(watcher.update(None, [player(2, middle, 30)]), {2})
         # Coming on to play, a track is on the field again after a while

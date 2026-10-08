@@ -58,6 +58,7 @@ OFF_FIELD_MARGIN = 2.0
 OFF_FIELD_SHARE = 0.85
 OFF_FIELD_MEMORY = 0.99
 OFF_FIELD_MIN_SIGHTINGS = 20.0
+OFF_FIELD_FORGET = 3000  # Updates without a sighting after which a track is forgotten
 # An estimate further than this from where the field was followed to, in field units,
 # replaces it outright: a cut, or the following has drifted
 JUMP_DISTANCE = 8.0
@@ -299,7 +300,8 @@ class OffFieldWatcher:
 
     def __init__(self, template: FieldTemplate):
         self.template = template
-        self._sightings: Dict[int, List[float]] = {}  # Track ID -> [seen, of these outside]
+        # Track ID -> [seen, of these outside, updates since it was last seen]
+        self._sightings: Dict[int, List[float]] = {}
 
     def reset(self) -> None:
         self._sightings.clear()
@@ -318,30 +320,36 @@ class OffFieldWatcher:
             tracks: The frame's tracks (track_id, class_name, to_ltrb())
         """
         players = [track for track in tracks if getattr(track, "class_name", None) == "player"]
+        # A track that is gone for good is forgotten
+        for track_id in [t for t, seen in self._sightings.items() if seen[2] > OFF_FIELD_FORGET]:
+            del self._sightings[track_id]
+        for seen in self._sightings.values():
+            seen[2] += 1
         if image_to_field is not None and players:
             boxes = np.array([track.to_ltrb() for track in players], dtype=np.float64)
             feet = np.column_stack(
                 [(boxes[:, 0] + boxes[:, 2]) / 2.0, boxes[:, 3], np.ones(len(boxes))]
             )
             places = feet @ image_to_field.T
-            to_image = np.linalg.inv(image_to_field)
+            # Feet stand on the ground, which is in front of the camera wherever it is
+            # seen: no test for that, and none could be made, since a mapping that was
+            # followed and blended has no fixed sign
             with np.errstate(divide="ignore", invalid="ignore"):
                 x, y = places[:, 0] / places[:, 2], places[:, 1] / places[:, 2]
-                in_front = x * to_image[2, 0] + y * to_image[2, 1] + to_image[2, 2] > 0
             outside = ~(
-                in_front
-                & (x >= -OFF_FIELD_MARGIN)
+                (x >= -OFF_FIELD_MARGIN)
                 & (x <= self.template.width + OFF_FIELD_MARGIN)
                 & (y >= -OFF_FIELD_MARGIN)
                 & (y <= self.template.length + OFF_FIELD_MARGIN)
             )
             for track, is_outside in zip(players, outside):
-                seen = self._sightings.setdefault(int(track.track_id), [0.0, 0.0])
+                seen = self._sightings.setdefault(int(track.track_id), [0.0, 0.0, 0])
                 seen[0] = seen[0] * OFF_FIELD_MEMORY + 1.0
                 seen[1] = seen[1] * OFF_FIELD_MEMORY + float(is_outside)
+                seen[2] = 0
         return {
             track_id
-            for track_id, (seen, outside) in self._sightings.items()
+            for track_id, (seen, outside, _) in self._sightings.items()
             if seen >= OFF_FIELD_MIN_SIGHTINGS and outside >= OFF_FIELD_SHARE * seen
         }
 
