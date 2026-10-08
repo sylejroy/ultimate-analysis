@@ -52,9 +52,11 @@ MAX_FOCAL_SAMPLES = 300
 # numbers for 0.4 to 0.1 are in docs/MEASUREMENTS.md.
 NEW_ESTIMATE_WEIGHT = 0.2
 # A track is off the field if its feet were further outside it than the margin (field
-# units) on this share of its recent sightings. Older sightings count less and less: one
+# units) on this share of its recent sightings. The margin is wide: the field's estimate
+# is off by two yards and more in half the frames, and with 2 units players near a
+# sideline went missing. Those standing right at the line stay in for it. Older sightings count less and less: one
 # hundred frames back, a third. A track seen fewer times than this is not judged.
-OFF_FIELD_MARGIN = 2.0
+OFF_FIELD_MARGIN = 4.0
 OFF_FIELD_SHARE = 0.85
 OFF_FIELD_MEMORY = 0.99
 OFF_FIELD_MIN_SIGHTINGS = 20.0
@@ -185,6 +187,11 @@ class FieldFollower:
         self._known_focal: Optional[float] = None
         # An estimate far from where the field was followed to, waiting to be said again
         self._doubted: Optional[np.ndarray] = None
+
+    @property
+    def focal(self) -> Optional[float]:
+        """The focal length of the video's camera in pixels, as far as it is known."""
+        return self._known_focal if self._known_focal is not None else self._focal.value
 
     def new_video(self, focal: Optional[float] = None) -> None:
         """Another camera: forget its focal length too, or take the one that is known."""

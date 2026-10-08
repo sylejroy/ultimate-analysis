@@ -27,7 +27,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from ...config.settings import get_config, get_setting
+from ...config.settings import get_setting
 from ...constants import SHORTCUTS
 from ...pipeline import PipelineOptions
 from ...processing.homography import load_default_matrix
@@ -255,7 +255,8 @@ class MainTab(QWidget):
         layout.addWidget(processing_group)
 
         # Model selection section
-        models_group = QGroupBox("Model Settings")
+        # Which models run is set once and seldom changed: folded away until asked for
+        models_group = QGroupBox("Models")
         models_layout = QFormLayout()
         # Model names are long: each label goes above its dropdown
         models_layout.setRowWrapPolicy(QFormLayout.WrapAllRows)
@@ -296,26 +297,8 @@ class MainTab(QWidget):
         self.disc_model_combo.currentTextChanged.connect(self._on_disc_model_changed)
         models_layout.addRow("Disc Detection Model:", self.disc_model_combo)
 
-        models_group.setLayout(models_layout)
-        layout.addWidget(models_group)
-
-        # Field Segmentation Controls
-        segmentation_group = QGroupBox("Field Segmentation")
-        segmentation_layout = QVBoxLayout()
-
-        # RANSAC line fitting checkbox
-        self.ransac_checkbox = QCheckBox("Use RANSAC Line Fitting")
-        self.ransac_checkbox.setChecked(True)  # Enable by default for advanced line detection
-        self.ransac_checkbox.stateChanged.connect(self._on_ransac_toggled)
-        self.ransac_checkbox.setToolTip(
-            "Fit straight lines to contour segments using RANSAC algorithm"
-        )
-        segmentation_layout.addWidget(self.ransac_checkbox)
-
-        # Model selection
+        # Field model dropdown, with a button to read the list of models again
         model_layout = QHBoxLayout()
-        model_layout.addWidget(QLabel("Model:"))
-
         self.segmentation_model_combo = compact_combo(QComboBox())
         self.segmentation_model_combo.currentTextChanged.connect(
             self._on_segmentation_model_changed
@@ -328,9 +311,10 @@ class MainTab(QWidget):
         refresh_models_button.clicked.connect(self._load_segmentation_models)
         model_layout.addWidget(refresh_models_button)
 
-        segmentation_layout.addLayout(model_layout)
-        segmentation_group.setLayout(segmentation_layout)
-        layout.addWidget(segmentation_group)
+        models_layout.addRow("Field Model:", model_layout)
+
+        models_group.setLayout(models_layout)
+        layout.addWidget(collapsible(models_group, expanded=False))
 
         # Performance metrics section
         # Only needed when tuning, so it is folded away until asked for
@@ -366,6 +350,7 @@ class MainTab(QWidget):
         )
 
         self.video_label = ZoomableImageLabel()
+        self.video_label.show_grid = False  # The grid is for calibrating, not for watching
         self.video_label.setText("No video selected")
         self.video_label.setAlignment(Qt.AlignCenter)
         self.video_label.setStyleSheet(
@@ -380,9 +365,15 @@ class MainTab(QWidget):
         self.video_scroll_area.setWidget(self.video_label)
         layout.addWidget(self.video_scroll_area, 1)  # Takes most space
 
-        # Which team had the disc over the last seconds
+        # Which team had the disc over the last seconds, and where the disc is now
+        possession_layout = QHBoxLayout()
         self.possession_bar = PossessionBar()
-        layout.addWidget(self.possession_bar)
+        possession_layout.addWidget(self.possession_bar, 1)
+        self.disc_label = QLabel("")
+        self.disc_label.setFixedWidth(150)
+        self.disc_label.setToolTip("Who has the disc, or how long it has been in the air")
+        possession_layout.addWidget(self.disc_label)
+        layout.addLayout(possession_layout)
 
         # Progress bar
         self.progress_bar = QSlider(Qt.Horizontal)
@@ -592,6 +583,13 @@ class MainTab(QWidget):
                 result.holder_id,
                 number if str(number).isdigit() else "",
             )
+            if result.holder_id is not None:
+                who = f"#{number}" if str(number).isdigit() else f"player {result.holder_id}"
+                self.disc_label.setText(f"Disc: {who}")
+            elif result.flight_seconds is not None:
+                self.disc_label.setText(f"In the air {result.flight_seconds:.1f} s")
+            else:
+                self.disc_label.setText("On the ground" if result.disc_state == "ground" else "")
         display_ms = (time.perf_counter() - display_start) * 1000
 
         if self.performance_widget.isVisible():
@@ -752,15 +750,6 @@ class MainTab(QWidget):
             self._request_display_update(immediate=True)
         else:
             self.homography_display_label.setText("Homography view disabled")
-
-    def _on_ransac_toggled(self, state: int):
-        """Handle RANSAC line fitting checkbox toggle."""
-        # The drawing code reads this setting; override it in memory for this session
-        ransac_config = get_config()
-        for key in ("models", "segmentation", "contour", "ransac"):
-            ransac_config = ransac_config.setdefault(key, {})
-        ransac_config["enabled"] = state == Qt.Checked
-        self._request_display_update(immediate=True)
 
     # ------------------------------------------------------------------ models
 

@@ -11,6 +11,8 @@ of the 74 with fewer, some 60 were close-ups, title cards or black, and the rest
 footage with hardly anybody in it (a huddle, an empty field), where nothing is lost.
 """
 
+import numpy as np
+
 from ..config.settings import get_setting
 
 
@@ -54,3 +56,41 @@ class ShotWatcher:
             self.wide = looks_wide
             self._disagreeing = 0
         return self.wide
+
+
+# A cut within drone footage: from one frame to the next the camera's motion cannot be
+# told and the players are elsewhere. With at least this many players before, fewer than
+# this share of them have a detection where they stood (boxes overlapping this much).
+CUT_MIN_PLAYERS = 6
+CUT_MAX_STAYING = 0.3
+CUT_SAME_PLACE_IOU = 0.3
+
+
+def players_are_elsewhere(before: np.ndarray, now: np.ndarray) -> bool:
+    """Whether the players of one frame are not where those of the frame before stood.
+
+    Between two frames of one shot nearly every player's box still overlaps their own.
+    After a cut to another view (a replay, the other end of the field) hardly any does,
+    and what was followed (tracks, the holder, the field) belongs to the view before.
+
+    Args:
+        before: Player boxes (n, 4) as x1, y1, x2, y2 of the frame before
+        now: Player boxes of this frame
+    """
+    before, now = np.asarray(before, dtype=np.float64), np.asarray(now, dtype=np.float64)
+    if len(before) < CUT_MIN_PLAYERS:
+        return False
+    if len(now) == 0:
+        return True
+    width = np.minimum(before[:, None, 2], now[None, :, 2]) - np.maximum(
+        before[:, None, 0], now[None, :, 0]
+    )
+    height = np.minimum(before[:, None, 3], now[None, :, 3]) - np.maximum(
+        before[:, None, 1], now[None, :, 1]
+    )
+    shared = np.clip(width, 0, None) * np.clip(height, 0, None)
+    area_before = (before[:, 2] - before[:, 0]) * (before[:, 3] - before[:, 1])
+    area_now = (now[:, 2] - now[:, 0]) * (now[:, 3] - now[:, 1])
+    overlap = shared / (area_before[:, None] + area_now[None, :] - shared)
+    staying = (overlap.max(axis=1) >= CUT_SAME_PLACE_IOU).mean()
+    return bool(staying < CUT_MAX_STAYING)

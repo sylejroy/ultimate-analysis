@@ -1,6 +1,6 @@
 """Drawing detections, tracks, trails, and jersey numbers on a frame."""
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -473,15 +473,35 @@ def possession_colour(track: Any) -> Tuple[int, int, int]:
     return UNKNOWN_TEAM_COLOUR if shirt is None else team_display_colour(shirt)
 
 
-def draw_possession(frame: np.ndarray, tracks: List[Any], holder_id: Optional[int]) -> None:
-    """Mark the player holding the disc with a thick box in the team's colour (in place)."""
+def draw_possession(
+    frame: np.ndarray,
+    tracks: List[Any],
+    holder_id: Optional[int],
+    last_seen: Optional[Sequence[float]] = None,
+    colour: Optional[Tuple[int, int, int]] = None,
+) -> None:
+    """Mark the player holding the disc with a thick box in the team's colour (in place).
+
+    Args:
+        frame: The picture
+        tracks: The frame's tracks
+        holder_id: Track ID of the holder, or None
+        last_seen: Where the holder was last seen (x1, y1, x2, y2), drawn if the holder
+            is not among the tracks: covered by the mark, they still have the disc
+        colour: The colour of the team in possession, for that case
+    """
+    if holder_id is None:
+        return
+    box, shown = last_seen, colour or UNKNOWN_TEAM_COLOUR
     for track in tracks:
-        if holder_id is None or getattr(track, "track_id", None) != holder_id:
-            continue
-        x1, y1, x2, y2 = map(int, track.to_ltrb())
-        # A dark rim keeps the box apart from grass and from a white shirt
-        cv2.rectangle(frame, (x1 - 4, y1 - 4), (x2 + 4, y2 + 4), (20, 20, 20), 6)
-        cv2.rectangle(frame, (x1 - 4, y1 - 4), (x2 + 4, y2 + 4), possession_colour(track), 3)
+        if getattr(track, "track_id", None) == holder_id:
+            box, shown = track.to_ltrb(), possession_colour(track)
+    if box is None:
+        return
+    x1, y1, x2, y2 = (int(value) for value in box)
+    # A dark rim keeps the box apart from grass and from a white shirt
+    cv2.rectangle(frame, (x1 - 4, y1 - 4), (x2 + 4, y2 + 4), (20, 20, 20), 6)
+    cv2.rectangle(frame, (x1 - 4, y1 - 4), (x2 + 4, y2 + 4), shown, 3)
 
 
 # The colours tracks are drawn in, as RGB: far apart from each other, from the grass, and

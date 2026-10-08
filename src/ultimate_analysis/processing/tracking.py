@@ -56,6 +56,10 @@ _frame_rate = 30.0
 # new track. The IDs handed out below are those of the players, not of the tracks.
 _identities = PlayerIdentities()
 _history_last_frame: Dict[int, int] = {}
+# A trail's point further from the picture's corner than this is no longer in view
+TRAIL_REACH_PIXELS = 20000.0
+# Player ID -> the team (0 or 1) the tracker last gave them, also once they are missing
+_player_teams: Dict[int, int] = {}
 # The video frame analysed last, and how many video frames lie between two analysed ones.
 # Live playback skips frames to keep up, so a trail of a fixed number of points would
 # reach back the further the slower the analysis runs.
@@ -326,9 +330,17 @@ def team_shirt_colours() -> Dict[int, Tuple[int, int, int]]:
     return _player_tracker.shirt_colours() if _player_tracker is not None else {}
 
 
+def team_of_player(player_id: int) -> Optional[int]:
+    """The team (0 or 1) of a player, present or missing; None if it is not known."""
+    return _player_teams.get(player_id)
+
+
 def _finish_tracks(frame: np.ndarray, tracks: List[Track]) -> None:
     """Give the tracks of a frame their player IDs and add them to the trails."""
     _assign_player_identities(frame, tracks)
+    for track in tracks:
+        if track.team is not None:
+            _player_teams[track.track_id] = track.team
 
     # The trail follows the player's feet (bottom centre of the box)
     for track in tracks:
@@ -526,6 +538,7 @@ def _assign_player_identities(frame: np.ndarray, tracks: List[Track]) -> None:
 def merge_players(player_id: int, into_player_id: int) -> None:
     """Declare a player to be an earlier one who went missing (e.g. same jersey number)."""
     _identities.merge(player_id, into_player_id)
+    _player_teams.pop(player_id, None)
     if player_id in _track_histories:
         _track_histories[into_player_id] = _track_histories.pop(player_id)
         _history_last_frame[into_player_id] = _history_last_frame.pop(player_id, _frame_count)
@@ -612,6 +625,7 @@ def reset_tracker() -> None:
     # Clear track histories and reset frame count
     _track_histories.clear()
     _history_last_frame.clear()
+    _player_teams.clear()
     _identities.reset()
     _frame_count = 0
     _video_frame, _frames_per_step = None, 1
@@ -663,10 +677,20 @@ def apply_camera_motion(camera_motion: np.ndarray) -> None:
         return
     lengths = [len(_track_histories[track_id]) for track_id in track_ids]
     stacked = np.concatenate([_track_histories[track_id] for track_id in track_ids])
-    moved = cv2.perspectiveTransform(stacked.reshape(-1, 1, 2), camera_motion).reshape(-1, 2)
+    mapped = np.column_stack([stacked, np.ones(len(stacked))]) @ np.asarray(camera_motion).T
+    # Ground the camera has flown over has no place in the picture any more: its points
+    # land far outside, or behind the camera, where the depth changes sign. A trail ends
+    # there, or it is drawn as a streak right across the frame.
+    depth = mapped[:, 2] * np.sign(camera_motion[2, 2] or 1.0)
+    in_front = depth > 1e-9
+    moved = (mapped[:, :2] / np.where(in_front, depth, 1.0)[:, None]).astype(np.float32)
+    in_reach = in_front & (np.abs(moved) < TRAIL_REACH_PIXELS).all(axis=1)
     start = 0
     for track_id, length in zip(track_ids, lengths):
-        _track_histories[track_id] = moved[start : start + length]
+        trail, kept = moved[start : start + length], in_reach[start : start + length]
+        if not kept.all():
+            trail = trail[length - int(np.argmin(kept[::-1])) :]  # What follows the last lost point
+        _track_histories[track_id] = trail
         start += length
 
 

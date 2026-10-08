@@ -161,6 +161,7 @@ def draw_tracks_top_down(
     track_histories: Dict[int, list],
     scale: float = 1.0,
     holder_id: Optional[int] = None,
+    disc_position: Optional[Tuple[float, float]] = None,
 ) -> np.ndarray:
     """Map tracked objects to the top-down view using their foot positions.
 
@@ -172,6 +173,9 @@ def draw_tracks_top_down(
         track_histories: Track ID -> recent foot positions, for the direction arrows
         scale: Display scale of warped_frame, applied to marker and label sizes
         holder_id: Track ID of the player holding the disc, marked with a ring
+        disc_position: Where in the view a flying disc is, if that has been worked out:
+            taken for a spot on the ground like the players' feet, a disc in the air
+            would be drawn yards behind where it is
 
     Returns:
         Frame with tracked objects mapped to top-down view
@@ -183,6 +187,21 @@ def draw_tracks_top_down(
 
     def px(value: float) -> int:
         return max(1, int(round(value * scale)))
+
+    # The trails first, under the markers: where each player has run, seen from above
+    for track in tracks:
+        track_id = getattr(track, "track_id", None)
+        history = (track_histories or {}).get(track_id)
+        if history is None or len(history) < 2 or track_id >= DISC_ID_OFFSET:
+            continue
+        places = np.column_stack([np.asarray(history, dtype=np.float64), np.ones(len(history))])
+        mapped = places @ np.asarray(matrix, dtype=np.float64).T
+        # A point of the picture above the horizon has no place on the ground
+        ahead = mapped[:, 2] * mapped[-1, 2] > 0
+        if ahead.sum() < 2:
+            continue
+        trail = np.rint(mapped[ahead, :2] / mapped[ahead, 2:3]).astype(np.int32)
+        cv2.polylines(result_frame, [trail], False, get_track_color(track_id), px(3), cv2.LINE_AA)
 
     for track in tracks:
         # Get track properties
@@ -214,6 +233,8 @@ def draw_tracks_top_down(
             transformed_foot = cv2.perspectiveTransform(foot_point, matrix)
             transformed_x = int(transformed_foot[0][0][0])
             transformed_y = int(transformed_foot[0][0][1])
+            if disc_position is not None and track_id >= DISC_ID_OFFSET:
+                transformed_x, transformed_y = (int(round(value)) for value in disc_position)
 
             # Check if transformed position is within frame bounds
             frame_h, frame_w = warped_frame.shape[:2]

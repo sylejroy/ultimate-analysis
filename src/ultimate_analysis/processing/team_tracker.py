@@ -48,6 +48,10 @@ MIN_TEAM_DISTANCE = 40.0
 # A shirt belongs to a team if it is nearer to its colour than to the other by this share
 # of the distance between the two
 MIN_COLOUR_MARGIN = 0.3
+# Two team colours this far apart in colour alone (Lab a and b, without lightness) are
+# told apart by colour; lightness then counts by this much only
+MIN_COLOUR_GAP = 15.0
+LIGHTNESS_WEIGHT = 0.3
 # How much the place of the feet counts in matching a detection to a track, next to how
 # much the boxes overlap. Two players whose boxes cover each other mostly stand at
 # different depths: their feet are apart when their boxes are not.
@@ -262,8 +266,15 @@ class TeamTracker(BYTETracker):
         """The team a shirt colour clearly belongs to, if any."""
         if self.team_colours is None or shirt is None:
             return None
-        distance = np.linalg.norm(self.team_colours - shirt, axis=1)
-        apart = np.linalg.norm(self.team_colours[0] - self.team_colours[1])
+        # Sun on a dark shirt makes it lighter, not another colour. Where the two teams
+        # differ in colour (green against white), the colour decides and how light a
+        # shirt is counts for little; where they do not (black against white), lightness
+        # is all there is to go by.
+        between = self.team_colours[0] - self.team_colours[1]
+        by_colour = float(np.hypot(between[1], between[2])) >= MIN_COLOUR_GAP
+        weights = np.array([LIGHTNESS_WEIGHT if by_colour else 1.0, 1.0, 1.0])
+        distance = np.linalg.norm((self.team_colours - shirt) * weights, axis=1)
+        apart = np.linalg.norm(between * weights)
         if abs(distance[0] - distance[1]) <= MIN_COLOUR_MARGIN * apart:
             return None
         return int(distance[1] < distance[0])

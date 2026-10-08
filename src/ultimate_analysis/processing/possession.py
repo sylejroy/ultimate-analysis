@@ -14,8 +14,11 @@ from the drone, the mark often covers the thrower, or the disc is held out past 
 These keep the disc with the thrower then:
 
 - While the disc is in the holder's box it is the holder's, however near it is to someone
-  else. So is a disc at no player but within arm's reach of the holder: a throw is
-  further away than that within a moment.
+  else. So is a disc at no player but within a body's height of the holder: a throw is
+  further away than that within a moment, and a disc held out or badly placed by the
+  detector is not.
+- A holder whose track the tracker loses and begins again under a new number stays
+  the holder.
 - A holder who is not found for a moment (covered by the mark) is remembered where they
   were last seen; a disc there is still theirs.
 - A disc that shows at a player standing right by the holder has most likely not changed
@@ -45,6 +48,10 @@ GROUND_RADIUS_PIXELS = 12.0  # The same when no player is in the picture to meas
 # A disc on the ground counts as picked up or thrown again once it is this many times
 # further from where it lay: the detection of a lying disc wanders by more than the radius
 GROUND_LEFT = 4.0
+# A disc not seen for this long is no longer said to be flying
+FLIGHT_UNSEEN_SECONDS = 0.5
+# A new track that covers this much (IoU) of where a lost holder stood is the holder
+SAME_PLAYER_OVERLAP = 0.5
 # What a frame with the disc elsewhere takes from a place's count, in frames. Less than
 # one: of two places the disc is seen at in turn, the one it is seen at more often wins.
 ELSEWHERE = 0.5
@@ -68,6 +75,19 @@ def _overlap(first: Sequence[float], second: Sequence[float]) -> bool:
         and second[0] < first[2]
         and first[1] < second[3]
         and second[1] < first[3]
+    )
+
+
+def _box_iou(first: Sequence[float], second: Sequence[float]) -> float:
+    width = min(first[2], second[2]) - max(first[0], second[0])
+    height = min(first[3], second[3]) - max(first[1], second[1])
+    if width <= 0 or height <= 0:
+        return 0.0
+    shared = width * height
+    return shared / (
+        (first[2] - first[0]) * (first[3] - first[1])
+        + (second[2] - second[0]) * (second[3] - second[1])
+        - shared
     )
 
 
@@ -131,6 +151,9 @@ class PossessionTracker:
         self._resting_at: Optional[Tuple[float, float]] = None  # A disc at no player: where
         self._resting_since = 0  # and since which frame it has not moved from there
         self._turned_over = False  # The disc has lain on the ground since someone last held it
+        self._known_tracks: set = set()  # Every player track seen so far
+        self._disc_seen: Optional[int] = None  # The frame the disc was last seen in
+        self._holder_teams = [0, 0]  # Frames the present holder was seen as of each team
 
     @property
     def disc_state(self) -> str:
@@ -138,6 +161,16 @@ class PossessionTracker:
         if self.holder_id is not None:
             return "held"
         return "ground" if self.on_ground else "air"
+
+    @property
+    def flight_seconds(self) -> Optional[float]:
+        """How long the disc has been in the air, in seconds; None if it is held, lies on
+        the ground, or has not been seen for a moment (then nothing says it still flies)."""
+        if self.disc_state != "air" or self._frame is None or self._disc_seen is None:
+            return None
+        if self._frame - self._disc_seen > FLIGHT_UNSEEN_SECONDS * self.frame_rate:
+            return None
+        return max(0.0, (self._disc_seen - self.since) / self.frame_rate)
 
     def rename(self, player_id: int, new_player_id: int) -> None:
         """A player turned out to be another one known earlier; keep following them."""
@@ -177,13 +210,37 @@ class PossessionTracker:
             if getattr(track, "track_id", None) == self.holder_id:
                 self._holder_box = tuple(float(value) for value in track.to_ltrb())
                 self._holder_unseen = 0
+                # The team the holder was mostly seen as while they have the disc: the
+                # tracker's view of a player's team wavers now and then (sun on a dark
+                # shirt), and the disc has not changed teams when it does
                 team = getattr(track, "team", None)
                 if team is not None:
-                    self.team = team
+                    self._holder_teams[team] += self._step
+                    self.team = int(self._holder_teams[1] > self._holder_teams[0])
                 return
+        # Not found. The tracker may have lost them and begun a new track where they
+        # stand: a track never seen before that covers the place they were last seen at
+        # is the holder under a new number. (One seen before is someone else, the mark
+        # for one, whose track was missing for a frame.)
+        if self._holder_box is not None:
+            for track in tracks:
+                if (
+                    _is_player(track)
+                    and track.track_id not in self._known_tracks
+                    and _box_iou(self._holder_box, track.to_ltrb()) >= SAME_PLAYER_OVERLAP
+                ):
+                    self.rename(self.holder_id, track.track_id)
+                    self._follow_holder(tracks)
+                    return
         self._holder_unseen += self._step
         if self._holder_unseen > self._frames("holder_memory_seconds", 2.0):
             self._holder_box = None
+
+    @property
+    def holder_box(self) -> Optional[Box]:
+        """Where the holder is: their box in this frame, or where they were last seen if
+        they are not found (covered by the mark); None without a holder or a place."""
+        return self._holder_box if self.holder_id is not None else None
 
     def _watch_ground(self, disc: Optional[Tuple[float, float]], tracks: List[Any]) -> None:
         """Follow a disc that is at no player (None: it is at one): does it lie still?"""
@@ -232,9 +289,20 @@ class PossessionTracker:
         if self._holder_box is not None and _overlap(self._holder_box, track.to_ltrb()):
             # Right by the holder: the mark, most likely
             needed = max(needed, self._frames("beside_holder_seconds", 1.5))
+        # A defender at the catch is taken for the catcher easily, and an interception
+        # is rare: a player of the team without the disc needs longer where a player of
+        # the team with it stands right by. Alone with the disc (the pull, a pick-up
+        # after a turnover the ground did not show) there is nobody to mistake them for.
         team = getattr(track, "team", None)
         if team is not None and self.team is not None and team != self.team:
-            needed = max(needed, self._frames("other_team_seconds", 1.0))
+            box = track.to_ltrb()
+            if any(
+                _is_player(other)
+                and getattr(other, "team", None) == self.team
+                and _overlap(box, other.to_ltrb())
+                for other in tracks
+            ):
+                needed = max(needed, self._frames("other_team_seconds", 1.0))
         return needed
 
     def update(
@@ -259,17 +327,19 @@ class PossessionTracker:
         skipped = 1 if previous is None else self._frame - previous
         self._step = min(max(1, skipped), max(1, round(self.frame_rate / 4)))
         self._follow_holder(tracks)
+        self._known_tracks.update(track.track_id for track in tracks if _is_player(track))
         discs = [detection for detection in detections if detection.get("class_name") == "disc"]
         if not discs:
             return self.holder_id
 
         disc = max(discs, key=lambda detection: detection.get("confidence", 0.0))
+        self._disc_seen = self._frame
         centre = _disc_centre(disc["bbox"])
         margin = float(get_setting("models.possession.box_margin", 0.15))
         at_disc = player_at_disc(disc["bbox"], tracks, margin)
 
         if self._holder_box is not None and at_disc != self.holder_id:
-            reach = float(get_setting("models.possession.reach", 0.35))
+            reach = float(get_setting("models.possession.reach", 1.0))
             arm = reach * (self._holder_box[3] - self._holder_box[1])
             x1, y1, x2, y2 = self._holder_box
             if _contains(_widened(self._holder_box, margin), *centre):
@@ -296,6 +366,7 @@ class PossessionTracker:
 
         if self._seen_at[at_disc] >= self._frames_needed(at_disc, tracks):
             self.holder_id = at_disc
+            self._holder_teams = [0, 0]
             self.since = self._first_seen[at_disc]
             self._seen_at.clear()
             self._first_seen.clear()

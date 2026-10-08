@@ -19,6 +19,7 @@ from .constants import DEFAULT_PATHS
 from .processing import health
 from .processing.camera_motion import CameraMotionEstimator
 from .processing.camera_motion import is_enabled as camera_motion_enabled
+from .processing.disc_flight import place_under_disc
 from .processing.field_analysis import create_unified_field_mask, fit_lines_from_mask
 from .processing.field_line_filter import FieldLineFilter
 from .processing.field_registration import FieldFollower, OffFieldWatcher, field_to_canvas
@@ -27,7 +28,7 @@ from .processing.homography import output_canvas_size
 from .processing.inference import reset_inference_state, run_inference
 from .processing.player_numbers import PlayerNumbers
 from .processing.possession import PossessionTracker
-from .processing.shot_type import ShotWatcher
+from .processing.shot_type import ShotWatcher, players_are_elsewhere
 from .processing.tracking import (
     apply_camera_motion,
     get_track_histories,
@@ -56,6 +57,7 @@ from .rendering.tracks import (
     draw_tracks_with_player_ids,
     team_display_colour,
 )
+from .utils.field_camera import camera_of
 from .utils.field_label_files import video_focal
 from .utils.field_template import DEFAULT_RULESET, TEMPLATES
 from .utils.logger import get_logger
@@ -108,6 +110,8 @@ class FrameResult:
     disc_state: str = "air"
     # The frame from which that is so: a change is confirmed some frames after it happened
     possession_since: int = 0
+    # How long the disc has been flying, in seconds; None if it is not seen to fly
+    flight_seconds: Optional[float] = None
 
 
 @dataclass
@@ -146,6 +150,12 @@ class AnalysisPipeline:
             )
         )
         self._off_field = OffFieldWatcher(self._field_follower.template)
+        # Over which spot of the field (field units) a flying disc is, if that is known
+        self.disc_place: Optional[Tuple[float, float]] = None
+        # For telling a cut: whether the camera's motion was known at the frame before,
+        # and where the players stood in it
+        self._motion_known = False
+        self._players_before = np.zeros((0, 4))
         self._follow_field = False
 
         # Results for the current frame
@@ -220,6 +230,7 @@ class AnalysisPipeline:
         """Forget everything derived from earlier frames."""
         self._field_follower.reset()
         self._off_field.reset()
+        self.disc_place = None
         self._numbers.reset()
         self._shot.reset()
         reset_tracker()
@@ -227,6 +238,7 @@ class AnalysisPipeline:
         reset_segmentation_cache()
         self._possession.reset()
         self._camera_motion.reset()
+        self._motion_known = False
         self._line_filter.reset()
         self._camera_since_calibration = np.eye(3)
         self.invalidate()
@@ -304,6 +316,7 @@ class AnalysisPipeline:
             possession_colour=self._possession_colour(),
             disc_state=self._possession.disc_state,
             possession_since=self._possession.since,
+            flight_seconds=self._possession.flight_seconds,
             timings=self._timings,
             wide_shot=self._shot.wide,
             problems=problems,
@@ -314,6 +327,31 @@ class AnalysisPipeline:
         duration_ms = (time.perf_counter() - start) * 1000
         self._timings[stage] = self._timings.get(stage, 0.0) + duration_ms
         return duration_ms
+
+    def _follow_flight(self, frame_shape: Tuple[int, int], frame_index: int) -> None:
+        """Work out over which spot of the field a flying disc is (`self.disc_place`).
+
+        Needs to know where the field lies; without that the disc stays where its pixel
+        would be on the ground.
+        """
+        self.disc_place = None
+        to_field = self._field_follower.image_to_field
+        discs = [d for d in self.detections if d["class_name"] == "disc"]
+        if to_field is None or not discs or self._possession.disc_state != "air":
+            return
+        x1, y1, x2, y2 = max(discs, key=lambda d: d.get("confidence", 0.0))["bbox"]
+        seen_over = to_field @ [(x1 + x2) / 2, (y1 + y2) / 2, 1.0]
+        if abs(seen_over[2]) < 1e-12:
+            return
+        try:
+            _, _, camera = camera_of(
+                np.linalg.inv(to_field),
+                (frame_shape[1], frame_shape[0]),
+                self._field_follower.focal,
+            )
+        except (np.linalg.LinAlgError, cv2.error):
+            return
+        self.disc_place = place_under_disc(seen_over[:2] / seen_over[2], camera)
 
     def _possession_colour(self) -> Optional[Tuple[int, int, int]]:
         """The colour that stands for the team in possession, None while it is not known."""
@@ -348,6 +386,21 @@ class AnalysisPipeline:
             start = time.perf_counter()
             boxes = [detection["bbox"] for detection in self.detections]
             motion = self._camera_motion.update(frame, boxes)
+            players = np.array(
+                [d["bbox"] for d in self.detections if d["class_name"] == "player"]
+            ).reshape(-1, 4)
+            if (
+                motion is None
+                and self._motion_known
+                and players_are_elsewhere(self._players_before, players)
+            ):
+                # A cut to another view: every track would break and be matched with
+                # whoever stands near. What was followed belongs to the view before.
+                logger.info("Cut to another view: starting again")
+                detections = self.detections
+                self.reset()
+                self.detections = detections
+            self._motion_known, self._players_before = motion is not None, players
             if motion is not None:
                 apply_camera_motion(motion)
                 self._possession.move(motion)
@@ -364,6 +417,7 @@ class AnalysisPipeline:
                 off_field = self._off_field.update(self._field_follower.image_to_field, self.tracks)
                 self.tracks = [track for track in self.tracks if track.track_id not in off_field]
             self._possession.update(self.detections, self.tracks, frame_index)
+            self._follow_flight(frame.shape[:2], frame_index)
             self._record("Tracking", start)
         else:
             self._possession.reset()
@@ -482,10 +536,20 @@ class AnalysisPipeline:
                 )
             else:
                 frame = draw_tracks(frame, self.tracks, track_histories, in_place=True)
-            draw_possession(frame, self.tracks, self._possession.holder_id)
+            draw_possession(
+                frame,
+                self.tracks,
+                self._possession.holder_id,
+                self._possession.holder_box,
+                self._possession_colour(),
+            )
 
         draw_fps_overlay(frame, self.fps)
-        if options.player_id and self.player_ids:
+        if (
+            options.player_id
+            and self.player_ids
+            and get_setting("models.player_id.show_reading_table", False)
+        ):
             draw_jersey_table(frame)
 
         self._record("Visualization", start)
@@ -588,6 +652,10 @@ class AnalysisPipeline:
                     logger.error(f"Error applying segmentation to top-down view: {e}")
 
             if options.tracking and self.tracks:
+                disc_in_view = None
+                if from_field and self.disc_place is not None:
+                    placed = np.diag([scale, scale, 1.0]) @ on_canvas @ [*self.disc_place, 1.0]
+                    disc_in_view = (placed[0] / placed[2], placed[1] / placed[2])
                 view = draw_tracks_top_down(
                     view,
                     matrix,
@@ -596,6 +664,7 @@ class AnalysisPipeline:
                     get_track_histories(),
                     scale,
                     holder_id=self._possession.holder_id,
+                    disc_position=disc_in_view,
                 )
 
             if self.ransac_lines:

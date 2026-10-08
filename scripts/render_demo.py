@@ -104,7 +104,11 @@ def compose(result, held: deque, frames_per_second: float, title: str, clock: st
     )
     holder = result.holder_id
     if holder is None:
-        put_text(picture, "Disc: in the air or not seen", (20, base + 125), 0.8, FAINT)
+        if result.flight_seconds is not None:
+            where = f"in the air {result.flight_seconds:.1f} s"
+        else:
+            where = "on the ground" if result.disc_state == "ground" else "not seen"
+        put_text(picture, f"Disc: {where}", (20, base + 125), 0.8, FAINT)
     else:
         number = result.player_ids.get(holder, ("", None))[0]
         who = f"number {number}" if is_number(number) else f"player {holder}"

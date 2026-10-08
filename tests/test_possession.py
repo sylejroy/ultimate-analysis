@@ -33,7 +33,7 @@ class PossessionTests(unittest.TestCase):
             "models.possession.holder_memory_seconds": MEMORY_FRAMES / FRAME_RATE,
             "models.possession.ground_seconds": GROUND_FRAMES / FRAME_RATE,
             "models.possession.other_team_seconds": OTHER_TEAM_FRAMES / FRAME_RATE,
-            "models.possession.reach": 0.35,
+            "models.possession.reach": 1.0,
             "models.possession.box_margin": 0.1,
         }
         patcher = patch.object(
@@ -134,6 +134,21 @@ class PossessionTests(unittest.TestCase):
         self.assertEqual(self.see(disc(210, 150), frames=CONFIRM_FRAMES * 5), 1)
         self.assertEqual(self.tracker.disc_state, "held")
 
+    def test_a_holder_who_gets_a_new_track_number_stays_the_holder(self):
+        self.see(disc(130, 150), frames=CONFIRM_FRAMES)
+        # The tracker loses track 1 and begins track 9 at nearly the same place
+        self.tracks[0] = player(9, 104, 100, 164, 300, team=0)
+        self.assertEqual(self.see(), 9)
+        self.assertEqual(self.tracker.holder_box, (104.0, 100.0, 164.0, 300.0))
+        # A track that was there before does not become the holder by standing there
+        self.tracks[0] = player(2, 600, 100, 660, 300, team=0)
+        self.tracks[1] = player(7, 300, 100, 360, 300, team=1)
+        self.see()
+        self.tracks[1] = player(7, 104, 100, 164, 300, team=1)
+        self.assertEqual(self.see(), 9)
+        # Their place is still known
+        self.assertEqual(self.tracker.holder_box, (104.0, 100.0, 164.0, 300.0))
+
     def test_the_team_in_possession_is_the_holders_and_stays_while_the_disc_flies(self):
         self.assertIsNone(self.tracker.team)
         self.see(disc(130, 150), frames=CONFIRM_FRAMES)
@@ -167,12 +182,20 @@ class PossessionTests(unittest.TestCase):
         self.assertEqual(self.see(disc(400, 400), frames=CONFIRM_FRAMES), 3)
         self.assertEqual((self.tracker.team, self.tracker.on_ground), (1, False))
 
-    def test_a_player_of_the_other_team_takes_longer_to_become_the_holder(self):
+    def test_a_defender_beside_a_receiver_takes_longer_to_become_the_holder(self):
         self.see(disc(130, 150), frames=CONFIRM_FRAMES)
-        defender = player(3, 380, 100, 440, 300, team=1)
-        self.tracks.append(defender)
-        self.assertEqual(self.see(disc(410, 150), frames=OTHER_TEAM_FRAMES - 1), 1)
-        self.assertEqual(self.see(disc(410, 150)), 3)
+        # A defender whose box touches that of a player of the team with the disc
+        self.tracks.append(player(3, 380, 100, 440, 300, team=1))
+        self.tracks.append(player(4, 430, 100, 490, 300, team=0))
+        self.assertEqual(self.see(disc(390, 150), frames=OTHER_TEAM_FRAMES - 1), 1)
+        self.assertEqual(self.see(disc(390, 150)), 3)
+        self.assertEqual(self.tracker.team, 1)
+
+    def test_a_player_of_the_other_team_alone_with_the_disc_has_it_at_once(self):
+        # The pull: caught by the other team with nobody near
+        self.see(disc(130, 150), frames=CONFIRM_FRAMES)
+        self.tracks.append(player(3, 380, 100, 440, 300, team=1))
+        self.assertEqual(self.see(disc(410, 150), frames=CONFIRM_FRAMES), 3)
         self.assertEqual(self.tracker.team, 1)
 
     def test_a_change_is_dated_back_to_when_the_disc_was_first_seen_there(self):
@@ -204,6 +227,30 @@ class PossessionTests(unittest.TestCase):
         self.tracks.append(player(3, 380, 250, 440, 450, team=1))
         self.tracker.update([disc(400, 400)], self.tracks, 300)
         self.assertEqual((self.tracker.disc_state, self.tracker.since), ("air", 300))
+
+    def test_a_holder_taken_for_the_other_team_for_a_moment_keeps_the_disc_for_theirs(self):
+        self.see(disc(130, 150), frames=CONFIRM_FRAMES * 4)
+        self.assertEqual(self.tracker.team, 0)
+        self.thrower.team = 1  # Sun on the shirt
+        self.see(disc(130, 150), frames=3)
+        self.assertEqual(self.tracker.team, 0)
+        # Seen as the other team for longer than as the first: that is their team
+        self.see(disc(130, 150), frames=CONFIRM_FRAMES * 5)
+        self.assertEqual(self.tracker.team, 1)
+
+    def test_the_time_in_the_air_counts_from_when_the_disc_left_while_it_is_seen(self):
+        for frame in range(100, 100 + CONFIRM_FRAMES):
+            self.tracker.update([disc(130, 150)], self.tracks, frame)
+        self.assertIsNone(self.tracker.flight_seconds)  # Held
+        for frame in range(120, 130):
+            self.tracker.update([disc(300 + 20 * (frame - 120), 150)], self.tracks, frame)
+        self.assertEqual(self.tracker.disc_state, "air")
+        # From the first frame it was out of the thrower's reach (frame 124) to the last
+        self.assertAlmostEqual(self.tracker.flight_seconds, 5 / FRAME_RATE)
+        # Not seen for a while: nothing says it still flies
+        for frame in range(130, 140):
+            self.tracker.update([], self.tracks, frame)
+        self.assertIsNone(self.tracker.flight_seconds)
 
     def test_a_resting_disc_is_followed_when_the_camera_moves(self):
         import numpy as np

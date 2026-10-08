@@ -224,6 +224,14 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual([track.track_id for track in result.tracks], [7])
         self.mocks["merge_players"].assert_called_once()
 
+        # Nor does one whose kit looks alike, if the tracker has the two in different teams
+        self.mocks["kit_distance"].return_value = 5.0
+        numbers_module = sys.modules[self.module.PlayerNumbers.__module__]
+        with patch.object(numbers_module, "team_of_player", side_effect={7: 0, 5: 1}.get):
+            result = self.pipeline.process(self.frame, 2, self.options)
+        self.assertEqual([track.track_id for track in result.tracks], [7])
+        self.mocks["merge_players"].assert_called_once()
+
     def test_top_down_view_needs_a_homography(self):
         options = self.module.PipelineOptions(top_down_source="calibration")
         result = self.pipeline.process(self.frame, 0, options)

@@ -37,5 +37,29 @@ class ShotWatcherTest(unittest.TestCase):
         self.assertTrue(kinds[-1])
 
 
+class CutTest(unittest.TestCase):
+    def setUp(self):
+        self.elsewhere = load_module("processing.shot_type").players_are_elsewhere
+
+    @staticmethod
+    def boxes(*places):
+        return [[x, y, x + 40, y + 90] for x, y in places]
+
+    def test_players_who_moved_a_little_are_where_they_were(self):
+        before = self.boxes(*[(100 + 150 * i, 300) for i in range(8)])
+        now = self.boxes(*[(110 + 150 * i, 305) for i in range(7)])  # One is missed
+        self.assertFalse(self.elsewhere(before, now))
+
+    def test_after_a_cut_the_players_are_elsewhere(self):
+        before = self.boxes(*[(100 + 150 * i, 300) for i in range(8)])
+        now = self.boxes(*[(170 + 150 * i, 600) for i in range(8)])
+        self.assertTrue(self.elsewhere(before, now))
+        self.assertTrue(self.elsewhere(before, []))
+
+    def test_a_few_players_tell_nothing(self):
+        before = self.boxes((100, 300), (300, 300))
+        self.assertFalse(self.elsewhere(before, self.boxes((600, 600), (900, 600))))
+
+
 if __name__ == "__main__":
     unittest.main()

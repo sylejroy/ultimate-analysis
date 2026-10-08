@@ -261,9 +261,8 @@ The model trained with close-ups gives no field on any close-up and never an are
 many, and its estimates are no longer far off (90% under 24 px, from 160). It pays for
 that with areas it does not give: fewer than labelled in 40 images, mostly an end zone,
 and no estimate at all in 10 of 26 frames. 26 frames and 190 images are few; the
-differences between the two YOLO26s models within 10 px are noise. It is not the
-default: that needs a TensorRT engine (`scripts/export_tensorrt.py`) and a look at
-whole games in the app.
+differences between the two YOLO26s models within 10 px are noise. It is the default
+since 8 October 2026, with a TensorRT engine built for it.
 
 The line fit (RANSAC on the field outline) gives the same lines for the same mask, and
 stops when what is left of the outline is shorter than a field line. Measured on 79 masks
@@ -388,6 +387,29 @@ of a frame's labelled lines with a found pixel within 4 px, and what is marked m
 
 Pieces that lie mostly in the boxes of detected players are dropped, and the boxes are
 blanked, so a line has a gap where a player stands.
+
+## A flying disc in the top-down view
+
+A disc in the air is not on the ground, and taken for ground it is drawn behind where it
+is (`processing/disc_flight.py`). There is no ground truth for a flight, but there is for
+its end: a caught disc is where the catcher is. On 220 seconds of three games, for each
+catch, how far the last place given to the disc in the air is from the catcher's feet,
+in yards:
+
+| The disc is placed | Catches | Median | Three quarters within | Nearer than "on the ground" |
+|---|---:|---:|---:|---:|
+| on the ground (before) | 25 | 4.7 | 5.5 | |
+| half a yard up | 25 | 2.7 | 3.5 | 23 |
+| one yard up (now) | 25 | 1.4 | 1.6 | 23 |
+| one and a half yards up | 25 | 2.2 | 2.9 | 22 |
+| two yards up | 25 | 4.2 | 5.4 | 15 |
+| by a fit of the whole throw: steady, straight, from the thrower | 17 | 9.5 | 19.6 | 1 |
+| the same, held strongly to two yards up | 17 | 4.6 | 5.5 | 10 |
+
+A catch is at catching height, so this says which height is right at the ends of a
+throw and nothing about the middle of a long one, where the disc is higher and still
+drawn somewhat too far away. The fit, which would follow the height through a throw,
+is exact on drawn throws and worse than the ground on these.
 
 ## Jersey number readers
 
@@ -571,11 +593,11 @@ Performance panel in the Main Analysis tab shows the time per pipeline stage.
   detections by class. A model only reports the classes it is selected for.
 - Possession goes to the player whose box contains the detected disc. The holder only
   changes after the disc has been seen at another player, or at no player, for
-  `models.possession.confirm_seconds` without a break (a third of a second), so a disc
+  `models.possession.confirm_seconds` (a quarter of a second), so a disc
   flying past someone does not change it. Frames without a detected disc leave the
   holder as it is.
 - The mark stands right in front of the holder and often covers them. A disc in the
-  holder's box, or at no player within arm's reach of it, stays the holder's however
+  holder's box, or at no player within a body's height of it, stays the holder's however
   near it is to someone else; a holder who is not found keeps the disc where they were
   last seen (`holder_memory_seconds`); and a player whose box touches the holder's must
   have the disc for `beside_holder_seconds` before they are taken for the holder. A
@@ -593,7 +615,7 @@ Performance panel in the Main Analysis tab shows the time per pipeline stage.
   the tracker matches by have the grass in them), and is held once 400 shirts of the
   team have been seen. A holder's jersey number, once read, is written on their
   stretch of the possession bar.
-- With the top-down view from the field model, a track whose feet are more than 2 yards
+- With the top-down view from the field model, a track whose feet are more than 4 yards
   outside the field as estimated on 85% of its recent sightings is left out
   (`models.tracking.hide_off_field`): the players standing along the sidelines. A
   player who steps out of bounds stays. Not measured against labels: there are none of
@@ -605,16 +627,40 @@ Performance panel in the Main Analysis tab shows the time per pipeline stage.
 - There is no ground truth for possession. Replayed on 80 seconds each of three games
   (what the possession tracker was fed, recorded once), the logic before and now:
 
-  | Stretch | Holder changes | Taken back within 2 s | Holders for under 1 s | Team changes now |
-  |---|---:|---:|---:|---:|
-  | San Francisco v Colorado, 24:27 | 20 → 11 | 2 → 0 | 4 → 0 | 0 |
-  | Chicago v New York, 10:00 | 13 → 10 | 0 → 0 | 0 → 0 | 3 |
-  | Portland v San Francisco, 11:00 | 21 → 9 | 0 → 0 | 1 → 1 | 2 |
+  | Stretch | Holder changes | Taken back within 2 s | Holders for under 1 s | Named as holder | Team changes now |
+  |---|---:|---:|---:|---:|---:|
+  | San Francisco v Colorado, 24:27 | 20 → 13 | 2 → 0 | 4 → 1 | 72% → 51% | 3 |
+  | Chicago v New York, 10:00 | 13 → 12 | 0 → 0 | 0 → 0 | 51% → 53% | 7 |
+  | Portland v San Francisco, 11:00 | 21 → 16 | 0 → 0 | 1 → 2 | 58% → 75% | 2 |
 
-  A player is named as holder for less of the time (72% → 45%, 51% → 46%, 58% → 38%):
-  the disc is found in about half the frames, and where it is seen only now and then
-  (between points, when players walk to the line) the logic before named someone from a
-  few frames. Fewer changes is what was aimed at; whether each holder is the right one
-  has not been checked against labels.
+  Where the disc is seen only now and then (between points, when players walk to the
+  line) the logic before named someone from a few frames, hence the first row. Whether
+  each holder is the right one has not been checked against labels, and seven changes
+  of team in 80 seconds are more than a game has: some holders are still of the wrong
+  team.
+- What was tried on these stretches and how it came out: a new holder is confirmed after
+  a quarter of a second (a third gave one holder change fewer per stretch at most). A
+  player of the other team needs a second only with a player of the team in possession
+  right by them; needing it always gave 1, 3 and 2 team changes, and kept the pulling
+  team in possession a second after the catch of every pull. A holder whose track is lost
+  and begun again under a new number stays the holder, but only by a track never seen
+  before: taking any track that was missing a frame before gave the disc to the mark
+  (20 holder changes and 5 taken back on the first stretch).
+- The team in possession is the one the holder was mostly seen as while they have the
+  disc, not the one of the latest frame: on the Portland stretch that took the team
+  changes from 6 to 2.
+- A shirt's team is decided by colour, with lightness counting for three tenths, where
+  the two team colours differ in colour by 15 Lab units or more (green against white);
+  sun on a dark green shirt made it "white" before. Between a black and a white team
+  lightness decides as before. Tested on drawn shirts only: none of the games here is
+  such a game.
+- Players with the same jersey number are only taken for one player if the tracker has
+  them in the same team, where it knows both teams; kit colour alone let a player of
+  each team be joined into one.
+- A cut within drone footage (the camera's motion cannot be told, and fewer than three in
+  ten of the players have a detection where they stood) starts everything again, as a
+  close-up does.
+- A trail ends where the ground it lies on has left the picture; such points were drawn
+  as streaks and wedges across the frame.
 - The disc model is skipped after a stretch with no disc and retried periodically
   (`models.disc_detection.skip_threshold`: 30 frames; `retry_interval`: 5 frames).

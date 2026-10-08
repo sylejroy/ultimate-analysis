@@ -41,7 +41,7 @@ models:
     full_search_interval: 15     # Search the whole frame at least this often, so a wrong lock does not last
   
   segmentation:
-    default_model: "data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt"
+    default_model: "data/models/segmentation/20261008_1_segmentation_yolo26s-seg_rendered_field_v2/finetune_20261008_155901/weights/best.pt"
     confidence_threshold: 0.4   # 0.6 cut the far end zone away in about one frame in five
     show_raw_masks: false      # Whether to show raw segmentation model output masks
     frame_interval: 5           # Process segmentation every N frames (1=every frame, 5=every 5th)
@@ -130,12 +130,12 @@ models:
 
   # Possession: the disc belongs to the player whose box it is in
   possession:
-    confirm_seconds: 0.33        # How long the disc must be seen at another player (or at none) before the holder changes
+    confirm_seconds: 0.25        # How long the disc must be seen at another player (or at none) before the holder changes
     beside_holder_seconds: 1.5   # The same for a player standing right by the holder: the mark, who has not been passed the disc
     holder_memory_seconds: 2.0   # A holder who is not found (covered by the mark) keeps the disc where they were last seen for this long
-    other_team_seconds: 1.0      # The same for a player of the team that does not have the disc: a defender at the catch far more often than an interception
-    reach: 0.35                  # A disc at no player this near to the holder (share of their height) is held out at arm's length, not thrown
-    ground_seconds: 1.5          # A disc lying still at no player for this long is on the ground: a turnover, the other team has it
+    other_team_seconds: 1.0      # The same for a player of the team without the disc who stands right by one of the team with it: a defender at the catch far more often than an interception
+    reach: 1.0                   # A disc at no player this near to the holder (share of their height) is still the holder's: held out, or badly placed by the detector; a throw is further off within a moment
+    ground_seconds: 1.0          # A disc lying still at no player for this long is on the ground: a turnover, the other team has it
     box_margin: 0.15             # Player boxes are widened by this fraction; a held disc is often just outside
 
   player_id:

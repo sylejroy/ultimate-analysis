@@ -102,6 +102,21 @@ class TrackingTests(unittest.TestCase):
         self.module._frames_per_step = 1
         self.module._track_histories.clear()
 
+    def test_a_trail_ends_where_the_ground_has_left_the_picture(self):
+        self.module._track_histories.clear()
+        self.module._track_histories[1] = np.array(
+            [(100, 900), (100, 1100), (100, 600), (110, 500)], dtype=np.float32
+        )
+        with patch.object(self.module, "_deepsort_tracker", None):
+            # The drone flies forward: what is low in the picture leaves it at the bottom,
+            # and what was below y = 1000 is behind the camera
+            forward = np.array([[1.0, 0, 0], [0, 1.0, 0], [0, -0.001, 1.0]])
+            self.module.apply_camera_motion(forward)
+        trail = self.module.get_track_histories()[1]
+        self.assertEqual(len(trail), 2)
+        np.testing.assert_allclose(trail, [(250, 1500), (220, 1000)], atol=1)
+        self.module._track_histories.clear()
+
     def test_camera_motion_moves_trails_and_where_tracks_expect_their_players(self):
         from types import SimpleNamespace
 

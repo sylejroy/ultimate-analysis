@@ -88,6 +88,20 @@ class TeamTrackerTests(unittest.TestCase):
         frame[y1:y2, x1:x2] = GRASS
         self.assertIsNone(team_tracker.appearance.shirt_colour(frame, boxes[0]))
 
+    def test_a_dark_green_shirt_in_the_sun_is_still_green_against_white(self):
+        green, shining = (40, 90, 20), (125, 185, 105)
+        for _ in range(40):
+            self.see((100, WHITE), (300, WHITE), (500, green), (700, green))
+        teams = self.tracker.teams_of_tracks()
+        self.assertEqual(len(set(teams.values())), 2)
+        lab = team_tracker.appearance.encode(*frame_with((100, shining)))[0][:3]
+        green_lab = team_tracker.appearance.encode(*frame_with((100, green)))[0][:3]
+        white_lab = team_tracker.appearance.encode(*frame_with((100, WHITE)))[0][:3]
+        # Lighter than halfway to white, and still the green team's
+        self.assertGreater(lab[0], (green_lab[0] + white_lab[0]) / 2)
+        self.assertEqual(self.tracker._team_of(lab), self.tracker._team_of(green_lab))
+        self.assertNotEqual(self.tracker._team_of(lab), self.tracker._team_of(white_lab))
+
     def test_a_track_is_not_continued_by_a_player_of_the_other_team(self):
         ids = self.learn_the_teams()
         # The white player at 300 vanishes and a dark one stands exactly there instead:
