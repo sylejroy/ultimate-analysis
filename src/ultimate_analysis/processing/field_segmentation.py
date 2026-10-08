@@ -5,7 +5,7 @@ identifying important field features like end zones and sidelines.
 """
 
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, Tuple
 
 import cv2
 import numpy as np
@@ -145,6 +145,17 @@ def run_field_segmentation(frame: np.ndarray, frame_index: int = 0) -> List[Any]
     except Exception as e:
         logger.exception(f"Error during field segmentation: {e}")
         return []
+
+
+def warmup_field_model(frame_shape: Tuple[int, int, int] = (1080, 1920, 3)) -> None:
+    """Load the field model and its engine now, on an empty frame of the video's size.
+
+    Not only to keep the first frame from being the slow one: in the app, an engine
+    that is first loaded after frames have been analysed crashes the process (an access
+    violation inside TensorRT). Loaded with the video, it is there before any frame is.
+    """
+    run_field_segmentation(np.zeros(frame_shape, dtype=np.uint8), 0)
+    reset_segmentation_cache()
 
 
 def set_field_model(model_path: str) -> bool:

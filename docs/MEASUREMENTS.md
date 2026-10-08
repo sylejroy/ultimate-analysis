@@ -104,6 +104,17 @@ say so.
   is a frame in which the field model sees no line at all: 35 of 40 close-ups, none of
   40 drone frames.
 
+## Engines are loaded with the video
+
+In the app, a TensorRT engine that is first loaded after frames have been analysed
+crashes the process with an access violation inside TensorRT. It showed when field
+segmentation was switched on only after playing, and when a video began with a close-up
+so that the field model was first needed after a seek. Without the window the same
+sequence runs; loading on another thread is not the cause (tried). The cause is not known.
+The engines of all three models are therefore loaded one after the other when a video is
+opened (`gui/main/pipeline_worker.py`). Choosing another model from a dropdown later
+still loads an engine late and has not been tried since.
+
 ## Camera motion
 
 The motion of the picture between frames is estimated from background points followed
