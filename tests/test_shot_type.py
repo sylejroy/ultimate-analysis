@@ -36,6 +36,20 @@ class ShotWatcherTest(unittest.TestCase):
         kinds = [self.watcher.update(14) for _ in range(20)]
         self.assertTrue(kinds[-1])
 
+    def test_a_swing_of_the_camera_with_few_players_in_view_is_still_the_drone(self):
+        self.watcher.update(14, continuous=True)
+        kinds = [self.watcher.update(4, continuous=True) for _ in range(60)]
+        self.assertTrue(all(kinds))
+        # ... but not for ever: an unbroken fade to a title card ends it too
+        kinds = [self.watcher.update(0, continuous=True) for _ in range(200)]
+        self.assertFalse(kinds[-1])
+
+    def test_few_players_after_the_picture_broke_is_a_cut_away(self):
+        self.watcher.update(14, continuous=True)
+        self.watcher.update(1, continuous=False)
+        kinds = [self.watcher.update(1, continuous=True) for _ in range(20)]
+        self.assertFalse(kinds[-1])
+
 
 class CutTest(unittest.TestCase):
     def setUp(self):

@@ -6,18 +6,27 @@ number most of their readings agreed on (processing/jersey_tracker.py), and uses
 that is read often enough to tell that a "new" player is one who had gone missing.
 """
 
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
 from ..config.settings import get_setting
 from ..utils.logger import get_logger
 from .jersey_crops import JerseyCropSelector
-from .jersey_tracker import get_best_jersey_number, merge_jersey_readings, reset_jersey_tracker
+from .jersey_tracker import (
+    get_best_jersey_number,
+    get_jersey_read_count,
+    merge_jersey_readings,
+    reset_jersey_tracker,
+)
 from .player_id import discard_pending_readings, run_player_id_on_tracks
 from .tracking import kit_distance, merge_players, missing_players, team_of_player
 
 logger = get_logger("PLAYER_NUMBERS")
+
+# Times a number must have been read on a player for them to be joined with another by
+# it: a number misread twice on one box is not rare, and a join cannot be undone
+MIN_READS_TO_JOIN = 3
 
 NO_NUMBER = ("Unknown", None, "")
 
@@ -30,6 +39,9 @@ class PlayerNumbers:
         self.numbers: Dict[int, Tuple[str, Any]] = {}
         self.crops = JerseyCropSelector()
         self._finalized: Set[int] = set()  # Players whose number is settled
+        # Asked before two players are joined by their number: whether anything else
+        # known of them (when and where they were seen, what they look like) excludes it
+        self.could_be: Optional[Callable[[int, int], bool]] = None
 
     def reset(self, readings_too: bool = False) -> None:
         """Forget the numbers (after a seek); with `readings_too` also every reading so far
@@ -111,7 +123,7 @@ class PlayerNumbers:
         missing = {}
         for player_id in missing_players(present):
             number, certainty = get_best_jersey_number(player_id)
-            if number and certainty >= certainty_needed:
+            if number and certainty >= certainty_needed and _read_often(player_id, number):
                 missing.setdefault(number, player_id)
 
         renamed = []
@@ -121,8 +133,10 @@ class PlayerNumbers:
                 continue
             number, certainty = get_best_jersey_number(player_id)
             earlier = missing.get(number) if number and certainty >= certainty_needed else None
-            if earlier is None:
+            if earlier is None or not _read_often(player_id, number):
                 continue
+            if self.could_be is not None and not self.could_be(player_id, earlier):
+                continue  # Seen elsewhere at the time, or looking like somebody else
             teams = team_of_player(player_id), team_of_player(earlier)
             if None in teams or teams[0] != teams[1]:
                 continue
@@ -135,3 +149,8 @@ class PlayerNumbers:
             del missing[number]
             logger.info(f"Player {player_id} is player {earlier} again (number {number})")
         return renamed
+
+
+def _read_often(player_id: int, number: str) -> bool:
+    """Whether a number was read on a player often enough to join two players by."""
+    return get_jersey_read_count(player_id, number) >= MIN_READS_TO_JOIN

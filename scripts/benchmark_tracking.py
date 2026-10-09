@@ -28,6 +28,7 @@ import os
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
+from typing import Tuple
 
 os.environ.setdefault("YOLO_AUTOINSTALL", "false")
 
@@ -74,8 +75,9 @@ def truth_of(folder: Path) -> dict:
     }
 
 
-def run_tracker(video: str, start: int, count: int) -> dict:
-    """Frame -> [(tracker ID, box)] of the pipeline as it is now."""
+def run_tracker(video: str, start: int, count: int) -> Tuple[dict, dict]:
+    """Frame -> [(tracker ID, box)] of the pipeline as it is now, and track -> player
+    as the tracks are joined looking back over the stretch."""
     path = REPO / "data" / "raw" / "videos" / f"{video}.mp4"
     capture = cv2.VideoCapture(str(path))
     rate = capture.get(cv2.CAP_PROP_FPS)
@@ -83,7 +85,7 @@ def run_tracker(video: str, start: int, count: int) -> dict:
     pipeline = AnalysisPipeline()
     pipeline.new_video(str(path))
     pipeline.set_frame_rate(rate)
-    options = PipelineOptions(top_down_view=False)
+    options = PipelineOptions()
     found = {}
     for step in range(count):
         ok, frame = capture.read()
@@ -95,7 +97,7 @@ def run_tracker(video: str, start: int, count: int) -> dict:
             for t in result.tracks
             if t.class_name == "player"
         ]
-    return found
+    return found, pipeline.players_of_tracks()
 
 
 def score(truth: dict, found: dict) -> dict:
@@ -203,26 +205,36 @@ def main() -> None:
         for p in root.iterdir()
         if (p / "labels.json").exists() and (not args.only or args.only in p.name)
     )
-    totals = defaultdict(list)
+    totals = {"as tracked": defaultdict(list), "joined after": defaultdict(list)}
     for folder in folders:
         labelled = truth_of(folder)
-        found = run_tracker(labelled["video"], labelled["start"], labelled["frames"])
-        result = score(labelled["truth"], found)
-        for key, value in result.items():
-            totals[key].append(value)
-        print(
-            f"{folder.name[:40]:40} players {result['players']:3d}  HOTA@0.5 {result['HOTA@0.5']:.3f}  "
-            f"DetA {result['DetA']:.3f}  AssA {result['AssA']:.3f}  IDF1 {result['IDF1']:.3f}  "
-            f"switches {result['ID switches']:3d}  IDs/player {result['IDs per player']:.2f}",
-            flush=True,
-        )
+        found, naming = run_tracker(labelled["video"], labelled["start"], labelled["frames"])
+        joined = {
+            frame: [(naming.get(track_id, track_id), box) for track_id, box in boxes]
+            for frame, boxes in found.items()
+        }
+        provisional = " (provisional truth)" if (folder / "PROVISIONAL.txt").exists() else ""
+        print(f"{folder.name}{provisional}", flush=True)
+        for kind, tracks in (("as tracked", found), ("joined after", joined)):
+            result = score(labelled["truth"], tracks)
+            for key, value in result.items():
+                totals[kind][key].append(value)
+            print(line(kind, result), flush=True)
     if len(folders) > 1:
-        print(
-            f"{'all (mean)':40} players {sum(totals['players']):3d}  "
-            f"HOTA@0.5 {np.mean(totals['HOTA@0.5']):.3f}  DetA {np.mean(totals['DetA']):.3f}  "
-            f"AssA {np.mean(totals['AssA']):.3f}  IDF1 {np.mean(totals['IDF1']):.3f}  "
-            f"switches {sum(totals['ID switches']):3d}  IDs/player {np.mean(totals['IDs per player']):.2f}"
-        )
+        print("all")
+        for kind, sums in totals.items():
+            mean = {key: float(np.mean(values)) for key, values in sums.items()}
+            mean["players"] = sum(sums["players"])
+            mean["ID switches"] = sum(sums["ID switches"])
+            print(line(kind, mean))
+
+
+def line(kind: str, result: dict) -> str:
+    return (
+        f"  {kind:13} players {result['players']:3d}  HOTA@0.5 {result['HOTA@0.5']:.3f}  "
+        f"DetA {result['DetA']:.3f}  AssA {result['AssA']:.3f}  IDF1 {result['IDF1']:.3f}  "
+        f"switches {result['ID switches']:3d}  IDs/player {result['IDs per player']:.2f}"
+    )
 
 
 if __name__ == "__main__":

@@ -399,18 +399,29 @@ class TeamTracker(BYTETracker):
         return detections
 
     def get_dists(self, tracks: List[STrack], detections: List[STrack]) -> np.ndarray:
-        distances = super().get_dists(tracks, detections)
+        distances = self.picture_distances(tracks, detections)
+        if len(tracks) and len(detections):
+            distances[self.other_team(tracks, detections)] = 1.0  # Never matched
+        return distances
+
+    def picture_distances(self, tracks: List[STrack], detections: List[STrack]) -> np.ndarray:
+        """How far each detection is from each track by their boxes and their feet."""
+        distances = BYTETracker.get_dists(self, tracks, detections)
         if len(tracks) and len(detections):
             distances = (1 - FEET_WEIGHT) * distances + FEET_WEIGHT * feet_distances(
                 np.array([track.xyxy for track in tracks], dtype=np.float64),
                 np.array([detection.xyxy for detection in detections], dtype=np.float64),
             )
-        if not len(tracks) or not len(detections):
-            return distances
+        return distances
+
+    def other_team(self, tracks: List[STrack], detections: List[STrack]) -> np.ndarray:
+        """Which detections are clearly of the other team than which tracks (a mask,
+        tracks by detections), and not the track's own player all the same."""
         # Here and not at the top: the tests load this module without Ultralytics
         from ultralytics.trackers.basetrack import TrackState
         from ultralytics.trackers.utils import matching
 
+        forbidden = np.zeros((len(tracks), len(detections)), dtype=bool)
         teams = [getattr(track, "team", None) for track in tracks]
         overlaps = 1.0 - matching.iou_distance(tracks, detections)
         for column, detection in enumerate(detections):
@@ -427,8 +438,8 @@ class TeamTracker(BYTETracker):
                     and overlaps[row, column] >= SAME_BOX_OVERLAP
                 )
                 if not its_own_player:
-                    distances[row, column] = 1.0  # Never matched
-        return distances
+                    forbidden[row, column] = True
+        return forbidden
 
     def reset(self) -> None:
         super().reset()

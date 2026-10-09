@@ -100,7 +100,8 @@ models:
           show_edge_points: false # Dots on outline points left out at the frame border
   
   tracking:
-    backend: bytetrack           # "bytetrack": by motion, each track within its team; "deepsort": by appearance
+    backend: bytetrack           # "bytetrack": by motion, each track within its team; "ground": the same, with lost players found again by their place on the field; "deepsort": by appearance
+    ground_keep_seconds: 6.0     # Backend "ground": how long a lost player is remembered where the field's place is known
     hide_non_players: true       # Leave out observers: orange or red shirts that are not a team colour; backend "bytetrack" only
     hide_off_field: true         # Leave out those standing beside the field, going by where the field model sees the field (top-down from the field model only)
     hide_newcomers_off_field: false  # Also a new track that has only been seen beside the field so far, until it is judged

@@ -218,6 +218,22 @@ class PlayerLooksTest(unittest.TestCase):
         self.assertEqual(self.cross(kept), [])
         self.assertEqual(self.looks._crossings, {})
 
+    def test_a_crossing_is_not_settled_while_one_of_the_two_is_out_of_the_frame(self):
+        import numpy as np
+
+        looks = self.looks
+        module = self.module
+        for track_id, vector in ((1, [1.0, 0.0]), (2, [0.0, 1.0])):
+            profile = module._Profile(first=0, last=10)
+            for _ in range(module.REJOIN_LOOKS):
+                profile.learn(np.array(vector))
+            # Since the crossing each looks like the other did before
+            profile.held = [(np.array(vector[::-1]), None)] * module.CROSSING_LOOKS
+            looks._profiles[track_id] = profile
+        looks._crossings = {(1, 2): 10}
+        self.assertEqual(looks.swapped([1], 12), [])
+        self.assertEqual(looks.swapped([1, 2], 13), [(1, 2)])
+
     def test_two_tracks_that_exchanged_names_exchange_what_is_theirs(self):
         self.looks._ran_from = {1: (0, np.array([1.0, 1.0]))}
         self.looks._crossings = {(1, 5): 3}

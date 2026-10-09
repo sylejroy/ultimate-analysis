@@ -26,6 +26,7 @@ from ..utils.logger import get_logger
 from .appearance import box_overlaps
 from .model_lock import GPU_SETUP_LOCK
 from .player_roster import PlayerRoster
+from .tracklet_linking import TrackletBook
 
 logger = get_logger("PLAYER_LOOKS")
 
@@ -134,6 +135,7 @@ class PlayerLooks:
         self._looked_at: Optional[int] = None  # The frame the players were last looked at
         self._frame: Optional[int] = None  # The frame taken in last
         self._profiles: Dict[int, _Profile] = {}
+        self.book = TrackletBook()  # The tracks since the last cut, to join looking back
         self._sharpness: Dict[int, List[float]] = {}  # Track -> sharpness of its last crops
         # The look under way on the second thread: its vectors when they are ready, and
         # whose they are (track, team colour). Tracks renamed meanwhile: old -> new.
@@ -148,6 +150,16 @@ class PlayerLooks:
         self._last_held: Optional[Tuple[int, Optional[int], Optional[np.ndarray], int]] = None
 
     # ------------------------------------------------------------------ the video
+
+    def could_be(self, track_id: int, other_id: int) -> bool:
+        """Whether two tracks may be one player, by when and where they were seen and
+        what they look like."""
+        return self.book.could_be(track_id, other_id, self.frame_rate)
+
+    def players_of_tracks(self) -> Dict[int, int]:
+        """Track -> player, looking back over the tracks since the last cut: the tracks
+        that turn out to be one player carry the name of the first of them."""
+        return self.book.players(self.frame_rate)
 
     def new_video(self, video_path: Optional[str]) -> None:
         """Another video: its roster is read if there is one, the last one's written."""
@@ -181,6 +193,7 @@ class PlayerLooks:
     def rename(self, track_id: int, new_track_id: int) -> None:
         """A track turned out to be a player the tracker knew before."""
         self.roster.rename(track_id, new_track_id)
+        self.book.rename(track_id, new_track_id)
         if self._looking is not None:
             self._renamed[track_id] = new_track_id
         for kept in (self._sharpness, self._ran_from):
@@ -212,6 +225,7 @@ class PlayerLooks:
         self._overlapping = {renamed.get(t, t) for t in self._overlapping}
 
     def _forget_tracks(self) -> None:
+        self.book.clear()
         self._looked_at = None
         self._frame = self._last_held = None
         self._profiles.clear()
@@ -266,11 +280,22 @@ class PlayerLooks:
             Track -> jersey number, for the tracks without a number of their own whose
             player the roster knows the number of
         """
+        players = [track for track in tracks if getattr(track, "class_name", None) == "player"]
+        present = [int(track.track_id) for track in players]
+        places = {track: np.asarray(place, dtype=float) for track, place in (places or {}).items()}
+        # Whether or not the network is there yet to look at them
+        for track in players:
+            track_id = int(track.track_id)
+            self.book.see(
+                frame_index,
+                track_id,
+                getattr(track, "team", None),
+                numbers.get(track_id, ""),
+                places.get(track_id),
+            )
         network = self._network()
         if network is None:
             return {}
-        players = [track for track in tracks if getattr(track, "class_name", None) == "player"]
-        present = [int(track.track_id) for track in players]
         for track in players:
             profile = self._profiles.setdefault(
                 int(track.track_id), _Profile(first=frame_index, last=frame_index)
@@ -285,7 +310,6 @@ class PlayerLooks:
         if looked:
             self.roster.match(present)
 
-        places = {track: np.asarray(place, dtype=float) for track, place in (places or {}).items()}
         self._count_time(present, holder_id, frame_index)
         self._count_running(frame_index, places)
         self._count_passes(frame_index, holder_id, players, places)
@@ -373,6 +397,7 @@ class PlayerLooks:
     def _learn(self, track_id: int, vector: np.ndarray, team_colour: Any) -> None:
         """Take a look at a track into what is known of its player."""
         self.roster.look(track_id, vector, team_colour)
+        self.book.learn(track_id, vector)
         profile = self._profiles.get(track_id)
         if profile is not None:
             profile.learn(vector)
@@ -450,6 +475,7 @@ class PlayerLooks:
             settled = (
                 frame_index > until
                 and not given_up
+                and all(t in present for t in pair)  # Both there to be exchanged
                 and all(len(p.held) >= CROSSING_LOOKS for p in before)
             )
             if not (given_up or settled):

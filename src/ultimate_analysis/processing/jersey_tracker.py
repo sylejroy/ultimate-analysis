@@ -159,6 +159,18 @@ def get_best_jersey_number(track_id: int) -> Tuple[Optional[str], float]:
     return get_jersey_tracker().get_best_jersey_number(track_id)
 
 
+def get_jersey_read_count(track_id: int, number: str) -> int:
+    """How many times a number was read on a player."""
+    return next(
+        (
+            count
+            for read, _, count in get_jersey_probabilities(track_id, top_k=10)
+            if read == number
+        ),
+        0,
+    )
+
+
 def merge_jersey_readings(from_id: int, into_id: int) -> None:
     """Hand the readings of one player over to another; the two were the same person."""
     get_jersey_tracker().merge(from_id, into_id)

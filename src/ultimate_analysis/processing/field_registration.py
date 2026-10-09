@@ -66,6 +66,17 @@ OFF_FIELD_FORGET = 3000  # Updates without a sighting after which a track is for
 # An estimate further than this from where the field was followed to, in field units,
 # replaces it outright: a cut, or the following has drifted
 JUMP_DISTANCE = 8.0
+# The field is followed by the camera's motion alone only so far. The motion is good
+# from frame to frame, but its errors add up with how far the camera has swung: after
+# a swing to the other end with nothing seen of the field to correct it, the players
+# are put yards off, and those on the field taken to stand beside it. While the camera
+# hovers, the field stays where it was, and following it is as good as seeing it.
+# How far the picture may have moved since the field was last seen (share of the
+# frame's width), and for how many frames at most whatever the camera did.
+MAX_MOVED_UNSEEN = 0.5
+MAX_FRAMES_UNSEEN = 1200
+# Up to this share of that, the field's place is good enough to say who stands beside it
+SEEN_LATELY = 0.3
 # An estimate is left out if fewer than this share of the players stand on the field as
 # estimated (with some room around it: a player may be out of bounds), or if the field as
 # estimated and the field the model sees share less than this much of what either covers.
@@ -189,6 +200,10 @@ class FieldFollower:
         self._known_focal: Optional[float] = None
         # An estimate far from where the field was followed to, waiting to be said again
         self._doubted: Optional[np.ndarray] = None
+        self.max_frames_unseen = MAX_FRAMES_UNSEEN
+        self._frames_unseen = 0  # Frames followed since an estimate was last taken in
+        self._since_seen = np.eye(3)  # How the camera has moved in them
+        self._frame_shape: Tuple[int, int] = (1080, 1920)
 
     @property
     def focal(self) -> Optional[float]:
@@ -206,10 +221,39 @@ class FieldFollower:
         self.image_to_field = None
         self._doubted = None
         self.left_out = ""
+        self._seen()
+
+    def _seen(self) -> None:
+        self._frames_unseen = 0
+        self._since_seen = np.eye(3)
+
+    def _followed_blind(self) -> float:
+        """How far the field was followed without being seen, as a share of how far it
+        may be: by how much the picture has moved, and for how long."""
+        probes = np.column_stack([self._probes(self._frame_shape), np.ones(4)])
+        moved = probes @ self._since_seen.T
+        if np.any(np.abs(moved[:, 2]) < 1e-12):
+            return float("inf")
+        shift = np.linalg.norm(moved[:, :2] / moved[:, 2:3] - probes[:, :2], axis=1).max()
+        return max(
+            float(shift) / (MAX_MOVED_UNSEEN * self._frame_shape[1]),
+            self._frames_unseen / max(self.max_frames_unseen, 1),
+        )
+
+    @property
+    def seen_lately(self) -> bool:
+        """Whether the field's place rests on a recent estimate, not on the camera's
+        motion over a long way: good enough to say who stands on the field and who
+        beside it."""
+        return self.image_to_field is not None and self._followed_blind() <= SEEN_LATELY
 
     def move(self, motion: np.ndarray) -> None:
         """Follow the camera: `motion` takes pixels of the frame before to this frame."""
         back = np.linalg.inv(motion)
+        self._frames_unseen += 1
+        self._since_seen = np.asarray(motion, dtype=np.float64) @ self._since_seen
+        if self.image_to_field is not None and self._followed_blind() > 1.0:
+            self.image_to_field = None  # Followed blind too far to be believed
         if self.image_to_field is not None:
             self.image_to_field = self.image_to_field @ back
         if self._doubted is not None:
@@ -272,11 +316,14 @@ class FieldFollower:
         estimated = estimate.image_to_field
         if since is not None:
             estimated = estimated @ np.linalg.inv(since)
+        self._frame_shape = tuple(frame_shape)
         if self.image_to_field is None:
             self.image_to_field = estimated
+            self._seen()
             return
         if self._apart(self.image_to_field, estimated, frame_shape) <= JUMP_DISTANCE:
             self._doubted = None
+            self._seen()
             self.image_to_field = self._blend(self.image_to_field, estimated, frame_shape)
             return
         # Far from where the field was followed to. The following is good from frame to
@@ -286,6 +333,7 @@ class FieldFollower:
             and self._apart(self._doubted, estimated, frame_shape) <= JUMP_DISTANCE
         ):
             self.image_to_field, self._doubted = estimated, None
+            self._seen()
         else:
             self._doubted = estimated
             self.left_out = "far from where the field was followed to; waiting for a second"

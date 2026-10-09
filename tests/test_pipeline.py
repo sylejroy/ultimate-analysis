@@ -29,6 +29,7 @@ NUMBER_STAGES = (
     "merge_players",
     "merge_jersey_readings",
     "get_best_jersey_number",
+    "get_jersey_read_count",
     "reset_jersey_tracker",
 )
 DRAWING = (
@@ -87,6 +88,7 @@ class PipelineTests(unittest.TestCase):
         self.mocks["get_track_histories"].return_value = {}
         self.mocks["missing_players"].return_value = []
         self.mocks["get_best_jersey_number"].return_value = (None, 0.0)
+        self.mocks["get_jersey_read_count"].return_value = 5
 
         # Each frame waits for the field unless a test says otherwise: what a test
         # sees must not depend on how fast another thread is
@@ -290,6 +292,20 @@ class PipelineTests(unittest.TestCase):
         numbers[9] = ("17", 0.9)
         self.mocks["missing_players"].return_value = [9]
         result = self.pipeline.process(self.frame, 3, self.options)
+        self.assertEqual([track.track_id for track in result.tracks], [7])
+        self.mocks["merge_players"].assert_called_once()
+
+        # Nor one of the right team and kit whose number was read only twice
+        self.mocks["missing_players"].return_value = [3]
+        self.mocks["get_jersey_read_count"].return_value = 2
+        result = self.pipeline.process(self.frame, 4, self.options)
+        self.assertEqual([track.track_id for track in result.tracks], [7])
+        self.mocks["merge_players"].assert_called_once()
+
+        # Nor one who was seen somewhere the missing player cannot have been
+        self.mocks["get_jersey_read_count"].return_value = 5
+        self.pipeline._numbers.could_be = lambda player, earlier: False
+        result = self.pipeline.process(self.frame, 5, self.options)
         self.assertEqual([track.track_id for track in result.tracks], [7])
         self.mocks["merge_players"].assert_called_once()
 

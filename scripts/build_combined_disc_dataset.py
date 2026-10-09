@@ -13,6 +13,8 @@ on. Frames close to old frames of different splits are left out.
 
     python scripts/build_combined_disc_dataset.py combined_discs_v1
     python scripts/build_combined_disc_dataset.py combined_players_v1 --object player
+    python scripts/build_combined_disc_dataset.py own_discs_v1 --without-roboflow \
+        --labelled labelled_players_discs_v1
 
 The sources are read-only; the result is written to a new dataset directory.
 """
@@ -70,6 +72,18 @@ def main() -> None:
     )
     parser.add_argument("name", help="Name of the new dataset folder in data/raw/training_data")
     parser.add_argument("--object", choices=sorted(ROBOFLOW_SOURCES), default="disc")
+    parser.add_argument(
+        "--labelled",
+        nargs="+",
+        default=list(LABELLED_SOURCES),
+        help="The datasets labelled with this app to take frames from",
+    )
+    parser.add_argument(
+        "--without-roboflow",
+        action="store_true",
+        help="Leave the Roboflow data out. The labelled frames keep the splits they have "
+        "with it, so the result can be compared on the same test frames",
+    )
     args = parser.parse_args()
     kind = args.object
 
@@ -86,6 +100,8 @@ def main() -> None:
     for split in SPLITS:
         images = sorted((source / split / "images").glob("*"))
         old_frames[split] = [frame for image in images if (frame := old_frame(image.name))]
+        if args.without_roboflow:
+            continue
         for image in images:
             shutil.copy2(image, output_dir / split / "images" / image.name)
             label = source / split / "labels" / f"{image.stem}.txt"
@@ -93,7 +109,7 @@ def main() -> None:
         print(f"{ROBOFLOW_SOURCES[kind]} {split}: {len(images)} images")
 
     # The frames labelled here: boxes of the one class only
-    for name in LABELLED_SOURCES:
+    for name in args.labelled:
         source = TRAINING_DATA / name
         if kind not in label_files.dataset_classes(source):
             continue  # No such boxes were drawn there: its frames do not say "none here"

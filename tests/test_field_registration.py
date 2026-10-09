@@ -175,6 +175,37 @@ class FieldEstimateTest(unittest.TestCase):
         follower.reset()
         self.assertIsNone(follower.image_to_field)
 
+    def test_a_field_followed_blind_for_too_long_is_no_longer_known(self):
+        follower = FieldFollower(self.template)
+        follower.max_frames_unseen = 10
+        follower.update(self.results, self.shape)
+        for _ in range(10):
+            follower.move(np.eye(3))
+        self.assertIsNotNone(follower.image_to_field)
+        follower.update(self.results, self.shape)  # Seen again: the count starts anew
+        for _ in range(10):
+            follower.move(np.eye(3))
+        self.assertIsNotNone(follower.image_to_field)
+        follower.move(np.eye(3))
+        self.assertIsNone(follower.image_to_field)
+
+    def test_a_field_followed_blind_through_a_swing_of_the_camera_is_no_longer_known(self):
+        follower = FieldFollower(self.template)
+        follower.update(self.results, self.shape)
+        step = np.array([[1.0, 0.0, 0.05 * self.shape[1]], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        back = np.linalg.inv(step)
+        for _ in range(50):  # Hovering: to and fro, going nowhere
+            follower.move(step)
+            follower.move(back)
+        self.assertTrue(follower.seen_lately)
+        for _ in range(4):
+            follower.move(step)
+        self.assertIsNotNone(follower.image_to_field)
+        self.assertFalse(follower.seen_lately)  # A fifth of the frame: no longer exact
+        for _ in range(7):
+            follower.move(step)
+        self.assertIsNone(follower.image_to_field)  # Over half the frame
+
     def as_estimate(self, mapping: np.ndarray) -> FieldEstimate:
         return FieldEstimate(mapping, np.linalg.inv(mapping), {}, 0.0, FOCAL, np.array(POSITION))
 

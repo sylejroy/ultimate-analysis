@@ -44,6 +44,7 @@ from .processing.tracking import (
     missing_players,
     reset_tracker,
     run_tracking,
+    set_field,
     set_frame_rate,
     set_team_of_player,
     swap_players,
@@ -95,6 +96,9 @@ SHIRT_EVERY_FRAMES = 6
 MIN_SHIRTS_PER_TEAM = 20
 SHIRTS_PER_TEAM = 300
 # The table of the players' statistics is handed out with every so many frames
+# The field's place is followed by the camera's motion alone for this long at most,
+# however little the camera moves
+FIELD_UNSEEN_SECONDS = 20.0
 STATS_EVERY_FRAMES = 30
 
 Line = Tuple[np.ndarray, np.ndarray]
@@ -241,6 +245,7 @@ class AnalysisPipeline:
 
         # Jersey numbers persist across frames: only some players are read per frame
         self._numbers = PlayerNumbers()
+        self._numbers.could_be = self._looks.could_be
 
         self._possession = PossessionTracker()
         self._camera_motion = CameraMotionEstimator()
@@ -344,6 +349,9 @@ class AnalysisPipeline:
         if frames_per_second and frames_per_second > 0:
             self._possession.frame_rate = float(frames_per_second)
             self._looks.frame_rate = float(frames_per_second)
+            self._field_follower.max_frames_unseen = round(
+                FIELD_UNSEEN_SECONDS * float(frames_per_second)
+            )
 
     def reset_player_ids(self) -> None:
         """Forget the jersey numbers read so far (e.g. after switching the reader)."""
@@ -749,12 +757,17 @@ class AnalysisPipeline:
 
         if options.tracking:
             start = time.perf_counter()
+            set_field(self._field_follower.image_to_field if self._follow_field else None)
             self.tracks = run_tracking(frame, self.detections + self._weak_players, frame_index)
             self._teams_by_looks(frame)
             if self._follow_field and get_setting("models.tracking.hide_off_field", True):
                 # Those standing along the sidelines are followed but not shown or counted
+                # ... judged only by a field seen lately: followed blind through a swing
+                # of the camera, it puts players on the field beside it
                 off_field = self._off_field.update(
-                    self._field_follower.image_to_field,
+                    self._field_follower.image_to_field
+                    if self._field_follower.seen_lately
+                    else None,
                     self.tracks,
                     bool(get_setting("models.tracking.hide_newcomers_off_field", False)),
                 )
@@ -914,6 +927,10 @@ class AnalysisPipeline:
             if abs(place[2]) > 1e-12
         }
 
+    def players_of_tracks(self) -> Dict[int, int]:
+        """Track -> player, looking back over the tracks since the last cut."""
+        return self._looks.players_of_tracks()
+
     def player_stats(self) -> List[dict]:
         """What is known of each player of the video and what they did: a row each
         (PlayerRoster.table), with the colour their team is drawn in."""
@@ -1032,7 +1049,8 @@ class AnalysisPipeline:
             return self._shot.wide  # No detections because of a failure say nothing
         was_wide = self._shot.wide
         players = sum(1 for detection in self.detections if detection["class_name"] == "player")
-        wide = self._shot.update(players)
+        # Of the frame before: this frame's camera motion is not worked out yet
+        wide = self._shot.update(players, continuous=self._motion_known)
         if was_wide and not wide:
             detections = self.detections
             self.reset()
