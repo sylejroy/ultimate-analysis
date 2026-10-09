@@ -97,6 +97,11 @@ def camera_of(
     return focal, cv2.Rodrigues(turn)[0].ravel(), -turn.T @ shift
 
 
+# How often a fit may ask for the misfits, and how exactly it is to be solved
+MAX_FIT_EVALUATIONS = 400
+FIT_TOLERANCE = 1e-4
+
+
 def _misfit_function(
     template: FieldTemplate, lines: Dict[str, Sequence[Point]], points: Dict[str, Point]
 ) -> Callable[[np.ndarray], np.ndarray]:
@@ -184,6 +189,8 @@ def fit_camera(
     free_fit = fit_field(template, lines, points)
     if free_fit is not None:
         starts.insert(0, camera_of(free_fit.field_to_image * free_fit.front_sign, size, focal))
+    # Starting from the camera of the frame before instead was tried: the search takes
+    # as many steps from there as from the free mapping's camera, and ends in the same place
 
     def mapping_of(values: np.ndarray) -> np.ndarray:
         if focal is not None:
@@ -191,6 +198,7 @@ def fit_camera(
         return camera_mapping(_focal(values[0]), values[1:4], values[4:7], size)
 
     misfits = _misfit_function(template, lines, points)
+
     best: Optional[CameraFit] = None
     for start_focal, rotation, position in starts:
         first = (
@@ -199,7 +207,19 @@ def fit_camera(
             else [np.log(start_focal), *rotation, *position]
         )
         try:
-            solved = least_squares(lambda values: misfits(mapping_of(values)), first, method="lm")
+            # Lines that fix no camera send the search round in circles: left to itself it
+            # asks for the misfits up to 5,600 times. With these two limits every estimate
+            # of 480 frames of six clips is still found, in the same place to a hundredth
+            # of a yard, in 15 ms instead of 37 (docs/MEASUREMENTS.md). Tighter limits
+            # lose estimates: without a known focal length some good fits come slowly.
+            solved = least_squares(
+                lambda values: misfits(mapping_of(values)),
+                first,
+                method="lm",
+                max_nfev=MAX_FIT_EVALUATIONS,
+                ftol=FIT_TOLERANCE,
+                xtol=FIT_TOLERANCE,
+            )
         except (ValueError, np.linalg.LinAlgError):
             continue
         position = solved.x[-3:]

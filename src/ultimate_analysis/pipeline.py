@@ -19,13 +19,16 @@ from .constants import DEFAULT_PATHS
 from .processing import health
 from .processing.camera_motion import CameraMotionEstimator
 from .processing.camera_motion import is_enabled as camera_motion_enabled
-from .processing.disc_flight import place_under_disc
+from .processing.disc_flight import DiscPath, place_under_disc
 from .processing.field_analysis import create_unified_field_mask, fit_lines_from_mask
 from .processing.field_line_filter import FieldLineFilter
 from .processing.field_registration import FieldFollower, OffFieldWatcher, field_to_canvas
 from .processing.field_segmentation import reset_segmentation_cache, run_field_segmentation
+from .processing.game_state import GameStateTracker, Player
 from .processing.homography import output_canvas_size
 from .processing.inference import reset_inference_state, run_inference
+from .processing.jersey_tracker import get_best_jersey_number
+from .processing.player_looks import PlayerLooks
 from .processing.player_numbers import PlayerNumbers
 from .processing.possession import PossessionTracker
 from .processing.shot_type import ShotWatcher, players_are_elsewhere
@@ -46,6 +49,7 @@ from .rendering.field_lines import draw_ransac_field_lines
 from .rendering.overlays import draw_fps_overlay, draw_jersey_table, draw_notice
 from .rendering.top_down import (
     apply_segmentation_to_warped_frame,
+    draw_field_diagram,
     draw_field_template,
     draw_tracks_top_down,
     hide_behind_camera,
@@ -63,6 +67,11 @@ from .utils.field_template import DEFAULT_RULESET, TEMPLATES
 from .utils.logger import get_logger
 
 logger = get_logger("PIPELINE")
+
+# Two team colours (BGR) nearer than this are one team's, seen before and after a cut
+SAME_TEAM_COLOUR = 90.0
+# The table of the players' statistics is handed out with every so many frames
+STATS_EVERY_FRAMES = 30
 
 Line = Tuple[np.ndarray, np.ndarray]
 # The dataset of field labels that a video's focal length is taken from
@@ -100,6 +109,10 @@ class FrameResult:
     detections: List[Dict[str, Any]]
     tracks: List[Any]
     player_ids: Dict[int, Tuple[str, Any]]
+    # Track -> jersey number of the player a track without a number looks like
+    numbers_by_looks: Dict[int, str]
+    # A row per player of the video (AnalysisPipeline.player_stats); None in most frames
+    player_stats: Optional[List[dict]]
     holder_id: Optional[int]  # Track ID of the player holding the disc, if any
     timings: Dict[str, float]  # Milliseconds per stage, in the order they ran
     wide_shot: bool = True  # False on a close-up or title card, where nothing is analysed
@@ -118,6 +131,14 @@ class FrameResult:
     possession_team: Optional[int] = None
     image_to_field: Optional[np.ndarray] = None
     disc_place: Optional[Tuple[float, float]] = None
+    # The phase of the game: "unknown", "between points", "lined up", "pull", "live" or
+    # "score" (processing/game_state.py)
+    game_state: str = "unknown"
+    # Points begun so far (pulls seen), how long the present one has been played (None
+    # between points), and the scores seen: (a team's colour (BGR), its points) each
+    points_begun: int = 0
+    point_seconds: Optional[float] = None
+    score: Tuple[Tuple[Tuple[int, int, int], int], ...] = ()
 
 
 @dataclass
@@ -156,6 +177,15 @@ class AnalysisPipeline:
             )
         )
         self._off_field = OffFieldWatcher(self._field_follower.template)
+        template = self._field_follower.template
+        self._game = GameStateTracker(template.length, template.end_zone)
+        self._score: List[list] = []  # [a team's colour (BGR), its points]
+        self._disc_path = DiscPath(float(get_setting("homography.disc_path_seconds", 8.0)))
+        self._looks = PlayerLooks()
+        self.numbers_by_looks: Dict[int, str] = {}
+        self._frame_size: Optional[Tuple[int, int]] = None
+        self._trails_now: Optional[Dict[int, np.ndarray]] = None
+        self._events_counted = 0
         # Over which spot of the field (field units) a flying disc is, if that is known
         self.disc_place: Optional[Tuple[float, float]] = None
         # For telling a cut: whether the camera's motion was known at the frame before,
@@ -225,18 +255,24 @@ class AnalysisPipeline:
                 focal length, which makes the field's place in a frame much more certain
         """
         self.reset()
+        self._game.reset()
+        self._score, self._events_counted = [], 0
         self.reset_fps()
         focal = None
         if video_path:
             dataset = Path(DEFAULT_PATHS["TRAINING_DATA"]) / FIELD_LABELS
             focal = video_focal(dataset, video_path, self._field_follower.template)
         self._field_follower.new_video(focal)
+        self._looks.new_video(video_path)
 
     def reset(self) -> None:
         """Forget everything derived from earlier frames."""
         self._field_follower.reset()
         self._off_field.reset()
+        self._game.cut()
+        self._looks.cut()
         self.disc_place = None
+        self._disc_path.reset()
         self._numbers.reset()
         self._shot.reset()
         reset_tracker()
@@ -257,6 +293,7 @@ class AnalysisPipeline:
         set_frame_rate(frames_per_second)
         if frames_per_second and frames_per_second > 0:
             self._possession.frame_rate = float(frames_per_second)
+            self._looks.frame_rate = float(frames_per_second)
 
     def reset_player_ids(self) -> None:
         """Forget the jersey numbers read so far (e.g. after switching the reader)."""
@@ -289,9 +326,11 @@ class AnalysisPipeline:
         """
         start = time.perf_counter()
         self._timings = {}
+        self._trails_now = None
         # Also without the top-down view shown: who stands beside the field, and whether
         # the fitted lines are drawn, should not depend on a view being switched on
         self._follow_field = options.field_segmentation and options.top_down_source == "field"
+        self._frame_size = (frame.shape[1], frame.shape[0])
 
         analysis_key = (frame_index, *options.analysis_key)
         if analysis_key != self._analysed_key:
@@ -299,7 +338,11 @@ class AnalysisPipeline:
             self._analyse(frame, frame_index, options)
             self._analysed_key = analysis_key
 
-        main_view = self._draw_main_view(frame.copy(), options)
+        # The copy of the frame that is drawn on belongs to the drawing
+        copy_start = time.perf_counter()
+        drawn_on = frame.copy()
+        self._record("Visualization", copy_start)
+        main_view = self._draw_main_view(drawn_on, options)
         problems = health.problems()
         for line, problem in enumerate(problems):
             draw_notice(main_view, problem, line=line + 1, alarm=True)
@@ -318,12 +361,19 @@ class AnalysisPipeline:
             detections=self.detections,
             tracks=self.tracks,
             player_ids=dict(self.player_ids),
+            numbers_by_looks=dict(self.numbers_by_looks),
+            # A table of every player is not made for every frame
+            player_stats=self.player_stats() if frame_index % STATS_EVERY_FRAMES == 0 else None,
             holder_id=self._possession.holder_id,
             possession_colour=self._possession_colour(),
             disc_state=self._possession.disc_state,
             possession_since=self._possession.since,
             flight_seconds=self._possession.flight_seconds,
             possession_team=self._possession.team,
+            game_state=self._game.state,
+            points_begun=sum(1 for event in self._game.events if event.kind == "pull"),
+            point_seconds=self._point_seconds(frame_index),
+            score=tuple((tuple(colour), points) for colour, points in self._score),
             image_to_field=self._field_follower.image_to_field if self._follow_field else None,
             disc_place=self.disc_place,
             timings=self._timings,
@@ -345,22 +395,176 @@ class AnalysisPipeline:
         """
         self.disc_place = None
         to_field = self._field_follower.image_to_field
-        discs = [d for d in self.detections if d["class_name"] == "disc"]
-        if to_field is None or not discs or self._possession.disc_state != "air":
+        if to_field is None:
             return
-        x1, y1, x2, y2 = max(discs, key=lambda d: d.get("confidence", 0.0))["bbox"]
-        seen_over = to_field @ [(x1 + x2) / 2, (y1 + y2) / 2, 1.0]
-        if abs(seen_over[2]) < 1e-12:
-            return
-        try:
-            _, _, camera = camera_of(
-                np.linalg.inv(to_field),
-                (frame_shape[1], frame_shape[0]),
-                self._field_follower.focal,
+        state = self._possession.disc_state
+        ground = raised = holder = None
+        seen = []
+        for detection in self.detections:
+            if detection["class_name"] == "disc":
+                x1, y1, x2, y2 = detection["bbox"]
+                over = to_field @ [(x1 + x2) / 2, (y1 + y2) / 2, 1.0]
+                if abs(over[2]) > 1e-12:
+                    seen.append((detection.get("confidence", 0.0), over[:2] / over[2]))
+        if seen:
+            # Of several things taken for a disc, the one nearest to where the disc was;
+            # with nothing to go by, the surest
+            last = self._disc_path.last_place
+            if last is None:
+                ground = max(seen, key=lambda sighting: sighting[0])[1]
+            else:
+                ground = min(seen, key=lambda sighting: np.linalg.norm(sighting[1] - last))[1]
+            try:
+                _, _, camera = camera_of(
+                    np.linalg.inv(to_field),
+                    (frame_shape[1], frame_shape[0]),
+                    self._field_follower.focal,
+                )
+                raised = place_under_disc(ground, camera)
+            except (np.linalg.LinAlgError, cv2.error):
+                pass
+        if state == "air":
+            self.disc_place = raised
+        for track in self.tracks:
+            if state == "held" and track.track_id == self._possession.holder_id:
+                x1, _, x2, y2 = track.to_ltrb()
+                feet = to_field @ [(x1 + x2) / 2, y2, 1.0]
+                if abs(feet[2]) > 1e-12:
+                    holder = feet[:2] / feet[2]
+        # The path of the disc, put right once it is known what the disc was doing
+        rate = self._possession.frame_rate
+        self._disc_path.add(
+            frame_index / rate, state, ground, raised, holder, self._possession.since / rate
+        )
+
+    def _follow_game(self, frame_index: int) -> None:
+        """Work out the phase of the game from where the players stand on the field."""
+        to_field = self._field_follower.image_to_field
+        players = []
+        if to_field is not None:
+            for track in self.tracks:
+                if track.class_name != "player":
+                    continue
+                x1, _, x2, y2 = track.to_ltrb()
+                place = to_field @ [(x1 + x2) / 2, y2, 1.0]
+                if abs(place[2]) > 1e-12:
+                    players.append(
+                        Player(track.track_id, track.team, place[0] / place[2], place[1] / place[2])
+                    )
+        self._game.update(
+            frame_index / self._possession.frame_rate,
+            players,
+            self._possession.disc_state,
+            self._possession.holder_id,
+            self._possession.flight_seconds,
+            known=self._shot.wide and to_field is not None,
+        )
+        # A score is counted for the colour of the team that made it: the tracker numbers
+        # its teams anew after every cut, the colours stay
+        for event in self._game.events[self._events_counted :]:
+            shirt = team_shirt_colours().get(event.team) if event.kind == "score" else None
+            if shirt is not None:
+                colour = team_display_colour(shirt)
+                for entry in self._score:
+                    if np.linalg.norm(np.subtract(entry[0], colour)) < SAME_TEAM_COLOUR:
+                        entry[1] += 1
+                        break
+                else:
+                    self._score.append([colour, 1])
+        self._events_counted = len(self._game.events)
+
+    def _point_seconds(self, frame_index: int) -> Optional[float]:
+        """How long the point under way has been played, None if none is."""
+        pulls = [event for event in self._game.events if event.kind == "pull"]
+        if not pulls or self._game.state not in ("pull", "live"):
+            return None
+        return max(0.0, frame_index / self._possession.frame_rate - pulls[-1].seconds)
+
+    def _draw_field_diagram(
+        self, on_canvas: np.ndarray, size: Tuple[int, int], options: PipelineOptions
+    ) -> np.ndarray:
+        """The top-down view as a drawing: the field, and the players where they stand."""
+        to_field = self._field_follower.image_to_field
+        template = self._field_follower.template
+        # A drawing needs no more pixels than the panel it is shown in
+        height = int(get_setting("homography.diagram_height", 900))
+        size = (int(height * 1.25 * template.width / template.length), height)
+        to_view = field_to_canvas(template, size)
+
+        def on_field(pixels: np.ndarray) -> np.ndarray:
+            mapped = pixels @ to_field[:, :2].T + to_field[:, 2]
+            ahead = mapped[:, 2] * mapped[-1, 2] > 0  # Above the horizon is no ground
+            return mapped[ahead, :2] / mapped[ahead, 2:3]
+
+        players, disc = [], None
+        histories = self._trails() if options.tracking else {}
+        shown_numbers = self._shown_numbers()
+        for track in self.tracks if options.tracking else ():
+            x1, y1, x2, y2 = track.to_ltrb()
+            if track.class_name != "player":
+                if self._possession.holder_id is None:
+                    disc = self.disc_place or tuple(
+                        on_field(np.array([[(x1 + x2) / 2, (y1 + y2) / 2]]))[0]
+                    )
+                continue
+            shirt = getattr(track, "team_colour", None)
+            number = shown_numbers.get(track.track_id, ("", None))[0]
+            trail = histories.get(track.track_id)
+            players.append(
+                {
+                    "place": tuple(on_field(np.array([[(x1 + x2) / 2, y2]]))[0]),
+                    "colour": None if shirt is None else team_display_colour(shirt),
+                    # A number with a tilde is known by the player's looks, not read
+                    "label": f"#{number}"
+                    if str(number).isdigit()
+                    else (str(number) if str(number).startswith("~") else ""),
+                    "holder": track.track_id == self._possession.holder_id,
+                    "trail": on_field(np.asarray(trail, dtype=float)) if trail is not None else (),
+                }
             )
-        except (np.linalg.LinAlgError, cv2.error):
-            return
-        self.disc_place = place_under_disc(seen_over[:2] / seen_over[2], camera)
+        return draw_field_diagram(
+            size,
+            template.width,
+            template.length,
+            template.end_zone,
+            to_view,
+            players,
+            disc,
+            self._seen_by_camera(to_field),
+            self._disc_path.stretches() if options.tracking else (),
+        )
+
+    def _seen_by_camera(self, to_field: np.ndarray) -> Optional[np.ndarray]:
+        """The outline on the field of what the frame shows: its border, as far as that
+        lies on the ground (the part above the horizon does not)."""
+        if self._frame_size is None:
+            return None
+        width, height = self._frame_size
+        along = np.linspace(0.0, 1.0, 24, endpoint=False)
+        border = np.concatenate(
+            [
+                np.column_stack([along * width, np.zeros_like(along)]),
+                np.column_stack([np.full_like(along, width), along * height]),
+                np.column_stack([(1 - along) * width, np.full_like(along, height)]),
+                np.column_stack([np.zeros_like(along), (1 - along) * height]),
+            ]
+        )
+        mapped = np.column_stack([border, np.ones(len(border))]) @ to_field.T
+        # The middle of the frame's lower edge is ground in front of the camera
+        ground = to_field @ [width / 2.0, height - 1.0, 1.0]
+        ahead = mapped[:, 2] * ground[2] > 1e-9 * abs(ground[2])
+        if ahead.sum() < 3:
+            return None
+        places = mapped[ahead, :2] / mapped[ahead, 2:3]
+        # Near the horizon the ground runs off to infinity: kept within sight of the field
+        reach = 3.0 * self._field_follower.template.length
+        return np.clip(places, -reach, reach)
+
+    def _trails(self) -> Dict[int, np.ndarray]:
+        """The trails of the tracks in this frame: both views draw them."""
+        if self._trails_now is None:
+            self._trails_now = get_track_histories()
+        return self._trails_now
 
     def _possession_colour(self) -> Optional[Tuple[int, int, int]]:
         """The colour that stands for the team in possession, None while it is not known."""
@@ -425,9 +629,14 @@ class AnalysisPipeline:
                 # Those standing along the sidelines are followed but not shown or counted
                 off_field = self._off_field.update(self._field_follower.image_to_field, self.tracks)
                 self.tracks = [track for track in self.tracks if track.track_id not in off_field]
+            self._record("Tracking", start)
+            # What is worked out from the tracks: who has the disc, where it flies, and
+            # the phase of the game
+            start = time.perf_counter()
             self._possession.update(self.detections, self.tracks, frame_index)
             self._follow_flight(frame.shape[:2], frame_index)
-            self._record("Tracking", start)
+            self._follow_game(frame_index)
+            self._record("Possession", start)
         else:
             self._possession.reset()
 
@@ -453,8 +662,67 @@ class AnalysisPipeline:
             for was, now in renamed:
                 self._possession.rename(was, now)
                 self._off_field.rename(was, now)
+                self._looks.rename(was, now)
         elif not options.player_id:
             self._numbers.numbers.clear()
+
+        self.numbers_by_looks = {}
+        if options.tracking and self.tracks and get_setting("models.reid.enabled", True):
+            start = time.perf_counter()
+            self.numbers_by_looks = self._looks.update(
+                frame,
+                self.tracks,
+                frame_index,
+                self._certain_numbers(),
+                self._possession.holder_id,
+                self._places_on_field(),
+            )
+            self._record("Player ID - Looks", start)
+
+    def _places_on_field(self) -> Dict[int, np.ndarray]:
+        """Track -> where the player stands on the field, if the field's place is known."""
+        to_field = self._field_follower.image_to_field if self._follow_field else None
+        players = [track for track in self.tracks if track.class_name == "player"]
+        if to_field is None or not players:
+            return {}
+        boxes = np.array([track.to_ltrb() for track in players], dtype=np.float64)
+        feet = np.column_stack([(boxes[:, 0] + boxes[:, 2]) / 2.0, boxes[:, 3]])
+        mapped = feet @ to_field[:, :2].T + to_field[:, 2]
+        return {
+            int(track.track_id): place[:2] / place[2]
+            for track, place in zip(players, mapped)
+            if abs(place[2]) > 1e-12
+        }
+
+    def player_stats(self) -> List[dict]:
+        """What is known of each player of the video and what they did: a row each
+        (PlayerRoster.table), with the colour their team is drawn in."""
+        rows = self._looks.roster.table()
+        for row in rows:
+            shirt = row.pop("team_colour")
+            row["colour"] = None if shirt is None else team_display_colour(shirt)
+        return rows
+
+    def _certain_numbers(self) -> Dict[int, str]:
+        """Track -> jersey number, for the players whose number is read often enough to
+        name them by."""
+        needed = float(get_setting("models.tracking.identity.number_certainty", 0.6))
+        certain = {}
+        for track in self.tracks:
+            if track.class_name == "player" and track.track_id in self.player_ids:
+                number, certainty = get_best_jersey_number(track.track_id)
+                if number and certainty >= needed:
+                    certain[track.track_id] = str(number)
+        return certain
+
+    def _shown_numbers(self) -> Dict[int, Tuple[str, Any]]:
+        """The numbers to draw: those read, and for the others the number of the player
+        they look like, marked with a tilde."""
+        shown = dict(self.player_ids)
+        for track_id, number in self.numbers_by_looks.items():
+            if not str(shown.get(track_id, ("", None))[0]).isdigit():
+                shown[track_id] = (f"~{number}", None)
+        return shown
 
     def _watch_shot(self) -> bool:
         """Whether this frame is drone footage; what was followed is dropped when it stops.
@@ -538,10 +806,10 @@ class AnalysisPipeline:
         if self.detections and not options.tracking:
             frame = draw_detections(frame, self.detections, in_place=True)
         elif self.tracks and options.tracking:
-            track_histories = get_track_histories()
+            track_histories = self._trails()
             if options.player_id:
                 frame = draw_tracks_with_player_ids(
-                    frame, self.tracks, track_histories, self.player_ids, in_place=True
+                    frame, self.tracks, track_histories, self._shown_numbers(), in_place=True
                 )
             else:
                 frame = draw_tracks(frame, self.tracks, track_histories, in_place=True)
@@ -620,6 +888,12 @@ class AnalysisPipeline:
             if top_down_matrix is None:
                 return None, "Homography matrix not available"
 
+        if from_field and get_setting("homography.field_diagram", True):
+            start = time.perf_counter()
+            view = self._draw_field_diagram(on_canvas, (output_width, output_height), options)
+            self._record("Top-down view", start)
+            return view, ""
+
         try:
             start = time.perf_counter()
 
@@ -670,7 +944,7 @@ class AnalysisPipeline:
                     matrix,
                     self.tracks,
                     self.player_ids,
-                    get_track_histories(),
+                    self._trails(),
                     scale,
                     holder_id=self._possession.holder_id,
                     disc_position=disc_in_view,

@@ -14,7 +14,6 @@ from typing import Deque, Dict, List, Optional, Set, Tuple
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
-    QGroupBox,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -92,37 +91,18 @@ class PerformanceWidget(QWidget):
     # UI setup
     def _init_ui(self) -> None:
         layout = QVBoxLayout()
-        layout.setContentsMargins(5, 5, 5, 5)
-
-        group = QGroupBox("")
-        vbox = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
 
         self.tree = QTreeWidget()
         self.tree.setColumnCount(4)
-        self.tree.setHeaderLabels(["Process", "Last (ms)", "Avg (ms)", "Max (ms)"])
+        self.tree.setHeaderLabels(["Stage (ms)", "Last", "Avg", "Max"])
         self.tree.setAlternatingRowColors(True)
         self.tree.setRootIsDecorated(True)
         self.tree.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # The theme's colours; only the rows are closer together than in other lists
         self.tree.setStyleSheet(
-            """
-            QTreeWidget {
-                background-color: #2a2a2a;
-                alternate-background-color: #3a3a3a;
-                color: #ffffff;
-                gridline-color: #555555;
-                font-size: 12px;
-                border: 1px solid #555555;
-            }
-            QHeaderView::section {
-                background-color: #444444;
-                color: #ffffff;
-                padding: 2px 4px;
-                font-size: 12px;
-                border: 1px solid #555555;
-                font-weight: bold;
-            }
-        """
+            "QTreeWidget { font-size: 12px; } QTreeWidget::item { padding: 1px 0; }"
         )
 
         # Build initial top-level categories (collapsed by default)
@@ -140,19 +120,27 @@ class PerformanceWidget(QWidget):
             self.category_items[cat] = item
 
         # Column widths
-        self.tree.setColumnWidth(0, 180)
-        self.tree.setColumnWidth(1, 80)
-        self.tree.setColumnWidth(2, 80)
-        self.tree.setColumnWidth(3, 80)
+        self.tree.setColumnWidth(0, 138)
+        self.tree.setColumnWidth(1, 46)
+        self.tree.setColumnWidth(2, 46)
+        self.tree.setColumnWidth(3, 46)
 
-        # Ensure the tree is tall enough to avoid scroll. Allow extra space for expanded rows.
-        # Approx: Header ~28px + top-level (~10 * 22px) + subrows (~10 * 18px) + padding
-        self.tree.setFixedHeight(28 + 10 * 22 + 10 * 18 + 24)
+        # As tall as its rows, and no taller: it grows when a stage is unfolded
+        self.tree.itemExpanded.connect(lambda _: self._fit_height())
+        self.tree.itemCollapsed.connect(lambda _: self._fit_height())
+        self._fit_height()
 
-        vbox.addWidget(self.tree)
-        group.setLayout(vbox)
-        layout.addWidget(group)
+        layout.addWidget(self.tree)
         self.setLayout(layout)
+
+    def _fit_height(self) -> None:
+        """Make the table as tall as the rows it shows."""
+        rows = 0
+        for index in range(self.tree.topLevelItemCount()):
+            item = self.tree.topLevelItem(index)
+            rows += 1 + (item.childCount() if item.isExpanded() else 0)
+        row_height = max(20, self.tree.sizeHintForRow(0))
+        self.tree.setFixedHeight(self.tree.header().sizeHint().height() + rows * row_height + 14)
 
     def _init_timer(self) -> None:
         # Refresh UI every 200ms

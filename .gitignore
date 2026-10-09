@@ -223,6 +223,7 @@ cython_debug/
 *.m4v
 *.3gp
 *.jpg
+!docs/*.jpg
 *.jpeg
 *.png
 # The screenshots the README shows are kept

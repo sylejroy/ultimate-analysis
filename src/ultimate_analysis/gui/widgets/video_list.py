@@ -21,18 +21,6 @@ class VideoListWidget(QListWidget):
         self.setTextElideMode(Qt.ElideMiddle)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        self.setStyleSheet(
-            """
-            QListWidget::item {
-                padding: 8px;
-                border-bottom: 1px solid #444;
-            }
-            QListWidget::item:selected {
-                background-color: #2a2a2a;
-            }
-        """
-        )
-
     def reload(self) -> List[str]:
         """Search the data folders again and list what is found; returns the paths."""
         self.video_files = find_video_files()

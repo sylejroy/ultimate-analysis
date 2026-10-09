@@ -646,15 +646,39 @@ def reset_tracker() -> None:
     logger.info("Tracker reset complete")
 
 
+def evened_out(trail: np.ndarray, reach: int) -> np.ndarray:
+    """A trail without the bobbing of a runner's stride.
+
+    The trail follows the bottom of a player's box, and that goes up and down with every
+    step: a foot on the ground, both in the air. Each point is replaced by the mean of
+    the points up to `reach` before and after it, over a whole stride, so the bobbing
+    cancels and the course stays. Towards either end as many points are taken as there
+    are on both sides, so the newest point is left where the player's feet are.
+
+    Args:
+        trail: Positions (N, 2), oldest first
+        reach: How many points before and after a point go into its mean
+    """
+    count = len(trail)
+    if count < 3 or reach < 1:
+        return trail
+    sums = np.vstack([np.zeros((1, 2)), np.cumsum(trail.astype(np.float64), axis=0)])
+    index = np.arange(count)
+    half = np.minimum(reach, np.minimum(index, count - 1 - index))
+    return (sums[index + half + 1] - sums[index - half]) / (2 * half + 1)[:, None]
+
+
 def get_track_histories() -> Dict[int, np.ndarray]:
-    """The trail of every tracked object.
+    """The trail of every tracked object, without the bobbing of the stride.
 
     Returns:
         Track ID -> positions of the feet in the picture, oldest first, as an integer
         array of shape (N, 2)
     """
+    seconds = float(get_setting("models.tracking.trail_smoothing_seconds", 0.4))
+    reach = int(round(seconds / 2 * _frame_rate / _frames_per_step))
     return {
-        track_id: np.rint(history).astype(np.int32)
+        track_id: np.rint(evened_out(history, reach)).astype(np.int32)
         for track_id, history in _track_histories.items()
     }
 

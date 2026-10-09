@@ -22,7 +22,7 @@ red nearly every time it is seen, without that being a team colour, can be left 
 """
 
 from types import SimpleNamespace
-from typing import Any, List, Optional, Sequence
+from typing import Any, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -42,9 +42,6 @@ MAX_SAMPLES = 3000
 # is held from that many on
 MIN_SHOWN_COLOUR_SAMPLES = 20
 SHOWN_COLOUR_SAMPLES = 400
-# If less than this share of a team's shirts is left without what is green like grass,
-# the shirts are green themselves, and their colour is taken with it
-MIN_SHIRT_LEFT = 0.6
 REFIT_FRAMES = 30
 # Two colour clusters closer than this (Lab units) are not two teams
 MIN_TEAM_DISTANCE = 40.0
@@ -246,12 +243,10 @@ class TeamTracker(BYTETracker):
         super().__init__(args)
         self._shirt_samples: List[np.ndarray] = []
         self.team_colours: Optional[np.ndarray] = None  # (2, 3) shirt colours in Lab
-        # Per team: the sum of its shirts' colours without grass (BGR), and how many
-        self._shown_sums = np.zeros((2, 3))
-        self._shown_counts = [0, 0]
-        # ... and how much of those shirts was left once the grass was taken out
-        self._shown_left = [0.0, 0.0]
-        self._shown_looks = [0, 0]
+        # Per team: the colours of its shirts as far as looked at (BGR)
+        self._shown_shirts: List[List[np.ndarray]] = [[], []]
+        # ... and their middle value, with the number of shirts it was taken over
+        self._shown_middle: List[Optional[Tuple[int, np.ndarray]]] = [None, None]
         self._frames_since_fit = 0
 
     def update(self, results: Any, img: Optional[np.ndarray] = None, *args, **kwargs):
@@ -305,30 +300,31 @@ class TeamTracker(BYTETracker):
     def shirt_colours(self) -> dict:
         """{team (0 or 1): its average shirt colour (BGR)}; empty until the teams are known.
 
-        For showing a team by its colour: the average over the shirts of its players
-        without the grass around them (the colours the tracker matches by have grass in
-        them, and are fitted again and again). It is held once enough shirts have been
-        seen, so a team does not change colour on the screen. Until a team has a few
-        such shirts, it is the colour the tracker matches by. So it is for a team that
-        plays in green: taking out what is green like grass takes out its shirts, and
-        what is left is the print on them, grey.
+        For showing a team by its colour: the middle value over its players of the
+        middle value of each shirt (the colours the tracker matches by are means, dulled
+        by the grass beside a player, and are fitted again and again). Twice the middle
+        value: within a shirt against the number and the grass at its edges, over the
+        shirts against the boxes that show mostly grass, of a player far away or bent
+        over. It is held once enough shirts have been seen, so a team does not change
+        colour on the screen.
+        Until a team has a few shirts, it is the colour the tracker matches by.
         """
         if self.team_colours is None:
             return {}
         lab = np.clip(self.team_colours, 0, 255).astype(np.uint8).reshape(1, 2, 3)
         matched = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)[0]
-        return {
-            team: tuple(
-                int(round(value))
-                for value in (
-                    self._shown_sums[team] / self._shown_counts[team]
-                    if self._shown_counts[team] >= MIN_SHOWN_COLOUR_SAMPLES
-                    and self._shown_left[team] >= MIN_SHIRT_LEFT * self._shown_looks[team]
-                    else matched[team]
-                )
-            )
-            for team in (0, 1)
-        }
+        colours = {}
+        for team in (0, 1):
+            shirts = self._shown_shirts[team]
+            colour = matched[team]
+            if len(shirts) >= MIN_SHOWN_COLOUR_SAMPLES:
+                # Asked for several times a frame, and new only with a new shirt
+                middle = self._shown_middle[team]
+                if middle is None or middle[0] != len(shirts):
+                    middle = self._shown_middle[team] = (len(shirts), np.median(shirts, axis=0))
+                colour = middle[1]
+            colours[team] = tuple(int(round(value)) for value in colour)
+        return colours
 
     def teams_of_tracks(self) -> dict:
         """{track ID: team (0 or 1)} for the tracks whose team is known."""
@@ -368,13 +364,10 @@ class TeamTracker(BYTETracker):
             ):
                 self._shirt_samples.append(shirt)
                 team = detection.shirt_team
-                if team is not None and self._shown_counts[team] < SHOWN_COLOUR_SAMPLES:
-                    shown, left = appearance.shirt_colour(img, detection.xyxy)
-                    self._shown_left[team] += left
-                    self._shown_looks[team] += 1
+                if team is not None and len(self._shown_shirts[team]) < SHOWN_COLOUR_SAMPLES:
+                    shown = appearance.shirt_colour(img, detection.xyxy)
                     if shown is not None:
-                        self._shown_sums[team] += shown
-                        self._shown_counts[team] += 1
+                        self._shown_shirts[team].append(shown)
         return detections
 
     def get_dists(self, tracks: List[STrack], detections: List[STrack]) -> np.ndarray:
@@ -398,8 +391,7 @@ class TeamTracker(BYTETracker):
         super().reset()
         self._shirt_samples = []
         self.team_colours = None
-        self._shown_sums = np.zeros((2, 3))
-        self._shown_counts = [0, 0]
-        self._shown_left = [0.0, 0.0]
-        self._shown_looks = [0, 0]
+        self._shown_shirts: List[List[np.ndarray]] = [[], []]
+        # ... and their middle value, with the number of shirts it was taken over
+        self._shown_middle: List[Optional[Tuple[int, np.ndarray]]] = [None, None]
         self._frames_since_fit = 0

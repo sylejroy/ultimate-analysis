@@ -206,6 +206,155 @@ Jersey numbers are decided by vote over all readings of a player. A number is sh
 the second reading on, and its certainty grows with agreement; a single reading never
 makes a number final.
 
+## Telling players apart by their looks
+
+A prototype. A jersey number is seen for a small part of the
+time a player is on the field, so the points of a game cannot be given to players by
+number alone. A small network turns a crop of a player into 128 numbers such that crops
+of one player lie close together (`processing/reid.py`, trained by
+`scripts/train_reid.py`, scored by `scripts/benchmark_reid.py`). It is trained on crops
+of tracked players of the four drone games (`reid_players_v2`: 136,111 crops of 80
+stretches of 45 seconds); who is who comes from the tracker within a stretch and from
+the jersey number across stretches.
+
+What counts is finding a player again in another point: of a numbered player's track,
+is the nearest track of a teammate in another stretch the same player? One game is used
+to choose by (Chicago v San Francisco, 767 tracks to match, at random 9%) and one is
+left out altogether (San Francisco v Colorado, 1008 tracks, at random 8%). A share of
+767 is known to about 1.5 points either way, so most of the differences below are none.
+
+| Network (crops stretched to 64 x 128) | Weights | Across points | Within a point |
+| --- | ---: | ---: | ---: |
+| Kit colour, as the tracker uses it | | 20% | 34% |
+| Colour histogram | | 12% | 32% |
+| Small network of four layers, trained from nothing | 1.2 M | 74% | 84% |
+| ResNet-18, first two stages | 0.7 M | 76% | 86% |
+| ResNet-18, first three stages | 2.8 M | 77% | 85% |
+| ResNet-18, whole | 11.3 M | 74% | 84% |
+| ResNet-34, first three stages | 8.2 M | 77% | 84% |
+| ResNet-50, first three stages | 8.8 M | 77% | 86% |
+| MobileNetV3 small | 1.1 M | 70% | 82% |
+| MobileNetV3 large | 3.2 M | 75% | 84% |
+| EfficientNet-B0 | 4.3 M | 75% | 83% |
+| ConvNeXt tiny | 28.0 M | 77% | 85% |
+| DenseNet-121 | 7.2 M | 78% | 86% |
+| ShuffleNetV2 | 1.5 M | 73% | 84% |
+| RegNetY-400MF | 4.0 M | 76% | 83% |
+| ResNet-18, three stages, four bands from head to foot (two otherwise) | 2.9 M | 77% | 83% |
+| ResNet-18, three stages, without the ImageNet weights | 2.8 M | 74% | 85% |
+
+Thirteen architectures from 0.7 to 28 million weights lie within 70 to 78%: the
+architecture is not what limits this. The whole ResNet-18 is worse than its first three
+stages, which keep a finer picture of a 64 x 128 crop. Weights learned on ImageNet are
+worth about three points. Taken further: the first three stages of ResNet-18, the
+smallest within noise of the best.
+
+How the crops are prepared, with that network, on the game chosen by and on the game
+left out:
+
+| Crops | Across points, chosen by | Across points, left out |
+| --- | ---: | ---: |
+| Stretched to 64 x 128 (as above) | 77% | 80% |
+| Proportions kept, padded | 76% | |
+| The most blurred 30% of each track left out | 79% | 82% |
+| 96 x 192 | 76% | |
+| All three | 80% | 82% |
+
+Leaving out the blurred crops gains two points on both games, and one of those two
+comes from leaving them out when a track is matched, with the network as it was (78%
+and 81%). Keeping the proportions and a larger crop change nothing that can be
+measured: the stored crops are 72 x 144, players being about 90 pixels tall, so a
+larger input has no more to see. The network to go on with is the one trained without
+the blurred crops, at 64 x 128
+(`20261009_reid_resnet18_s3_sharp70_reid_players_v2`). With the place of the jersey
+number painted over it still finds 78% on the game left out (all three changes; 82%
+with the number): most of what it goes by is not the number. Within a point it is
+right in 87 to 88%.
+
+One in five matches across points is wrong, so a match alone cannot name a player; a
+number read once has to confirm it. Some of the wrong ones are not the network's: which
+players are teammates is told per stretch from the lightness of the shirt, and where
+that is wrong a player is offered opponents to choose from.
+
+### In the app: the roster
+
+The app cannot compare whole tracks afterwards as the test above does. It keeps one
+entry per player of a video (`processing/player_roster.py`), looks at every tracked
+player in one frame of six (`processing/player_looks.py`), and gives a track to the
+entry it looks like as soon as it has seen enough of it, or opens a new entry. A number
+read with certainty names the entry, and two entries with the same number in one team
+become one. A track whose number is not read is shown with the number of its entry and
+a tilde (~43).
+
+Measured by running the roster over the 20 stretches of a game in order. It is told the
+numbers read in every second stretch; the numbered tracks of the other stretches, about
+105, say how many it names and how many of those rightly. A track is matched once it
+has been looked at 15 times:
+
+| Likeness needed, and lead over the next entry | Chosen by: named | of those right | Left out: named | of those right |
+| --- | ---: | ---: | ---: | ---: |
+| 0.7, 0.1 | 57 of 106 | 81% | 55 of 105 | 73% |
+| 0.75, 0.05 | 50 | 84% | 53 | 79% |
+| 0.8, 0.05 (now) | 46 | 89% | 44 | 89% |
+| 0.8, 0.1 | 35 | 91% | 31 | 90% |
+
+So with the present thresholds four in ten numbered players are named in a point where
+their number is not told, and one in nine of those names is wrong. That is worse than
+the 82% of the test on whole tracks with everything named, and the price of deciding
+while the game runs: a lower threshold names more and wrongly (0.6: 76 named, 54%
+right), a higher one opens an entry for nearly every track (139 entries for about 40
+players at 0.8, which the numbers then join). Matching after 5 looks instead of 15
+names fewer at the same threshold (30, 83% right). 106 tracks are few: these shares are
+known to about five points.
+
+### After the game: all tracks at once
+
+What is wanted in the end is, for every jersey number, all the stretches that player
+was tracked in. That does not have to be decided while the game runs. Two things were
+measured on the same two games, with one vector per track (not yet built into the app).
+
+Two given tracks of one team from different stretches, same player or not, by their
+likeness alone:
+
+| | Chosen by (399 same, 8,507 different pairs) | Left out (526 same, 9,429 different) |
+| --- | ---: | ---: |
+| Same-player pairs linked, with 1 in 100 different pairs linked too | 51% | 68% |
+| Same-player pairs linked, with 1 in 1,000 | 30% | 37% |
+
+A pair on its own is weak evidence: for every pair of the same player there are twenty
+of different players, so even at 1 in 100 a third to a half of the links made are
+wrong.
+
+Grouping all tracks of a team at once does much better. Tracks with the same number
+start as one group, the two most alike groups are joined while their likeness is over
+a threshold, and never two groups that hold different numbers or tracks that were on
+the field at the same time. Tested as the roster above (numbers told in every second
+stretch, the numbered tracks of the others tested):
+
+| | Chosen by: named | of those right | Left out: named | of those right |
+| --- | ---: | ---: | ---: | ---: |
+| The roster, while the game runs | 46 of 106 | 89% | 44 of 105 | 89% |
+| Grouping afterwards, joined over 0.6 | 89 of 105 | 83% | 95 of 104 | 87% |
+| Grouping afterwards, joined over 0.7 | 78 | 90% | 89 | 92% |
+| Grouping afterwards, joined over 0.8 | 61 | 93% | 87 | 93% |
+
+At 0.7 it names about twice as many as the roster and is as often right. The numbers
+that keep groups apart and the rule that two players on the field are two do much of
+the work that likeness alone cannot.
+
+What a player does is counted on the entry from the first frame (seconds seen, seconds
+and times with the disc), and the roster of a video is kept in `data/cache/rosters`, so
+it is there again the next time the video is opened. Also counted, where the field's
+place is known: how far a player ran (from where they stand every half second, so that
+the jitter of a box is not counted as running; no faster than 12 yards a second), and
+for a disc that goes from one player to a teammate within ten seconds, how far, for the
+thrower and for the receiver. None of these is checked against a game counted by hand.
+
+Cost: one call of the network for all players every sixth frame, 1.6 ms a frame on a
+free GPU and 16 to 19 ms in the frame it runs in (a few players in every frame cost
+three times as much). With and without it the pipeline ran 22.8 and 23.9, then 25.5
+and 25.4 frames per second on the same 360 frames: within what two runs differ by.
+
 ## Field segmentation
 
 The field lines are fitted to the outline of the predicted field. `scripts/benchmark_segmentation.py`
@@ -426,6 +575,26 @@ throw and nothing about the middle of a long one, where the disc is higher and s
 drawn somewhat too far away. The fit, which would follow the height through a throw,
 is exact on drawn throws and worse than the ground on these.
 
+The top-down view also draws where the disc has been over the last 8 seconds
+(`DiscPath`, `homography.disc_path_seconds`): with its holder while it is held, where it
+is seen while it lies, and one yard up while it flies. That a disc was caught is known a
+quarter of a second after the catch, so the path is put right backwards from the frame
+possession counts the catch from. A flight that has ended is then shifted so that it
+begins where the thrower stood and ends at the catcher or where the disc lies, each end
+by as much as it was off and evenly in between. On 30 seconds of Portland v San
+Francisco from 11:25, four flights ended in a catch and their ends were moved by 2.8,
+3.6, 0.7 and 0.0 yards. This is not a measurement of how right the path is: the ends
+are right by construction, and nothing says where the disc was in between.
+
+What the disc model takes for a disc while the disc flies is not always the disc: in
+those 30 seconds the surest detection was more than 10 yards from the one a frame
+before 20 times (cones, markers, a white shoe at the far end of the field), and
+the path ran across the field and back. Now a sighting counts only if the disc can have
+flown there from where it last was (30 yards a second, and 3 yards of room), and of
+several detections the one nearest to where the disc was is taken. In the pictures of
+the same stretch, one a second, the path no longer crosses the field; the jumps were
+not counted again.
+
 ## Jersey number readers
 
 The reader is chosen with "Jersey Number Reader" in the Main Analysis tab or
@@ -523,6 +692,80 @@ yard and the tracks of the run are the same.
 The estimate runs on every fifth frame, so it costs about 15 ms there; the slowest
 twentieth of the frames takes over 70 ms. What possession, the sideline filter, the
 trails and the team colours add is 0.15 ms a frame together.
+
+A later pass, with the function-by-function profile of 150 frames of live play. A
+training run was using the GPU and the processor at the time, so these are the same run
+before and after and not frames per second, which are still to be measured on a free
+machine:
+
+| Per frame | Before | After |
+| --- | ---: | ---: |
+| A team's shown colour (the middle value of 400 shirts, asked for three times a frame; now kept until a shirt is added) | 2.1 ms | 0.5 ms |
+| Smoothing the trails (once for each view; now once a frame) | 1.6 ms | 0.75 ms |
+| Drawing the top-down view on its own, 14 players with trails (the empty field is kept, a trail is drawn through 30 of its points) | 6.9 ms | 3.9 ms |
+
+| Whether the field mask is empty, before its outline is drawn (looked through the whole mask in every frame; now told by the outline kept per mask) | 1.9 ms | 0.3 ms |
+| A team's vivid colour for drawing (worked out for every player in every frame; now kept per colour) | 0.5 ms | 0.02 ms |
+| Mapping points to the field and to the drawing (without building an array per call) | 1.5 ms | 1.1 ms |
+
+A trail drawn through 30 of its 120 points differs from the full one in 804 of 405,000
+pixels. The camera fit was capped at 250 evaluations in this pass (some frames ran to
+5,600 on lines that fix no camera); the places on the 91 labelled frames are the same,
+but see below.
+
+With the GPU free again, `scripts/benchmark_pipeline.py` on its clip (a stretch of
+Portland v San Francisco, no focal length known for it): 21 frames per second, not the
+31 measured two days before. The field estimate takes 16 ms a frame there, 80 ms each
+time it runs. In every frame of that clip the field model shows something that is taken
+for a goal line and is none; the estimate first searches for a camera that fits all
+five lines, from five starting cameras, each search running to its limit and ending 23
+to 215 pixels off, and only then leaves a goal line out and finds the field within a
+pixel. (Whether the newer field model brought this, or a change to the estimate, was
+not traced.) On the same lines the field model finds in 480 frames of six clips, every
+fifth frame of 400, without a focal length:
+
+| Search for the camera | Estimates of 480 | Time per estimate |
+| --- | ---: | ---: |
+| No limit, solved to 1e-8 | 434 | 37 ms |
+| At most 250 evaluations, to 1e-6 (the pass before) | 428 | 14 ms |
+| At most 100, to 1e-6 | 392 | 9 ms |
+| At most 250, to 1e-3 | 398 | 11 ms |
+| At most 400, to 1e-4 (now) | 434 | 15 ms |
+
+The limit of 250 of the pass before lost 6 estimates, which the 91 labelled frames did
+not show: without a known focal length some good fits come slowly. With the present
+limits all 434 are found and none is further than 0.01 yards from where the unlimited
+search puts it. Fitting each naming of the lines only once (two namings of the unsure
+lines can come to the same lines) is exact as well. The benchmark then gives 23 frames
+per second, the field estimate 13 ms a frame. Tried and not kept: giving up a search
+early unless it is within 30 or 100 pixels after 100 evaluations (loses 22 to 42
+estimates); not searching at all where even a free mapping misses the lines by 12
+pixels, with each naming's goal lines left out in turn afterwards (no estimate lost,
+none moved, 2 to 43 added of which nothing says they are right, and only 13% faster:
+the free mapping fits the lines that no camera fits). The time goes into the searches
+that fail, and what would save it is knowing the focal length: with it, the labelled
+frames take 4 ms.
+
+Each of the three models ends with a suppression step over about 19,000 candidate
+boxes: 2.8 ms for the players, 1.2 ms for the disc and 2.0 ms for the field every fifth
+frame, of 8.8 ms for all three networks. The YOLO26 models carry a second head that
+needs no such step (`nms=False`). Validated at 1280 with each head:
+
+| Model | Head | AP50 | AP50-95 | Precision | Recall | After the network |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Players | with suppression (as now) | 0.990 | 0.718 | 0.976 | 0.967 | 1.1 ms |
+| Players | end to end | 0.983 | 0.713 | 0.957 | 0.959 | 0.2 ms |
+| Disc (on `combined_discs_v4`) | with suppression (as now) | 0.590 | 0.246 | 0.815 | 0.531 | 1.2 ms |
+| Disc | end to end | 0.572 | 0.234 | 0.745 | 0.526 | 0.2 ms |
+
+Not switched: it would save about 3 ms a frame and costs two points of precision on
+the players, which is boxes the tracker then has to get rid of, and seven on the disc.
+
+In live play the pipeline alone manages 22 frames per second (300 frames of Portland v
+San Francisco from 11:30, focal length known: the field estimate 3.4 ms a frame, the
+three networks 15 ms, where the benchmark clip has 9; why was not traced, the jersey
+reader working on the same GPU in the background is the first thing to look at). The app showed 18 to 21 on
+the same stretch.
 
 ByteTrack runs no network of its own. The player model is trained at 1280 like the disc
 model, and players are 90 pixels tall and found as well at 960

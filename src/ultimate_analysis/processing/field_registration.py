@@ -399,8 +399,16 @@ def estimate_field(
     if not {"left_sideline", "right_sideline", "far_back_line"} <= set(lines):
         return None
     size = (frame_shape[1], frame_shape[0])
+    fitted: Dict[tuple, Optional[CameraFit]] = {}
 
     def camera_for(tried: Dict[str, Line]) -> Optional[CameraFit]:
+        # Two ways of naming the unsure lines can come to the same lines: fitted once
+        key = tuple(sorted((name, np.asarray(line).tobytes()) for name, line in tried.items()))
+        if key not in fitted:
+            fitted[key] = fit_for(tried)
+        return fitted[key]
+
+    def fit_for(tried: Dict[str, Line]) -> Optional[CameraFit]:
         # Both sidelines and the far back line would place a camera whose focal length
         # is known, without a goal line. Tried: of the four estimates that gives more
         # on the labelled frames, three are more than 2 yd off. Three lines fix a camera

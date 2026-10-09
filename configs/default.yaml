@@ -100,6 +100,7 @@ models:
     hide_non_players: true       # Leave out observers: orange or red shirts that are not a team colour; backend "bytetrack" only
     hide_off_field: true         # Leave out those standing beside the field, going by where the field model sees the field (top-down from the field model only)
     track_history_length: 300    # Most points a trail is kept for
+    trail_smoothing_seconds: 0.4 # A trail's points are averaged over this long, a stride, so it does not bob up and down with every step; 0 = as measured
     trail_seconds: 4.0           # How far back a trail reaches, however many frames playback skips to keep up
     camera_motion_compensation: true   # Keep trails on the ground when the camera pans or zooms
     
@@ -139,6 +140,14 @@ models:
     ground_seconds: 1.0          # A disc lying still at no player for this long is on the ground: a turnover, the other team has it
     box_margin: 0.15             # Player boxes are widened by this fraction; a held disc is often just outside
 
+  reid:
+    # Knowing players by their looks (prototype): a track whose number is never read
+    # takes the number of the player it looks like, shown with a tilde (~43)
+    enabled: true
+    weights: "data/models/reid/20261009_reid_resnet18_s3_sharp70_reid_players_v2/best.pt"
+    look_every_frames: 6                # Each tracked player is looked at this often
+    roster_folder: "data/cache/rosters" # The players of each video, kept between sessions; "" = not kept
+
   player_id:
     # Jersey number reader: easyocr, parseq, florence, or yolo_digits (also selectable in the GUI).
     # parseq read 18 of 23 test players with none wrong, at EasyOCR's speed; see README.
@@ -177,6 +186,9 @@ logging:
 # Homography Estimation Settings
 homography:
   source: "field"                      # Top-down view from: "calibration" (set by hand in the Homography tab) or "field" (where the field model sees the field)
+  field_diagram: true                        # With the field model as source: draw the field and the players as dots, where the video frame is otherwise warped onto the ground
+  disc_path_seconds: 8.0                     # How far back the path of the disc is drawn on it
+  diagram_height: 900                        # Height of that drawing in pixels
   ruleset: "usau"                            # The field the field model's view is laid on: "usau" or "wfdf"
   save_directory: "configs"
   default_params_file: "configs/homography_params.yaml"

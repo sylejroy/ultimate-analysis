@@ -11,7 +11,7 @@ this table; `tests/test_layering.py` fails when one does not.
 | Package | Contents |
 | --- | --- |
 | `config/`, `constants.py`, `utils/` | Settings (`get_setting("dot.path", default)`), fixed limits, logging, video files, model files, label files, the field's dimensions and the camera fitted to it |
-| `processing/` | Analysis stages: detection, camera motion, tracking, possession, jersey numbers, field segmentation and geometry, where the field lies (`field_registration.py`), homography, TensorRT. Not yet used by the pipeline: the phase of the game (`game_state.py`), telling players apart by their looks (`reid.py`) and the roster built on that (`player_roster.py`) engines |
+| `processing/` | Analysis stages: detection, camera motion, tracking, possession, jersey numbers, field segmentation and geometry, where the field lies (`field_registration.py`), homography, TensorRT. Also the phase of the game (`game_state.py`) and where a flying disc is and has been (`disc_flight.py`). Knowing players by their looks: the network (`reid.py`), the players of a video (`player_roster.py`), and the stage that looks at them frame by frame (`player_looks.py`) engines |
 | `rendering/` | Drawing results on frames with OpenCV. No Qt. |
 | `pipeline.py` | `AnalysisPipeline`: one frame in, results and rendered views out. No Qt. |
 | `gui/` | Everything Qt. One package per tab (`main/`, `easyocr/`, `training/`, `homography/`, `labelling/`), shared widgets in `widgets/`, the window in `main_app.py` |

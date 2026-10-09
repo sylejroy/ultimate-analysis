@@ -1,5 +1,6 @@
 """Drawing detections, tracks, trails, and jersey numbers on a frame."""
 
+from functools import lru_cache
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
@@ -148,8 +149,9 @@ def draw_tracks_with_player_ids(
         if track_id >= DISC_ID_OFFSET:
             jersey_label = "disc"
         elif jersey_number != "Unknown":
-            # Create simple jersey number label without confidence
-            jersey_label = f"#{jersey_number}"
+            # A number with a tilde is not read on this player but known by their looks
+            by_looks = str(jersey_number).startswith("~")
+            jersey_label = str(jersey_number) if by_looks else f"#{jersey_number}"
         else:
             # Show compact "?" for unknown tracks
             jersey_label = f"{track_id}:?"
@@ -446,9 +448,12 @@ def draw_tracks(
     return vis_frame
 
 
-# A shirt less saturated than this (of 255) is white, grey or black: it has no colour
-# to exaggerate, and what little hue it has comes from the light
-COLOURLESS_SATURATION = 45
+# A shirt with less colour than this (distance from grey in Lab) is white, grey or
+# black: it has no colour to exaggerate, and what little hue it has comes from the
+# light. In Lab and not by saturation: a black shirt is "saturated" by a hint of blue,
+# and a dark green one hardly more (36 and 50 of 255), while their colour differs
+# plainly (2 and 10).
+COLOURLESS_CHROMA = 6.0
 
 
 def team_display_colour(shirt: Tuple[int, int, int]) -> Tuple[int, int, int]:
@@ -458,10 +463,19 @@ def team_display_colour(shirt: Tuple[int, int, int]) -> Tuple[int, int, int]:
     The hue is kept and made saturated and bright. A shirt without a colour stays white
     or becomes dark, so that a team in white and one in black remain apart.
     """
+    return _vivid(int(shirt[0]), int(shirt[1]), int(shirt[2]))
+
+
+@lru_cache(maxsize=256)
+def _vivid(blue: int, green: int, red: int) -> Tuple[int, int, int]:
+    """`team_display_colour` of a colour: asked for every player in every frame, and a
+    game has two."""
+    shirt = (blue, green, red)
     hue, saturation, value = (
         int(part) for part in cv2.cvtColor(np.uint8([[shirt]]), cv2.COLOR_BGR2HSV)[0, 0]
     )
-    if saturation < COLOURLESS_SATURATION:
+    _, a, b = (int(part) for part in cv2.cvtColor(np.uint8([[shirt]]), cv2.COLOR_BGR2LAB)[0, 0])
+    if np.hypot(a - 128, b - 128) < COLOURLESS_CHROMA:
         return (255, 255, 255) if value >= 128 else (40, 40, 40)
     vivid = np.uint8([[(hue, max(200, min(255, saturation * 2)), max(230, value))]])
     return tuple(int(part) for part in cv2.cvtColor(vivid, cv2.COLOR_HSV2BGR)[0, 0])

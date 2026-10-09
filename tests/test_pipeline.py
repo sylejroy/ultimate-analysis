@@ -58,6 +58,11 @@ class PipelineTests(unittest.TestCase):
                 self.mocks[name] = patcher.start()
                 self.addCleanup(patcher.stop)
 
+        # No network in the tests: nobody is known by their looks
+        looks = patch.object(self.module, "PlayerLooks")
+        looks.start().return_value.update.return_value = {}
+        self.addCleanup(looks.stop)
+
         # Drawing functions hand back the frame they were given
         for name in DRAWING:
             self.mocks[name].side_effect = lambda frame, *args, **kwargs: frame

@@ -30,6 +30,9 @@ def collapsible(group: QGroupBox, expanded: bool) -> QGroupBox:
     def show_contents(visible: bool) -> None:
         for child in group.findChildren(QWidget, options=Qt.FindDirectChildrenOnly):
             child.setVisible(visible)
+        # Folded away, only the title is left: no empty box under it
+        group.setFlat(not visible)
+        group.setMaximumHeight(16777215 if visible else group.fontMetrics().height() + 14)
 
     group.setCheckable(True)
     group.setChecked(expanded)

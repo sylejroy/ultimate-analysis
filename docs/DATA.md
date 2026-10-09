@@ -7,8 +7,10 @@ Everything under `data/` is local and not tracked by Git.
 - `data/models/detection/`, `data/models/segmentation/` — one folder per training run.
   The model dropdowns list each run's `weights/best.pt`.
 - `data/models/reid/` — the networks that tell players apart by their looks, one folder
-  per run of `scripts/train_reid.py` (`best.pt`, `training.json`). A prototype: the app
-  does not use them yet.
+  per run of `scripts/train_reid.py` (`best.pt`, `training.json`). The one named in
+  `models.reid.weights` is used by the app; without it players are not known by looks.
+- `data/cache/rosters/` — the players of each video as the app came to know them: looks,
+  team, number and what they did, one file per video. Delete a file to start it afresh.
 - `data/raw/training_data/` — datasets in YOLO format, named
   `<origin>_<content>_<version>`. The origin says who made the labels and how far the
   folder can be trusted as a source:

@@ -78,16 +78,14 @@ class TeamTrackerTests(unittest.TestCase):
         # A slim player: much of what counts as the shirt in the box is grass
         frame, boxes = frame_with((100, WHITE))
         x1, y1, x2, y2 = (int(value) for value in boxes[0])
-        frame[y1:y2, x1 : x1 + 14] = GRASS
-        frame[y1:y2, x2 - 14 : x2] = GRASS
-        colour, left = team_tracker.appearance.shirt_colour(frame, boxes[0])
+        frame[y1:y2, x1 : x1 + 12] = GRASS
+        frame[y1:y2, x2 - 12 : x2] = GRASS
+        colour = team_tracker.appearance.shirt_colour(frame, boxes[0])
         self.assertLess(np.abs(colour - WHITE).max(), 12)
-        self.assertGreater(left, 0.3)
         with_grass = team_tracker.appearance.encode(frame, boxes)[0][:3]
         self.assertGreater(abs(float(with_grass[1]) - 128), 5)  # Greenish, in Lab
-        # Nothing but grass tells no shirt
-        frame[y1:y2, x1:x2] = GRASS
-        self.assertIsNone(team_tracker.appearance.shirt_colour(frame, boxes[0])[0])
+        # A box too small to show a shirt tells none
+        self.assertIsNone(team_tracker.appearance.shirt_colour(frame, [100, 200, 104, 208]))
 
     def test_a_team_in_green_is_shown_in_green_not_in_the_grey_of_its_print(self):
         # Green like grass, with a grey number on the chest

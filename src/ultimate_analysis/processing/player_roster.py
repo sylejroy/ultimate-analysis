@@ -25,10 +25,11 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 
 # A track is matched once it has this many looks at its player: one crop is one pose
-MIN_LOOKS = 5
+MIN_LOOKS = 15
 # How alike (cosine, 1 = the same) a track and an entry must be to be one player, and by
 # how much the best entry must beat the next: two teammates may both be somewhat alike
-MIN_LIKENESS = 0.6
+# (chosen on one game and confirmed on another: docs/MEASUREMENTS.md)
+MIN_LIKENESS = 0.8
 MIN_LEAD = 0.05
 # A number counts as an entry's once it was the reading of this many of its tracks
 MIN_NUMBER_VOTES = 1
@@ -123,6 +124,23 @@ class PlayerRoster:
             stats = self.entries[track.entry].stats
             stats[what] = stats.get(what, 0.0) + amount
 
+    def rename(self, track_id: int, new_track_id: int) -> None:
+        """A track turned out to be one the tracker knew before, and goes on under that
+        name: what was seen of it is the other's."""
+        track = self._tracks.pop(track_id, None)
+        if track is None:
+            return
+        known = self._tracks.get(new_track_id)
+        if known is None:
+            self._tracks[new_track_id] = track
+            return
+        if track.total is not None:
+            known.total = track.total if known.total is None else known.total + track.total
+            known.looks += track.looks
+        known.team = known.team if known.team is not None else track.team
+        known.number = known.number or track.number
+        known.entry = known.entry if known.entry is not None else track.entry
+
     def tracks_ended(self, track_ids: Optional[Sequence[int]] = None) -> None:
         """The tracker has dropped these tracks, or all of them (a cut): their numbers
         will be given to other players. The entries stay."""
@@ -166,7 +184,13 @@ class PlayerRoster:
             offers.append((likeness[0][0] if likeness else -1.0, track_id, likeness))
         for _, track_id, likeness in sorted(offers, reverse=True):
             track = self._tracks[track_id]
-            free = [(value, entry) for value, entry in likeness if entry not in taken]
+            # An entry offered may be gone by now: naming a track matched before this
+            # one can show two entries to be one player
+            free = [
+                (value, entry)
+                for value, entry in likeness
+                if entry not in taken and entry in self.entries
+            ]
             found = None
             if free and free[0][0] >= MIN_LIKENESS:
                 lead = free[0][0] - (free[1][0] if len(free) > 1 else -1.0)
@@ -238,11 +262,14 @@ class PlayerRoster:
     # ------------------------------------------------------------------ on disk
 
     def table(self) -> List[dict]:
-        """The roster as rows: entry, team, number, looks, stats (without the vectors)."""
+        """The roster as rows: entry, team and its shirt colour (BGR), number, looks,
+        stats (without the vectors)."""
+        colours = [tuple(int(round(value)) for value in colour) for colour in self._team_colours]
         return [
             {
                 "entry": entry.entry,
                 "team": entry.team,
+                "team_colour": colours[entry.team] if entry.team < len(colours) else None,
                 "number": entry.number or "",
                 "looks": entry.looks,
                 **{what: round(amount, 2) for what, amount in sorted(entry.stats.items())},

@@ -123,6 +123,13 @@ class GameStateTracker:
         self.state, self.since, self.events, self.attacks = UNKNOWN, 0.0, [], {}
         self.__post_init__()
 
+    def cut(self) -> None:
+        """The view has changed and the tracker has started again: where the game stands
+        must be found anew, and the tracker counts its teams anew, so which end each
+        attacks is no longer known. The events so far are kept."""
+        self.state, self.attacks = UNKNOWN, {}
+        self.__post_init__()
+
     # ------------------------------------------------------------------ what is seen
 
     def _speeds(self, players: Sequence[Player], seconds: float) -> Dict[int, float]:

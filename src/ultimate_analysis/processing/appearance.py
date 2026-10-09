@@ -8,7 +8,7 @@ same kit. Kit colour separates the two teams better than that network did, and c
 almost nothing.
 """
 
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence
 
 import cv2
 import numpy as np
@@ -20,11 +20,6 @@ SHIRT_ROWS = slice(6, 16)
 SHORTS_ROWS = slice(16, 22)
 MIDDLE_COLUMNS = slice(4, 12)
 MIN_BOX_SIZE = (8, 16)  # Smaller boxes show too little of a player
-# Grass, in OpenCV's HSV: yellow-green to green, and not pale
-GRASS_HUES = (30, 90)
-GRASS_MIN_SATURATION = 50
-# A shirt of which less than this share is left without the grass is not told from it
-MIN_SHIRT_SHARE = 0.2
 
 
 def encode(frame: np.ndarray, boxes: Sequence[Sequence[float]]) -> List[Optional[np.ndarray]]:
@@ -55,30 +50,20 @@ def encode(frame: np.ndarray, boxes: Sequence[Sequence[float]]) -> List[Optional
     return signatures
 
 
-def shirt_colour(frame: np.ndarray, box: Sequence[float]) -> Tuple[Optional[np.ndarray], float]:
-    """(the colour of the shirt in a box (BGR), going only by what is not grass; the
-    share of the shirt that is left without the grass).
+def shirt_colour(frame: np.ndarray, box: Sequence[float]) -> Optional[np.ndarray]:
+    """The colour of the shirt in a box (BGR): the middle value of what the shirt's part
+    of the box shows, for showing a team by its colour.
 
-    The middle of a box shows grass beside a slim player and between the arms, and the
-    average of shirt and grass is a greenish shirt. For showing a team by its colour the
-    grass is left out. None for a box that is too small, or where hardly anything but
-    grass is left. That also happens to a team that plays in green; the share that is
-    left tells: of a white shirt nearly all, of a green one little.
+    The mean of that part is dulled by what else is in it: grass beside a slim player,
+    the number, a sleeve. The middle value is the shirt as long as the shirt is most of
+    it, and it does not have to tell grass from a green shirt, which taking the grass
+    out by its colour had to and could not (a team in green was shown grey, or blue).
+    None for a box that is too small.
     """
     frame_h, frame_w = frame.shape[:2]
     x1, y1 = max(0, int(box[0])), max(0, int(box[1]))
     x2, y2 = min(frame_w, int(box[2])), min(frame_h, int(box[3]))
     if x2 - x1 < MIN_BOX_SIZE[0] or y2 - y1 < MIN_BOX_SIZE[1]:
-        return None, 0.0
+        return None
     small = cv2.resize(frame[y1:y2, x1:x2], SIGNATURE_SIZE, interpolation=cv2.INTER_AREA)
-    shirt = small[SHIRT_ROWS, MIDDLE_COLUMNS].reshape(-1, 1, 3)
-    hsv = cv2.cvtColor(shirt, cv2.COLOR_BGR2HSV).reshape(-1, 3)
-    grass = (
-        (hsv[:, 0] >= GRASS_HUES[0])
-        & (hsv[:, 0] <= GRASS_HUES[1])
-        & (hsv[:, 1] >= GRASS_MIN_SATURATION)
-    )
-    left = float((~grass).mean())
-    if left < MIN_SHIRT_SHARE:
-        return None, left
-    return shirt.reshape(-1, 3)[~grass].astype(np.float64).mean(axis=0), left
+    return np.median(small[SHIRT_ROWS, MIDDLE_COLUMNS].reshape(-1, 3).astype(np.float64), axis=0)
