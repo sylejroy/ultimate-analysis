@@ -100,7 +100,15 @@ class PipelineWorker(QObject):
 
             if frame is not None:
                 with MODEL_LOCK:
-                    result = self.pipeline.process(frame, frame_index, options)
+                    # The reader hands out a frame of its own each time, so it may
+                    # be drawn on; and during playback it knows the frame that follows
+                    result = self.pipeline.process(
+                        frame,
+                        frame_index,
+                        options,
+                        frame_is_ours=True,
+                        next_frame=self.video_player.peek_next_frame if mode == "next" else None,
+                    )
                 total_ms = (time.perf_counter() - start) * 1000
                 result.timings = {"Frame I/O": io_ms, **result.timings, "Total Runtime": total_ms}
         except Exception:

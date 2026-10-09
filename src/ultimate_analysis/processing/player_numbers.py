@@ -83,6 +83,19 @@ class PlayerNumbers:
             del self.numbers[player_id]
         return timing, renamed
 
+    def join(self, track: Any, earlier: int) -> None:
+        """A track is a player known before and missing since: it goes on as that player,
+        with what was read on both."""
+        player_id = track.track_id
+        merge_players(player_id, earlier)
+        merge_jersey_readings(player_id, earlier)
+        track.track_id = earlier
+        if player_id in self.numbers:
+            self.numbers[earlier] = self.numbers.pop(player_id)
+        if player_id in self._finalized:
+            self._finalized.discard(player_id)
+            self._finalized.add(earlier)
+
     def _merge_by_number(self, tracks: List[Any]) -> List[Tuple[int, int]]:
         """A player whose number is that of a missing player is that player.
 
@@ -117,14 +130,7 @@ class PlayerNumbers:
             if distance is None or distance > max_distance:
                 continue
 
-            merge_players(player_id, earlier)
-            merge_jersey_readings(player_id, earlier)
-            track.track_id = earlier
-            if player_id in self.numbers:
-                self.numbers[earlier] = self.numbers.pop(player_id)
-            if player_id in self._finalized:
-                self._finalized.discard(player_id)
-                self._finalized.add(earlier)
+            self.join(track, earlier)
             renamed.append((player_id, earlier))
             del missing[number]
             logger.info(f"Player {player_id} is player {earlier} again (number {number})")

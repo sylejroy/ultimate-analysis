@@ -36,6 +36,8 @@ class PlayerLooksTest(unittest.TestCase):
         settings = {
             "models.reid.roster_folder": self.folder.name,
             "models.reid.look_every_frames": 1,
+            "models.reid.in_background": False,
+            "models.reid.rejoin_seconds": 10.0,
         }
         for owner, name, replacement in (
             (reid, "embed", by_colour),
@@ -137,6 +139,91 @@ class PlayerLooksTest(unittest.TestCase):
         tracks = [player(8, self.boxes["anna"])]
         found = self.watch(tracks, {}, self.roster_module.MIN_LOOKS + 2)
         self.assertEqual(found, {8: "17"})
+
+    def test_a_new_track_that_looks_like_a_lost_teammate_is_that_player(self):
+        anna, ben = player(1, self.boxes["anna"]), player(2, self.boxes["ben"])
+        anna.team = ben.team = 0
+        self.watch([anna, ben], {}, 10)
+        # Both are lost; a second later two new tracks appear, the other way round
+        again = [player(7, self.boxes["ben"]), player(8, self.boxes["anna"])]
+        again[0].team = again[1].team = 0
+        self.watch(again, {}, 10, start=70)
+        self.assertEqual(sorted(self.looks.returned([7, 8], [1, 2], 80)), [(7, 2), (8, 1)])
+        # Not of the other team, not a player who is still there, not after too long
+        again[1].team = 1
+        self.looks._profiles[8].team = 1
+        self.assertEqual(self.looks.returned([7, 8], [1, 2], 80), [(7, 2)])
+        self.assertEqual(self.looks.returned([7], [1], 80), [])
+        self.assertEqual(self.looks.returned([7], [2], 80 + 100000), [])
+
+    def test_two_lost_teammates_who_look_alike_are_not_told_apart(self):
+        twin = self.boxes["anna"]
+        first, second = player(1, twin), player(2, twin)
+        first.team = second.team = 0
+        self.watch([first, second], {}, 10)
+        new = player(7, twin)
+        new.team = 0
+        self.watch([new], {}, 10, start=70)
+        self.assertEqual(self.looks.returned([7], [1, 2], 80), [])
+
+    def test_the_teams_are_told_from_what_the_players_look_like(self):
+        # Three players a side: one kit reddish, one greenish, each player a shade of it
+        reds = [(200 - 10 * n, 30, 40 + 10 * n) for n in range(3)]
+        greens = [(30, 200 - 10 * n, 40 + 10 * n) for n in range(3)]
+        tracks = []
+        for index, colour in enumerate(reds + greens):
+            x = 5 + 30 * index
+            self.frame[10:60, x : x + 25] = colour
+            tracks.append(player(index + 1, (x, 10, x + 25, 60)))
+        self.watch(tracks, {}, 12)
+        # The tracker has one of the reds in the other team, and one without a team
+        tracker = {1: 0, 2: 1, 3: None, 4: 1, 5: 1, 6: 1}
+        self.assertEqual(self.looks.teams(tracker), {1: 0, 2: 0, 3: 0, 4: 1, 5: 1, 6: 1})
+        # Too few players looked at, or no team from the tracker to number them by
+        self.assertEqual(self.looks.teams(dict.fromkeys(tracker)), {})
+        self.looks.cut()
+        self.watch(tracks[:3], {}, 12)
+        self.assertEqual(self.looks.teams(tracker), {})
+
+    def cross(self, after):
+        """Anna and Ben apart, then their boxes overlapping, then apart again with the
+        tracks as `after` gives them; returns what `swapped` said over the frames."""
+        self.frame[10:60, 40:100] = 0
+        apart = [player(1, self.boxes["anna"]), player(2, self.boxes["ben"])]
+        self.watch(apart, {}, 10)
+        self.watch([player(1, (10, 10, 40, 60)), player(2, (20, 10, 50, 60))], {}, 5, start=10)
+        said = []
+        for frame_index in range(15, 22):
+            self.looks.update(self.frame, after, frame_index, {})
+            said += self.looks.swapped([1, 2], frame_index)
+            if said:
+                break  # The caller exchanges the tracks' players from here on
+        return said
+
+    def test_tracks_that_changed_players_in_a_crossing_are_found_out(self):
+        changed = [player(1, self.boxes["ben"]), player(2, self.boxes["anna"])]
+        self.assertEqual(self.cross(changed), [(1, 2)])
+        # What was seen since is put with the player it is of: track 1 is Ben now
+        anna, ben = (self.looks._profiles[track_id] for track_id in (1, 2))
+        self.assertGreater(anna.looks, 10)
+        for profile, colour in ((anna, ANNA), (ben, BEN)):
+            np.testing.assert_allclose(
+                profile.total / np.linalg.norm(profile.total),
+                np.array(colour) / np.linalg.norm(colour),
+                atol=0.02,
+            )
+
+    def test_tracks_that_kept_their_players_in_a_crossing_are_left_alone(self):
+        kept = [player(1, self.boxes["anna"]), player(2, self.boxes["ben"])]
+        self.assertEqual(self.cross(kept), [])
+        self.assertEqual(self.looks._crossings, {})
+
+    def test_two_tracks_that_exchanged_names_exchange_what_is_theirs(self):
+        self.looks._ran_from = {1: (0, np.array([1.0, 1.0]))}
+        self.looks._crossings = {(1, 5): 3}
+        self.looks.swap(1, 2)
+        self.assertEqual(list(self.looks._ran_from), [2])
+        self.assertEqual(self.looks._crossings, {(2, 5): 3})
 
     def test_a_renamed_track_keeps_what_was_seen_of_it(self):
         enough = self.roster_module.MIN_LOOKS + 2

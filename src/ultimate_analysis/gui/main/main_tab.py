@@ -629,20 +629,26 @@ class MainTab(QWidget):
     def _on_frame_processed(self, processed: ProcessedFrame) -> None:
         """Show a frame from the worker and keep playback going."""
         self._busy = False
+        current = processed.generation == self._generation
+        if current and processed.result is None and processed.mode == "next":
+            logger.info("End of video reached")
+            self._stop_playback()
 
-        if processed.generation == self._generation:
-            if processed.result is not None:
-                self._show_frame(processed)
-            elif processed.mode == "next":
-                logger.info("End of video reached")
-                self._stop_playback()
-
+        # The next frame is asked for before this one is shown: the worker analyses it
+        # while the window draws
         if self._redraw_pending:
             self._redraw_pending = False
             self._request_frame("current")
         elif self.is_playing:
             elapsed_ms = (time.perf_counter() - self._last_request_time) * 1000
-            self.playback_timer.start(max(0, int(self._frame_interval_ms - elapsed_ms)))
+            wait_ms = int(self._frame_interval_ms - elapsed_ms)
+            if wait_ms <= 0:
+                self._request_frame("next")
+            else:
+                self.playback_timer.start(wait_ms)
+
+        if current and processed.result is not None:
+            self._show_frame(processed)
 
     def _show_frame(self, processed: ProcessedFrame) -> None:
         result = processed.result

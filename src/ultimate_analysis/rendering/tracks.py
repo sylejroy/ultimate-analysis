@@ -7,6 +7,7 @@ import cv2
 import numpy as np
 
 from ..constants import VISUALIZATION_COLORS
+from ..processing.appearance import shirt_kind
 from ..processing.tracking import DISC_ID_OFFSET
 from ..utils.logger import get_logger
 
@@ -448,20 +449,13 @@ def draw_tracks(
     return vis_frame
 
 
-# A shirt with less colour than this (distance from grey in Lab) is white, grey or
-# black: it has no colour to exaggerate, and what little hue it has comes from the
-# light. In Lab and not by saturation: a black shirt is "saturated" by a hint of blue,
-# and a dark green one hardly more (36 and 50 of 255), while their colour differs
-# plainly (2 and 10).
-COLOURLESS_CHROMA = 6.0
-
-
 def team_display_colour(shirt: Tuple[int, int, int]) -> Tuple[int, int, int]:
     """A team's average shirt colour (BGR) made vivid, to mark the team on the frame.
 
     The average of a shirt is dull: shadow, folds and the print pull it towards grey.
-    The hue is kept and made saturated and bright. A shirt without a colour stays white
-    or becomes dark, so that a team in white and one in black remain apart.
+    The hue is kept and made saturated and bright. A shirt without a colour to speak
+    of (`appearance.shirt_kind`) is shown white or dark, so that a team in white and one
+    in black remain apart and neither is given a colour it does not wear.
     """
     return _vivid(int(shirt[0]), int(shirt[1]), int(shirt[2]))
 
@@ -474,9 +468,9 @@ def _vivid(blue: int, green: int, red: int) -> Tuple[int, int, int]:
     hue, saturation, value = (
         int(part) for part in cv2.cvtColor(np.uint8([[shirt]]), cv2.COLOR_BGR2HSV)[0, 0]
     )
-    _, a, b = (int(part) for part in cv2.cvtColor(np.uint8([[shirt]]), cv2.COLOR_BGR2LAB)[0, 0])
-    if np.hypot(a - 128, b - 128) < COLOURLESS_CHROMA:
-        return (255, 255, 255) if value >= 128 else (40, 40, 40)
+    kind = shirt_kind(shirt)
+    if kind != "coloured":
+        return (255, 255, 255) if kind == "light" else (40, 40, 40)
     vivid = np.uint8([[(hue, max(200, min(255, saturation * 2)), max(230, value))]])
     return tuple(int(part) for part in cv2.cvtColor(vivid, cv2.COLOR_HSV2BGR)[0, 0])
 

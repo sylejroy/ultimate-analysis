@@ -19,7 +19,7 @@ class InferenceTests(unittest.TestCase):
         disc = {"class_name": "disc", "bbox": [2, 2, 4, 4], "confidence": 0.9}
         disc_calls = 0
 
-        def predict(frame, model, size, prefix, target):
+        def predict(frame, model, size, prefix, target, weak_players_from=0.0):
             nonlocal disc_calls
             if target == "disc":
                 disc_calls += 1
@@ -46,7 +46,7 @@ class InferenceTests(unittest.TestCase):
                 module.reset_inference_state()
                 frame_index = 0
 
-                def predict(image, model, size, prefix, target):
+                def predict(image, model, size, prefix, target, weak_players_from=0.0):
                     return ([disc] if target == "disc" and 34 <= frame_index <= 39 else []), {}
 
                 with (
@@ -75,7 +75,7 @@ class InferenceTests(unittest.TestCase):
         seen = []  # (shape searched, image size) per call
         found = True
 
-        def predict(image, model, size, prefix, target):
+        def predict(image, model, size, prefix, target, weak_players_from=0.0):
             seen.append((image.shape[:2], size))
             if not found:
                 return [], {}

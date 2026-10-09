@@ -6,6 +6,7 @@ app:
   name: "Ultimate Analysis"
   version: "0.1.0"
   log_level: "INFO"
+  draw_views_side_by_side: true   # Draw the camera view and the top-down view at the same time
   legacy_tabs: false             # Show the Field Calibration and Jersey Number Tuning tabs: no longer needed for the analysis, kept until they are removed
 
 # Video Processing Settings
@@ -22,6 +23,8 @@ models:
     half_precision: true  # Use FP16 for ~2x speedup (requires compatible GPU)
     warmup_on_load: true   # Pre-warm models to avoid first-frame delay
     tensorrt: true         # Use a TensorRT engine when one was built for the model (scripts/export_tensorrt.py)
+    side_by_side: true     # Run the disc model on a second thread while the player model runs: the same detections, sooner
+    detect_ahead: true     # During playback, look for players and disc in the next frame while this one is followed and drawn
   
   # Separate player and disc detection models
   player_detection:
@@ -46,6 +49,7 @@ models:
     confidence_threshold: 0.4   # 0.6 cut the far end zone away in about one frame in five
     show_raw_masks: false      # Whether to show raw segmentation model output masks
     frame_interval: 5           # Process segmentation every N frames (1=every frame, 5=every 5th)
+    in_background: true         # Find the field beside the frames and take it in a frame or two later; false = the frame waits for it
     iou_threshold: 0.7          # IoU threshold for segmentation
     
     # Morphological operations for mask smoothing
@@ -99,6 +103,8 @@ models:
     backend: bytetrack           # "bytetrack": by motion, each track within its team; "deepsort": by appearance
     hide_non_players: true       # Leave out observers: orange or red shirts that are not a team colour; backend "bytetrack" only
     hide_off_field: true         # Leave out those standing beside the field, going by where the field model sees the field (top-down from the field model only)
+    hide_newcomers_off_field: false  # Also a new track that has only been seen beside the field so far, until it is judged
+    weak_detections_from: 0.0    # Give the tracker players the detector is less sure of than its threshold, from this confidence: they can continue a track, not begin one. 0 = not
     track_history_length: 300    # Most points a trail is kept for
     trail_smoothing_seconds: 0.4 # A trail's points are averaged over this long, a stride, so it does not bob up and down with every step; 0 = as measured
     trail_seconds: 4.0           # How far back a trail reaches, however many frames playback skips to keep up
@@ -146,6 +152,10 @@ models:
     enabled: true
     weights: "data/models/reid/20261009_reid_resnet18_s3_sharp70_reid_players_v2/best.pt"
     look_every_frames: 6                # Each tracked player is looked at this often
+    in_background: true                 # The network runs beside the frames; what it finds is taken in a frame or two later
+    check_crossings: true               # After two players' boxes overlapped, check by their looks whether the tracks changed players, and put them right
+    teams_by_looks: true                # A player's team is what they look like, once they have been looked at enough; until then, and without the network, the colour of the shirt
+    rejoin_seconds: 0.0                 # A new track that looks like a teammate lost up to this long ago is that player again; 0 = never. Off: it joined few and some of them wrongly
     roster_folder: "data/cache/rosters" # The players of each video, kept between sessions; "" = not kept
 
   player_id:

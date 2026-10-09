@@ -7,23 +7,29 @@ this module: the GUI owns one AnalysisPipeline and runs it on a worker thread.
 """
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 
 from .config.settings import get_setting
 from .constants import DEFAULT_PATHS
-from .processing import health
+from .processing import appearance, health
 from .processing.camera_motion import CameraMotionEstimator
 from .processing.camera_motion import is_enabled as camera_motion_enabled
 from .processing.disc_flight import DiscPath, place_under_disc
 from .processing.field_analysis import create_unified_field_mask, fit_lines_from_mask
 from .processing.field_line_filter import FieldLineFilter
 from .processing.field_registration import FieldFollower, OffFieldWatcher, field_to_canvas
-from .processing.field_segmentation import reset_segmentation_cache, run_field_segmentation
+from .processing.field_segmentation import (
+    prepare_for_segmentation,
+    reset_segmentation_cache,
+    run_field_segmentation,
+    segment_prepared,
+)
 from .processing.game_state import GameStateTracker, Player
 from .processing.homography import output_canvas_size
 from .processing.inference import reset_inference_state, run_inference
@@ -35,9 +41,12 @@ from .processing.shot_type import ShotWatcher, players_are_elsewhere
 from .processing.tracking import (
     apply_camera_motion,
     get_track_histories,
+    missing_players,
     reset_tracker,
     run_tracking,
     set_frame_rate,
+    set_team_of_player,
+    swap_players,
     team_shirt_colours,
 )
 from .rendering.field import (
@@ -70,6 +79,21 @@ logger = get_logger("PIPELINE")
 
 # Two team colours (BGR) nearer than this are one team's, seen before and after a cut
 SAME_TEAM_COLOUR = 90.0
+
+
+def _exchange_names(rename: Callable[[int, int], None], first: int, second: int) -> None:
+    """Exchange two names with a `rename(was, now)` that takes one at a time."""
+    between = -1
+    for was, now in ((first, between), (second, first), (between, second)):
+        rename(was, now)
+
+
+# The colour a team is shown in, by the teams the players' looks give: a shirt is taken
+# every so many frames, a colour is given from so many shirts, and no more are taken
+# after so many, so that a team does not change colour on the screen
+SHIRT_EVERY_FRAMES = 6
+MIN_SHIRTS_PER_TEAM = 20
+SHIRTS_PER_TEAM = 300
 # The table of the players' statistics is handed out with every so many frames
 STATS_EVERY_FRAMES = 30
 
@@ -183,6 +207,20 @@ class AnalysisPipeline:
         self._disc_path = DiscPath(float(get_setting("homography.disc_path_seconds", 8.0)))
         self._looks = PlayerLooks()
         self.numbers_by_looks: Dict[int, str] = {}
+        # For what can be done beside the main work of a frame
+        self._threads = ThreadPoolExecutor(max_workers=3, thread_name_prefix="pipeline")
+        self._ahead: Optional[Any] = None  # The detectors' work on the next frame
+        # The field model's work beside the frames: the job under way, the frame and
+        # frame size the last one was begun at, and the masks last taken in
+        self._field_job: Optional[dict] = None
+        self._field_begun: Optional[Tuple[int, Tuple[int, int]]] = None
+        self._field_seen: List[Any] = []
+        # The shirts of the players of each team as their looks give it, the colours
+        # made of them, and a count of frames
+        self._shirts_by_looks: List[list] = [[], []]
+        self._colours_by_looks: Optional[dict] = None
+        self._shirt_turn = 0
+        self._weak_players: List[Dict[str, Any]] = []
         self._frame_size: Optional[Tuple[int, int]] = None
         self._trails_now: Optional[Dict[int, np.ndarray]] = None
         self._events_counted = 0
@@ -271,6 +309,7 @@ class AnalysisPipeline:
         self._off_field.reset()
         self._game.cut()
         self._looks.cut()
+        self._forget_side_work()
         self.disc_place = None
         self._disc_path.reset()
         self._numbers.reset()
@@ -287,6 +326,17 @@ class AnalysisPipeline:
         self.detections = []
         self.tracks = []
         self.field_results = []
+
+    def _forget_side_work(self) -> None:
+        """What the other threads were working out is of the view before."""
+        if self._ahead is not None:
+            self._ahead.result()  # Waited for: its frame must not be drawn on meanwhile
+            self._ahead = None
+        self._field_job, self._field_begun, self._field_seen = None, None, []
+        # After a cut the tracker numbers its teams anew
+        self._shirts_by_looks = [[], []]
+        self._colours_by_looks = None
+        self._shirt_turn = 0
 
     def set_frame_rate(self, frames_per_second: float) -> None:
         """Tell the pipeline the frame rate of the video; durations are set in seconds."""
@@ -313,13 +363,25 @@ class AnalysisPipeline:
 
     # ------------------------------------------------------------------ per frame
 
-    def process(self, frame: np.ndarray, frame_index: int, options: PipelineOptions) -> FrameResult:
+    def process(
+        self,
+        frame: np.ndarray,
+        frame_index: int,
+        options: PipelineOptions,
+        frame_is_ours: bool = False,
+        next_frame: Optional[Callable[[], Optional[np.ndarray]]] = None,
+    ) -> FrameResult:
         """Analyse a frame and render the camera and top-down views.
 
         Args:
-            frame: Video frame (BGR); it is not modified
+            frame: Video frame (BGR); it is not modified, unless `frame_is_ours`
             frame_index: Position of the frame in the video
             options: Stages to run
+            frame_is_ours: The caller has no further use for the frame: the camera view
+                may be drawn on it, which saves a copy of every frame
+            next_frame: Gives the frame that will be processed next, if the caller knows
+                it: its players and disc are then looked for while this frame is being
+                followed and drawn. The very array has to be passed as `frame` next.
 
         Returns:
             The rendered views, the analysis results, and the time each stage took
@@ -335,12 +397,23 @@ class AnalysisPipeline:
         analysis_key = (frame_index, *options.analysis_key)
         if analysis_key != self._analysed_key:
             health.start_frame()
-            self._analyse(frame, frame_index, options)
+            self._analyse(frame, frame_index, options, next_frame)
             self._analysed_key = analysis_key
 
-        # The copy of the frame that is drawn on belongs to the drawing
+        # The two views are drawn side by side: neither changes what the other reads.
+        # The trails both draw are worked out before they part.
+        side_by_side = bool(get_setting("app.draw_views_side_by_side", True))
+        top_down = None
+        if options.top_down_view and side_by_side:
+            if options.tracking and self.tracks:
+                self._trails()
+            top_down = self._threads.submit(self._draw_top_down_view, frame, options)
+
+        # The copy of the frame that is drawn on belongs to the drawing. None is needed
+        # of a frame that is ours, unless the top-down view is made of the frame itself.
         copy_start = time.perf_counter()
-        drawn_on = frame.copy()
+        warped = options.top_down_view and not self._top_down_is_drawn(options)
+        drawn_on = frame if frame_is_ours and not warped else frame.copy()
         self._record("Visualization", copy_start)
         main_view = self._draw_main_view(drawn_on, options)
         problems = health.problems()
@@ -348,7 +421,9 @@ class AnalysisPipeline:
             draw_notice(main_view, problem, line=line + 1, alarm=True)
 
         top_down_view, top_down_message = None, "Homography view disabled"
-        if options.top_down_view:
+        if top_down is not None:
+            top_down_view, top_down_message = top_down.result()
+        elif options.top_down_view:
             top_down_view, top_down_message = self._draw_top_down_view(frame, options)
 
         total_ms = (time.perf_counter() - start) * 1000
@@ -379,6 +454,13 @@ class AnalysisPipeline:
             timings=self._timings,
             wide_shot=self._shot.wide,
             problems=problems,
+        )
+
+    @staticmethod
+    def _top_down_is_drawn(options: PipelineOptions) -> bool:
+        """Whether the top-down view is a drawing of the field, not the frame warped."""
+        return options.top_down_source == "field" and bool(
+            get_setting("homography.field_diagram", True)
         )
 
     def _record(self, stage: str, start: float) -> float:
@@ -462,7 +544,7 @@ class AnalysisPipeline:
         # A score is counted for the colour of the team that made it: the tracker numbers
         # its teams anew after every cut, the colours stay
         for event in self._game.events[self._events_counted :]:
-            shirt = team_shirt_colours().get(event.team) if event.kind == "score" else None
+            shirt = self._team_colours().get(event.team) if event.kind == "score" else None
             if shirt is not None:
                 colour = team_display_colour(shirt)
                 for entry in self._score:
@@ -568,7 +650,7 @@ class AnalysisPipeline:
 
     def _possession_colour(self) -> Optional[Tuple[int, int, int]]:
         """The colour that stands for the team in possession, None while it is not known."""
-        shirt = team_shirt_colours().get(self._possession.team)
+        shirt = self._team_colours().get(self._possession.team)
         return None if shirt is None else team_display_colour(shirt)
 
     def _update_fps(self, frame_time_ms: float) -> None:
@@ -580,16 +662,53 @@ class AnalysisPipeline:
 
     # ------------------------------------------------------------------ analysis
 
-    def _analyse(self, frame: np.ndarray, frame_index: int, options: PipelineOptions) -> None:
+    def _detect(self, frame: np.ndarray) -> List[Dict[str, Any]]:
+        """The players and discs of a frame: found ahead, if it was this frame that was
+        looked at ahead, or found now."""
+        ahead, self._ahead = self._ahead, None
+        if ahead is not None:
+            # Waited for also when it is of another frame (after a seek, say)
+            looked_at, found = ahead.result()
+            if looked_at is frame:
+                return found
+        return run_inference(frame, weak_players_from=self._weak_from())
+
+    @staticmethod
+    def _weak_from() -> float:
+        """The confidence from which the tracker is given players the detector is not
+        sure of (0: not at all)."""
+        return float(get_setting("models.tracking.weak_detections_from", 0.0))
+
+    def _detect_ahead(self, next_frame: Callable[[], Optional[np.ndarray]]) -> tuple:
+        frame = next_frame()
+        if frame is None:
+            return None, []
+        return frame, run_inference(frame, weak_players_from=self._weak_from())
+
+    def _analyse(
+        self,
+        frame: np.ndarray,
+        frame_index: int,
+        options: PipelineOptions,
+        next_frame: Optional[Callable[[], Optional[np.ndarray]]] = None,
+    ) -> None:
         """Run the enabled stages and store their results."""
         self.detections = []
+        self._weak_players = []
         self.tracks = []
         self.field_results = []
 
         if options.detection:
             start = time.perf_counter()
-            self.detections = run_inference(frame)
+            found = self._detect(frame)
+            # Players the detector is not sure of are for the tracker alone
+            self.detections = [detection for detection in found if not detection.get("weak")]
+            self._weak_players = [detection for detection in found if detection.get("weak")]
             self._record("Inference", start)
+            # The detectors know nothing of what follows here, so the next frame can be
+            # put before them now: by the time it is this frame's turn, they are done
+            if next_frame is not None and get_setting("models.inference.detect_ahead", True):
+                self._ahead = self._threads.submit(self._detect_ahead, next_frame)
             if get_setting("models.shot_type.enabled", True) and not self._watch_shot():
                 return  # A close-up or a title card: nothing to follow
 
@@ -614,6 +733,12 @@ class AnalysisPipeline:
                 self.reset()
                 self.detections = detections
             self._motion_known, self._players_before = motion is not None, players
+            if self._field_job is not None:
+                # What is being worked out of the field is of the frame it was begun in
+                before = self._field_job["since"]
+                self._field_job["since"] = (
+                    None if motion is None or before is None else motion @ before
+                )
             if motion is not None:
                 apply_camera_motion(motion)
                 self._possession.move(motion)
@@ -624,10 +749,15 @@ class AnalysisPipeline:
 
         if options.tracking:
             start = time.perf_counter()
-            self.tracks = run_tracking(frame, self.detections, frame_index)
+            self.tracks = run_tracking(frame, self.detections + self._weak_players, frame_index)
+            self._teams_by_looks(frame)
             if self._follow_field and get_setting("models.tracking.hide_off_field", True):
                 # Those standing along the sidelines are followed but not shown or counted
-                off_field = self._off_field.update(self._field_follower.image_to_field, self.tracks)
+                off_field = self._off_field.update(
+                    self._field_follower.image_to_field,
+                    self.tracks,
+                    bool(get_setting("models.tracking.hide_newcomers_off_field", False)),
+                )
                 self.tracks = [track for track in self.tracks if track.track_id not in off_field]
             self._record("Tracking", start)
             # What is worked out from the tracks: who has the disc, where it flies, and
@@ -643,10 +773,15 @@ class AnalysisPipeline:
         self.ransac_lines, self.ransac_confidences = [], []
         if options.field_segmentation:
             start = time.perf_counter()
-            self.field_results = run_field_segmentation(frame, frame_index)
+            in_background = bool(get_setting("models.segmentation.in_background", True))
+            if in_background:
+                self._field_beside_the_frames(frame, frame_index)
+            else:
+                self.field_results = run_field_segmentation(frame, frame_index)
             self._record("Field Segmentation", start)
             if self.field_results:
-                self._update_field_geometry(frame.shape[:2])
+                if not in_background:
+                    self._update_field_geometry(frame.shape[:2])
                 # The lines fitted to the outline are shown where they are what the view
                 # is made from; with the field model's own estimate they are only clutter
                 if self._geometry.mask is not None and not self._follow_field:
@@ -677,7 +812,92 @@ class AnalysisPipeline:
                 self._possession.holder_id,
                 self._places_on_field(),
             )
+            self._rejoin_by_looks(frame_index)
+            self._settle_crossings(frame_index)
             self._record("Player ID - Looks", start)
+
+    def _settle_crossings(self, frame_index: int) -> None:
+        """Exchange the players of two tracks that changed them while their boxes
+        overlapped, as their looks before and after say."""
+        players = {t.track_id: t for t in self.tracks if t.class_name == "player"}
+        for first, second in self._looks.swapped(list(players), frame_index):
+            if not swap_players(first, second):
+                continue
+            one, other = players[first], players[second]
+            one.track_id, other.track_id = other.track_id, one.track_id
+            one.team, other.team = other.team, one.team
+            one.team_colour, other.team_colour = other.team_colour, one.team_colour
+            # What belongs to the box goes with the box: who has the disc, where they
+            # stood by the field, how sharp and how far they ran
+            for watcher in (self._possession, self._off_field):
+                _exchange_names(watcher.rename, first, second)
+            self._looks.swap(first, second)
+            logger.info(f"Players {first} and {second} had changed tracks in a crossing")
+
+    def _teams_by_looks(self, frame: np.ndarray) -> None:
+        """Put the players in the team their looks say, where those say another than
+        the colour of the shirt area does: a kit is not always one colour. And take
+        the colour a team is shown in from the shirts of those the looks put in it."""
+        if not get_setting("models.reid.teams_by_looks", True):
+            return
+        players = [track for track in self.tracks if track.class_name == "player"]
+        by_looks = self._looks.teams(
+            {track.track_id: getattr(track, "team", None) for track in players}
+        )
+        if not by_looks:
+            return
+        for track in players:
+            team = by_looks.get(track.track_id)
+            if team is not None and team != getattr(track, "team", None):
+                track.team = team
+                set_team_of_player(track.track_id, team)
+        # A shirt every few frames, of players who stand clear of the others, until
+        # there are enough: after that a team's colour stays as it is
+        self._shirt_turn += 1
+        if self._shirt_turn % SHIRT_EVERY_FRAMES == 0:
+            boxes = [track.to_ltrb() for track in players]
+            touched = appearance.box_overlaps(boxes).max(axis=1) > 0 if boxes else []
+            for track, box, is_touched in zip(players, boxes, touched):
+                team = by_looks.get(track.track_id)
+                if team is None or len(self._shirts_by_looks[team]) >= SHIRTS_PER_TEAM:
+                    continue
+                if is_touched:
+                    continue
+                shirt = appearance.shirt_colour(frame, box)
+                if shirt is not None:
+                    self._shirts_by_looks[team].append(shirt)
+                    self._colours_by_looks = None
+        colours = self._team_colours()
+        for track in players:
+            if getattr(track, "team", None) is not None:
+                track.team_colour = colours.get(track.team)
+
+    def _team_colours(self) -> Dict[int, Tuple[int, int, int]]:
+        """{team: the colour of its shirts (BGR)}: of the shirts of those the looks put
+        in the team once there are a few, and as the tracker has it until then."""
+        if self._colours_by_looks is None:
+            colours = dict(team_shirt_colours())
+            for team, shirts in enumerate(self._shirts_by_looks):
+                if len(shirts) >= MIN_SHIRTS_PER_TEAM:
+                    colours[team] = tuple(int(round(v)) for v in np.median(shirts, axis=0))
+            if all(len(shirts) < MIN_SHIRTS_PER_TEAM for shirts in self._shirts_by_looks):
+                return colours  # The tracker's, which it may still be changing
+            self._colours_by_looks = appearance.told_apart(colours)
+        return self._colours_by_looks
+
+    def _rejoin_by_looks(self, frame_index: int) -> None:
+        """Give a player the tracker lost a while ago their ID back, where a new track
+        looks like them."""
+        players = {t.track_id: t for t in self.tracks if t.class_name == "player"}
+        returned = self._looks.returned(list(players), missing_players(set(players)), frame_index)
+        for was, now in returned:
+            self._numbers.join(players[was], now)
+            self._possession.rename(was, now)
+            self._off_field.rename(was, now)
+            self._looks.rename(was, now)
+            if was in self.numbers_by_looks:
+                self.numbers_by_looks[now] = self.numbers_by_looks.pop(was)
+            logger.info(f"Player {was} is player {now} again (by their looks)")
 
     def _places_on_field(self) -> Dict[int, np.ndarray]:
         """Track -> where the player stands on the field, if the field's place is known."""
@@ -723,6 +943,84 @@ class AnalysisPipeline:
             if not str(shown.get(track_id, ("", None))[0]).isdigit():
                 shown[track_id] = (f"~{number}", None)
         return shown
+
+    def _field_beside_the_frames(self, frame: np.ndarray, frame_index: int) -> None:
+        """The field model and what follows from it, on another thread: begun every
+        few frames, and taken in when it is done, a frame or two later. Finding the
+        field takes several frames' worth of time, and the field does not move."""
+        job = self._field_job
+        if job is not None and job["work"].done():
+            self._field_job = None
+            self._take_field(job)
+        interval = max(1, int(get_setting("models.segmentation.frame_interval", 5)))
+        shape = frame.shape[:2]
+        due = (
+            self._field_begun is None
+            or not 0 <= frame_index - self._field_begun[0] < interval
+            or self._field_begun[1] != shape
+        )
+        if due and self._field_job is None:
+            prepared = prepare_for_segmentation(frame)
+            if prepared is not None:
+                self._field_begun = (frame_index, shape)
+                feet = np.array(
+                    [
+                        [(d["bbox"][0] + d["bbox"][2]) / 2.0, d["bbox"][3]]
+                        for d in self.detections
+                        if d["class_name"] == "player"
+                    ]
+                ).reshape(-1, 2)
+                self._field_job = {
+                    "work": self._threads.submit(
+                        self._look_at_field, prepared, shape, self._follow_field
+                    ),
+                    "shape": shape,
+                    "feet": feet,
+                    "follow": self._follow_field,
+                    "since": np.eye(3),
+                }
+        self.field_results = self._field_seen
+
+    def _look_at_field(self, prepared: np.ndarray, shape: Tuple[int, int], follow: bool) -> dict:
+        """On another thread: the field model's masks for a frame, the lines of their
+        outline, and where the field lies by them."""
+        results = segment_prepared(prepared)
+        mask = create_unified_field_mask(results, shape) if results else None
+        lines, confidences, contour, ransac_fit = [], [], None, None
+        if mask is not None:
+            lines, confidences, contour, ransac_fit = fit_lines_from_mask(mask)
+        estimate = self._field_follower.estimate(results, shape, lines) if follow else None
+        return {
+            "results": results,
+            "mask": mask,
+            "lines": lines,
+            "confidences": confidences,
+            "contour": contour,
+            "ransac_fit": ransac_fit,
+            "estimate": estimate,
+        }
+
+    def _take_field(self, job: dict) -> None:
+        """Take in what was worked out of the field beside the frames."""
+        try:
+            seen = job["work"].result()
+        except Exception as error:
+            logger.exception(f"Error finding the field: {error}")
+            health.report("Field", f"failed ({type(error).__name__}); see the log")
+            return
+        self._field_seen = seen["results"]
+        self._geometry = _FieldGeometry(
+            seen["results"], job["shape"], seen["mask"], seen["contour"], seen["ransac_fit"]
+        )
+        self._line_filter.update(seen["lines"], seen["confidences"])
+        since = job["since"]
+        if since is None:
+            return  # The camera's motion was lost meanwhile: where that frame lay is not known
+        self._line_filter.move(since)
+        if job["follow"]:
+            self._field_follower.take(
+                seen["estimate"], job["shape"], seen["mask"], job["feet"], since
+            )
 
     def _watch_shot(self) -> bool:
         """Whether this frame is drone footage; what was followed is dropped when it stops.

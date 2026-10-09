@@ -97,6 +97,24 @@ class PlayerIdentityTests(unittest.TestCase):
         self.see(0.5)
         self.assertNotIn(self.see(1.0, (7, BLUE, 110))[7], first.values())
 
+    def test_a_new_track_on_the_spot_of_a_player_lost_a_moment_ago_is_that_player(self):
+        # The track of player 1 was cut because their shirt read as the other team's in
+        # one frame; the track that begins there at once is given the other team. Nobody
+        # else is near: it is player 1
+        first = self.see(0.0, (1, RED_TALL, 100), (2, BLUE, 800), teams={1: 0, 2: 1})
+        new = self.see(0.05, (2, BLUE, 800), (7, RED_TALL, 102), teams={2: 1, 7: 1})
+        self.assertEqual(new[7], first[1])
+        # Beside a player who is being followed, the new track may be anybody
+        self.identities.reset()
+        first = self.see(0.0, (1, RED_TALL, 100), (2, BLUE, 130), teams={1: 0, 2: 1})
+        new = self.see(0.05, (2, BLUE, 130), (7, RED_TALL, 102), teams={2: 1, 7: 1})
+        self.assertNotEqual(new[7], first[1])
+        # With another lost player in reach, the colours decide as before
+        self.identities.reset()
+        first = self.see(0.0, (1, RED_TALL, 100), (3, BLUE, 130), teams={1: 0, 3: 1})
+        new = self.see(0.05, (7, RED_TALL, 102), teams={7: 1})
+        self.assertNotEqual(new[7], first[1])
+
     def test_opponents_who_come_apart_are_told_apart_by_their_kit(self):
         # A player and their marker covered each other and both tracks were lost. Both
         # new tracks are within reach of both players; place alone could not decide.

@@ -505,8 +505,11 @@ def _read_jersey_numbers(
 
     # One read at a time: the reader models are shared with the background reader. And
     # never while a GPU engine is being set up on another thread.
-    with GPU_SETUP_LOCK:
+    with _one_read_at_a_time, GPU_SETUP_LOCK.work():
         return _read_crops(crop_images, unread, timing)
+
+
+_one_read_at_a_time = threading.Lock()
 
 
 def _read_crops(

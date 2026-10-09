@@ -72,11 +72,12 @@ def prepare(
     keep_proportions: bool = False,
 ) -> "torch.Tensor":
     """Crops (BGR, any size) as one batch for the network, all at one size."""
-    batch = np.empty((len(crops), 3, size[1], size[0]), dtype=np.float32)
+    # Brought to one size one by one, and to the network's numbers all at once
+    pictures = np.empty((len(crops), size[1], size[0], 3), dtype=np.uint8)
     for index, crop in enumerate(crops):
-        rgb = fit(crop, size, keep_proportions)[:, :, ::-1].astype(np.float32) / 255.0
-        batch[index] = ((rgb - MEAN) / SPREAD).transpose(2, 0, 1)
-    return torch.from_numpy(batch)
+        pictures[index] = fit(crop, size, keep_proportions)
+    rgb = pictures[:, :, :, ::-1].astype(np.float32) / 255.0
+    return torch.from_numpy(np.ascontiguousarray(((rgb - MEAN) / SPREAD).transpose(0, 3, 1, 2)))
 
 
 if TORCH_AVAILABLE:

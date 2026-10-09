@@ -65,6 +65,14 @@ LIGHTNESS_WEIGHT = 0.3
 # much the boxes overlap. Two players whose boxes cover each other mostly stand at
 # different depths: their feet are apart when their boxes are not.
 FEET_WEIGHT = 0.5
+# A box in the other team's colours is the track's own player after all, with a shirt
+# that reads wrongly in this frame (a dark shirt catching the light), if it lies on
+# where the track expected its player by at least this overlap, and the track has been
+# followed for this many frames in a row without any other box touching its own: then
+# nobody is near who it could be instead. Where two players cover each other, neither
+# holds, and the rule keeps them apart as before.
+SAME_BOX_OVERLAP = 0.6
+ALONE_FRAMES = 15
 # A track has a team once this many clear sightings, and this share of them, agree
 MIN_VOTES = 3
 MIN_VOTE_SHARE = 0.75
@@ -154,13 +162,20 @@ class DetectionBoxes:
         return DetectionBoxes(self.xyxy[index], self.conf[index])
 
 
-def tracker_settings(track_buffer: int) -> SimpleNamespace:
-    """Ultralytics' ByteTrack settings, with our time a lost track is kept (frames)."""
+def tracker_settings(track_buffer: int, sure_from: float = 0.25) -> SimpleNamespace:
+    """Ultralytics' ByteTrack settings, with our time a lost track is kept (frames).
+
+    Args:
+        track_buffer: Frames a lost track is kept
+        sure_from: The confidence from which a detection may begin a track and is
+            matched first. Weaker ones only continue a track nothing better was found
+            for: a player half covered by another.
+    """
     return SimpleNamespace(
         tracker_type="bytetrack",
-        track_high_thresh=0.25,
-        track_low_thresh=0.1,
-        new_track_thresh=0.25,
+        track_high_thresh=sure_from,
+        track_low_thresh=0.05,
+        new_track_thresh=sure_from,
         track_buffer=track_buffer,
         match_thresh=0.8,
         fuse_score=True,
@@ -171,15 +186,7 @@ def largest_overlaps(boxes: np.ndarray) -> np.ndarray:
     """For each box (x1, y1, x2, y2) the largest IoU it has with any other of the boxes."""
     if len(boxes) < 2:
         return np.zeros(len(boxes))
-    x1 = np.maximum(boxes[:, None, 0], boxes[None, :, 0])
-    y1 = np.maximum(boxes[:, None, 1], boxes[None, :, 1])
-    x2 = np.minimum(boxes[:, None, 2], boxes[None, :, 2])
-    y2 = np.minimum(boxes[:, None, 3], boxes[None, :, 3])
-    shared = np.clip(x2 - x1, 0, None) * np.clip(y2 - y1, 0, None)
-    area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
-    overlap = shared / (area[:, None] + area[None, :] - shared + 1e-9)
-    np.fill_diagonal(overlap, 0.0)
-    return overlap.max(axis=1)
+    return appearance.box_overlaps(boxes).max(axis=1)
 
 
 def feet_distances(tracks: np.ndarray, detections: np.ndarray) -> np.ndarray:
@@ -201,15 +208,15 @@ class TeamTrack(STrack):
     """A track that keeps count of which team its player's shirt looked like."""
 
     clear = False  # As a detection: no other box covers it
+    alone = False  # As a detection: no other box so much as touches it
+    alone_for = 0  # As a track: frames in a row it was followed by such a box
     shirt_team: Optional[int] = None  # As a detection: the team its shirt colour says
     off_colours: Optional[bool] = None  # As a detection: an observer's orange or red shirt
     team: Optional[int] = None  # As a track: the team most of its clear sightings said
     outsider = False  # As a track: an observer's shirt nearly every time
 
     def _count(self, detection: "TeamTrack") -> None:
-        if not hasattr(self, "votes"):
-            self.votes = [0, 0]
-            self.colour_sightings = [0, 0]  # All with a known shirt colour, those off the teams'
+        self._begin_counting()
         if detection.clear and detection.off_colours is not None:
             self.colour_sightings[0] += 1
             self.colour_sightings[1] += detection.off_colours
@@ -221,6 +228,24 @@ class TeamTrack(STrack):
             agreed = self.votes[best] >= max(MIN_VOTES, MIN_VOTE_SHARE * sum(self.votes))
             self.team = best if agreed else None
 
+    def _begin_counting(self) -> None:
+        if not hasattr(self, "votes"):
+            self.votes = [0, 0]
+            self.colour_sightings = [0, 0]  # All with a known shirt colour, those off the teams'
+
+    def exchange_player(self, other: "TeamTrack") -> None:
+        """This track and another go on with each other's boxes under their own names:
+        the tracker went on with the wrong one of two players who crossed. What was
+        counted of a player's shirt goes with the name."""
+        self._begin_counting()
+        other._begin_counting()
+        for name in ("votes", "colour_sightings", "team", "outsider"):
+            mine, theirs = getattr(self, name), getattr(other, name)
+            setattr(self, name, theirs)
+            setattr(other, name, mine)
+        self.track_id, other.track_id = other.track_id, self.track_id
+        self.alone_for = other.alone_for = 0
+
     def activate(self, kalman_filter: Any, frame_id: int) -> None:
         super().activate(kalman_filter, frame_id)
         self._count(self)
@@ -228,10 +253,12 @@ class TeamTrack(STrack):
     def update(self, new_track: "TeamTrack", frame_id: int) -> None:
         super().update(new_track, frame_id)
         self._count(new_track)
+        self.alone_for = self.alone_for + 1 if new_track.alone else 0
 
     def re_activate(self, new_track: "TeamTrack", frame_id: int, new_id: bool = False) -> None:
         super().re_activate(new_track, frame_id, new_id)
         self._count(new_track)
+        self.alone_for = 0  # It was lost: who knows who stood there meanwhile
 
 
 class TeamTracker(BYTETracker):
@@ -324,7 +351,7 @@ class TeamTracker(BYTETracker):
                     middle = self._shown_middle[team] = (len(shirts), np.median(shirts, axis=0))
                 colour = middle[1]
             colours[team] = tuple(int(round(value)) for value in colour)
-        return colours
+        return appearance.told_apart(colours)
 
     def teams_of_tracks(self) -> dict:
         """{track ID: team (0 or 1)} for the tracks whose team is known."""
@@ -355,6 +382,7 @@ class TeamTracker(BYTETracker):
         for detection, kit, overlap, confidence in zip(detections, kits, overlaps, results.conf):
             shirt = None if kit is None else kit[:3]
             detection.clear = bool(overlap < CLEAR_OVERLAP)
+            detection.alone = bool(overlap < SAMPLE_OVERLAP)
             detection.shirt_team = self._team_of(shirt)
             detection.off_colours = self._off_team_colours(shirt)
             if (
@@ -377,13 +405,28 @@ class TeamTracker(BYTETracker):
                 np.array([track.xyxy for track in tracks], dtype=np.float64),
                 np.array([detection.xyxy for detection in detections], dtype=np.float64),
             )
-        for row, track in enumerate(tracks):
-            team = getattr(track, "team", None)
-            if team is None:
+        if not len(tracks) or not len(detections):
+            return distances
+        # Here and not at the top: the tests load this module without Ultralytics
+        from ultralytics.trackers.basetrack import TrackState
+        from ultralytics.trackers.utils import matching
+
+        teams = [getattr(track, "team", None) for track in tracks]
+        overlaps = 1.0 - matching.iou_distance(tracks, detections)
+        for column, detection in enumerate(detections):
+            shirt = getattr(detection, "shirt_team", None)
+            if shirt is None or not getattr(detection, "clear", False):
                 continue
-            for column, detection in enumerate(detections):
-                other = getattr(detection, "shirt_team", None)
-                if getattr(detection, "clear", False) and other is not None and other != team:
+            for row, track in enumerate(tracks):
+                if teams[row] is None or teams[row] == shirt:
+                    continue
+                its_own_player = (
+                    track.state == TrackState.Tracked
+                    and getattr(track, "alone_for", 0) >= ALONE_FRAMES
+                    and detection.alone
+                    and overlaps[row, column] >= SAME_BOX_OVERLAP
+                )
+                if not its_own_player:
                     distances[row, column] = 1.0  # Never matched
         return distances
 

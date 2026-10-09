@@ -190,6 +190,16 @@ class VideoPlayer:
         self._decode_ahead = self._decode_executor.submit(self.cap.read)
         return frame
 
+    def peek_next_frame(self) -> Optional[np.ndarray]:
+        """The frame `get_next_frame` will return, without taking it: for work that can
+        be begun on it ahead. Waits for it to be decoded. None at the end of the video
+        or if nothing is being decoded ahead."""
+        pending = self._decode_ahead
+        if pending is None:
+            return None
+        ret, frame = pending.result()
+        return frame if ret else None
+
     def seek_to_frame(self, frame_idx: int) -> bool:
         """Seek to a specific frame in the video.
 

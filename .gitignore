@@ -286,3 +286,10 @@ secrets.json
 .ruff_cache/
 *.prof
 bandit-report.json
+
+# Kept on this machine only: how the app works inside and how well
+docs/MEASUREMENTS.md
+docs/DEVELOPMENT_GUIDELINES.md
+docs/DATA.md
+docs/REVIEW_*.md
+CLAUDE.local.md

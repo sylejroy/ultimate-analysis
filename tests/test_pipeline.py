@@ -60,7 +60,10 @@ class PipelineTests(unittest.TestCase):
 
         # No network in the tests: nobody is known by their looks
         looks = patch.object(self.module, "PlayerLooks")
-        looks.start().return_value.update.return_value = {}
+        stage = looks.start().return_value
+        stage.update.return_value, stage.returned.return_value = {}, []
+        stage.teams.return_value, stage.swapped.return_value = {}, []
+        stage.swap.return_value = None
         self.addCleanup(looks.stop)
 
         # Drawing functions hand back the frame they were given
@@ -84,6 +87,22 @@ class PipelineTests(unittest.TestCase):
         self.mocks["get_track_histories"].return_value = {}
         self.mocks["missing_players"].return_value = []
         self.mocks["get_best_jersey_number"].return_value = (None, 0.0)
+
+        # Each frame waits for the field unless a test says otherwise: what a test
+        # sees must not depend on how fast another thread is
+        self.beside_the_frames = False
+        setting = self.module.get_setting
+        patcher = patch.object(
+            self.module,
+            "get_setting",
+            lambda key, default=None: (
+                self.beside_the_frames
+                if key == "models.segmentation.in_background"
+                else setting(key, default)
+            ),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
         self.pipeline = self.module.AnalysisPipeline()
         self.options = self.module.PipelineOptions(top_down_view=False)
@@ -147,7 +166,7 @@ class PipelineTests(unittest.TestCase):
         health = sys.modules[self.module.health.__name__]
         self.pipeline.process(self.frame, 0, self.options)
 
-        def failing(frame):
+        def failing(frame, **_):
             health.report("Detection", "failed (RuntimeError); see the log")
             return []
 
@@ -172,6 +191,32 @@ class PipelineTests(unittest.TestCase):
         self.mocks["run_field_segmentation"].return_value = [object()]
         self.pipeline.process(self.frame, 5, self.options)
         self.assertEqual(self.mocks["create_unified_field_mask"].call_count, 2)
+
+    def test_field_found_beside_the_frames_is_taken_in_a_frame_later(self):
+        self.beside_the_frames = True
+        seen = [object()]
+        with (
+            patch.object(self.module, "prepare_for_segmentation", return_value=self.frame),
+            patch.object(self.module, "segment_prepared", return_value=seen) as model,
+        ):
+            first = self.pipeline.process(self.frame, 0, self.options)
+            self.pipeline._field_job["work"].result()
+            # Begun in the first frame, there in the second, and not begun again at once
+            self.assertEqual(first.frame_index, 0)
+            self.assertEqual(self.pipeline.field_results, [])
+            self.pipeline.process(self.frame, 1, self.options)
+            self.assertIs(self.pipeline.field_results, seen)
+            self.assertIsNotNone(self.pipeline._geometry.mask)
+            for index in range(2, 5):
+                self.pipeline.process(self.frame, index, self.options)
+            self.assertEqual(model.call_count, 1)
+            self.pipeline.process(self.frame, 5, self.options)
+            self.pipeline._field_job["work"].result()
+            self.assertEqual(model.call_count, 2)
+            # After a seek, what was found is of the view before
+            self.pipeline.reset()
+            self.assertIsNone(self.pipeline._field_job)
+            self.assertEqual(self.pipeline._field_seen, [])
 
     def test_video_and_reader_resets_discard_player_crop_snapshots(self):
         for reset in (self.pipeline.reset, self.pipeline.reset_player_ids):

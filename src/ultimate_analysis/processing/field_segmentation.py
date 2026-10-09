@@ -5,7 +5,7 @@ identifying important field features like end zones and sidelines.
 """
 
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import Any, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -14,6 +14,7 @@ from ..config.settings import get_setting
 from ..utils.logger import get_logger
 from ..utils.model_files import default_model_path, get_training_image_size
 from . import health
+from .model_lock import GPU_SETUP_LOCK
 from .tensorrt_engines import get_engine
 
 logger = get_logger("FIELD_SEG")
@@ -98,6 +99,21 @@ def run_field_segmentation(frame: np.ndarray, frame_index: int = 0) -> List[Any]
             # Empty results are also valid; do not re-run an empty scene every frame.
             return _last_segmentation_results
 
+    prepared = prepare_for_segmentation(frame)
+    if prepared is None:
+        return []
+    results = segment_prepared(prepared)
+    # Cache results for frame interval optimization
+    _last_segmentation_results = results
+    _last_segmentation_frame = frame_index
+    _last_segmentation_shape = frame.shape
+    return results
+
+
+def prepare_for_segmentation(frame: np.ndarray) -> Optional[np.ndarray]:
+    """The frame as the field model takes it (a picture of its own, not the frame), or
+    None if there is no field model. With `segment_prepared`, the model can be run on
+    another thread while the frame is drawn on."""
     # Load default model if none is loaded (lazy loading optimization)
     if _field_model is None:
         logger.debug("Loading default model on first use (lazy loading)")
@@ -105,8 +121,14 @@ def run_field_segmentation(frame: np.ndarray, frame_index: int = 0) -> List[Any]
 
     if _field_model is None:
         logger.warning("No field segmentation model available")
-        return []
+        return None
+    imgsz = _model_imgsz if _model_imgsz else 640
+    prepared = _preprocess_frame_for_segmentation(frame, imgsz)
+    return prepared.copy() if prepared is frame else prepared
 
+
+def segment_prepared(preprocessed_frame: np.ndarray) -> List[Any]:
+    """Run the field model on a picture from `prepare_for_segmentation`."""
     try:
         # Get segmentation parameters from config
         confidence_threshold = get_setting("models.segmentation.confidence_threshold", 0.25)
@@ -115,8 +137,6 @@ def run_field_segmentation(frame: np.ndarray, frame_index: int = 0) -> List[Any]
         # Determine image size to use - prefer model's training size
         imgsz = _model_imgsz if _model_imgsz else 640
 
-        preprocessed_frame = _preprocess_frame_for_segmentation(frame, imgsz)
-
         # A TensorRT engine built for this model replaces the PyTorch model
         runtime_model, runtime_imgsz = _field_model, imgsz
         engine = get_engine(_field_model, preprocessed_frame.shape, imgsz, half=False)
@@ -124,24 +144,18 @@ def run_field_segmentation(frame: np.ndarray, frame_index: int = 0) -> List[Any]
             runtime_model, runtime_imgsz = engine
 
         # Run YOLO segmentation on square image
-        results = runtime_model.predict(
-            preprocessed_frame,
-            conf=confidence_threshold,
-            iou=iou_threshold,
-            imgsz=runtime_imgsz,
-            verbose=False,
-            save=False,
-            show=False,
-        )
+        with GPU_SETUP_LOCK.work():
+            results = runtime_model.predict(
+                preprocessed_frame,
+                conf=confidence_threshold,
+                iou=iou_threshold,
+                imgsz=runtime_imgsz,
+                verbose=False,
+                save=False,
+                show=False,
+            )
 
-        results = _masks_to_numpy(list(results))
-
-        # Cache results for frame interval optimization
-        _last_segmentation_results = results
-        _last_segmentation_frame = frame_index
-        _last_segmentation_shape = frame.shape
-
-        return results
+        return _masks_to_numpy(list(results))
 
     except Exception as e:
         logger.exception(f"Error during field segmentation: {e}")

@@ -224,23 +224,54 @@ class FieldFollower:
         player_feet: Optional[np.ndarray] = None,
     ) -> None:
         """Take in what the field model saw in the current frame."""
+        estimate = self.estimate(segmentation_results, frame_shape, outline_lines)
+        self.take(estimate, frame_shape, field_mask, player_feet)
+
+    def estimate(
+        self,
+        segmentation_results: List[Any],
+        frame_shape: Tuple[int, int],
+        outline_lines: Optional[Sequence[Line]] = None,
+    ) -> Optional[FieldEstimate]:
+        """Where the field lies by what the field model saw in a frame: the long part
+        of `update`, which may be done on another thread while frames go on. `take` then
+        takes it in."""
+        focal_length = self._focal  # Of this video, also if another is opened meanwhile
         lines = found_lines(segmentation_results, frame_shape, outline_lines)
         focal = self._known_focal
         if focal is None:
-            if self._focal.wants_one():
+            if focal_length.wants_one():
                 free = estimate_field(segmentation_results, frame_shape, self.template, lines=lines)
                 if free is not None and free.misfit <= GOOD_MISFIT_PIXELS:
-                    self._focal.add(free.focal)
-            focal = self._focal.value
-        estimate = estimate_field(
-            segmentation_results, frame_shape, self.template, focal, lines=lines
-        )
+                    focal_length.add(free.focal)
+            focal = focal_length.value
+        return estimate_field(segmentation_results, frame_shape, self.template, focal, lines=lines)
+
+    def take(
+        self,
+        estimate: Optional[FieldEstimate],
+        frame_shape: Tuple[int, int],
+        field_mask: Optional[np.ndarray] = None,
+        player_feet: Optional[np.ndarray] = None,
+        since: Optional[np.ndarray] = None,
+    ) -> None:
+        """Take in an estimate of where the field lies.
+
+        Args:
+            estimate: From `estimate`, or None if the frame showed too little
+            frame_shape: (height, width) of the frame
+            field_mask, player_feet: Of the frame the estimate is of, to check it by
+            since: How the camera has moved since that frame, if frames have gone by:
+                takes pixels of that frame to pixels of the present one
+        """
         if estimate is None:
             return
         self.left_out = implausible(estimate, self.template, field_mask, player_feet)
         if self.left_out:
             return
         estimated = estimate.image_to_field
+        if since is not None:
+            estimated = estimated @ np.linalg.inv(since)
         if self.image_to_field is None:
             self.image_to_field = estimated
             return
@@ -320,13 +351,20 @@ class OffFieldWatcher:
         if track_id in self._sightings:
             self._sightings[new_track_id] = self._sightings.pop(track_id)
 
-    def update(self, image_to_field: Optional[np.ndarray], tracks: Sequence[Any]) -> set:
+    def update(
+        self,
+        image_to_field: Optional[np.ndarray],
+        tracks: Sequence[Any],
+        hide_newcomers: bool = False,
+    ) -> set:
         """Take in the player tracks of a frame; returns the IDs of those off the field.
 
         Args:
             image_to_field: Where the field lies in this frame, or None if it is not
                 known: nothing is learned then, and what was learned holds
             tracks: The frame's tracks (track_id, class_name, to_ltrb())
+            hide_newcomers: Also those seen too few times to be judged, if every time
+                so far they were beside the field
         """
         players = [track for track in tracks if getattr(track, "class_name", None) == "player"]
         # A track that is gone for good is forgotten
@@ -359,7 +397,10 @@ class OffFieldWatcher:
         return {
             track_id
             for track_id, (seen, outside, _) in self._sightings.items()
-            if seen >= OFF_FIELD_MIN_SIGHTINGS and outside >= OFF_FIELD_SHARE * seen
+            if (seen >= OFF_FIELD_MIN_SIGHTINGS and outside >= OFF_FIELD_SHARE * seen)
+            # Not judged yet, and never seen on the field: whoever begins beside it is
+            # most likely standing there, and is shown once they step on
+            or (hide_newcomers and seen < OFF_FIELD_MIN_SIGHTINGS and outside >= seen > 0)
         }
 
 

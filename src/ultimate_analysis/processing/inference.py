@@ -4,7 +4,9 @@ This module handles running YOLO models for object detection on video frames.
 Detects players, discs, and other relevant objects in Ultimate Frisbee games.
 """
 
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -14,6 +16,7 @@ from ..config.settings import get_setting
 from ..utils.logger import get_logger
 from ..utils.model_files import default_model_path, get_training_image_size
 from . import health
+from .model_lock import GPU_SETUP_LOCK
 from .tensorrt_engines import get_engine
 
 logger = get_logger("INFERENCE")
@@ -50,15 +53,21 @@ _disc_frames_missing = 0
 _frames_since_full_search = 0
 
 
+# The detectors take one frame at a time: the pipeline has the next frame searched
+# while it works on this one, and a tab or a change of model may come in between
+_detector_lock = threading.RLock()
+
+
 def reset_inference_state() -> None:
     """Resume disc detection when the video or playback position changes."""
     global _frames_since_last_disc, _disc_position, _disc_velocity
     global _disc_frames_missing, _frames_since_full_search
-    _frames_since_last_disc = 0
-    _disc_position = None
-    _disc_velocity = (0.0, 0.0)
-    _disc_frames_missing = 0
-    _frames_since_full_search = 0
+    with _detector_lock:
+        _frames_since_last_disc = 0
+        _disc_position = None
+        _disc_velocity = (0.0, 0.0)
+        _disc_frames_missing = 0
+        _frames_since_full_search = 0
 
 
 def _disc_search_window(frame_shape: Tuple[int, ...]) -> Optional[Tuple[int, int, int, int]]:
@@ -159,7 +168,12 @@ _MODEL_ROLES = {
 
 
 def _run_single_model_inference(
-    frame: np.ndarray, model: Any, model_imgsz: Optional[int], config_prefix: str, target_class: str
+    frame: np.ndarray,
+    model: Any,
+    model_imgsz: Optional[int],
+    config_prefix: str,
+    target_class: str,
+    weak_players_from: float = 0.0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
     """Run inference on a single model and return normalized detections with detailed timing.
 
@@ -175,7 +189,7 @@ def _run_single_model_inference(
     """
     model_type = _MODEL_ROLES.get(target_class, (config_prefix, "disc_model"))[1]
     return _predict_detections(
-        frame, model, model_imgsz, {target_class: (config_prefix, model_type)}
+        frame, model, model_imgsz, {target_class: (config_prefix, model_type)}, weak_players_from
     )
 
 
@@ -184,6 +198,7 @@ def _predict_detections(
     model: Any,
     model_imgsz: Optional[int],
     roles: Dict[str, Tuple[str, str]],
+    weak_players_from: float = 0.0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
     """Run one model and return the detections of the requested classes.
 
@@ -192,6 +207,8 @@ def _predict_detections(
         model: Loaded YOLO model
         model_imgsz: Model's training image size
         roles: Class name -> (settings prefix for its thresholds, model type label)
+        weak_players_from: Also give players the model is at least this sure of but
+            less than its threshold, marked "weak": True (0: do not)
 
     Returns:
         Tuple of (List of detection dictionaries, timing_breakdown dict)
@@ -211,6 +228,11 @@ def _predict_detections(
             name: get_setting(f"{prefix}.confidence_threshold", 0.5)
             for name, (prefix, _) in roles.items()
         }
+        # Players the model is less sure of are given too, marked as weak, if asked for:
+        # the tracker can go on with one where a player is half covered
+        sure = dict(thresholds)
+        if weak_players_from and "player" in thresholds:
+            thresholds["player"] = min(thresholds["player"], weak_players_from)
         first_prefix = next(iter(roles.values()))[0]
         nms_threshold = get_setting(f"{first_prefix}.nms_threshold", 0.45)
 
@@ -238,16 +260,17 @@ def _predict_detections(
 
         # === INFERENCE PHASE ===
         inference_start = time.perf_counter()
-        results = runtime_model.predict(
-            frame,
-            conf=min(thresholds.values()),
-            iou=nms_threshold,
-            classes=class_ids or None,
-            verbose=False,
-            save=False,
-            show=False,
-            **runtime_kwargs,
-        )
+        with GPU_SETUP_LOCK.work():
+            results = runtime_model.predict(
+                frame,
+                conf=min(thresholds.values()),
+                iou=nms_threshold,
+                classes=class_ids or None,
+                verbose=False,
+                save=False,
+                show=False,
+                **runtime_kwargs,
+            )
         timing["inference"] = time.perf_counter() - inference_start
 
         # === POSTPROCESSING PHASE ===
@@ -286,6 +309,8 @@ def _predict_detections(
                             "model_type": roles[class_name][1],  # For visualization
                         }
                     )
+                    if conf < sure[class_name]:
+                        detections[-1]["weak"] = True
 
         timing["postprocessing"] = time.perf_counter() - postprocess_start
 
@@ -461,8 +486,33 @@ def set_disc_model(model_path: str) -> bool:
     return True
 
 
+_disc_thread: Optional[ThreadPoolExecutor] = None
+
+
+def _second_thread() -> ThreadPoolExecutor:
+    """The thread the disc model runs on while the player model runs on the caller's."""
+    global _disc_thread
+    if _disc_thread is None:
+        _disc_thread = ThreadPoolExecutor(max_workers=1, thread_name_prefix="disc-model")
+    return _disc_thread
+
+
 def run_inference(
-    frame: np.ndarray, return_timing: bool = False
+    frame: np.ndarray, return_timing: bool = False, weak_players_from: float = 0.0
+) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], Dict[str, float]]]:
+    """Find the players and the disc in a frame (see `_run_inference`), one frame at a
+    time whichever thread asks.
+
+    With `weak_players_from`, players the model gives at least that confidence but less
+    than its threshold are returned as well, with "weak": True. They are for the tracker
+    only: nothing else should take them for players.
+    """
+    with _detector_lock:
+        return _run_inference(frame, return_timing, float(weak_players_from))
+
+
+def _run_inference(
+    frame: np.ndarray, return_timing: bool = False, weak_players_from: float = 0.0
 ) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], Dict[str, float]]]:
     """Run YOLO inference on a video frame using the player and disc models.
 
@@ -537,17 +587,34 @@ def run_inference(
         % max(1, int(get_setting("models.disc_detection.retry_interval", 5)))
         != 0
     )
+    # The two models look at the same frame and know nothing of each other: the disc
+    # model is started on a second thread and its answer taken after the players'. Both
+    # spend their time in OpenCV and on the GPU, which let another thread run meanwhile.
+    disc_runs = not shared_model and _disc_model is not None and not skip_disc
+    disc_ahead = None
+    if (
+        disc_runs
+        and _player_model is not None
+        and get_setting("models.inference.side_by_side", True)
+    ):
+        disc_ahead = _second_thread().submit(_detect_disc, frame)
+
     # Run player detection
     if shared_model:
         all_detections, player_timing = _predict_detections(
-            frame, _player_model, _player_model_imgsz, dict(_MODEL_ROLES)
+            frame, _player_model, _player_model_imgsz, dict(_MODEL_ROLES), weak_players_from
         )
         disc_count = sum(1 for det in all_detections if det["class_name"] == "disc")
         player_count = len(all_detections) - disc_count
     elif _player_model is not None:
         logger.debug("┌─ Running player model inference...")
         player_detections, player_timing = _run_single_model_inference(
-            frame, _player_model, _player_model_imgsz, "models.player_detection", "player"
+            frame,
+            _player_model,
+            _player_model_imgsz,
+            "models.player_detection",
+            "player",
+            weak_players_from,
         )
         player_count = len(player_detections)
         all_detections.extend(player_detections)
@@ -558,7 +625,9 @@ def run_inference(
         disc_timing = {"preprocessing": 0.0, "inference": 0.0, "postprocessing": 0.0, "total": 0.0}
     elif _disc_model is not None and not skip_disc:
         logger.debug("┌─ Running disc model inference...")
-        disc_detections, disc_timing = _detect_disc(frame)
+        disc_detections, disc_timing = (
+            disc_ahead.result() if disc_ahead is not None else _detect_disc(frame)
+        )
         disc_count = len(disc_detections)
         all_detections.extend(disc_detections)
 

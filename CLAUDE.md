@@ -3,10 +3,8 @@
 PyQt5 desktop app that analyses Ultimate Frisbee video: player and disc detection (YOLO),
 tracking (DeepSORT), possession, jersey numbers, field segmentation, and a top-down view.
 
-Layout, code style, and how a frame flows through the app are in
-`docs/DEVELOPMENT_GUIDELINES.md`. The README has the pipeline overview;
-`docs/MEASUREMENTS.md` has the measured accuracy and speed of every model. Read those instead of guessing; this file only holds
-what they do not say.
+The README says what the app does and how to run it. Keep checked-in documents short:
+what the app does and how to use it, not how it works inside.
 
 ## Environment
 
@@ -39,26 +37,3 @@ what they do not say.
   progress printed per epoch.
 - Commit only when asked.
 - Source files use Windows line endings (CRLF); keep them.
-
-## Things that are easy to get wrong
-
-- The Roboflow dataset exports are 16:9 frames stretched to a square. Detection datasets
-  are converted back to 16:9 (`scripts/build_merged_detection_dataset.py`). The field
-  segmentation model is trained on the stretched images, so the app stretches frames the
-  same way before segmenting; padding instead costs outline accuracy.
-- A model runs at the image size it was trained at, read from the `args.yaml` of its run.
-- TensorRT engines sit next to the weights and are tied to the model, frame size, GPU, and
-  driver. A new or retrained model needs `scripts/export_tensorrt.py`, otherwise it runs
-  in PyTorch, about three times slower.
-- Tracking, possession, and jersey numbers build on earlier frames. Feed the pipeline
-  frames in order and reset it after a seek.
-- Qt's offscreen mode (`QT_QPA_PLATFORM=offscreen`) is fine for tests but renders no text;
-  screenshots need a real window.
-- Timings measured while a training run uses the GPU are meaningless.
-
-## Measuring
-
-Change a model, a threshold, or preprocessing only with a before and after number from
-the benchmark scripts listed under "Testing" in `docs/DEVELOPMENT_GUIDELINES.md`. The
-validation and test sets are small (98 discs, 48 field images), so small differences are
-noise. Record results in the tables of `docs/MEASUREMENTS.md`.

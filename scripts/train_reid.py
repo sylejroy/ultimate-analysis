@@ -38,6 +38,7 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 os.chdir(REPO)
 
+import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 from benchmark_reid import load_index, picture_of, score, sharp_enough  # noqa: E402
@@ -66,10 +67,25 @@ def identity_of(row: dict) -> tuple:
 
 
 def augmented(
-    crop: np.ndarray, rng: random.Random, size: tuple = CROP_SIZE, keep_proportions: bool = False
+    crop: np.ndarray,
+    rng: random.Random,
+    size: tuple = CROP_SIZE,
+    keep_proportions: bool = False,
+    downsample_to: tuple = (),
 ) -> np.ndarray:
     """A crop as the network sees it in training: cut, mirrored, lit and covered a little
-    differently each time. The colours are left as they are: they are what tells."""
+    differently each time. The colours are left as they are: they are what tells.
+
+    With `downsample_to` (low, high), the crop is first shrunk to a random height in that
+    range (pixels) and brought back: a far player is seen through fewer pixels than a
+    near one, and the two should give the same vector all the same.
+    """
+    if downsample_to and rng.random() < 0.7:
+        height = rng.randint(int(downsample_to[0]), int(downsample_to[1]))
+        if height < crop.shape[0]:
+            width = max(4, round(crop.shape[1] * height / crop.shape[0]))
+            small = cv2.resize(crop, (width, height), interpolation=cv2.INTER_AREA)
+            crop = cv2.resize(small, (crop.shape[1], crop.shape[0]), interpolation=cv2.INTER_LINEAR)
     height, width = crop.shape[:2]
     cut_x, cut_y = int(0.1 * width), int(0.08 * height)
     left, top = rng.randint(0, cut_x), rng.randint(0, cut_y)
@@ -124,6 +140,14 @@ def main() -> None:
         type=float,
         default=0.0,
         help="Share of each track's crops, the most blurred, that is not used",
+    )
+    parser.add_argument(
+        "--downsample-to",
+        type=int,
+        nargs=2,
+        default=[],
+        metavar=("LOW", "HIGH"),
+        help="Shrink crops to a random height in this range (pixels) and back while training",
     )
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--steps", type=int, default=150, help="Steps per epoch")
@@ -192,6 +216,7 @@ def main() -> None:
     name += f"_{args.size[0]}x{args.size[1]}" if tuple(args.size) != CROP_SIZE else ""
     name += "_proportions" if args.keep_proportions else ""
     name += f"_sharp{round(100 * (1 - args.skip_blurred))}" if args.skip_blurred else ""
+    name += f"_down{args.downsample_to[0]}to{args.downsample_to[1]}" if args.downsample_to else ""
     output = (
         REPO / "data" / "models" / "reid" / f"{time.strftime('%Y%m%d')}_reid_{name}_{args.dataset}"
     )
@@ -219,6 +244,7 @@ def main() -> None:
                             rng,
                             tuple(args.size),
                             args.keep_proportions,
+                            tuple(args.downsample_to),
                         )
                     )
                     who.append(number_of[player])

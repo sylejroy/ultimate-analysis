@@ -123,12 +123,21 @@ class TeamTrackerTests(unittest.TestCase):
 
     def test_a_track_is_not_continued_by_a_player_of_the_other_team(self):
         ids = self.learn_the_teams()
-        # The white player at 300 vanishes and a dark one stands exactly there instead:
-        # by motion alone the track would simply carry on
+        # A dark player comes to stand beside the white one at 300, who then vanishes
+        # behind them: by motion alone the white track could carry on with the dark box
+        for place in range(500, 360, -10):
+            self.see((100, WHITE), (300, WHITE), (place, DARK), (700, DARK))
+        for _ in range(5):
+            now = self.see((100, WHITE), (330, DARK), (700, DARK))
+        self.assertEqual(now, {0: ids[0], 1: ids[2], 2: ids[3]})
+
+    def test_a_player_whose_shirt_reads_as_the_other_teams_keeps_the_track(self):
+        ids = self.learn_the_teams()
+        # The white player at 300 looks dark for a moment (in shadow, say). No dark
+        # player is anywhere near: it is them, and a track ended here would be a break
         for _ in range(5):
             now = self.see((100, WHITE), (300, DARK), (500, DARK), (700, DARK))
-        self.assertNotEqual(now.get(1), ids[1])
-        self.assertEqual(now[0], ids[0])
+        self.assertEqual(now, ids)
 
     def test_a_player_in_their_own_colours_keeps_the_track(self):
         ids = self.learn_the_teams()

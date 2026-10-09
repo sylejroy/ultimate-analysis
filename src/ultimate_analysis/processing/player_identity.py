@@ -23,7 +23,7 @@ to keep the two teams' equal numbers apart.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
@@ -31,6 +31,10 @@ from scipy.optimize import linear_sum_assignment
 from ..config.settings import get_setting
 
 NO_MATCH = 1e6
+# A new track is on the spot of a lost player if it begins this soon after (seconds) and
+# this near to where they stood or were expected (body heights)
+ON_THE_SPOT_SECONDS = 0.5
+ON_THE_SPOT_HEIGHTS = 0.5
 
 
 @dataclass
@@ -104,7 +108,7 @@ class PlayerIdentities:
         present = {self._player_of_track[obs.track_id] for obs in known}
 
         if new:
-            matches = self._match(time_s, new, present, new_track_age_s)
+            matches = self._match(time_s, new, present, new_track_age_s, known)
             for observation, player_id in matches.items():
                 # The track that had this player until now did not find them again
                 for track_id in [t for t, p in self._player_of_track.items() if p == player_id]:
@@ -127,7 +131,12 @@ class PlayerIdentities:
         return {obs.track_id: self._player_of_track[obs.track_id] for obs in observations}
 
     def _match(
-        self, time_s: float, new: List[Observation], present: set, new_track_age_s: float
+        self,
+        time_s: float,
+        new: List[Observation],
+        present: set,
+        new_track_age_s: float,
+        known: Sequence[Observation] = (),
     ) -> Dict[int, int]:
         """Index of a new observation -> missing player it clearly is."""
         longest_gap = self._setting("position_match_seconds", 0.0)
@@ -148,25 +157,60 @@ class PlayerIdentities:
         # Cost of a match: how far the new track is from where the player was expected,
         # as a share of how far from there they can have got
         cost = np.full((len(candidates), len(missing)), NO_MATCH)
+        # ... and the same for those in reach whom only their colours keep apart
+        by_place = np.full((len(candidates), len(missing)), NO_MATCH)
+        on_the_spot = np.zeros((len(candidates), len(missing)), dtype=bool)
         for row, index in enumerate(candidates):
             observation = new[index]
             for column, player_id in enumerate(missing):
                 profile = self._profiles[player_id]
                 expected, reach = self._reachable(profile, time_s - profile.last_seen)
-                off = np.hypot(
-                    observation.position[0] - expected[0], observation.position[1] - expected[1]
+                # From where they were going to, or from where they last stood: the
+                # course of a player about to be covered is told from boxes that have
+                # begun to jump about, and may point anywhere
+                off = min(
+                    np.hypot(observation.position[0] - place[0], observation.position[1] - place[1])
+                    for place in (expected, profile.position)
+                )
+                if off > reach:
+                    continue
+                by_place[row, column] = off / reach
+                on_the_spot[row, column] = (
+                    time_s - profile.last_seen <= ON_THE_SPOT_SECONDS
+                    and off <= ON_THE_SPOT_HEIGHTS * max(profile.height, 1.0)
+                    # ... and nobody who is being followed stands there: beside a player
+                    # who covers the lost one, the new track may be anybody
+                    and not any(
+                        np.hypot(
+                            other.position[0] - profile.position[0],
+                            other.position[1] - profile.position[1],
+                        )
+                        < max(profile.height, 1.0)
+                        for other in known
+                    )
                 )
                 # A player of the other team is nobody's return, however near and
                 # however alike the kits look in this light
                 other_team = None not in (profile.team, observation.team) and (
                     profile.team != observation.team
                 )
-                if (
-                    off <= reach
-                    and not other_team
-                    and not self._other_kit(profile, observation, kit_limit)
-                ):
+                if not other_team and not self._other_kit(profile, observation, kit_limit):
                     cost[row, column] = off / reach
+
+        # Colours are told wrongly at times, of a new track more than of any: its team is
+        # what a few frames lean to, its kit one look. A new track right where a player
+        # was lost a moment ago, with no other lost player in reach of it and no other new track in
+        # reach of that player, is that player whatever its colours say: there is nobody
+        # else it could be.
+        within = by_place < NO_MATCH
+        for row, column in zip(*np.nonzero(within)):
+            if (
+                cost[row, column] >= NO_MATCH
+                and on_the_spot[row, column]
+                and within[row].sum() == 1
+                and within[:, column].sum() == 1
+            ):
+                cost[row, column] = by_place[row, column]
 
         matches = {}
         rows, columns = linear_sum_assignment(cost)
@@ -266,6 +310,17 @@ class PlayerIdentities:
             ahead = move(x + profile.velocity[0], y + profile.velocity[1])
             profile.position = move(x, y)
             profile.velocity = (ahead[0] - profile.position[0], ahead[1] - profile.position[1])
+
+    def player_of(self, track_id: int) -> Optional[int]:
+        """The player a track of the tracker is, if it has been given one."""
+        return self._player_of_track.get(track_id)
+
+    def forget_course(self, player_id: int) -> None:
+        """A player turned out to be somewhere else than they were followed to: where
+        they were going is not known."""
+        if player_id in self._profiles:
+            self._profiles[player_id].velocity = (0.0, 0.0)
+            self._profiles[player_id].height = 0.0
 
     def knows_track(self, track_id: int) -> bool:
         """Whether a track has been given a player's identity already."""

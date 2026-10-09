@@ -60,8 +60,9 @@ class CameraMotionEstimator:
             texture). Positions carried over from earlier frames are then unrelated.
         """
         frame_h, frame_w = frame.shape[:2]
-        gray = cv2.cvtColor(
-            cv2.resize(frame, WORK_SIZE, interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY
+        # Grey first: a third of the numbers to shrink
+        gray = cv2.resize(
+            cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), WORK_SIZE, interpolation=cv2.INTER_AREA
         )
         mask = self._background_mask(player_boxes, frame_w, frame_h)
         previous, previous_mask = self._previous, self._previous_mask

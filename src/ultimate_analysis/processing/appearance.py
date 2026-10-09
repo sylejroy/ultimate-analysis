@@ -67,3 +67,52 @@ def shirt_colour(frame: np.ndarray, box: Sequence[float]) -> Optional[np.ndarray
         return None
     small = cv2.resize(frame[y1:y2, x1:x2], SIGNATURE_SIZE, interpolation=cv2.INTER_AREA)
     return np.median(small[SHIRT_ROWS, MIDDLE_COLUMNS].reshape(-1, 3).astype(np.float64), axis=0)
+
+
+# A shirt with less colour than this (distance from grey in Lab, where 128 is none) is
+# white, grey or black, and what tint it has comes from the light: the sky, the grass.
+# Of the shirts of ten games, the white, grey and black ones measured up to 17, the
+# coloured ones (blue, red, orange) from 21. Below this a tint must not be made much of:
+# shown vivid, a white team was lime green and a black one yellow or pink.
+COLOURLESS_CHROMA = 20.0
+# A shirt without colour is a light one from this lightness (Lab, 0 to 255), a dark one below
+LIGHT_FROM = 110.0
+
+
+def shirt_kind(colour: Sequence[float]) -> str:
+    """Whether a shirt colour (BGR) is "light", "dark" or "coloured"."""
+    pixel = np.clip(np.asarray(colour, dtype=np.float64), 0, 255).astype(np.uint8)
+    lightness, a, b = (
+        float(v) for v in cv2.cvtColor(pixel.reshape(1, 1, 3), cv2.COLOR_BGR2LAB)[0, 0]
+    )
+    if np.hypot(a - 128.0, b - 128.0) >= COLOURLESS_CHROMA:
+        return "coloured"
+    return "light" if lightness >= LIGHT_FROM else "dark"
+
+
+def told_apart(colours: dict) -> dict:
+    """Two teams' shirt colours {0: BGR, 1: BGR} such that they are not shown alike: two
+    teams without colour, both light or both dark (white against grey, say), are given
+    as white and black, the lighter and the darker."""
+    if len(colours) != 2:
+        return colours
+    kinds = [shirt_kind(colours[team]) for team in (0, 1)]
+    if kinds[0] == kinds[1] != "coloured":
+        lighter = int(sum(colours[1]) > sum(colours[0]))
+        colours = dict(colours)
+        colours[lighter], colours[1 - lighter] = (235, 235, 235), (45, 45, 45)
+    return colours
+
+
+def box_overlaps(boxes: np.ndarray) -> np.ndarray:
+    """IoU of every box (x1, y1, x2, y2) with every other: (N, N), zero on the diagonal."""
+    boxes = np.asarray(boxes, dtype=np.float64).reshape(-1, 4)
+    x1 = np.maximum(boxes[:, None, 0], boxes[None, :, 0])
+    y1 = np.maximum(boxes[:, None, 1], boxes[None, :, 1])
+    x2 = np.minimum(boxes[:, None, 2], boxes[None, :, 2])
+    y2 = np.minimum(boxes[:, None, 3], boxes[None, :, 3])
+    shared = np.clip(x2 - x1, 0, None) * np.clip(y2 - y1, 0, None)
+    area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+    overlap = shared / (area[:, None] + area[None, :] - shared + 1e-9)
+    np.fill_diagonal(overlap, 0.0)
+    return overlap

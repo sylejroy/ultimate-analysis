@@ -281,7 +281,12 @@ def _run_bytetrack_tracking(frame: np.ndarray, detections: List[Dict[str, Any]])
     """Track players within their teams, and discs, by the motion of their boxes."""
     global _player_tracker, _disc_tracker
     if _player_tracker is None or _disc_tracker is None:
-        _player_tracker = TeamTracker(tracker_settings(_max_age_frames()))
+        # With weak detections coming in, only those the detector is sure of begin a track
+        weak_from = float(get_setting("models.tracking.weak_detections_from", 0.0))
+        sure_from = float(get_setting("models.player_detection.confidence_threshold", 0.5))
+        _player_tracker = TeamTracker(
+            tracker_settings(_max_age_frames(), sure_from if weak_from > 0 else 0.25)
+        )
         _disc_tracker = BYTETracker(tracker_settings(_max_age_frames()))
 
     tracks = []
@@ -332,6 +337,29 @@ def _run_bytetrack_tracking(frame: np.ndarray, detections: List[Dict[str, Any]])
 def team_shirt_colours() -> Dict[int, Tuple[int, int, int]]:
     """{team (0 or 1): its average shirt colour (BGR)}; empty until the teams are known."""
     return _player_tracker.shirt_colours() if _player_tracker is not None else {}
+
+
+def swap_players(first: int, second: int) -> bool:
+    """Exchange the players of two tracks: the tracker went on with the wrong one of two
+    players who crossed. Returns whether it was done (both are still followed)."""
+    if _player_tracker is None:
+        return False
+    track_of = {}
+    for track in _player_tracker.tracked_stracks + _player_tracker.lost_stracks:
+        player = _identities.player_of(int(track.track_id))
+        if player in (first, second):
+            track_of[player] = track
+    if len(track_of) != 2:
+        return False
+    track_of[first].exchange_player(track_of[second])
+    for player in (first, second):
+        _identities.forget_course(player)
+    return True
+
+
+def set_team_of_player(player_id: int, team: int) -> None:
+    """Say which team a player is in, by other knowledge than their shirt colour."""
+    _player_teams[player_id] = team
 
 
 def team_of_player(player_id: int) -> Optional[int]:
@@ -740,18 +768,26 @@ def _move_track_states(camera_motion: np.ndarray) -> None:
         ]
     else:
         states = [] if _deepsort_tracker is None else list(_deepsort_tracker.tracker.tracks)
-    for track in states:
-        x, y = float(track.mean[0]), float(track.mean[1])
-        moved = camera_motion @ np.array([x, y, 1.0])
-        if abs(moved[2]) < 1e-9:
+    if not states:
+        return
+    # All tracks at once: each centre, and a step to its right and one below it, which
+    # say how the picture stretches and turns around it
+    centres = np.array([[track.mean[0], track.mean[1]] for track in states], dtype=np.float64)
+    points = np.concatenate([centres, centres + [1.0, 0.0], centres + [0.0, 1.0]])
+    mapped = points @ camera_motion[:, :2].T + camera_motion[:, 2]
+    count = len(states)
+    depth = mapped[:, 2].reshape(3, count)
+    usable = np.abs(depth[0]) >= 1e-9
+    with np.errstate(divide="ignore", invalid="ignore"):
+        moved = (mapped[:, :2] / mapped[:, 2:3]).reshape(3, count, 2)
+    for index, track in enumerate(states):
+        if not usable[index]:
             continue
-        new_x, new_y = moved[0] / moved[2], moved[1] / moved[2]
-        # How the picture stretches and turns around this point
-        step = np.array([[x + 1.0, y, 1.0], [x, y + 1.0, 1.0]]) @ camera_motion.T
-        local = (step[:, :2] / step[:, 2:3] - [new_x, new_y]).T
-        scale = float(np.sqrt(abs(np.linalg.det(local))))
+        new = moved[0, index]
+        local = (moved[1:, index] - new).T
+        scale = float(np.sqrt(abs(local[0, 0] * local[1, 1] - local[0, 1] * local[1, 0])))
 
-        track.mean[0], track.mean[1] = new_x, new_y
+        track.mean[0], track.mean[1] = new
         track.mean[3] *= scale
         track.mean[4:6] = local @ track.mean[4:6]
         track.mean[7] *= scale

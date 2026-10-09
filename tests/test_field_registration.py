@@ -243,6 +243,14 @@ class FieldEstimateTest(unittest.TestCase):
         for frame in range(60):
             off = again.update(-mapping, [player(1, middle, 30), player(2, -5, 30)])
         self.assertEqual(off, {2})
+
+        # Asked to, it leaves out a newcomer who has only been seen beside the field,
+        # until they step on; one who begins on the field is shown from the first frame
+        strict = OffFieldWatcher(self.template)
+        off = strict.update(mapping, [player(1, middle, 30), player(2, -8, 30)], True)
+        self.assertEqual(off, {2})
+        self.assertEqual(strict.update(mapping, [player(2, middle, 30)], True), set())
+        self.assertEqual(OffFieldWatcher(self.template).update(mapping, [player(2, -8, 30)]), set())
         # Without knowing where the field is, what was learned holds
         self.assertEqual(watcher.update(None, [player(2, middle, 30)]), {2})
         # Coming on to play, a track is on the field again after a while
