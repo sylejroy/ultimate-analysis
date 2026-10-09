@@ -7,9 +7,11 @@ import cv2
 import numpy as np
 
 from ultimate_analysis.processing.field_registration import (
+    FieldEstimate,
     FieldFollower,
     estimate_field,
     field_to_canvas,
+    implausible,
 )
 from ultimate_analysis.utils.field_camera import (
     camera_mapping,
@@ -172,6 +174,81 @@ class FieldEstimateTest(unittest.TestCase):
         np.testing.assert_allclose(after[:2] / after[2], before[:2] / before[2], atol=1e-6)
         follower.reset()
         self.assertIsNone(follower.image_to_field)
+
+    def as_estimate(self, mapping: np.ndarray) -> FieldEstimate:
+        return FieldEstimate(mapping, np.linalg.inv(mapping), {}, 0.0, FOCAL, np.array(POSITION))
+
+    def test_an_estimate_that_puts_the_players_off_the_field_cannot_be_right(self):
+        places = [(x, y) for x in (8.0, 20.0, 32.0) for y in (60.0, 75.0, 95.0)]
+        feet = np.array([pixel_of(self.mapping, place) for place in places])
+        mask = np.asarray(self.results[0].masks.data).max(axis=0)
+        mask = cv2.resize(mask, SIZE, interpolation=cv2.INTER_NEAREST).astype(np.uint8)
+        self.assertEqual(implausible(self.as_estimate(self.mapping), self.template, mask, feet), "")
+
+        # The same view taken for a field 45 yards to the side
+        aside = self.mapping @ np.array([[1.0, 0.0, 45.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        self.assertIn("players", implausible(self.as_estimate(aside), self.template, None, feet))
+        self.assertIn("field model", implausible(self.as_estimate(aside), self.template, mask))
+
+    def test_one_estimate_far_from_the_followed_field_is_not_taken_two_are(self):
+        follower = FieldFollower(self.template)
+        follower.new_video(FOCAL)
+        follower.update(self.results, self.shape)
+        first = follower.image_to_field.copy()
+
+        elsewhere = camera_mapping(FOCAL, looking_down_the_field(), (18.0, 5.0, 9.0), SIZE)
+        other = masks_as_the_field_model_gives_them(self.template, elsewhere)
+        follower.update(other, self.shape)
+        np.testing.assert_allclose(follower.image_to_field, first)
+        self.assertIn("waiting", follower.left_out)
+
+        follower.update(other, self.shape)
+        self.assertGreater(np.abs(follower.image_to_field - first).max(), 1e-6)
+        self.assertEqual(follower.left_out, "")
+
+        # A lone outlier between two estimates that agree with the followed field is forgotten
+        follower.update(self.results, self.shape)
+        self.assertIn("waiting", follower.left_out)
+
+    def test_someone_standing_beside_the_field_is_told_from_one_who_steps_out(self):
+        from types import SimpleNamespace
+
+        from ultimate_analysis.processing.field_registration import OffFieldWatcher
+
+        watcher = OffFieldWatcher(self.template)
+        mapping = np.eye(3)  # A pixel is a field unit: feet at (x, y) stand at (x, y)
+
+        def player(track_id, x, y):
+            return SimpleNamespace(
+                track_id=track_id, class_name="player", to_ltrb=lambda: [x - 1, y - 4, x + 1, y]
+            )
+
+        middle = self.template.width / 2
+        for frame in range(60):
+            # 1 on the field, 2 five units beside it, 3 on the field and out for a moment,
+            # 4 a unit over the line: within the margin
+            steps_out = -5.0 if 30 <= frame < 40 else 5.0
+            off = watcher.update(
+                mapping,
+                [
+                    player(1, middle, 30),
+                    player(2, -5, 30),
+                    player(3, steps_out, 50),
+                    player(4, -1, 60),
+                ],
+            )
+        self.assertEqual(off, {2})
+        # A mapping says the same whatever its sign
+        again = OffFieldWatcher(self.template)
+        for frame in range(60):
+            off = again.update(-mapping, [player(1, middle, 30), player(2, -5, 30)])
+        self.assertEqual(off, {2})
+        # Without knowing where the field is, what was learned holds
+        self.assertEqual(watcher.update(None, [player(2, middle, 30)]), {2})
+        # Coming on to play, a track is on the field again after a while
+        for frame in range(300):
+            off = watcher.update(mapping, [player(2, middle, 30)])
+        self.assertEqual(off, set())
 
     def test_canvas_shows_the_whole_field_with_the_far_end_on_top(self):
         on_canvas = field_to_canvas(self.template, (400, 1200))

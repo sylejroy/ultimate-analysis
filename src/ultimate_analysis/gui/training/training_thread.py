@@ -140,7 +140,7 @@ class ModelTrainingThread(QThread):
                     encoding="utf-8",
                     errors="replace",
                     cwd=os.getcwd(),
-                    env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+                    env={**os.environ, "PYTHONIOENCODING": "utf-8", "YOLO_AUTOINSTALL": "false"},
                 )
 
                 epoch_count = 0

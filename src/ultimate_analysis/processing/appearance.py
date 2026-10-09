@@ -48,3 +48,22 @@ def encode(frame: np.ndarray, boxes: Sequence[Sequence[float]]) -> List[Optional
         shorts = lab[SHORTS_ROWS, MIDDLE_COLUMNS].reshape(-1, 3).mean(axis=0)
         signatures.append(np.concatenate((shirt, shorts)))
     return signatures
+
+
+def shirt_colour(frame: np.ndarray, box: Sequence[float]) -> Optional[np.ndarray]:
+    """The colour of the shirt in a box (BGR): the middle value of what the shirt's part
+    of the box shows, for showing a team by its colour.
+
+    The mean of that part is dulled by what else is in it: grass beside a slim player,
+    the number, a sleeve. The middle value is the shirt as long as the shirt is most of
+    it, and it does not have to tell grass from a green shirt, which taking the grass
+    out by its colour had to and could not (a team in green was shown grey, or blue).
+    None for a box that is too small.
+    """
+    frame_h, frame_w = frame.shape[:2]
+    x1, y1 = max(0, int(box[0])), max(0, int(box[1]))
+    x2, y2 = min(frame_w, int(box[2])), min(frame_h, int(box[3]))
+    if x2 - x1 < MIN_BOX_SIZE[0] or y2 - y1 < MIN_BOX_SIZE[1]:
+        return None
+    small = cv2.resize(frame[y1:y2, x1:x2], SIGNATURE_SIZE, interpolation=cv2.INTER_AREA)
+    return np.median(small[SHIRT_ROWS, MIDDLE_COLUMNS].reshape(-1, 3).astype(np.float64), axis=0)

@@ -34,9 +34,6 @@ class FieldLabel:
     lines: Dict[str, List[Point]] = field(default_factory=dict)  # Name -> two pixels on the line
     points: Dict[str, Point] = field(default_factory=dict)  # Name -> the pixel of the mark
 
-    def is_empty(self) -> bool:
-        return not self.lines and not self.points
-
     def copy(self) -> "FieldLabel":
         return FieldLabel(
             {name: [tuple(pixel) for pixel in pixels] for name, pixels in self.lines.items()},
@@ -127,6 +124,26 @@ def write_splits(dataset_dir: Path) -> None:
     for split in SPLITS:
         lines = [f"./images/{name}.jpg" for name in names if split_of(name) == split]
         (dataset_dir / f"{split}.txt").write_text("\n".join(lines) + ("\n" if lines else ""))
+
+
+def video_focal(
+    dataset_dir: Path, video_path: str, template: field_template.FieldTemplate
+) -> Optional[float]:
+    """Focal length of a video's camera in pixels, as its labelled frames give it.
+
+    A drone that does not zoom keeps one focal length; the middle of what the labels of
+    the video give is taken. None if the video has no label that gives one.
+    """
+    from .field_camera import fit_camera
+
+    focals = []
+    for name in labelled_frames(dataset_dir, video_path):
+        label = load_label(dataset_dir, name)
+        stored = json.loads((Path(dataset_dir) / "labels" / f"{name}.json").read_text())
+        fit = fit_camera(template, {}, label.points, tuple(stored["image_size"]))
+        if fit is not None:
+            focals.append(fit.focal)
+    return float(np.median(focals)) if focals else None
 
 
 def summary(dataset_dir: Path) -> Dict[str, int]:

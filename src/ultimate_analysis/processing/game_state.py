@@ -1,297 +1,264 @@
-"""Game state: what is happening on the field (lined up, pull, live play, stoppage, ...).
+"""Which phase a game is in: between points, lined up, the pull, live play, a score.
 
-The state is derived from what the other stages see, all of which can be missing in any
-frame: where the tracked players stand, how they move, who holds the disc, and where the
-end zones are. Every decision therefore needs its evidence to hold for some time, and no
-evidence means the state stays as it is.
+A game of Ultimate goes round in a circle. Both teams line up on their goal lines; one
+pulls and runs down the field while the disc is in the air; the point is played until
+someone catches the disc in the end zone they attack; everyone walks back, and the teams
+line up again, the scorers where they scored. Each phase looks different from above:
 
-    UNKNOWN ──> LINED_UP ──> PULL ──> LIVE <──> STOPPAGE
-                   ^                    │
-                   └── BETWEEN_POINTS <─┘ (score, or the footage cuts to the next point)
+- lined up: nearly every player of one team stands at one end of the field and nearly
+  every player of the other at the other end
+- the pull: the line breaks: the disc is in the air, or players run out of their end
+- live: the teams are mixed over the field
+- a score: a player holds the disc in the end zone their team attacks (which end that
+  is, the line-up has said), or, where no line-up was seen, holds it in an end zone
+  while everybody slows down
+- between points: none of these; players walk
 
-- LINED_UP: at least one team stands side by side on its goal line.
-- PULL: the line breaks up and runs downfield.
-- LIVE: a receiver has the disc after the pull, or players are spread out and moving.
-- STOPPAGE: play was live and now nearly everybody stands still (foul, pick, timeout).
-- BETWEEN_POINTS: a catch in an end zone after which the players stop, or a cut.
+What is seen is rough (places on the field are off by yards, the disc is found in half
+the frames, a player's team is not always known), so every change of phase must be seen
+for a while before it is taken, and the order of the circle counts: a score comes out of
+live play, a pull out of a line-up.
 
-Positions are in image pixels. Speeds are measured relative to the other players, which
-removes camera pans, and in player heights per second, which makes near and far players
-comparable.
+The state follows from what the pipeline already works out per frame; nothing here looks
+at a picture.
 """
 
 from collections import deque
-from enum import Enum
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Deque, Dict, List, Optional, Sequence, Tuple
 
-import cv2
 import numpy as np
 
-from ..config.settings import get_setting
+UNKNOWN, BETWEEN_POINTS, LINED_UP, PULL, LIVE, SCORE = (
+    "unknown",
+    "between points",
+    "lined up",
+    "pull",
+    "live",
+    "score",
+)
+STATES = (UNKNOWN, BETWEEN_POINTS, LINED_UP, PULL, LIVE, SCORE)
 
-SPEED_WINDOW_S = 0.5  # Player speed is measured over this time
-MIN_SPEED_HISTORY_S = 0.25
-CUT_THUMBNAIL = (64, 36)
-HOLD_GRACE_S = 0.4
-
-
-class GameState(str, Enum):
-    UNKNOWN = "Unknown"
-    BETWEEN_POINTS = "Between points"
-    LINED_UP = "Lined up"
-    PULL = "Pull"
-    LIVE = "Live play"
-    STOPPAGE = "Stoppage"
-
-
-def _setting(name: str, default: float) -> float:
-    return float(get_setting(f"models.game_state.{name}", default))
-
-
-Player = Tuple[float, float, float]  # foot x, foot y, height in image pixels
-
-
-def _largest_row(players: List[Player]) -> List[Player]:
-    """The largest group of players standing side by side.
-
-    Seen from behind or in front, that is a row of players of similar size with their feet
-    at the same image height, spread out sideways.
-    """
-    best: List[Player] = []
-    for _, anchor_y, anchor_height in players:
-        row = [
-            player
-            for player in players
-            if abs(player[1] - anchor_y) < 0.4 * anchor_height
-            and 0.65 * anchor_height < player[2] < 1.5 * anchor_height
-        ]
-        xs = [player[0] for player in row]
-        # Side by side, not bunched together
-        if len(row) > len(best) and max(xs) - min(xs) >= len(row) * 0.5 * anchor_height:
-            best = row
-    return best
+# A team is at an end of the field if this many of its players, and this share of them,
+# stand no further than this beyond the goal line (field units; places are rough)
+MIN_PLAYERS_AT_AN_END = 4
+SHARE_AT_AN_END = 0.7
+LINE_REACH = 8.0
+# Seconds something must be seen for before the state changes on it
+LINE_UP_SECONDS = 1.0
+LINE_BROKEN_SECONDS = 0.5
+SCORE_SECONDS = 0.5
+# A line-up seen again this soon after a pull means the pull was none
+FALSE_START_SECONDS = 6.0
+# A pull is over when someone has the disc, at the earliest and at the latest after this
+MIN_PULL_SECONDS = 2.0
+MAX_PULL_SECONDS = 12.0
+# After a score the state stays "score" this long, then it is between points
+SCORE_SHOWN_SECONDS = 4.0
+# Without the field for this long, nothing is known
+LOST_SECONDS = 2.0
+# Speeds, in field units per second: walking pace, and clearly running
+WALKING, RUNNING = 2.0, 3.5
+# A player's speed is taken over this long: places wobble from frame to frame
+SPEED_SECONDS = 0.6
+# Without a line-up seen: holding the disc in an end zone while everyone slows down for
+# this long is a score
+SLOW_SCORE_SECONDS = 2.5
 
 
-def line_up(players: List[Player]) -> Tuple[int, float]:
-    """(players in the largest row, share of all players standing in the two largest rows).
+@dataclass
+class Player:
+    """A player as the state model sees them."""
 
-    Before a pull each team stands in a row on its goal line and nobody stands between
-    them, so nearly every player is in one of two rows. A stack during play also forms a
-    row, but the handlers and their defenders stand elsewhere.
-    """
-    if not players:
-        return 0, 0.0
-    first = _largest_row(players)
-    others = [player for player in players if player not in first]
-    second = _largest_row(others)
-    # The other team's row is at the far end of the field, not next to the first one
-    apart = (
-        first and second and abs(first[0][1] - second[0][1]) > 2 * min(first[0][2], second[0][2])
-    )
-    in_rows = len(first) + (len(second) if apart and len(second) >= 3 else 0)
-    return len(first), in_rows / len(players)
+    player: int
+    team: Optional[int]  # 0 or 1, if the tracker knows
+    x: float  # Across the field
+    y: float  # Along the field
 
 
-def in_end_zone(field_results: List[Any], x: float, y: float, frame_shape: Tuple[int, int]) -> bool:
-    """Whether an image point lies in a segmented end zone."""
-    frame_h, frame_w = frame_shape
-    for result in field_results:
-        if getattr(result, "masks", None) is None:
-            continue
-        masks = np.asarray(result.masks.data)
-        classes = np.asarray(
-            result.boxes.cls.cpu() if hasattr(result.boxes.cls, "cpu") else result.boxes.cls
-        )
-        for mask, class_id in zip(masks, classes):
-            if "endzone" not in str(result.names[int(class_id)]).lower():
-                continue
-            mask_h, mask_w = mask.shape
-            column = min(mask_w - 1, max(0, int(x / frame_w * mask_w)))
-            row = min(mask_h - 1, max(0, int(y / frame_h * mask_h)))
-            if mask[row, column] > 0.5:
-                return True
-    return False
+@dataclass
+class GameEvent:
+    seconds: float
+    kind: str  # "pull" or "score"
+    team: Optional[int] = None  # Who scored
 
 
+@dataclass
+class _Seen:
+    """Whether something has been seen without a break, and since when."""
+
+    since: Optional[float] = None
+
+    def update(self, seen: bool, seconds: float) -> float:
+        """How long it has been seen for, 0 if it is not seen now."""
+        if not seen:
+            self.since = None
+            return 0.0
+        if self.since is None:
+            self.since = seconds
+        return seconds - self.since
+
+
+@dataclass
 class GameStateTracker:
-    """Follows the game state over the frames of a video."""
+    """Follows the phase of a game from frame to frame."""
 
-    def __init__(self):
-        self.state = GameState.UNKNOWN
-        self.reset()
+    length: float = 110.0  # Of the field, back line to back line
+    end_zone: float = 20.0
+    state: str = UNKNOWN
+    since: float = 0.0  # When the state was entered
+    events: List[GameEvent] = field(default_factory=list)
+    # Team -> +1 if it attacks the far end zone (y grows), -1 the near one; from the
+    # last line-up
+    attacks: Dict[int, int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self._places: Dict[int, Deque[Tuple[float, float, float]]] = {}
+        self._lined_up, self._line_broken = _Seen(), _Seen()
+        self._scoring, self._slow_in_end_zone = _Seen(), _Seen()
+        self._lost, self._playing, self._walking = _Seen(), _Seen(), _Seen()
 
     def reset(self) -> None:
-        """Forget everything (new video, seek)."""
-        self.state = GameState.UNKNOWN
-        self._state_since = 0.0
-        self._positions: Dict[int, Deque[Tuple[float, float, float]]] = {}
-        self._held_since: Dict[str, Optional[Tuple[float, float]]] = {}
-        self._thumbnail: Optional[np.ndarray] = None
-        self._holder_id: Optional[int] = None
-        self._end_zone_catch_at: Optional[float] = None
-        self.features: Dict[str, float] = {}
+        """Start again (new video, seek); the events so far are forgotten."""
+        self.state, self.since, self.events, self.attacks = UNKNOWN, 0.0, [], {}
+        self.__post_init__()
 
-    # ------------------------------------------------------------------ evidence
+    def cut(self) -> None:
+        """The view has changed and the tracker has started again: where the game stands
+        must be found anew, and the tracker counts its teams anew, so which end each
+        attacks is no longer known. The events so far are kept."""
+        self.state, self.attacks = UNKNOWN, {}
+        self.__post_init__()
 
-    def _is_cut(self, frame: np.ndarray) -> bool:
-        """Whether the footage jumps to another scene at this frame (or is blacked out)."""
-        thumbnail = cv2.cvtColor(cv2.resize(frame, CUT_THUMBNAIL), cv2.COLOR_BGR2GRAY).astype(
-            np.int16
-        )
-        previous, self._thumbnail = self._thumbnail, thumbnail
-        if thumbnail.mean() < 12:
-            return True
-        return previous is not None and float(np.abs(thumbnail - previous).mean()) > _setting(
-            "cut_difference", 35
-        )
+    # ------------------------------------------------------------------ what is seen
 
-    def _moving_share(self, time_s: float, players: Dict[int, Tuple[float, float, float]]) -> float:
-        """Share of players moving relative to the others (-1 if it cannot be told yet)."""
-        velocities, heights = [], []
-        for track_id, (x, y, height) in players.items():
-            history = self._positions.setdefault(track_id, deque())
-            history.append((time_s, x, y))
-            while history and time_s - history[0][0] > SPEED_WINDOW_S:
-                history.popleft()
-            elapsed = time_s - history[0][0]
-            if elapsed >= MIN_SPEED_HISTORY_S:
-                velocities.append(((x - history[0][1]) / elapsed, (y - history[0][2]) / elapsed))
-                heights.append(height)
-        for track_id in [track_id for track_id in self._positions if track_id not in players]:
-            del self._positions[track_id]
+    def _speeds(self, players: Sequence[Player], seconds: float) -> Dict[int, float]:
+        """Each player's speed over the last moment, as far as they were seen that long."""
+        speeds = {}
+        for player in players:
+            trail = self._places.setdefault(player.player, deque())
+            trail.append((seconds, player.x, player.y))
+            while trail and seconds - trail[0][0] > 2 * SPEED_SECONDS:
+                trail.popleft()
+            earlier = next((p for p in trail if seconds - p[0] <= SPEED_SECONDS), trail[0])
+            elapsed = seconds - earlier[0]
+            if elapsed >= 0.5 * SPEED_SECONDS:
+                speeds[player.player] = float(
+                    np.hypot(player.x - earlier[1], player.y - earlier[2]) / elapsed
+                )
+        present = {player.player for player in players}
+        for gone in [p for p, trail in self._places.items() if p not in present]:
+            if seconds - self._places[gone][-1][0] > 2.0:
+                del self._places[gone]
+        return speeds
 
-        if len(velocities) < 4:
-            return -1.0
-        velocities = np.array(velocities)
-        # A camera pan moves everybody the same way; what is left is the players' own motion
-        relative = np.linalg.norm(velocities - np.median(velocities, axis=0), axis=1)
-        speeds = relative / np.array(heights)
-        return float((speeds > _setting("moving_speed", 0.6)).mean())
+    def _line_up(self, players: Sequence[Player]) -> Optional[Dict[int, int]]:
+        """If the teams stand at opposite ends: team -> the direction it will attack in."""
+        near_line, far_line = self.end_zone + LINE_REACH, self.length - self.end_zone - LINE_REACH
+        at_end = {}
+        for team in (0, 1):
+            along = np.array([p.y for p in players if p.team == team])
+            if len(along) < MIN_PLAYERS_AT_AN_END:
+                return None
+            near, far = int((along <= near_line).sum()), int((along >= far_line).sum())
+            needed = max(MIN_PLAYERS_AT_AN_END, SHARE_AT_AN_END * len(along))
+            at_end[team] = +1 if near >= needed else -1 if far >= needed else 0
+        if at_end[0] * at_end[1] != -1:
+            return None
+        return at_end
 
-    def _held_for(self, name: str, condition: bool, time_s: float) -> float:
-        """Seconds a condition has held (0 if it does not hold).
-
-        A break shorter than HOLD_GRACE_S does not start the count again: a player is
-        missed for a frame or two, or steps out of the row and back.
-        """
-        since, last_true = self._held_since.get(name) or (None, None)
-        if condition:
-            since = time_s if since is None else since
-            self._held_since[name] = (since, time_s)
-            return time_s - since
-        if since is not None and time_s - last_true > HOLD_GRACE_S:
-            self._held_since[name] = None
-        return 0.0
-
-    def _enter(self, state: GameState, time_s: float) -> None:
-        if state != self.state:
-            self.state = state
-            self._state_since = time_s
-            self._end_zone_catch_at = None
-            # Evidence gathered in the old state does not count towards leaving the new one
-            self._held_since.clear()
+    def _in_end_zone(self, y: float) -> int:
+        """+1 in the far end zone, -1 in the near one, 0 on the central field."""
+        return +1 if y >= self.length - self.end_zone else -1 if y <= self.end_zone else 0
 
     # ------------------------------------------------------------------ per frame
 
     def update(
         self,
-        time_s: float,
-        frame: np.ndarray,
-        tracks: List[Any],
-        holder_id: Optional[int],
-        field_results: List[Any],
-        disc_in_flight: bool = False,
-    ) -> GameState:
-        """Take a frame's results into account; returns the game state.
+        seconds: float,
+        players: Sequence[Player],
+        disc_state: str = "air",
+        holder: Optional[int] = None,
+        flight_seconds: Optional[float] = None,
+        known: bool = True,
+    ) -> str:
+        """Take in a frame; returns the state.
 
         Args:
-            time_s: Position of the frame in the video in seconds
-            frame: The video frame, to notice cuts
-            tracks: Tracked objects of the frame
-            holder_id: Track ID of the player holding the disc, if any
-            field_results: Field segmentation results, to place a catch in an end zone
-            disc_in_flight: Whether a disc is detected away from every player
+            seconds: Time of the frame in the video
+            players: The players on the field with their places
+            disc_state: "held", "air" or "ground" (see possession.py)
+            holder: The player who holds the disc, if one does
+            flight_seconds: How long the disc has been seen flying, if it is
+            known: Whether this is drone footage with the field found; without that
+                the players' places say nothing
         """
-        if self._is_cut(frame):
-            # The tracks before and after a cut have nothing to do with each other.
-            # Edited footage cuts from a score straight to the next line-up.
-            was_playing = self.state in (GameState.PULL, GameState.LIVE, GameState.STOPPAGE)
-            self._positions.clear()
-            self._held_since.clear()
-            self._holder_id = None
-            self._enter(GameState.BETWEEN_POINTS if was_playing else self.state, time_s)
+        if self._lost.update(not known, seconds) > LOST_SECONDS and self.state != UNKNOWN:
+            self._enter(UNKNOWN, seconds)
+        if not known:
             return self.state
 
-        players = {}
-        for track in tracks:
-            if getattr(track, "class_name", None) == "player":
-                x1, y1, x2, y2 = track.to_ltrb()
-                if y2 > y1:
-                    players[track.track_id] = ((x1 + x2) / 2, y2, y2 - y1)
+        speeds = self._speeds(players, seconds)
+        typical_speed = float(np.median(list(speeds.values()))) if speeds else 0.0
+        lined_up = self._line_up(players)
+        holding = next((p for p in players if p.player == holder), None)
+        flying = disc_state == "air" and (flight_seconds or 0.0) >= 0.3
 
-        count = len(players)
-        enough = count >= int(_setting("min_players", 6))
-        moving = self._moving_share(time_s, players)
-        in_line, in_rows = line_up(list(players.values()))
-        lined = (
-            in_line >= int(_setting("line_players", 5))
-            and in_rows >= _setting("line_share", 0.8)
-            and 0 <= moving < _setting("line_up_moving", 0.2)
+        lined_for = self._lined_up.update(lined_up is not None, seconds)
+        # The line is broken: the disc flies, or the teams are no longer at their ends
+        # and run
+        broken_for = self._line_broken.update(
+            flying or (lined_up is None and typical_speed >= WALKING), seconds
         )
-        # The pull is up when the disc is seen in the air while the teams are still in rows
-        rows = in_line >= int(_setting("line_players", 5)) and in_rows >= _setting(
-            "line_share", 0.8
+        playing_for = self._playing.update(
+            lined_up is None and typical_speed >= WALKING and (flying or holding is not None),
+            seconds,
         )
-        pulled_for = self._held_for("pulled", rows and disc_in_flight, time_s)
-        self.features = {"players": count, "in_line": in_line, "in_rows": in_rows, "moving": moving}
+        walking_for = self._walking.update(typical_speed < WALKING, seconds)
 
-        lined_for = self._held_for("lined", lined, time_s)
-        # The line-up ends when the players start running, still in their rows at first
-        dispersed_for = self._held_for("dispersed", enough and not lined, time_s)
-        active_for = self._held_for("active", enough and not lined and moving >= 0.3, time_s)
-        still_for = self._held_for("still", enough and not lined and 0 <= moving < 0.12, time_s)
-        few_for = self._held_for("few", count < 4, time_s)
-        in_state = time_s - self._state_since
+        # A score: the holder stands in the end zone their team attacks
+        end = self._in_end_zone(holding.y) if holding is not None else 0
+        attacked = self.attacks.get(holding.team) if holding is not None else None
+        scoring_for = self._scoring.update(end != 0 and attacked == end, seconds)
+        slow_for = self._slow_in_end_zone.update(
+            end != 0 and attacked is None and typical_speed < WALKING, seconds
+        )
 
-        # A catch in an end zone is a score if the players then stop
-        if holder_id is not None and holder_id != self._holder_id and holder_id in players:
-            x, y, _ = players[holder_id]
-            if self.state == GameState.LIVE and in_end_zone(field_results, x, y, frame.shape[:2]):
-                self._end_zone_catch_at = time_s
-        self._holder_id = holder_id
-        catch_at = self._end_zone_catch_at
-        if catch_at is not None and time_s - catch_at > _setting("score_window_s", 6):
-            self._end_zone_catch_at = catch_at = None
-
-        state = self.state
-        waiting = state in (GameState.UNKNOWN, GameState.BETWEEN_POINTS, GameState.LINED_UP)
-        if waiting and pulled_for >= 0.2:
-            self._enter(GameState.PULL, time_s)
-        elif state == GameState.LINED_UP:
-            if dispersed_for >= _setting("pull_start_s", 0.5):
-                self._enter(GameState.PULL, time_s)
-        elif (
-            lined_for
-            >= (2.0 if state in (GameState.LIVE, GameState.STOPPAGE) else 1.0)
-            * _setting("line_up_s", 1.0)
-            and state != GameState.PULL
-        ):
-            self._enter(GameState.LINED_UP, time_s)
-        elif state == GameState.PULL:
-            caught = holder_id is not None and in_state >= _setting("pull_min_s", 3)
-            if caught or in_state >= _setting("pull_max_s", 10):
-                self._enter(GameState.LIVE, time_s)
-        elif state == GameState.LIVE:
-            if catch_at is not None and 0 <= moving < 0.2 and time_s - catch_at >= 2.0:
-                self._enter(GameState.BETWEEN_POINTS, time_s)
-            elif still_for >= _setting("stoppage_s", 8):
-                self._enter(GameState.STOPPAGE, time_s)
-        elif state == GameState.STOPPAGE:
-            if active_for >= 1.0:
-                self._enter(GameState.LIVE, time_s)
-        elif active_for >= _setting("live_s", 3):  # UNKNOWN or BETWEEN_POINTS, joined mid-play
-            self._enter(GameState.LIVE, time_s)
-
-        if few_for >= _setting("unknown_s", 5) and self.state != GameState.BETWEEN_POINTS:
-            self._enter(GameState.UNKNOWN, time_s)
+        if self.state != LINED_UP and lined_for >= LINE_UP_SECONDS:
+            # Seen from live play: the point ended without the score being seen. Seen a
+            # moment after a pull: there was none, someone only stepped off the line.
+            pulled = self.events[-1] if self.events and self.events[-1].kind == "pull" else None
+            if pulled is not None and seconds - pulled.seconds <= FALSE_START_SECONDS:
+                self.events.pop()
+            self.attacks = dict(lined_up)
+            self._enter(LINED_UP, seconds)
+        elif self.state == LINED_UP:
+            if lined_up is not None:
+                self.attacks = dict(lined_up)
+            if broken_for >= LINE_BROKEN_SECONDS:
+                self._enter(PULL, seconds)
+                self.events.append(GameEvent(seconds, "pull"))
+        elif self.state == PULL:
+            lasted = seconds - self.since
+            if (holding is not None and lasted >= MIN_PULL_SECONDS) or lasted >= MAX_PULL_SECONDS:
+                self._enter(LIVE, seconds)
+        elif self.state == LIVE:
+            if scoring_for >= SCORE_SECONDS or slow_for >= SLOW_SCORE_SECONDS:
+                self._enter(SCORE, seconds)
+                self.events.append(GameEvent(seconds, "score", holding.team))
+        elif self.state == SCORE:
+            if seconds - self.since >= SCORE_SHOWN_SECONDS:
+                self._enter(BETWEEN_POINTS, seconds)
+        elif self.state in (UNKNOWN, BETWEEN_POINTS):
+            # A point under way that did not begin with a line-up that was seen
+            if playing_for >= 2.0 and typical_speed >= RUNNING:
+                self._enter(LIVE, seconds)
+            elif self.state == UNKNOWN and walking_for >= 3.0:
+                self._enter(BETWEEN_POINTS, seconds)
         return self.state
+
+    def _enter(self, state: str, seconds: float) -> None:
+        self.state, self.since = state, seconds
+        for seen in (self._lined_up, self._line_broken, self._scoring, self._slow_in_end_zone):
+            seen.since = None
+        self._playing.since = self._walking.since = None

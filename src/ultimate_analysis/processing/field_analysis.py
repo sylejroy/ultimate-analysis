@@ -26,6 +26,10 @@ logger = get_logger("FIELD_ANALYSIS")
 _kernel_cache = {}
 
 
+# A seam between two areas of the field is closed up to the mask's height divided by this
+SEAM_SHARE = 50
+
+
 def _normalize_contour_to_points(contour: np.ndarray) -> np.ndarray:
     """Normalize contour input to (N, 2) points format efficiently.
 
@@ -116,6 +120,15 @@ def create_unified_field_mask(
 
             # Combine the class masks first, so only one image is scaled to the frame
             combined = masks.max(axis=0)
+            if len(masks) > 1:
+                # The areas of the field do not always touch: a seam of a few rows between
+                # an end zone and the central field would make two fields of one
+                seam = max(3, combined.shape[0] // SEAM_SHARE) | 1
+                combined = cv2.morphologyEx(
+                    (combined > 0.5).astype(np.uint8),
+                    cv2.MORPH_CLOSE,
+                    np.ones((seam, seam), np.uint8),
+                )
             if combined.shape != (frame_h, frame_w):
                 combined = cv2.resize(
                     combined.astype(np.float32), (frame_w, frame_h), interpolation=cv2.INTER_LINEAR

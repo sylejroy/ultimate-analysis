@@ -35,7 +35,6 @@ VISUALIZATION_COLORS = {
     # Class-specific colors
     "DISC": (0, 255, 255),  # Bright cyan - easy to spot
     "PLAYER": (128, 128, 128),  # Subtle gray
-    "POSSESSION": (0, 215, 255),  # Gold - the player holding the disc
     # Model-specific colors for differentiation
     "PLAYER_MODEL": (0, 200, 0),  # Bright green for player model detections
     "DISC_MODEL": (
@@ -56,7 +55,7 @@ DEFAULT_PATHS = {
 FALLBACK_DEFAULTS = {
     "model_player_detection": "data/models/detection/20261005_1_detection_yolo26s_players_merged.v2.yolov8/finetune_20261005_010313/weights/best.pt",
     "model_disc_detection": "data/models/detection/20261006_1_detection_yolo26s_combined_discs_v3/finetune_20261006_070123/weights/best.pt",
-    "model_segmentation": "data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt",
+    "model_segmentation": "data/models/segmentation/20261008_1_segmentation_yolo26s-seg_rendered_field_v2/finetune_20261008_155901/weights/best.pt",
 }
 
 # Video file extensions (system constraint)

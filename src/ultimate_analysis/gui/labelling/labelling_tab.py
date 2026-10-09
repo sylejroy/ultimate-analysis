@@ -5,7 +5,6 @@ them and saves the frame; saved frames go into a dataset folder at full resoluti
 to be selected in the Model Training tab.
 """
 
-import random
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -43,7 +42,8 @@ from .box_canvas import BoxCanvas
 logger = get_logger("LABELLING")
 
 DEFAULT_DATASET = "labelled_players_discs_v1"
-RANDOM_FRAME_TRIES = 20
+# How often a random frame is drawn again when it turns out to be a close-up
+RANDOM_FRAME_DRAWS = 6
 HELP_TEXT = (
     "Left drag: new disc box, right drag: new player\n"
     "    box (also across other boxes)\n"
@@ -291,25 +291,36 @@ class LabellingTab(QWidget):
                 capture = cv2.VideoCapture(video)
                 self._frame_counts[video] = max(0, int(capture.get(cv2.CAP_PROP_FRAME_COUNT)))
                 capture.release()
-        counts = [self._frame_counts[video] for video in videos]
-        if not any(counts):
-            return
-        # Videos with few labels for their length come up more often
-        labelled = [
-            len(label_files.labelled_frames(self._dataset_dir(), video)) for video in videos
-        ]
-        weights = label_files.random_video_weights(counts, labelled)
-
-        for _ in range(RANDOM_FRAME_TRIES):
-            row = random.choices(range(len(videos)), weights=weights)[0]
-            index = random.randrange(counts[row])
-            name = label_files.frame_name(videos[row], index)
-            if (self._dataset_dir() / "labels" / f"{name}.txt").exists():
-                continue
+        # Edited games cut to close-ups; a few more draws find drone footage again
+        for _ in range(RANDOM_FRAME_DRAWS):
+            picked = label_files.random_unlabelled_frame(
+                videos,
+                [self._frame_counts[video] for video in videos],
+                [label_files.labelled_frames(self._dataset_dir(), video) for video in videos],
+            )
+            if picked is None:
+                return
+            row, index = picked
             if row != self.video_list.currentRow():
                 self.video_list.setCurrentRow(row)  # Opens the video at its first frame
             self._go_to(index)
-            return
+            if not self._looks_like_a_close_up():
+                return
+
+    def _looks_like_a_close_up(self) -> bool:
+        """Whether the frame shown is no drone footage, going by what the models suggest.
+
+        Cannot be told (and is taken for drone footage) without suggestions, in a dataset
+        without players, or while the models are busy.
+        """
+        if (
+            not self.prelabel_check.isChecked()
+            or self._awaiting_suggestion is not None
+            or "player" not in label_files.dataset_classes(self._dataset_dir())
+        ):
+            return False
+        players = sum(1 for box in self.canvas.boxes if CLASS_NAMES[box.class_id] == "player")
+        return players < int(get_setting("models.shot_type.min_players", 6))
 
     def _go_to_labelled(self, direction: int) -> None:
         """Go to the frame labelled before or after the current one, in any video.

@@ -19,7 +19,7 @@ import numpy as np
 from ..config.settings import get_setting
 from ..constants import TRACK_HISTORY_MAX_LENGTH
 from ..utils.logger import get_logger
-from . import appearance
+from . import appearance, health
 from .player_identity import Observation, PlayerIdentities
 from .team_tracker import BYTETracker, DetectionBoxes, TeamTracker, tracker_settings
 
@@ -56,7 +56,15 @@ _frame_rate = 30.0
 # new track. The IDs handed out below are those of the players, not of the tracks.
 _identities = PlayerIdentities()
 _history_last_frame: Dict[int, int] = {}
-_player_teams: Dict[int, int] = {}  # Player ID -> team (0 or 1), once known
+# A trail's point further from the picture's corner than this is no longer in view
+TRAIL_REACH_PIXELS = 20000.0
+# Player ID -> the team (0 or 1) the tracker last gave them, also once they are missing
+_player_teams: Dict[int, int] = {}
+# The video frame analysed last, and how many video frames lie between two analysed ones.
+# Live playback skips frames to keep up, so a trail of a fixed number of points would
+# reach back the further the slower the analysis runs.
+_video_frame: Optional[int] = None
+_frames_per_step = 1
 # Discs are not players; their track IDs are moved out of the way of the player IDs
 DISC_ID_OFFSET = 100000
 _frame_count = 0
@@ -81,7 +89,12 @@ class Track:
         self.class_name = class_name
         self.model_type = model_type  # Track which model detected this
         self.det_class = class_name  # For compatibility with existing code
-        self.team: Optional[int] = None  # 0 or 1 once the player's shirt has told
+        # The player's team (0 or 1) and its average shirt colour (BGR), once the tracker
+        # knows them
+        self.team: Optional[int] = None
+        self.team_colour: Optional[Tuple[int, int, int]] = None
+        # The team a young track's few sightings lean to, before the tracker settles it
+        self.team_leaning: Optional[int] = None
 
     def to_ltrb(self) -> List[float]:
         """Return bounding box in [x1, y1, x2, y2] format."""
@@ -218,12 +231,16 @@ def _embed_detections(frame: np.ndarray, deepsort_detections: List[tuple]) -> Op
     return embeds
 
 
-def run_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) -> List[Track]:
+def run_tracking(
+    frame: np.ndarray, detections: List[Dict[str, Any]], frame_index: Optional[int] = None
+) -> List[Track]:
     """Run object tracking on detected objects.
 
     Args:
         frame: Input video frame as numpy array (H, W, C) in BGR format
         detections: List of detection dictionaries from inference
+        frame_index: The frame's number in the video, if known: frames may be skipped
+            between calls, and the trails are kept for a time, not a number of calls
 
     Returns:
         List of Track objects with consistent IDs across frames
@@ -234,14 +251,20 @@ def run_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) -> List[Tr
             track_id = track.track_id
             x1, y1, x2, y2 = track.to_ltrb()
     """
-    global _frame_count
+    global _frame_count, _video_frame, _frames_per_step
     _frame_count += 1
+    if frame_index is not None:
+        skipped = frame_index - _video_frame if _video_frame is not None else 1
+        # Anything else is a seek, after which the caller resets the tracker anyway
+        _frames_per_step = skipped if 0 < skipped <= _frame_rate else 1
+        _video_frame = frame_index
 
     if _uses_bytetrack():
         try:
             return _run_bytetrack_tracking(frame, detections)
         except Exception as e:
             logger.exception(f"Error in ByteTrack tracking: {e}")
+            health.report("Tracking", f"failed ({type(e).__name__}); players are not followed")
             return _run_simple_tracking(detections)
 
     if not detections and _deepsort_tracker is None:
@@ -283,34 +306,45 @@ def _run_bytetrack_tracking(frame: np.ndarray, detections: List[Dict[str, Any]])
             if tracker is _player_tracker and get_setting("models.tracking.hide_non_players", True)
             else ()
         )
-        teams = tracker.teams() if tracker is _player_tracker else {}
+        teams = tracker.teams_of_tracks() if tracker is _player_tracker else {}
+        leanings = tracker.leanings_of_tracks() if tracker is _player_tracker else {}
+        team_colours = tracker.shirt_colours() if tracker is _player_tracker else {}
         for row in rows:
             if int(row[4]) in hidden:
                 continue
-            track = Track(
-                track_id=int(row[4]),
-                bbox=[float(value) for value in row[:4]],
-                class_id=class_id,
-                confidence=float(row[5]),
-                class_name=class_name,
-                model_type=f"{class_name}_model",
+            tracks.append(
+                Track(
+                    track_id=int(row[4]),
+                    bbox=[float(value) for value in row[:4]],
+                    class_id=class_id,
+                    confidence=float(row[5]),
+                    class_name=class_name,
+                    model_type=f"{class_name}_model",
+                )
             )
-            track.team = teams.get(track.track_id)
-            tracks.append(track)
+            tracks[-1].team = teams.get(int(row[4]))
+            tracks[-1].team_leaning = leanings.get(int(row[4]))
+            tracks[-1].team_colour = team_colours.get(tracks[-1].team)
     _finish_tracks(frame, tracks)
     return tracks
+
+
+def team_shirt_colours() -> Dict[int, Tuple[int, int, int]]:
+    """{team (0 or 1): its average shirt colour (BGR)}; empty until the teams are known."""
+    return _player_tracker.shirt_colours() if _player_tracker is not None else {}
+
+
+def team_of_player(player_id: int) -> Optional[int]:
+    """The team (0 or 1) of a player, present or missing; None if it is not known."""
+    return _player_teams.get(player_id)
 
 
 def _finish_tracks(frame: np.ndarray, tracks: List[Track]) -> None:
     """Give the tracks of a frame their player IDs and add them to the trails."""
     _assign_player_identities(frame, tracks)
-
-    # A player keeps the team once known, also while a new track of theirs has none yet
     for track in tracks:
         if track.team is not None:
             _player_teams[track.track_id] = track.team
-        else:
-            track.team = _player_teams.get(track.track_id)
 
     # The trail follows the player's feet (bottom centre of the box)
     for track in tracks:
@@ -495,6 +529,7 @@ def _assign_player_identities(frame: np.ndarray, tracks: List[Track]) -> None:
             position=((track.bbox[0] + track.bbox[2]) / 2, track.bbox[3]),
             height=track.bbox[3] - track.bbox[1],
             feature=feature,
+            team=track.team if track.team is not None else track.team_leaning,
         )
         for track, feature in zip(players, features)
     ]
@@ -508,6 +543,7 @@ def _assign_player_identities(frame: np.ndarray, tracks: List[Track]) -> None:
 def merge_players(player_id: int, into_player_id: int) -> None:
     """Declare a player to be an earlier one who went missing (e.g. same jersey number)."""
     _identities.merge(player_id, into_player_id)
+    _player_teams.pop(player_id, None)
     if player_id in _track_histories:
         _track_histories[into_player_id] = _track_histories.pop(player_id)
         _history_last_frame[into_player_id] = _history_last_frame.pop(player_id, _frame_count)
@@ -578,7 +614,7 @@ def reset_tracker() -> None:
 
     This should be called when switching videos or when tracking quality degrades.
     """
-    global _deepsort_tracker, _track_histories, _frame_count
+    global _deepsort_tracker, _track_histories, _frame_count, _video_frame, _frames_per_step
 
     logger.info("Resetting tracker state")
 
@@ -597,6 +633,7 @@ def reset_tracker() -> None:
     _player_teams.clear()
     _identities.reset()
     _frame_count = 0
+    _video_frame, _frames_per_step = None, 1
 
     # Reset jersey tracking as well
     try:
@@ -609,30 +646,39 @@ def reset_tracker() -> None:
     logger.info("Tracker reset complete")
 
 
-def team_of_player(player_id: int) -> Optional[int]:
-    """The team (0 or 1) of a player, or None if it is not known (yet)."""
-    return _player_teams.get(player_id)
+def evened_out(trail: np.ndarray, reach: int) -> np.ndarray:
+    """A trail without the bobbing of a runner's stride.
 
+    The trail follows the bottom of a player's box, and that goes up and down with every
+    step: a foot on the ground, both in the air. Each point is replaced by the mean of
+    the points up to `reach` before and after it, over a whole stride, so the bobbing
+    cancels and the course stays. Towards either end as many points are taken as there
+    are on both sides, so the newest point is left where the player's feet are.
 
-def team_shirt_colour(team: int) -> Optional[Tuple[int, int, int]]:
-    """The shirt colour (BGR) the tracker has learned for a team, or None if it has none."""
-    colours = getattr(_player_tracker, "team_colours", None)
-    if colours is None or not 0 <= team < len(colours):
-        return None
-    lab = np.clip(colours[team], 0, 255).astype(np.uint8).reshape(1, 1, 3)
-    blue, green, red = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)[0, 0]
-    return int(blue), int(green), int(red)
+    Args:
+        trail: Positions (N, 2), oldest first
+        reach: How many points before and after a point go into its mean
+    """
+    count = len(trail)
+    if count < 3 or reach < 1:
+        return trail
+    sums = np.vstack([np.zeros((1, 2)), np.cumsum(trail.astype(np.float64), axis=0)])
+    index = np.arange(count)
+    half = np.minimum(reach, np.minimum(index, count - 1 - index))
+    return (sums[index + half + 1] - sums[index - half]) / (2 * half + 1)[:, None]
 
 
 def get_track_histories() -> Dict[int, np.ndarray]:
-    """The trail of every tracked object.
+    """The trail of every tracked object, without the bobbing of the stride.
 
     Returns:
         Track ID -> positions of the feet in the picture, oldest first, as an integer
         array of shape (N, 2)
     """
+    seconds = float(get_setting("models.tracking.trail_smoothing_seconds", 0.4))
+    reach = int(round(seconds / 2 * _frame_rate / _frames_per_step))
     return {
-        track_id: np.rint(history).astype(np.int32)
+        track_id: np.rint(evened_out(history, reach)).astype(np.int32)
         for track_id, history in _track_histories.items()
     }
 
@@ -660,10 +706,20 @@ def apply_camera_motion(camera_motion: np.ndarray) -> None:
         return
     lengths = [len(_track_histories[track_id]) for track_id in track_ids]
     stacked = np.concatenate([_track_histories[track_id] for track_id in track_ids])
-    moved = cv2.perspectiveTransform(stacked.reshape(-1, 1, 2), camera_motion).reshape(-1, 2)
+    mapped = np.column_stack([stacked, np.ones(len(stacked))]) @ np.asarray(camera_motion).T
+    # Ground the camera has flown over has no place in the picture any more: its points
+    # land far outside, or behind the camera, where the depth changes sign. A trail ends
+    # there, or it is drawn as a streak right across the frame.
+    depth = mapped[:, 2] * np.sign(camera_motion[2, 2] or 1.0)
+    in_front = depth > 1e-9
+    moved = (mapped[:, :2] / np.where(in_front, depth, 1.0)[:, None]).astype(np.float32)
+    in_reach = in_front & (np.abs(moved) < TRAIL_REACH_PIXELS).all(axis=1)
     start = 0
     for track_id, length in zip(track_ids, lengths):
-        _track_histories[track_id] = moved[start : start + length]
+        trail, kept = moved[start : start + length], in_reach[start : start + length]
+        if not kept.all():
+            trail = trail[length - int(np.argmin(kept[::-1])) :]  # What follows the last lost point
+        _track_histories[track_id] = trail
         start += length
 
 
@@ -709,6 +765,9 @@ def _update_track_history(track_id: int, center_point: Tuple[int, int]) -> None:
         center_point: Center point (x, y) of the tracked object
     """
     max_length = get_setting("models.tracking.track_history_length", TRACK_HISTORY_MAX_LENGTH)
+    # As many points as cover the trail's time at the rate frames are analysed at
+    seconds = float(get_setting("models.tracking.trail_seconds", 4.0))
+    max_length = max(2, min(max_length, round(seconds * _frame_rate / _frames_per_step)))
     point = np.array([center_point], dtype=np.float32)
     history = _track_histories.get(track_id)
     if history is None:

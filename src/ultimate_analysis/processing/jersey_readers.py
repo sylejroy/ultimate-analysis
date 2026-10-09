@@ -4,7 +4,7 @@ Every reader takes the upper-body crops of the players and returns, per crop, a 
 (box, text, confidence) in the format EasyOCR produces, so the rest of the player ID
 pipeline (digit filtering, validation, probabilistic tracking) is the same for all of them.
 
-Measured on 1,016 labelled crops of 23 players from four games (see README):
+Measured on 1,016 labelled crops of 23 players from four games (see docs/MEASUREMENTS.md):
 - parseq:      PARSeq recognizer on regions found by EasyOCR's text detector
 - florence:    Florence-2 vision-language model reading the whole crop
 - yolo_digits: a YOLO model trained to detect the digits 0-9

@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-# The clip the timings in the README were taken on; without it, the app's default video
+# The clip the timings in docs/MEASUREMENTS.md were taken on; without it, the app's default video
 BENCHMARK_CLIP = (
     REPO
     / "data"

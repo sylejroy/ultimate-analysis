@@ -10,7 +10,7 @@ key frame) is fitted directly. Fitting every pair of consecutive frames separate
 multiplying the results lets small errors add up twice as fast, and costs twice the time.
 """
 
-from typing import List, Optional, Sequence, Tuple
+from typing import Optional, Sequence
 
 import cv2
 import numpy as np
@@ -130,14 +130,6 @@ class CameraMotionEstimator:
                 -1,
             )
         return mask
-
-
-def move_points(points: List[Tuple[int, int]], motion: np.ndarray) -> List[Tuple[int, int]]:
-    """Positions in the previous frame, moved to where the same spots are in this frame."""
-    if not points:
-        return points
-    moved = cv2.perspectiveTransform(np.float32(points).reshape(-1, 1, 2), motion)
-    return [tuple(point) for point in np.rint(moved).astype(int).reshape(-1, 2).tolist()]
 
 
 def is_enabled() -> bool:

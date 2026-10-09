@@ -32,13 +32,29 @@ class PlayerIdentityTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.identities = self.module.PlayerIdentities()
 
-    def see(self, time_s, *players, alive=None):
+    def see(self, time_s, *players, alive=None, teams=None):
         """players: (track id, feature, x) -> {track id: player id}"""
         observations = [
-            self.module.Observation(track_id, (x, 500.0), 100.0, feature)
+            self.module.Observation(
+                track_id, (x, 500.0), 100.0, feature, (teams or {}).get(track_id)
+            )
             for track_id, feature, x in players
         ]
         return self.identities.assign(time_s, observations, alive)
+
+    def test_a_new_track_of_the_other_team_is_not_a_missing_player_returning(self):
+        # Two teams whose kits look alike in this light; the tracker tells them apart
+        first = self.see(0.0, (1, RED_TALL, 100), (2, BLUE, 800), teams={1: 0, 2: 1})
+        self.see(0.5, (2, BLUE, 800), teams={2: 1})
+        # A new track appears where player 1 could be, in a kit like theirs, of team 1
+        new = self.see(1.0, (2, BLUE, 800), (7, RED_SHORT, 120), teams={2: 1, 7: 1})
+        self.assertNotEqual(new[7], first[1])
+        # One of their own team, or of a team not yet known, is taken for them as before
+        self.identities.reset()
+        first = self.see(0.0, (1, RED_TALL, 100), (2, BLUE, 800), teams={1: 0, 2: 1})
+        self.see(0.5, (2, BLUE, 800), teams={2: 1})
+        new = self.see(1.0, (2, BLUE, 800), (7, RED_SHORT, 120), teams={2: 1})
+        self.assertEqual(new[7], first[1])
 
     def test_a_track_that_misses_some_frames_keeps_its_player(self):
         first = self.see(0.0, (1, RED_TALL, 100), (2, BLUE, 800), alive={1, 2})

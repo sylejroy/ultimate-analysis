@@ -84,6 +84,52 @@ class TrackingTests(unittest.TestCase):
             self.module.set_frame_rate(0)
             self.assertEqual(tracker.tracker.max_age, 90)
 
+    def test_a_trail_reaches_back_a_time_however_many_frames_are_skipped(self):
+        settings = {
+            "models.tracking.track_history_length": 300,
+            "models.tracking.trail_seconds": 4.0,
+        }
+        self.module.set_frame_rate(60.0)
+        for step, points in ((1, 240), (10, 24)):
+            self.module._track_histories.clear()
+            self.module._frames_per_step = step
+            with patch.object(
+                self.module, "get_setting", side_effect=lambda key, default=None: settings[key]
+            ):
+                for index in range(400):
+                    self.module._update_track_history(1, (index, 0))
+            self.assertEqual(len(self.module._track_histories[1]), points)
+        self.module._frames_per_step = 1
+        self.module._track_histories.clear()
+
+    def test_a_trail_does_not_bob_with_the_stride(self):
+        # A player runs to the right; the bottom of the box goes up and down 6 px a stride
+        steps = np.arange(60)
+        trail = np.column_stack([100 + 5.0 * steps, 500 + 6 * np.sin(steps * 2 * np.pi / 10)])
+        evened = self.module.evened_out(trail, 5)
+        self.assertLess(np.abs(evened[10:-10, 1] - 500).max(), 1.0)
+        np.testing.assert_allclose(evened[10:-10, 0], trail[10:-10, 0], atol=1e-6)
+        # The ends stay where they are: the newest point is where the feet are
+        np.testing.assert_allclose(evened[[0, -1]], trail[[0, -1]])
+        # A turn is still a turn, a little rounder
+        corner = np.array([(x, 0.0) for x in range(20)] + [(19.0, y) for y in range(1, 20)])
+        self.assertLess(np.abs(self.module.evened_out(corner, 3) - corner).max(), 2.5)
+
+    def test_a_trail_ends_where_the_ground_has_left_the_picture(self):
+        self.module._track_histories.clear()
+        self.module._track_histories[1] = np.array(
+            [(100, 900), (100, 1100), (100, 600), (110, 500)], dtype=np.float32
+        )
+        with patch.object(self.module, "_deepsort_tracker", None):
+            # The drone flies forward: what is low in the picture leaves it at the bottom,
+            # and what was below y = 1000 is behind the camera
+            forward = np.array([[1.0, 0, 0], [0, 1.0, 0], [0, -0.001, 1.0]])
+            self.module.apply_camera_motion(forward)
+        trail = self.module.get_track_histories()[1]
+        self.assertEqual(len(trail), 2)
+        np.testing.assert_allclose(trail, [(250, 1500), (220, 1000)], atol=1)
+        self.module._track_histories.clear()
+
     def test_camera_motion_moves_trails_and_where_tracks_expect_their_players(self):
         from types import SimpleNamespace
 

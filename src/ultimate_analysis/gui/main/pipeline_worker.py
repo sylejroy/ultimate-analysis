@@ -15,8 +15,14 @@ from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot
 
 from ...config.settings import get_setting
 from ...pipeline import AnalysisPipeline, FrameResult, PipelineOptions
-from ...processing.field_segmentation import set_field_model
-from ...processing.inference import set_disc_model, set_player_model, warmup_models
+from ...processing.field_segmentation import set_field_model, warmup_field_model
+from ...processing.inference import (
+    reset_inference_state,
+    run_inference,
+    set_disc_model,
+    set_player_model,
+    warmup_models,
+)
 from ...processing.model_lock import MODEL_LOCK
 from ...processing.player_id import initialize_player_id_system, set_player_id_method
 from ...utils.logger import get_logger
@@ -56,7 +62,7 @@ class PipelineWorker(QObject):
         info: Dict[str, Any] = {"loaded": False, "path": video_path}
         try:
             with MODEL_LOCK:
-                self.pipeline.new_video()
+                self.pipeline.new_video(video_path)
                 self.pipeline.homography_matrix = homography_matrix
 
                 if self.video_player.load_video(video_path):
@@ -67,6 +73,14 @@ class PipelineWorker(QObject):
                         initialize_player_id_system()
                     if options.detection and get_setting("models.inference.warmup_on_load", True):
                         warmup_models()
+                    # The engines of all three models are loaded here, one after the
+                    # other, whatever is switched on: an engine first loaded after frames
+                    # have been analysed crashes the process (an access violation inside
+                    # TensorRT, seen only in the app)
+                    shape = (info.get("height") or 1080, info.get("width") or 1920, 3)
+                    run_inference(np.zeros(shape, dtype=np.uint8))
+                    reset_inference_state()
+                    warmup_field_model(shape)
         except Exception:
             logger.exception(f"Error loading video {video_path}")
         self.video_loaded.emit(info)

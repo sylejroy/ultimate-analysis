@@ -10,8 +10,8 @@ this table; `tests/test_layering.py` fails when one does not.
 
 | Package | Contents |
 | --- | --- |
-| `config/`, `constants.py`, `utils/` | Settings (`get_setting("dot.path", default)`), fixed limits, logging, video files, model files, label files |
-| `processing/` | Analysis stages: detection, camera motion, tracking, possession, game state, jersey numbers, field segmentation and geometry, homography, TensorRT engines |
+| `config/`, `constants.py`, `utils/` | Settings (`get_setting("dot.path", default)`), fixed limits, logging, video files, model files, label files, the field's dimensions and the camera fitted to it |
+| `processing/` | Analysis stages: detection, camera motion, tracking, possession, jersey numbers, field segmentation and geometry, where the field lies (`field_registration.py`), homography, TensorRT. Also the phase of the game (`game_state.py`) and where a flying disc is and has been (`disc_flight.py`). Knowing players by their looks: the network (`reid.py`), the players of a video (`player_roster.py`), and the stage that looks at them frame by frame (`player_looks.py`) engines |
 | `rendering/` | Drawing results on frames with OpenCV. No Qt. |
 | `pipeline.py` | `AnalysisPipeline`: one frame in, results and rendered views out. No Qt. |
 | `gui/` | Everything Qt. One package per tab (`main/`, `easyocr/`, `training/`, `homography/`, `labelling/`), shared widgets in `widgets/`, the window in `main_app.py` |
@@ -22,7 +22,12 @@ Outside `src/`:
 
 - `configs/` — `default.yaml`, `easyocr_params.yaml`, `training.yaml`,
   `homography_params.yaml`
-- `scripts/` — dataset building, TensorRT export, benchmarks, profiling
+- `scripts/` — dataset building, TensorRT export, benchmarks, profiling. Each script
+  says in its first lines what it reads and writes. The dataset builders
+  (`build_*.py`, `collect_field_negatives.py`) only read their sources and write a new
+  folder; which dataset comes from which is in `docs/DATA.md`. `build_disc_tile_dataset.py`
+  and `build_native_disc_dataset.py` belong to two disc experiments that did not beat
+  the default model (see `docs/MEASUREMENTS.md`) and are kept to repeat them.
 - `tests/` — one file per area; synthetic frames and mocked models
 - `data/` — local videos, datasets, and trained models. Not tracked by Git, so anything
   deleted there is gone; leave it alone during cleanups.
@@ -69,13 +74,20 @@ Modules that are still too large and should be split when they are next worked o
 `gui/homography/homography_tab.py` (1,600 lines), `gui/easyocr/easyocr_tab.py` and
 `gui/training/training_tab.py` (1,100 each), `processing/field_analysis.py` (800).
 
+## When a stage fails
+
+A stage that fails keeps the app running by returning what it can, and says so with
+`health.report(stage, problem)` (`processing/health.py`). The pipeline shows these on the
+frame in red. A failure that is only logged looks like a normal result: no detections
+read as "nobody there".
+
 ## Testing
 
 - Logic that carries state from frame to frame gets a unit test with synthetic input:
   tracking, possession, jersey number bookkeeping, caches, the pipeline's result reuse.
   Models are mocked; the tests need no videos, weights, or GPU.
 - How good a model is cannot be unit tested. Measure it with the benchmark scripts and
-  record the result in the README:
+  record the result in `docs/MEASUREMENTS.md`:
   - `scripts/benchmark_detectors.py` — players and discs
   - `scripts/benchmark_segmentation.py` — field area and outline
   - `scripts/benchmark_field_registration.py` — where the field lies, against the labelled field frames
@@ -83,6 +95,10 @@ Modules that are still too large and should be split when they are next worked o
   - `scripts/benchmark_player_id_scheduling.py` — temporal crop selection, votes and OCR work
   - `scripts/benchmark_homography_optimizer.py` — coverage sampling speed and candidate agreement
   - `scripts/benchmark_pipeline.py` — analysis/rendering throughput, stage costs and track-output comparison
+  - `scripts/benchmark_reid.py` — matching players by their looks, within a point and across points
+- Possession, the sideline filter and a flying disc's place have no labels to measure
+  against. What was used instead, and how each came out, is in `docs/MEASUREMENTS.md`;
+  a change to them needs the same kind of before and after.
 - GUI code is checked by starting the app, visiting every tab, playing a video, and
   closing it without an error in the log.
 - A bug that got through gets a test that would have caught it.

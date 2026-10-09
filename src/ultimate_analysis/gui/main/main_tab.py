@@ -4,14 +4,14 @@ The tab only handles the interface. Decoding and analysis run on a worker thread
 (pipeline_worker.py); the tab sends it requests and displays the frames that come back.
 """
 
+import re
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List
 
-from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import QEvent, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QFormLayout,
     QGroupBox,
@@ -27,7 +27,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from ...config.settings import get_config, get_setting
+from ...config.settings import get_setting
 from ...constants import SHORTCUTS
 from ...pipeline import PipelineOptions
 from ...processing.homography import load_default_matrix
@@ -35,18 +35,73 @@ from ...processing.jersey_readers import READER_LABELS
 from ...processing.player_id import get_player_id_method
 from ...utils.logger import get_logger
 from ...utils.model_files import default_model_path, models_root
+from ..theme import FAINT_TEXT, PICTURE_FRAME, PICTURE_PLACEHOLDER
+from ..widgets.controls import StageBars, ToggleSwitch
 from ..widgets.images import frame_to_pixmap
 from ..widgets.model_selection import (
     populate_detection_model_combo,
     populate_segmentation_model_combo,
 )
 from ..widgets.panels import PANEL_WIDTH, collapsible, compact_combo, side_panel
-from ..widgets.performance_widget import PerformanceWidget
+from ..widgets.player_stats import PlayerStatsTable
+from ..widgets.possession_bar import PossessionBar
 from ..widgets.video_list import VideoListWidget
 from ..widgets.zoomable_image_label import ZoomableImageLabel
 from .pipeline_worker import PipelineWorker, ProcessedFrame
 
 logger = get_logger("MAIN_TAB")
+
+MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+
+
+def clock(seconds: float) -> str:
+    """Seconds as m:ss."""
+    return f"{int(seconds // 60)}:{int(seconds % 60):02d}"
+
+
+def faint(text: str) -> QLabel:
+    """A label in the fainter of the two text colours: a name, not a value."""
+    label = QLabel(text)
+    label.setStyleSheet(f"color: {FAINT_TEXT}; font-weight: normal;")
+    return label
+
+
+def short_model_name(run: str) -> str:
+    """A training run's name as architecture and date: "YOLO26s · 5 Oct".
+
+    The runs are called <date>_<count>_<task>_<architecture>_<dataset>; anything else
+    stays as it is.
+    """
+    found = re.search(r"(\d{4})(\d{2})(\d{2})_\d+_[a-z]+_([A-Za-z0-9\-]+)_", run)
+    if not found:
+        return run
+    _, month, day, architecture = found.groups()
+    name = architecture.replace("yolo", "YOLO").replace("rtdetr", "RT-DETR")
+    return f"{name} · {int(day)} {MONTHS[int(month) - 1]}"
+
+
+def shorten_model_names(combo: QComboBox) -> None:
+    """Show the models of a dropdown by short names; what an entry stood for is kept as
+    its data (unless it has data already) and shown when the mouse rests on it."""
+    blocked = combo.blockSignals(True)  # Nothing is chosen anew by being renamed
+    for index in range(combo.count()):
+        full = combo.itemText(index)
+        if combo.itemData(index) is None:
+            combo.setItemData(index, full)
+        combo.setItemData(index, full, Qt.ToolTipRole)
+        combo.setItemText(index, short_model_name(full))
+    combo.blockSignals(blocked)
+
+
+# Phase of the game -> (background, text) of its tag
+GAME_STATE_COLOURS = {
+    "unknown": ("transparent", "#888888"),
+    "between points": ("#4b5563", "#e5e7eb"),
+    "lined up": ("#b45309", "#fff7ed"),
+    "pull": ("#7c3aed", "#f5f3ff"),
+    "live": ("#15803d", "#f0fdf4"),
+    "score": ("#facc15", "#1c1917"),
+}
 
 # Closing waits this long for the worker, which may still be loading the models
 WORKER_SHUTDOWN_TIMEOUT_MS = 60000
@@ -73,8 +128,6 @@ class MainTab(QWidget):
 
         # Results of the frame on screen
         self.current_detections: List[Dict] = []
-        self.current_tracks: List[Any] = []
-        self.current_player_ids: Dict[int, Tuple[str, Any]] = {}
 
         # Frames in flight become stale when the video position or the models change;
         # their generation number then no longer matches and they are not shown.
@@ -162,12 +215,12 @@ class MainTab(QWidget):
         layout = QVBoxLayout()
 
         # Video list section
-        video_group = QGroupBox("Available Videos")
+        video_group = QGroupBox("Videos")
         video_layout = QVBoxLayout()
 
         # Video list with refresh button
         list_header = QHBoxLayout()
-        list_header.addWidget(QLabel("Videos"))
+        list_header.addStretch()
 
         refresh_button = QPushButton("Refresh")
         refresh_button.clicked.connect(self._reload_videos)
@@ -178,6 +231,7 @@ class MainTab(QWidget):
 
         # Video list widget
         self.video_list = VideoListWidget()
+        self.video_list.setMinimumHeight(190)  # Six videos, however full the column is
         self.video_list.currentRowChanged.connect(self._on_video_selection_changed)
         video_layout.addWidget(self.video_list)
 
@@ -185,25 +239,26 @@ class MainTab(QWidget):
         layout.addWidget(video_group)
 
         # Processing controls section
-        processing_group = QGroupBox("Processing Options")
+        processing_group = QGroupBox("Analysis")
         processing_layout = QVBoxLayout()
+        processing_layout.setSpacing(2)
 
-        # Checkboxes for processing features
-        self.inference_checkbox = QCheckBox("Object Detection (Inference)")
+        # A switch per stage of the analysis
+        self.inference_checkbox = ToggleSwitch("Detection")
         self.inference_checkbox.setToolTip(
             f"Enable/disable object detection [{SHORTCUTS['TOGGLE_INFERENCE']}]"
         )
         self.inference_checkbox.setChecked(True)  # Enable inference by default
         self.inference_checkbox.stateChanged.connect(self._on_inference_toggled)
 
-        self.tracking_checkbox = QCheckBox("Object Tracking")
+        self.tracking_checkbox = ToggleSwitch("Tracking and possession")
         self.tracking_checkbox.setToolTip(
             f"Enable/disable object tracking [{SHORTCUTS['TOGGLE_TRACKING']}]"
         )
         self.tracking_checkbox.setChecked(True)  # Enable tracking by default
         self.tracking_checkbox.stateChanged.connect(self._on_tracking_toggled)
 
-        self.player_id_checkbox = QCheckBox("Player Identification")
+        self.player_id_checkbox = ToggleSwitch("Jersey numbers")
         self.player_id_checkbox.setToolTip(
             f"Enable/disable player ID based on jersey numbers [{SHORTCUTS['TOGGLE_PLAYER_ID']}]"
         )
@@ -211,7 +266,7 @@ class MainTab(QWidget):
         self.player_id_checkbox.setChecked(True)
         self.player_id_checkbox.stateChanged.connect(self._on_player_id_toggled)
 
-        self.field_segmentation_checkbox = QCheckBox("Field Segmentation")
+        self.field_segmentation_checkbox = ToggleSwitch("Field")
         self.field_segmentation_checkbox.setToolTip(
             f"Enable/disable field boundary detection [{SHORTCUTS['TOGGLE_FIELD_SEGMENTATION']}]"
         )
@@ -220,7 +275,7 @@ class MainTab(QWidget):
             True
         )  # Enable by default to show advanced field line detection
 
-        self.homography_checkbox = QCheckBox("Enable Top-Down View")
+        self.homography_checkbox = ToggleSwitch("Top-down view")
         self.homography_checkbox.setChecked(True)  # Enable by default
         self.homography_checkbox.setToolTip(
             "Enable/disable homography transformation for top-down view"
@@ -238,9 +293,7 @@ class MainTab(QWidget):
         self.top_down_source_combo.setCurrentIndex(
             max(
                 0,
-                self.top_down_source_combo.findData(
-                    get_setting("homography.source", "calibration")
-                ),
+                self.top_down_source_combo.findData(get_setting("homography.source", "field")),
             )
         )
         self.top_down_source_combo.currentIndexChanged.connect(
@@ -253,15 +306,17 @@ class MainTab(QWidget):
         processing_layout.addWidget(self.field_segmentation_checkbox)
         processing_layout.addWidget(self.homography_checkbox)
         processing_layout.addWidget(self.top_down_source_combo)
+        # The other source is a calibration set by hand in a tab that is on its way out
+        self.top_down_source_combo.setVisible(bool(get_setting("app.legacy_tabs", False)))
 
         processing_group.setLayout(processing_layout)
         layout.addWidget(processing_group)
 
         # Model selection section
-        models_group = QGroupBox("Model Settings")
+        # Which models run; can be folded away
+        models_group = QGroupBox("Models")
         models_layout = QFormLayout()
-        # Model names are long: each label goes above its dropdown
-        models_layout.setRowWrapPolicy(QFormLayout.WrapAllRows)
+        models_layout.setLabelAlignment(Qt.AlignLeft)
 
         self.player_model_combo = compact_combo(QComboBox())
         populate_detection_model_combo(
@@ -269,8 +324,9 @@ class MainTab(QWidget):
             "player",
             default_model_path("player_detection"),
         )
-        self.player_model_combo.currentTextChanged.connect(self._on_player_model_changed)
-        models_layout.addRow("Player Detection Model:", self.player_model_combo)
+        shorten_model_names(self.player_model_combo)
+        self.player_model_combo.currentIndexChanged.connect(self._on_player_model_changed)
+        models_layout.addRow(faint("Players"), self.player_model_combo)
 
         # Jersey number reader dropdown
         self.player_id_method_combo = compact_combo(QComboBox())
@@ -287,7 +343,7 @@ class MainTab(QWidget):
             "A reader that cannot be loaded falls back to EasyOCR."
         )
         self.player_id_method_combo.currentIndexChanged.connect(self._on_player_id_method_changed)
-        models_layout.addRow("Jersey Number Reader:", self.player_id_method_combo)
+        models_layout.addRow(faint("Numbers"), self.player_id_method_combo)
 
         # Disc detection model dropdown
         self.disc_model_combo = compact_combo(QComboBox())
@@ -296,50 +352,41 @@ class MainTab(QWidget):
             "disc",
             default_model_path("disc_detection"),
         )
-        self.disc_model_combo.currentTextChanged.connect(self._on_disc_model_changed)
-        models_layout.addRow("Disc Detection Model:", self.disc_model_combo)
+        shorten_model_names(self.disc_model_combo)
+        self.disc_model_combo.currentIndexChanged.connect(self._on_disc_model_changed)
+        models_layout.addRow(faint("Disc"), self.disc_model_combo)
 
-        models_group.setLayout(models_layout)
-        layout.addWidget(models_group)
-
-        # Field Segmentation Controls
-        segmentation_group = QGroupBox("Field Segmentation")
-        segmentation_layout = QVBoxLayout()
-
-        # RANSAC line fitting checkbox
-        self.ransac_checkbox = QCheckBox("Use RANSAC Line Fitting")
-        self.ransac_checkbox.setChecked(True)  # Enable by default for advanced line detection
-        self.ransac_checkbox.stateChanged.connect(self._on_ransac_toggled)
-        self.ransac_checkbox.setToolTip(
-            "Fit straight lines to contour segments using RANSAC algorithm"
-        )
-        segmentation_layout.addWidget(self.ransac_checkbox)
-
-        # Model selection
+        # Field model dropdown, with a button to read the list of models again
         model_layout = QHBoxLayout()
-        model_layout.addWidget(QLabel("Model:"))
-
         self.segmentation_model_combo = compact_combo(QComboBox())
         self.segmentation_model_combo.currentTextChanged.connect(
             self._on_segmentation_model_changed
         )
         model_layout.addWidget(self.segmentation_model_combo)
 
-        refresh_models_button = QPushButton("↻")
-        refresh_models_button.setMaximumWidth(30)
-        refresh_models_button.setToolTip("Refresh model list")
+        models_layout.addRow(faint("Field"), model_layout)
+
+        refresh_models_button = QPushButton("Look for new models")
+        refresh_models_button.setToolTip("Read the list of field models again")
         refresh_models_button.clicked.connect(self._load_segmentation_models)
-        model_layout.addWidget(refresh_models_button)
+        models_layout.addRow(refresh_models_button)
 
-        segmentation_layout.addLayout(model_layout)
-        segmentation_group.setLayout(segmentation_layout)
-        layout.addWidget(segmentation_group)
+        models_group.setLayout(models_layout)
+        layout.addWidget(collapsible(models_group, expanded=True))
 
-        # Performance metrics section
-        # Only needed when tuning, so it is folded away until asked for
+        # The players of the video and what each of them did
+        unit = "yd" if get_setting("homography.ruleset", "usau") == "usau" else "m"
+        players_group = QGroupBox("Players")
+        players_layout = QVBoxLayout()
+        self.player_stats_table = PlayerStatsTable(unit)
+        players_layout.addWidget(self.player_stats_table)
+        players_group.setLayout(players_layout)
+        layout.addWidget(collapsible(players_group, expanded=True))
+
+        # What each stage costs per frame; folded away until it is asked for
         timings_group = QGroupBox("Stage Timings")
         timings_layout = QVBoxLayout()
-        self.performance_widget = PerformanceWidget()
+        self.performance_widget = StageBars()
         timings_layout.addWidget(self.performance_widget)
         timings_group.setLayout(timings_layout)
         layout.addWidget(collapsible(timings_group, expanded=False))
@@ -355,44 +402,72 @@ class MainTab(QWidget):
         panel = QWidget()
         layout = QVBoxLayout()
 
+        # Above the video: the phase of the game, the point, and the score
+        header = QHBoxLayout()
+        self.game_state_label = QLabel("")
+        self.game_state_label.setAlignment(Qt.AlignCenter)
+        self.game_state_label.setToolTip(
+            "The phase of the game as estimated from where the players stand and what the\n"
+            "disc does: between points, lined up, pull, live, score. Needs the field model."
+        )
+        header.addWidget(self.game_state_label)
+        self.point_label = faint("")
+        header.addWidget(self.point_label)
+        header.addStretch()
+        self.score_label = QLabel("")
+        self.score_label.setTextFormat(Qt.RichText)
+        self.score_label.setToolTip(
+            "Scores seen since the video was opened or last sought, by the colour of the\n"
+            "team that scored. An estimate: a score that is not seen is not counted."
+        )
+        header.addWidget(self.score_label)
+        layout.addLayout(header)
+
         # Video display area with zoom capability
         self.video_scroll_area = QScrollArea()
         self.video_scroll_area.setWidgetResizable(True)
         self.video_scroll_area.setMinimumHeight(360)
-        self.video_scroll_area.setStyleSheet(
-            """
-            QScrollArea {
-                border: 2px solid #555;
-                background-color: #1a1a1a;
-            }
-        """
-        )
+        self.video_scroll_area.setStyleSheet(PICTURE_FRAME)
 
         self.video_label = ZoomableImageLabel()
+        self.video_label.show_grid = False  # The grid is for calibrating, not for watching
         self.video_label.setText("No video selected")
         self.video_label.setAlignment(Qt.AlignCenter)
-        self.video_label.setStyleSheet(
-            """
-            QLabel {
-                background-color: #1a1a1a;
-                color: #999;
-                font-size: 14px;
-            }
-        """
-        )
+        self.video_label.setStyleSheet(PICTURE_PLACEHOLDER)
         self.video_scroll_area.setWidget(self.video_label)
         layout.addWidget(self.video_scroll_area, 1)  # Takes most space
 
-        # Progress bar
+        # On the video, in its lower left corner: who has the disc
+        self.disc_label = QLabel("", self.video_scroll_area)
+        self.disc_label.setTextFormat(Qt.RichText)
+        self.disc_label.setStyleSheet(
+            "background-color: rgba(17, 18, 20, 210); border: 1px solid #3d4148;"
+            " border-radius: 8px; padding: 6px 12px; font-weight: 600;"
+        )
+        self.disc_label.hide()
+        self.video_scroll_area.installEventFilter(self)
+
+        # Which team had the disc over the last seconds
+        possession_group = QGroupBox("Possession · last 30 s")
+        possession_layout = QVBoxLayout()
+        possession_layout.setSpacing(4)
+        self.possession_bar = PossessionBar()
+        possession_layout.addWidget(self.possession_bar)
+        legend = faint(
+            "Full height: held  ·  Band: in the air  ·  Line at the bottom: on the ground"
+        )
+        possession_layout.addWidget(legend)
+        possession_group.setLayout(possession_layout)
+        layout.addWidget(possession_group)
+
+        # Control buttons, with the bar to seek by between them and the times
+        controls_layout = QHBoxLayout()
         self.progress_bar = QSlider(Qt.Horizontal)
         self.progress_bar.setMinimum(0)
         self.progress_bar.setMaximum(100)
         self.progress_bar.setValue(0)
         self.progress_bar.sliderMoved.connect(self._on_seek)
-        layout.addWidget(self.progress_bar)
-
-        # Control buttons
-        controls_layout = QHBoxLayout()
+        self.time_label, self.length_label = faint("0:00"), faint("0:00")
 
         # Previous video button
         self.prev_button = QPushButton("⏮")
@@ -406,6 +481,7 @@ class MainTab(QWidget):
         self.play_pause_button.setToolTip(f"Play/Pause [{SHORTCUTS['PLAY_PAUSE']}]")
         self.play_pause_button.clicked.connect(self._toggle_play_pause)
         self.play_pause_button.setFixedSize(60, 40)
+        self.play_pause_button.setProperty("primary", True)
         controls_layout.addWidget(self.play_pause_button)
 
         # Next video button
@@ -415,8 +491,9 @@ class MainTab(QWidget):
         self.next_button.setFixedSize(40, 40)
         controls_layout.addWidget(self.next_button)
 
-        # Add some space
-        controls_layout.addStretch()
+        controls_layout.addWidget(self.time_label)
+        controls_layout.addWidget(self.progress_bar, 1)
+        controls_layout.addWidget(self.length_label)
 
         # Reset tracker button
         reset_button = QPushButton("Reset Tracker")
@@ -445,29 +522,27 @@ class MainTab(QWidget):
         self.homography_scroll_area.setWidgetResizable(True)
         self.homography_scroll_area.setMinimumHeight(300)  # Reasonable minimum
         self.homography_scroll_area.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-        self.homography_scroll_area.setStyleSheet(
-            """
-            QScrollArea {
-                border: 2px solid #555;
-                background-color: #1a1a1a;
-            }
-        """
-        )
+        self.homography_scroll_area.setStyleSheet(PICTURE_FRAME)
 
         self.homography_display_label = ZoomableImageLabel()
+        self.homography_display_label.show_grid = False
         self.homography_display_label.setText("Loading top-down view...")
         self.homography_display_label.setAlignment(Qt.AlignCenter)
-        self.homography_display_label.setStyleSheet(
-            """
-            QLabel {
-                background-color: #1a1a1a;
-                color: #999;
-                font-size: 14px;
-            }
-        """
-        )
+        self.homography_display_label.setStyleSheet(PICTURE_PLACEHOLDER)
         self.homography_scroll_area.setWidget(self.homography_display_label)
         view_layout.addWidget(self.homography_scroll_area)
+
+        # Under the view: what the analysis knows at this moment
+        facts = QFormLayout()
+        facts.setLabelAlignment(Qt.AlignLeft)
+        facts.setFormAlignment(Qt.AlignLeft)
+        self.fact_labels = {}
+        for name in ("Disc", "Players on the field", "Numbers known"):
+            value = QLabel("")
+            value.setAlignment(Qt.AlignRight)
+            facts.addRow(faint(name), value)
+            self.fact_labels[name] = value
+        view_layout.addLayout(facts)
 
         view_group.setLayout(view_layout)
         layout.addWidget(
@@ -572,8 +647,6 @@ class MainTab(QWidget):
     def _show_frame(self, processed: ProcessedFrame) -> None:
         result = processed.result
         self.current_detections = result.detections
-        self.current_tracks = result.tracks
-        self.current_player_ids = result.player_ids
 
         display_start = time.perf_counter()
         self.video_label.set_image(frame_to_pixmap(result.main_view))
@@ -583,6 +656,25 @@ class MainTab(QWidget):
             self.homography_display_label.setText(result.top_down_message)
         if processed.mode == "next":
             self.progress_bar.setValue(processed.video_position)
+        if self.tracking_checkbox.isChecked() and result.wide_shot:
+            number = result.player_ids.get(result.holder_id, ("", None))[0]
+            self.possession_bar.add(
+                result.frame_index,
+                result.possession_colour,
+                result.disc_state,
+                result.possession_since,
+                result.holder_id,
+                number if str(number).isdigit() else "",
+            )
+            self._show_disc(result, number)
+            self._show_game_state(result.game_state)
+            self._show_point_and_score(result)
+            self._show_facts(result)
+            if result.player_stats is not None and self.player_stats_table.isVisible():
+                self.player_stats_table.show_players(result.player_stats)
+        rate = self.video_info.get("fps", 0) if self.video_info else 0
+        if rate > 0:
+            self.time_label.setText(clock(result.frame_index / rate))
         display_ms = (time.perf_counter() - display_start) * 1000
 
         if self.performance_widget.isVisible():
@@ -590,6 +682,89 @@ class MainTab(QWidget):
             for stage, duration_ms in result.timings.items():
                 self.performance_widget.add_processing_measurement(stage, duration_ms)
             self.performance_widget.add_processing_measurement("UI Display", display_ms)
+
+    def _show_disc(self, result, number) -> None:
+        """Say on the video who has the disc, or how long it has been in the air."""
+        rate = self.video_info.get("fps", 0) if self.video_info else 0
+        colour = result.possession_colour or (175, 175, 175)
+        dot = f'<span style="color: rgb({colour[2]}, {colour[1]}, {colour[0]})">&#9679;</span>'
+        if result.holder_id is not None:
+            who = f"#{number}" if str(number).isdigit() else f"Player {result.holder_id}"
+            held = (result.frame_index - result.possession_since) / rate if rate > 0 else 0.0
+            text = f"{dot}&nbsp; {who} has the disc &nbsp;<span style='color: #9aa0aa'>{held:.1f} s</span>"
+        elif result.flight_seconds is not None:
+            text = f"{dot}&nbsp; In the air &nbsp;<span style='color: #9aa0aa'>{result.flight_seconds:.1f} s</span>"
+        elif result.disc_state == "ground":
+            text = f"{dot}&nbsp; On the ground"
+        else:
+            self.disc_label.hide()
+            return
+        self.disc_label.setText(text)
+        self.disc_label.adjustSize()
+        self._place_disc_label()
+        self.disc_label.show()
+
+    def _place_disc_label(self) -> None:
+        area = self.video_scroll_area
+        self.disc_label.move(14, area.height() - self.disc_label.height() - 14)
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self.video_scroll_area and event.type() == QEvent.Resize:
+            self._place_disc_label()
+        return super().eventFilter(watched, event)
+
+    def _show_point_and_score(self, result) -> None:
+        """Above the video: which point this is and how long it has run, and the score."""
+        if result.points_begun:
+            text = f"Point {result.points_begun}"
+            if result.point_seconds is not None:
+                text += f"  ·  {clock(result.point_seconds)} into the point"
+            self.point_label.setText(text)
+        else:
+            self.point_label.setText("")
+        parts = [
+            f'<span style="color: rgb({colour[2]}, {colour[1]}, {colour[0]})">&#9679;</span> {points}'
+            for colour, points in result.score
+        ]
+        self.score_label.setText(
+            "<span style='font-size: 15px; font-weight: 600'>"
+            + " &nbsp;:&nbsp; ".join(parts)
+            + "</span>"
+        )
+
+    def _show_facts(self, result) -> None:
+        """Under the top-down view: the disc, how many players, how many numbers."""
+        players = [track for track in result.tracks if track.class_name == "player"]
+        teams = [sum(1 for track in players if track.team == team) for team in (0, 1)]
+        unknown = len(players) - sum(teams)
+        if result.holder_id is not None:
+            disc = "held"
+        elif result.flight_seconds is not None:
+            disc = f"in the air {result.flight_seconds:.1f} s"
+        else:
+            disc = "on the ground" if result.disc_state == "ground" else "not seen"
+        numbers = sum(
+            1
+            for track in players
+            if str(result.player_ids.get(track.track_id, ("", None))[0]).isdigit()
+        )
+        self.fact_labels["Disc"].setText(disc)
+        self.fact_labels["Players on the field"].setText(
+            f"{teams[0]} and {teams[1]}" + (f", {unknown} of no known team" if unknown else "")
+        )
+        self.fact_labels["Numbers known"].setText(f"{numbers} of {len(players)}")
+
+    def _show_game_state(self, state: str) -> None:
+        """Show the phase of the game as a coloured tag."""
+        if state == getattr(self, "_shown_game_state", None):
+            return
+        self._shown_game_state = state
+        background, text = GAME_STATE_COLOURS.get(state, GAME_STATE_COLOURS["unknown"])
+        self.game_state_label.setText("" if state == "unknown" else state.capitalize())
+        self.game_state_label.setStyleSheet(
+            f"background-color: {background}; color: {text}; border-radius: 11px;"
+            " padding: 3px 14px; font-weight: bold;"
+        )
 
     # ------------------------------------------------------------------ videos
 
@@ -642,6 +817,10 @@ class MainTab(QWidget):
 
         self.video_info = info
         self._frame_interval_ms = 1000.0 / info["fps"] if info["fps"] > 0 else 40.0
+        self.possession_bar.clear()
+        self.possession_bar.set_frame_rate(info["fps"])
+        if info["fps"] > 0:
+            self.length_label.setText(clock(info["total_frames"] / info["fps"]))
         self.progress_bar.setMaximum(max(1, info["total_frames"] - 1))
         self.progress_bar.setValue(0)
         self._request_frame("current")
@@ -701,6 +880,7 @@ class MainTab(QWidget):
     def _reset_tracker(self):
         """Reset the object tracker and everything derived from earlier frames."""
         self._run_on_worker(lambda worker: worker.pipeline.reset())
+        self.possession_bar.clear()
         logger.info("Tracker reset")
 
     def hideEvent(self, event):
@@ -741,26 +921,19 @@ class MainTab(QWidget):
         else:
             self.homography_display_label.setText("Homography view disabled")
 
-    def _on_ransac_toggled(self, state: int):
-        """Handle RANSAC line fitting checkbox toggle."""
-        # The drawing code reads this setting; override it in memory for this session
-        ransac_config = get_config()
-        for key in ("models", "segmentation", "contour", "ransac"):
-            ransac_config = ransac_config.setdefault(key, {})
-        ransac_config["enabled"] = state == Qt.Checked
-        self._request_display_update(immediate=True)
-
     # ------------------------------------------------------------------ models
 
-    def _on_player_model_changed(self, model_path: str):
+    def _on_player_model_changed(self, _index: int):
         """Handle player detection model change."""
+        model_path = self.player_model_combo.currentData()
         if model_path:
             full_path = str(models_root() / model_path)
             self._run_on_worker(lambda worker: worker.set_player_model(full_path))
             self._request_display_update()
 
-    def _on_disc_model_changed(self, model_path: str):
+    def _on_disc_model_changed(self, _index: int):
         """Handle disc detection model change."""
+        model_path = self.disc_model_combo.currentData()
         if model_path:
             full_path = str(models_root() / model_path)
             self._run_on_worker(lambda worker: worker.set_disc_model(full_path))
@@ -779,6 +952,7 @@ class MainTab(QWidget):
             self.segmentation_model_combo,
             default_model_path("segmentation"),
         )
+        shorten_model_names(self.segmentation_model_combo)
         self._on_segmentation_model_changed(self.segmentation_model_combo.currentText())
 
     def _on_segmentation_model_changed(self, display_name: str):

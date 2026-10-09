@@ -4,3 +4,8 @@
 ruff        # linting, import sorting, and formatting
 vulture     # dead code check
 snakeviz    # viewer for scripts/profile_app.py profiles
+
+# Tools of single scripts. Install these with --no-deps, one by one, so that nothing
+# replaces the CUDA build of PyTorch:
+#   yt-dlp            scripts/download_videos.py
+#   imageio-ffmpeg    scripts/render_demo.py (compresses the video it writes)

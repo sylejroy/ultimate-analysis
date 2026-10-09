@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from ..config.settings import get_setting
 from ..utils.logger import get_logger
+from . import health
 from .model_lock import GPU_SETUP_LOCK
 
 logger = get_logger("TENSORRT")
@@ -114,6 +115,11 @@ def _load_engine(
     except Exception as e:
         # Engines are tied to the GPU, driver, and TensorRT version they were built with
         logger.warning(f"TensorRT engine {path} is not usable, running PyTorch instead: {e}")
+        health.report(
+            f"Engine {path.parent.parent.parent.name[:40]}",
+            "not usable, the model runs about three times slower",
+            standing=True,
+        )
         return None
 
 

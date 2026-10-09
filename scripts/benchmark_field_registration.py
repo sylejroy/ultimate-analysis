@@ -1,21 +1,25 @@
 """Measure the estimate of where the field lies against the labelled frames.
 
 For every frame of a field dataset (Labelling tab, "Field lines"), the field is estimated
-from the field model's masks and compared with the label:
+from the field model's masks and compared with the label at the corners that were put on
+the picture by hand, and only there: what a label says about the rest of the field
+follows from those corners and is no measurement.
 
-- picture: how far the places of the field that are in the frame lie from where the label
-  has them, in pixels (median over a grid of places)
-- field: how far the frame's pixels on the field are mapped from where the label maps them,
-  in the field's unit (median over a grid of pixels)
+- pixels: how far the estimate draws a labelled corner from where it was put, the worst
+  of a frame's corners
+- field: how far the estimate maps the labelled pixel from the corner's place on the
+  field, in the field's unit, the worst of a frame's corners. At the far end a pixel is
+  about half a yard along the field, so this is the stricter number.
 
-The estimate is made twice: with the camera's focal length unknown, and with the focal
-length the other labelled frames of the same game give (none of the frame's own label goes
-into its estimate). The label is taken as the camera of the game's focal length that fits
-its corners best, since corners at the far end alone leave the near end open.
+A frame counts as given if there is an estimate and it passes the check against the
+players and the field mask (`implausible`); as wrong if it is given and more than
+`--wrong` field units off. The focal length is that of the game's other labelled frames:
+nothing of a frame's own label goes into its estimate.
 
 Usage:
     python scripts/benchmark_field_registration.py
-    python scripts/benchmark_field_registration.py --dataset labelled_field_v1 --save-pictures out/
+    python scripts/benchmark_field_registration.py --save-pictures out/
+    python scripts/benchmark_field_registration.py --games Pacmen colorado --model best.pt
 """
 
 import argparse
@@ -23,6 +27,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Dict, Optional, Tuple
 
 os.environ.setdefault("YOLO_AUTOINSTALL", "false")
 
@@ -34,16 +39,23 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
 from ultimate_analysis.constants import DEFAULT_PATHS  # noqa: E402
-from ultimate_analysis.processing.field_registration import estimate_field  # noqa: E402
+from ultimate_analysis.processing.field_analysis import create_unified_field_mask  # noqa: E402
+from ultimate_analysis.processing.field_registration import (  # noqa: E402
+    estimate_field,
+    implausible,
+)
 from ultimate_analysis.processing.field_segmentation import (  # noqa: E402
     reset_segmentation_cache,
     run_field_segmentation,
+    set_field_model,
+)
+from ultimate_analysis.processing.inference import (  # noqa: E402
+    detect_players,
+    load_detection_model,
 )
 from ultimate_analysis.utils import field_label_files, field_template  # noqa: E402
 from ultimate_analysis.utils.field_camera import fit_camera  # noqa: E402
-
-GRID_STEP = 5.0  # Field units between the places compared
-PIXEL_STEP = 60  # Frame pixels between the pixels compared
+from ultimate_analysis.utils.model_files import default_model_path  # noqa: E402
 
 
 def game_of(name: str) -> str:
@@ -51,54 +63,23 @@ def game_of(name: str) -> str:
     return re.sub(r"(_snippet_\d+_\d+)?_frame_\d+$", "", name)
 
 
-def errors(estimate_to_image, label_to_image, template, frame_shape):
-    """(median pixels, median field units) between an estimated mapping and the labelled one."""
-    height, width = frame_shape
-    xs = np.arange(0.0, template.width + 0.1, GRID_STEP)
-    ys = np.arange(0.0, template.length + 0.1, GRID_STEP)
-    places = np.array([[x, y, 1.0] for y in ys for x in xs])
-
-    def to_image(mapping):
-        mapped = places @ mapping.T
-        front = mapped[:, 2] > 1e-9
-        pixels = np.full((len(places), 2), np.nan)
-        pixels[front] = mapped[front, :2] / mapped[front, 2:3]
-        return pixels
-
-    labelled, estimated = to_image(label_to_image), to_image(estimate_to_image)
-    in_frame = (
-        (labelled[:, 0] >= 0)
-        & (labelled[:, 0] < width)
-        & (labelled[:, 1] >= 0)
-        & (labelled[:, 1] < height)
-    )
-    in_picture = np.linalg.norm(labelled[in_frame] - estimated[in_frame], axis=1)
-    in_picture = np.where(np.isnan(in_picture), 10.0 * width, in_picture)
-
-    pixels = np.array(
-        [
-            [x, y, 1.0]
-            for y in range(PIXEL_STEP // 2, height, PIXEL_STEP)
-            for x in range(PIXEL_STEP // 2, width, PIXEL_STEP)
-        ]
-    )
-
-    def to_field(mapping):
-        mapped = pixels @ np.linalg.inv(mapping).T
-        return mapped[:, :2] / mapped[:, 2:3]
-
-    labelled, estimated = to_field(label_to_image), to_field(estimate_to_image)
-    on_field = (
-        (labelled[:, 0] >= 0)
-        & (labelled[:, 0] <= template.width)
-        & (labelled[:, 1] >= 0)
-        & (labelled[:, 1] <= template.length)
-    )
-    on_the_field = np.linalg.norm(labelled[on_field] - estimated[on_field], axis=1)
-    return (
-        float(np.median(in_picture)) if len(in_picture) else float("nan"),
-        float(np.median(on_the_field)) if len(on_the_field) else float("nan"),
-    )
+def corner_errors(
+    field_to_image: np.ndarray, corners: Dict[str, Tuple[float, float]], template
+) -> Tuple[float, float]:
+    """(pixels, field units): how far off the estimate is at the worst labelled corner."""
+    image_to_field = np.linalg.inv(field_to_image)
+    pixels, units = [], []
+    for name, (u, v) in corners.items():
+        place = np.array(template.points[name])
+        drawn = field_to_image @ [*place, 1.0]
+        pixels.append(
+            float(np.hypot(drawn[0] / drawn[2] - u, drawn[1] / drawn[2] - v))
+            if drawn[2] > 0
+            else float("inf")
+        )
+        mapped = image_to_field @ [u, v, 1.0]
+        units.append(float(np.linalg.norm(mapped[:2] / mapped[2] - place)))
+    return max(pixels), max(units)
 
 
 def draw(frame, mapping, template, colour):
@@ -113,83 +94,105 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--dataset", default="labelled_field_v1")
+    parser.add_argument("--wrong", type=float, default=2.0, help="Field units that count as wrong")
     parser.add_argument("--save-pictures", type=Path, help="Folder for the frames as estimated")
+    parser.add_argument(
+        "--games", nargs="+", help="Only games called like this, e.g. those a model has not seen"
+    )
+    parser.add_argument("--model", type=Path, help="Field model to use instead of the default")
     args = parser.parse_args()
 
     dataset = REPO / DEFAULT_PATHS["TRAINING_DATA"] / args.dataset
     template = field_template.TEMPLATES[field_label_files.dataset_ruleset(dataset)]
+    players = load_detection_model(default_model_path("player_detection"))
     if args.save_pictures:
         args.save_pictures.mkdir(parents=True, exist_ok=True)
+    if args.model and not set_field_model(str(args.model)):
+        sys.exit(f"Cannot load {args.model}")
 
-    # The corner dots of each label, and the focal length they give by themselves
-    labels, focals = {}, {}
+    # The corners of each label that lie in the frame, and the focal length it gives
+    labels = {}
     for name in field_label_files.labelled_frames(dataset):
         label = field_label_files.load_label(dataset, name)
         frame = cv2.imread(str(dataset / "images" / f"{name}.jpg"))
-        if frame is None or len(label.points) < 4:
+        if frame is None:
             continue
         size = (frame.shape[1], frame.shape[0])
+        corners = {
+            key: pixel
+            for key, pixel in label.points.items()
+            if 0 <= pixel[0] < size[0] and 0 <= pixel[1] < size[1]
+        }
         free = fit_camera(template, {}, label.points, size)
-        if free is not None:
-            labels[name], focals[name] = (label, frame), free.focal
+        labels[name] = (frame, corners, free.focal if free is not None else None)
 
-    print("Focal length each game's labels give (pixels):")
-    for game in sorted({game_of(name) for name in labels}):
-        values = sorted(round(focals[name]) for name in labels if game_of(name) == game)
-        print(f"  {game}: {values}")
-
-    rows = []
-    for name, (label, frame) in labels.items():
-        size = (frame.shape[1], frame.shape[0])
+    rows = []  # (name, game, state, pixels, units)
+    for name, (frame, corners, _) in labels.items():
+        if args.games and not any(part in game_of(name) for part in args.games):
+            continue
         others = [
-            focals[other] for other in labels if other != name and game_of(other) == game_of(name)
+            focal
+            for other, (_, _, focal) in labels.items()
+            if other != name and game_of(other) == game_of(name) and focal is not None
         ]
-        focal = float(np.median(others)) if others else None
-        reference = fit_camera(template, {}, label.points, size, focal or focals[name])
+        focal: Optional[float] = float(np.median(others)) if others else None
 
         reset_segmentation_cache()
         results = run_field_segmentation(frame, 0)
-        row = [name]
-        for known in (None, focal):
-            estimate = estimate_field(results, frame.shape[:2], template, focal=known)
-            row.append(
-                errors(estimate.field_to_image, reference.field_to_image, template, frame.shape[:2])
-                if estimate is not None
-                else None
-            )
-        row.append(sorted(estimate.lines) if estimate is not None else [])
-        rows.append(row)
+        estimate = estimate_field(results, frame.shape[:2], template, focal=focal)
+        state, pixels, units = "none", float("nan"), float("nan")
+        if estimate is not None:
+            pixels, units = corner_errors(estimate.field_to_image, corners, template)
+            boxes = np.array([d["bbox"] for d in detect_players(frame, *players)]).reshape(-1, 4)
+            feet = np.column_stack([(boxes[:, 0] + boxes[:, 2]) / 2.0, boxes[:, 3]])
+            mask = create_unified_field_mask(results, frame.shape[:2])
+            state = "left out" if implausible(estimate, template, mask, feet) else "given"
+        rows.append((name, game_of(name), state, pixels, units))
         if args.save_pictures:
-            draw(frame, reference.field_to_image, template, (0, 255, 255))
+            for key, (u, v) in corners.items():
+                cv2.circle(frame, (int(u), int(v)), 10, (0, 255, 255), 2)
             if estimate is not None:
-                draw(frame, estimate.field_to_image, template, (255, 0, 255))
+                colour = (255, 0, 255) if state == "given" else (0, 0, 255)
+                draw(frame, estimate.field_to_image, template, colour)
             cv2.imwrite(str(args.save_pictures / f"{name}.jpg"), frame)
 
     unit = template.unit
-    print(f"\n{'':<46} {'focal unknown':>18} {'focal known':>18}")
-    print(f"{'frame':<46} {'px':>9} {unit:>8} {'px':>9} {unit:>8}  lines")
-    for name, free, known, lines in rows:
-        short = name[:20] + ".." + name[-20:] if len(name) > 44 else name
-        cells = "".join(
-            f" {found[0]:>9.1f} {found[1]:>8.2f}" if found else f" {'-':>9} {'-':>8}"
-            for found in (free, known)
+    print(f"{'game':<34} {'frames':>6} {'given':>6} {'wrong':>6} {'left out':>9} {'none':>5}")
+
+    def line(title, chosen):
+        given = [row for row in chosen if row[2] == "given"]
+        wrong = sum(1 for row in given if row[4] > args.wrong)
+        left_out = sum(1 for row in chosen if row[2] == "left out")
+        none = sum(1 for row in chosen if row[2] == "none")
+        print(
+            f"{title[:34]:<34} {len(chosen):>6} {len(given):>6} {wrong:>6} {left_out:>9} {none:>5}"
         )
-        print(f"{short:<46}{cells}  {', '.join(name[:-5] for name in lines)}")
-    for title, column in (("focal unknown", 1), ("focal known", 2)):
-        done = np.array([row[column] for row in rows if row[column] is not None])
-        print(f"\n{title}: estimated {len(done)} of {len(rows)} frames")
-        if len(done):
-            print(
-                f"  median over these: {np.median(done[:, 0]):.1f} px, "
-                f"{np.median(done[:, 1]):.2f} {unit}"
-            )
-            print(
-                "  within 1 / 2 / 5 "
-                + unit
-                + ": "
-                + " / ".join(str(int(np.sum(done[:, 1] <= limit))) for limit in (1.0, 2.0, 5.0))
-                + f" of {len(rows)} frames"
-            )
+
+    for game in sorted({row[1] for row in rows}):
+        line(game, [row for row in rows if row[1] == game])
+    line("all", rows)
+
+    given = np.array([[row[3], row[4]] for row in rows if row[2] == "given"])
+    left_out = np.array([row[4] for row in rows if row[2] == "left out"])
+    print(f"\nOf {len(rows)} frames, an estimate is given for {len(given)}.")
+    if len(given):
+        print(
+            f"At the worst labelled corner of these: median {np.median(given[:, 0]):.1f} px / "
+            f"{np.median(given[:, 1]):.2f} {unit}, 90% under "
+            f"{np.percentile(given[:, 0], 90):.0f} px / {np.percentile(given[:, 1], 90):.1f} {unit}"
+        )
+        for limit in (5, 10, 20):
+            print(f"  within {limit} px: {int((given[:, 0] <= limit).sum())} of {len(rows)} frames")
+        print(
+            f"  given and more than {args.wrong:g} {unit} off: "
+            f"{int((given[:, 1] > args.wrong).sum())} of {len(given)}"
+        )
+    if len(left_out):
+        kept_out_wrong = int((left_out > args.wrong).sum())
+        print(
+            f"Left out by the check: {len(left_out)}, of which {kept_out_wrong} were more than "
+            f"{args.wrong:g} {unit} off"
+        )
 
 
 if __name__ == "__main__":

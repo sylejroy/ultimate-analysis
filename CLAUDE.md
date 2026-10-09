@@ -4,8 +4,8 @@ PyQt5 desktop app that analyses Ultimate Frisbee video: player and disc detectio
 tracking (DeepSORT), possession, jersey numbers, field segmentation, and a top-down view.
 
 Layout, code style, and how a frame flows through the app are in
-`docs/DEVELOPMENT_GUIDELINES.md`. The README has the pipeline overview and the measured
-accuracy and speed of every model. Read those instead of guessing; this file only holds
+`docs/DEVELOPMENT_GUIDELINES.md`. The README has the pipeline overview;
+`docs/MEASUREMENTS.md` has the measured accuracy and speed of every model. Read those instead of guessing; this file only holds
 what they do not say.
 
 ## Environment
@@ -20,6 +20,8 @@ what they do not say.
   ```
 
   Tests are `unittest` (pytest is not installed) and need no videos, weights, or GPU.
+- `requirements-lock.txt` is the environment as it is known to work (`pip freeze`);
+  update it when a package changes.
 - PyTorch must stay at `2.7.1+cu128` and setuptools below 81. Newer setuptools removes
   `pkg_resources`, and DeepSORT then fails to load without an error: tracking silently
   falls back to a much worse tracker.
@@ -32,7 +34,9 @@ what they do not say.
   write new datasets and runs to new folders.
 - Start model training through the app's Model Training tab so the progress is visible,
   not headless from a script. Dataset building, benchmarks, and TensorRT export are fine
-  from the terminal.
+  from the terminal. The tab only trains YOLO models: the network that tells players
+  apart by their looks (`scripts/train_reid.py`) is trained from the terminal, with its
+  progress printed per epoch.
 - Commit only when asked.
 - Source files use Windows line endings (CRLF); keep them.
 
@@ -57,4 +61,4 @@ what they do not say.
 Change a model, a threshold, or preprocessing only with a before and after number from
 the benchmark scripts listed under "Testing" in `docs/DEVELOPMENT_GUIDELINES.md`. The
 validation and test sets are small (98 discs, 48 field images), so small differences are
-noise. Record results in the README tables.
+noise. Record results in the tables of `docs/MEASUREMENTS.md`.

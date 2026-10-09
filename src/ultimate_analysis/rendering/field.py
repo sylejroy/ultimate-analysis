@@ -273,7 +273,9 @@ def draw_unified_field_mask(
     Returns:
         The frame with the field drawn
     """
-    if unified_mask is None or not np.any(unified_mask):
+    # A mask without an outline is empty; the outline is kept per mask, where looking
+    # through the mask for a set pixel would be done again in every frame
+    if unified_mask is None or not _get_mask_outline(unified_mask):
         return frame
 
     result = frame if in_place else frame.copy()

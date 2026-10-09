@@ -75,28 +75,6 @@ TEMPLATES: Dict[str, FieldTemplate] = {
     "wfdf": FieldTemplate("wfdf", "m", 37.0, 100.0, 18.0, 18.0),
 }
 DEFAULT_RULESET = "usau"
-
-# Order in which the elements are asked for when labelling: the ones nearly every view
-# shows first, then what ties down the near part of the field
-LABELLING_ORDER: List[str] = [
-    "left_sideline",
-    "right_sideline",
-    "far_back_line",
-    "far_goal_line",
-    "near_goal_line",
-    "near_back_line",
-    "far_brick",
-    "midfield",
-    "near_brick",
-    "far_back_left",
-    "far_back_right",
-    "far_goal_left",
-    "far_goal_right",
-    "near_goal_left",
-    "near_goal_right",
-    "near_back_left",
-    "near_back_right",
-]
 MIN_STATEMENTS = 8  # What a homography needs
 
 
@@ -185,29 +163,36 @@ def fit_field(
     # The solution above makes an algebraic misfit small, which weighs the elements
     # unevenly. Refined here to make the distances in the picture small, which is what
     # the person labelling sees and what tells which element is off.
-    def misfits(image_to_field: np.ndarray) -> List[Tuple[str, float]]:
-        """(element, distance in pixels of each labelled pixel from where the element is drawn)."""
-        field_to_image = np.linalg.inv(image_to_field)
-        found: List[Tuple[str, float]] = []
-        for name, pixels in lines.items():
-            if name not in template.lines:
-                continue
-            # The field's line as a line of the picture
-            line = image_to_field.T @ _line_through(*template.lines[name])
-            line = line / max(np.hypot(line[0], line[1]), 1e-12)
-            found += [(name, float(line @ [u, v, 1.0])) for u, v in pixels]
-        for name, (u, v) in points.items():
-            if name not in template.points:
-                continue
-            mapped = field_to_image @ [*template.points[name], 1.0]
-            if abs(mapped[2]) < 1e-12:
-                found += [(name, 1e6), (name, 1e6)]
-                continue
-            found += [
-                (name, float(mapped[0] / mapped[2] - u)),
-                (name, float(mapped[1] / mapped[2] - v)),
-            ]
-        return found
+    # The refinement asks for the misfits some hundred times, and the field is fitted
+    # while a video plays: everything that does not change with the mapping is laid out
+    # once, as arrays.
+    on_lines = [
+        (name, pixel)
+        for name, pixels in lines.items()
+        if name in template.lines
+        for pixel in pixels
+    ]
+    marks = [(name, pixel) for name, pixel in points.items() if name in template.points]
+    field_lines = np.array([_line_through(*template.lines[name]) for name, _ in on_lines]).reshape(
+        -1, 3
+    )
+    line_pixels = np.array([[u, v, 1.0] for _, (u, v) in on_lines]).reshape(-1, 3)
+    mark_places = np.array([[*template.points[name], 1.0] for name, _ in marks]).reshape(-1, 3)
+    mark_pixels = np.array([pixel for _, pixel in marks], dtype=np.float64).reshape(-1, 2)
+    elements = [name for name, _ in on_lines] + [name for name, _ in marks for _ in range(2)]
+
+    def misfits(image_to_field: np.ndarray) -> np.ndarray:
+        """Distance in pixels of each labelled pixel from where its element is drawn, in
+        the order of `elements`."""
+        # The field's lines as lines of the picture
+        drawn = field_lines @ image_to_field
+        drawn = drawn / np.maximum(np.hypot(drawn[:, 0], drawn[:, 1]), 1e-12)[:, None]
+        from_lines = np.einsum("ij,ij->i", drawn, line_pixels)
+        mapped = mark_places @ np.linalg.inv(image_to_field).T
+        nowhere = np.abs(mapped[:, 2]) < 1e-12
+        depth = np.where(nowhere, 1.0, mapped[:, 2])
+        from_marks = np.where(nowhere[:, None], 1e6, mapped[:, :2] / depth[:, None] - mark_pixels)
+        return np.concatenate([from_lines, from_marks.ravel()])
 
     def unpack(values: np.ndarray) -> np.ndarray:
         return np.append(values, 1.0).reshape(3, 3)
@@ -217,7 +202,7 @@ def fit_field(
 
         try:
             refined = least_squares(
-                lambda values: [distance for _, distance in misfits(unpack(values))],
+                lambda values: misfits(unpack(values)),
                 image_to_field.ravel()[:8],
                 x_scale="jac",
                 max_nfev=50,
@@ -228,8 +213,7 @@ def fit_field(
         except (ValueError, np.linalg.LinAlgError):
             pass  # The first solution stands
 
-    distances = misfits(image_to_field)
-    values = np.array([distance for _, distance in distances])
+    values = misfits(image_to_field)
     field_to_image = np.linalg.inv(image_to_field)
     # The labelled pixels are in the picture, so their places on the field are in front
     labelled = [pixel for pixels in lines.values() for pixel in pixels] + list(points.values())
@@ -237,14 +221,14 @@ def fit_field(
     if places is None:
         return None
     depth = np.column_stack([places, np.ones(len(places))]) @ field_to_image[2]
-    worst = max(distances, key=lambda item: abs(item[1]))
+    worst = int(np.argmax(np.abs(values)))
     return FieldFit(
         front_sign=1.0 if np.median(depth) >= 0 else -1.0,
         image_to_field=image_to_field,
         field_to_image=field_to_image,
         statements=len(rows),
         error=float(np.sqrt(np.mean(values**2))),
-        worst=(worst[0], abs(worst[1])),
+        worst=(elements[worst], float(abs(values[worst]))),
     )
 
 

@@ -1,18 +1,20 @@
 """Drawing detections, tracks, trails, and jersey numbers on a frame."""
 
-import colorsys
-from typing import Any, Dict, List, Optional, Tuple
+from functools import lru_cache
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
 
 from ..constants import VISUALIZATION_COLORS
-from ..processing.tracking import DISC_ID_OFFSET, team_of_player, team_shirt_colour
+from ..processing.tracking import DISC_ID_OFFSET
 from ..utils.logger import get_logger
 
 logger = get_logger("RENDERING")
 
-POSSESSION_COLOR = VISUALIZATION_COLORS["POSSESSION"]
+# Who has the disc is marked in the team's colour; this is for a team not yet known.
+# Grey: white is a team's colour often enough.
+UNKNOWN_TEAM_COLOUR = (175, 175, 175)
 
 
 def draw_detections(
@@ -144,9 +146,12 @@ def draw_tracks_with_player_ids(
             jersey_number, details = player_ids[track_id]
 
         # Always show track ID and jersey number when using player ID mode
-        if jersey_number != "Unknown":
-            # Create simple jersey number label without confidence
-            jersey_label = f"#{jersey_number}"
+        if track_id >= DISC_ID_OFFSET:
+            jersey_label = "disc"
+        elif jersey_number != "Unknown":
+            # A number with a tilde is not read on this player but known by their looks
+            by_looks = str(jersey_number).startswith("~")
+            jersey_label = str(jersey_number) if by_looks else f"#{jersey_number}"
         else:
             # Show compact "?" for unknown tracks
             jersey_label = f"{track_id}:?"
@@ -443,87 +448,112 @@ def draw_tracks(
     return vis_frame
 
 
-def draw_possession(frame: np.ndarray, tracks: List[Any], holder_id: Optional[int]) -> None:
-    """Mark the player holding the disc with a thick box and a caption (drawn in place)."""
+# A shirt with less colour than this (distance from grey in Lab) is white, grey or
+# black: it has no colour to exaggerate, and what little hue it has comes from the
+# light. In Lab and not by saturation: a black shirt is "saturated" by a hint of blue,
+# and a dark green one hardly more (36 and 50 of 255), while their colour differs
+# plainly (2 and 10).
+COLOURLESS_CHROMA = 6.0
+
+
+def team_display_colour(shirt: Tuple[int, int, int]) -> Tuple[int, int, int]:
+    """A team's average shirt colour (BGR) made vivid, to mark the team on the frame.
+
+    The average of a shirt is dull: shadow, folds and the print pull it towards grey.
+    The hue is kept and made saturated and bright. A shirt without a colour stays white
+    or becomes dark, so that a team in white and one in black remain apart.
+    """
+    return _vivid(int(shirt[0]), int(shirt[1]), int(shirt[2]))
+
+
+@lru_cache(maxsize=256)
+def _vivid(blue: int, green: int, red: int) -> Tuple[int, int, int]:
+    """`team_display_colour` of a colour: asked for every player in every frame, and a
+    game has two."""
+    shirt = (blue, green, red)
+    hue, saturation, value = (
+        int(part) for part in cv2.cvtColor(np.uint8([[shirt]]), cv2.COLOR_BGR2HSV)[0, 0]
+    )
+    _, a, b = (int(part) for part in cv2.cvtColor(np.uint8([[shirt]]), cv2.COLOR_BGR2LAB)[0, 0])
+    if np.hypot(a - 128, b - 128) < COLOURLESS_CHROMA:
+        return (255, 255, 255) if value >= 128 else (40, 40, 40)
+    vivid = np.uint8([[(hue, max(200, min(255, saturation * 2)), max(230, value))]])
+    return tuple(int(part) for part in cv2.cvtColor(vivid, cv2.COLOR_HSV2BGR)[0, 0])
+
+
+def possession_colour(track: Any) -> Tuple[int, int, int]:
+    """The colour that marks a track as holding the disc: its team's, or grey without one."""
+    shirt = getattr(track, "team_colour", None)
+    return UNKNOWN_TEAM_COLOUR if shirt is None else team_display_colour(shirt)
+
+
+def draw_possession(
+    frame: np.ndarray,
+    tracks: List[Any],
+    holder_id: Optional[int],
+    last_seen: Optional[Sequence[float]] = None,
+    colour: Optional[Tuple[int, int, int]] = None,
+) -> None:
+    """Mark the player holding the disc with a thick box in the team's colour (in place).
+
+    Args:
+        frame: The picture
+        tracks: The frame's tracks
+        holder_id: Track ID of the holder, or None
+        last_seen: Where the holder was last seen (x1, y1, x2, y2), drawn if the holder
+            is not among the tracks: covered by the mark, they still have the disc
+        colour: The colour of the team in possession, for that case
+    """
+    if holder_id is None:
+        return
+    box, shown = last_seen, colour or UNKNOWN_TEAM_COLOUR
     for track in tracks:
-        if holder_id is None or getattr(track, "track_id", None) != holder_id:
-            continue
-        x1, y1, x2, y2 = map(int, track.to_ltrb())
-        cv2.rectangle(frame, (x1 - 3, y1 - 3), (x2 + 3, y2 + 3), POSSESSION_COLOR, 3)
-
-        label = "DISC"
-        (width, height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
-        cv2.rectangle(
-            frame, (x1 - 3, y2 + 3), (x1 + width + 7, y2 + height + 13), POSSESSION_COLOR, -1
-        )
-        cv2.putText(
-            frame, label, (x1 + 2, y2 + height + 8), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2
-        )
+        if getattr(track, "track_id", None) == holder_id:
+            box, shown = track.to_ltrb(), possession_colour(track)
+    if box is None:
+        return
+    x1, y1, x2, y2 = (int(value) for value in box)
+    # A dark rim keeps the box apart from grass and from a white shirt
+    cv2.rectangle(frame, (x1 - 4, y1 - 4), (x2 + 4, y2 + 4), (20, 20, 20), 6)
+    cv2.rectangle(frame, (x1 - 4, y1 - 4), (x2 + 4, y2 + 4), shown, 3)
 
 
-# The colours used while the shirts of the teams are not known: blue and pink, as hues in
-# degrees. Apart from each other, from the grass, and from the yellow that marks who has
-# the disc.
-TEAM_HUES = (210.0, 330.0)
-# How far a player's colour may lie from the team's, as a hue in degrees
-TEAM_HUE_SPREAD = 20.0
-# Teammates differ in how strong and how bright their colour is, as shares of the team's
-SATURATIONS = (1.0, 0.7, 0.85)
-BRIGHTNESSES = (1.0, 0.78, 0.9)
-GOLDEN_STEP = 0.6180339887
-# A shirt less colourful than this (white, grey, black) has no hue to vary: its players
-# get faint tints of all hues instead
-MIN_SHIRT_SATURATION = 0.25
-TINT = (0.12, 0.32)  # Saturation of those tints, from and to
-# Colours are kept at least this bright and this strong to stand out on the grass
-MIN_BRIGHTNESS = 0.55
-MIN_SATURATION = 0.5
-# A dark shirt without colour is drawn in greys no brighter than this, a light one no darker
-DARK_SHIRT = 0.5
+# The colours tracks are drawn in, as RGB: far apart from each other, from the grass, and
+# Neighbouring IDs get a cool and a warm one.
+TRACK_COLOURS = (
+    (56, 189, 248),  # Sky
+    (251, 113, 133),  # Rose
+    (139, 92, 246),  # Violet
+    (249, 115, 22),  # Orange
+    (34, 211, 238),  # Cyan
+    (236, 72, 153),  # Pink
+    (99, 102, 241),  # Indigo
+    (239, 68, 68),  # Red
+    (192, 132, 252),  # Lilac
+    (253, 186, 116),  # Peach
+    (59, 130, 246),  # Blue
+    (217, 70, 239),  # Fuchsia
+    (45, 212, 191),  # Turquoise
+    (225, 29, 72),  # Crimson
+    (125, 211, 252),  # Light blue
+    (249, 168, 212),  # Light pink
+    (13, 148, 136),  # Teal
+    (180, 83, 9),  # Rust
+)
+# A disc's track (BGR): dark, so the white text of its label can be read
+DISC_TRACK_COLOUR = (72, 52, 40)
 
 
 def get_track_color(track_id: int) -> Tuple[int, int, int]:
-    """The colour a player is drawn in: the colour of their team's shirts, varied a little.
-
-    Teammates share the colour their shirts have and differ in shade and tint, so the
-    teams are told apart at a glance and a player still keeps a colour of their own.
-    Dark shirts are drawn brighter than they are, to show on the grass. Until the shirts
-    are known a team is blue or pink; a player whose team is not known (yet) is grey, a
-    disc white.
+    """The colour a track is drawn in: the same for an ID every time, apart for near IDs.
 
     Args:
-        track_id: The player's ID (or a disc's)
+        track_id: The player's ID (or a disc's, which is dark)
 
     Returns:
         BGR colour
     """
     if track_id >= DISC_ID_OFFSET:
-        return (255, 255, 255)
-    step = track_id * GOLDEN_STEP % 1.0  # Spread evenly however many IDs there are
-    weaker = SATURATIONS[track_id % len(SATURATIONS)]
-    darker = BRIGHTNESSES[(track_id // len(SATURATIONS)) % len(BRIGHTNESSES)]
-    team = team_of_player(track_id)
-    if team is None:
-        grey = int(255 * (0.55 + 0.4 * step))
-        return (grey, grey, grey)
-
-    shirt = team_shirt_colour(team)
-    if shirt is None:
-        hue, saturation, brightness = TEAM_HUES[team] / 360.0, 0.95, 1.0
-    else:
-        hue, saturation, brightness = colorsys.rgb_to_hsv(*(value / 255.0 for value in shirt[::-1]))
-    if shirt is not None and saturation < MIN_SHIRT_SATURATION:
-        # White, grey or black: every hue as a faint tint, light or dark as the shirt is
-        hue = step
-        saturation = TINT[0] + (TINT[1] - TINT[0]) * (1.0 - weaker) / (1.0 - min(SATURATIONS))
-        brightness = (
-            (0.35 + (DARK_SHIRT - 0.35) * darker)
-            if brightness < DARK_SHIRT
-            else max(MIN_BRIGHTNESS + 0.15, brightness) * darker
-        )
-    else:
-        hue = (hue + (step - 0.5) * 2.0 * TEAM_HUE_SPREAD / 360.0) % 1.0
-        saturation = max(MIN_SATURATION, saturation) * weaker
-        brightness = min(1.0, max(MIN_BRIGHTNESS / min(BRIGHTNESSES), brightness)) * darker
-    red, green, blue = colorsys.hsv_to_rgb(hue, min(1.0, saturation), min(1.0, brightness))
-    return (int(blue * 255), int(green * 255), int(red * 255))
+        return DISC_TRACK_COLOUR
+    red, green, blue = TRACK_COLOURS[track_id % len(TRACK_COLOURS)]
+    return (blue, green, red)

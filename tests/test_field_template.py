@@ -107,7 +107,6 @@ class FieldTemplateTests(unittest.TestCase):
         usau, wfdf = self.module.TEMPLATES["usau"], self.module.TEMPLATES["wfdf"]
         self.assertEqual(set(usau.lines), set(wfdf.lines))
         self.assertEqual(set(usau.points), set(wfdf.points))
-        self.assertEqual(set(self.module.LABELLING_ORDER), set(usau.lines) | set(usau.points))
 
 
 if __name__ == "__main__":

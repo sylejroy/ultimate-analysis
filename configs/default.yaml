@@ -6,6 +6,7 @@ app:
   name: "Ultimate Analysis"
   version: "0.1.0"
   log_level: "INFO"
+  legacy_tabs: false             # Show the Field Calibration and Jersey Number Tuning tabs: no longer needed for the analysis, kept until they are removed
 
 # Video Processing Settings
 video:
@@ -41,7 +42,7 @@ models:
     full_search_interval: 15     # Search the whole frame at least this often, so a wrong lock does not last
   
   segmentation:
-    default_model: "data/models/segmentation/20250826_1_segmentation_yolo11s-seg_field finder.v8i.yolov8/finetune_20250826_092226/weights/best.pt"
+    default_model: "data/models/segmentation/20261008_1_segmentation_yolo26s-seg_rendered_field_v2/finetune_20261008_155901/weights/best.pt"
     confidence_threshold: 0.4   # 0.6 cut the far end zone away in about one frame in five
     show_raw_masks: false      # Whether to show raw segmentation model output masks
     frame_interval: 5           # Process segmentation every N frames (1=every frame, 5=every 5th)
@@ -89,7 +90,7 @@ models:
         # Edge filtering parameters
         edge_filtering:
           enabled: true         # Whether to filter points near image edges
-          margin: 15           # Distance from edge in pixels to consider as "near edge"
+          margin: 45           # Outline this near the frame's edge is where the frame cuts the field off, not a field line; masks stop up to some 40 px short of the edge
           edge_point_color: [0, 0, 255] # BGR color for filtered edge points (red)
           edge_point_radius: 6  # Radius for edge point visualization (increased for visibility)
           show_edge_points: false # Dots on outline points left out at the frame border
@@ -97,7 +98,10 @@ models:
   tracking:
     backend: bytetrack           # "bytetrack": by motion, each track within its team; "deepsort": by appearance
     hide_non_players: true       # Leave out observers: orange or red shirts that are not a team colour; backend "bytetrack" only
-    track_history_length: 300
+    hide_off_field: true         # Leave out those standing beside the field, going by where the field model sees the field (top-down from the field model only)
+    track_history_length: 300    # Most points a trail is kept for
+    trail_smoothing_seconds: 0.4 # A trail's points are averaged over this long, a stride, so it does not bob up and down with every step; 0 = as measured
+    trail_seconds: 4.0           # How far back a trail reaches, however many frames playback skips to keep up
     camera_motion_compensation: true   # Keep trails on the ground when the camera pans or zooms
     
     max_age_seconds: 3.0         # How long a player who is not detected is remembered and can return as the same track
@@ -120,15 +124,35 @@ models:
     max_cosine_distance: 0.5     # Feature similarity threshold (tighter for faster matching)
     nn_budget: 50                # Feature budget per class (reduced from 100 for speed)
     
+  # Edited games cut away from the drone to close-ups and title cards; nothing is analysed there
+  shot_type:
+    enabled: true
+    min_players: 6               # Drone footage shows at least this many players; a close-up shows the detector none or one or two
+    confirm_frames: 15           # Frames in a row that must look like the other kind before the analysis stops or starts again
+
   # Possession: the disc belongs to the player whose box it is in
   possession:
-    confirm_frames: 10           # Frames the disc must be seen at another player (or at none) before the holder changes
+    confirm_seconds: 0.25        # How long the disc must be seen at another player (or at none) before the holder changes
+    beside_holder_seconds: 1.5   # The same for a player standing right by the holder: the mark, who has not been passed the disc
+    holder_memory_seconds: 2.0   # A holder who is not found (covered by the mark) keeps the disc where they were last seen for this long
+    other_team_seconds: 1.0      # The same for a player of the team without the disc who stands right by one of the team with it: a defender at the catch far more often than an interception
+    reach: 1.0                   # A disc at no player this near to the holder (share of their height) is still the holder's: held out, or badly placed by the detector; a throw is further off within a moment
+    ground_seconds: 1.0          # A disc lying still at no player for this long is on the ground: a turnover, the other team has it
     box_margin: 0.15             # Player boxes are widened by this fraction; a held disc is often just outside
+
+  reid:
+    # Knowing players by their looks (prototype): a track whose number is never read
+    # takes the number of the player it looks like, shown with a tilde (~43)
+    enabled: true
+    weights: "data/models/reid/20261009_reid_resnet18_s3_sharp70_reid_players_v2/best.pt"
+    look_every_frames: 6                # Each tracked player is looked at this often
+    roster_folder: "data/cache/rosters" # The players of each video, kept between sessions; "" = not kept
 
   player_id:
     # Jersey number reader: easyocr, parseq, florence, or yolo_digits (also selectable in the GUI).
     # parseq read 18 of 23 test players with none wrong, at EasyOCR's speed; see README.
     method: "parseq"
+    show_reading_table: false      # Draw the table of jersey readings on the video: for tuning the reader
     florence:
       min_confidence: 0.7          # Below this the model is guessing; lower finds more numbers but more wrong ones
     yolo_digits:
@@ -161,7 +185,10 @@ logging:
 
 # Homography Estimation Settings
 homography:
-  source: "calibration"                      # Top-down view from: "calibration" (set by hand in the Homography tab) or "field" (where the field model sees the field)
+  source: "field"                      # Top-down view from: "calibration" (set by hand in the Homography tab) or "field" (where the field model sees the field)
+  field_diagram: true                        # With the field model as source: draw the field and the players as dots, where the video frame is otherwise warped onto the ground
+  disc_path_seconds: 8.0                     # How far back the path of the disc is drawn on it
+  diagram_height: 900                        # Height of that drawing in pixels
   ruleset: "usau"                            # The field the field model's view is laid on: "usau" or "wfdf"
   save_directory: "configs"
   default_params_file: "configs/homography_params.yaml"

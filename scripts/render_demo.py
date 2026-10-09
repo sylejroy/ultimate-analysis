@@ -34,7 +34,8 @@ from ultimate_analysis import pipeline as pipeline_module  # noqa: E402
 from ultimate_analysis.pipeline import AnalysisPipeline, PipelineOptions  # noqa: E402
 from ultimate_analysis.processing.homography import load_default_matrix  # noqa: E402
 from ultimate_analysis.processing.player_id import discard_pending_readings  # noqa: E402
-from ultimate_analysis.rendering.tracks import get_track_color  # noqa: E402
+from ultimate_analysis.rendering.tracks import UNKNOWN_TEAM_COLOUR  # noqa: E402
+from ultimate_analysis.utils.video import seconds_of  # noqa: E402
 
 WIDTH, HEIGHT = 1920, 1080
 CAMERA_SIZE = (1440, 810)  # The camera view, top left
@@ -42,14 +43,6 @@ STRIP_SECONDS = 20.0  # How far back the strip of who held the disc reaches
 BACKGROUND = (30, 30, 30)
 TEXT = (235, 235, 235)
 FAINT = (150, 150, 150)
-
-
-def seconds_of(text: str) -> float:
-    """Seconds from "90", "1:30" or "0:01:30"."""
-    seconds = 0.0
-    for part in text.split(":"):
-        seconds = seconds * 60.0 + float(part)
-    return seconds
 
 
 def put_text(picture, text, place, scale=0.7, colour=TEXT, thickness=1):
@@ -64,7 +57,11 @@ def is_number(read) -> bool:
 
 
 def compose(result, held: deque, frames_per_second: float, title: str, clock: str) -> np.ndarray:
-    """One picture of the demo: camera view, top-down view, and the possession strip."""
+    """One picture of the demo: camera view, top-down view, and the possession strip.
+
+    `held`: for each frame written, (colour of the holder's team, the holder's ID), or
+    None for nobody.
+    """
     picture = np.full((HEIGHT, WIDTH, 3), BACKGROUND, dtype=np.uint8)
     camera_width, camera_height = CAMERA_SIZE
     picture[:camera_height, :camera_width] = cv2.resize(
@@ -100,11 +97,15 @@ def compose(result, held: deque, frames_per_second: float, title: str, clock: st
     )
     holder = result.holder_id
     if holder is None:
-        put_text(picture, "Disc: in the air or not seen", (20, base + 125), 0.8, FAINT)
+        if result.flight_seconds is not None:
+            where = f"in the air {result.flight_seconds:.1f} s"
+        else:
+            where = "on the ground" if result.disc_state == "ground" else "not seen"
+        put_text(picture, f"Disc: {where}", (20, base + 125), 0.8, FAINT)
     else:
         number = result.player_ids.get(holder, ("", None))[0]
         who = f"number {number}" if is_number(number) else f"player {holder}"
-        cv2.circle(picture, (34, base + 117), 12, get_track_color(holder), -1)
+        cv2.circle(picture, (34, base + 117), 12, held[-1][0], -1)
         put_text(picture, f"Disc: {who}", (60, base + 125), 0.8)
 
     # Who held the disc over the last seconds, newest on the right
@@ -114,6 +115,7 @@ def compose(result, held: deque, frames_per_second: float, title: str, clock: st
     cv2.rectangle(picture, (strip_left, strip_top), (strip_right, strip_top + 36), (55, 55, 55), -1)
     length = int(STRIP_SECONDS * frames_per_second)
     step = (strip_right - strip_left) / length
+    runs = []  # [first position, last position, (colour, holder)] of one holder's stretch
     for position, earlier in enumerate(held):
         if earlier is None:
             continue
@@ -122,9 +124,27 @@ def compose(result, held: deque, frames_per_second: float, title: str, clock: st
             picture,
             (int(x), strip_top),
             (int(x + step) + 1, strip_top + 36),
-            get_track_color(earlier),
+            earlier[0],
             -1,
         )
+        if runs and runs[-1][1] == position - 1 and runs[-1][2] == earlier:
+            runs[-1][1] = position
+        else:
+            runs.append([position, position, earlier])
+    # The holder's jersey number on their stretch, where it has been read and fits
+    for first, last, (colour, holder) in runs:
+        number = result.player_ids.get(holder, ("", None))[0]
+        if not is_number(number):
+            continue
+        text = f"#{number}"
+        (text_width, text_height), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+        left = strip_left + (length - len(held) + first) * step
+        right = strip_left + (length - len(held) + last + 1) * step
+        if text_width + 8 > right - left:
+            continue
+        ink = (20, 20, 20) if sum(colour) > 380 else (245, 245, 245)
+        place = (int((left + right - text_width) / 2), strip_top + 18 + text_height // 2)
+        put_text(picture, text, place, 0.65, ink, 2)
     return picture
 
 
@@ -200,7 +220,7 @@ def main() -> None:
     # The processing rate shown in the app says nothing here: every frame is waited for
     pipeline_module.draw_fps_overlay = lambda *_, **__: None
     pipeline = AnalysisPipeline()
-    pipeline.new_video()
+    pipeline.new_video(str(args.video))
     pipeline.set_frame_rate(frames_per_second)
     if args.top_down == "calibration":
         pipeline.homography_matrix = load_default_matrix()
@@ -220,7 +240,18 @@ def main() -> None:
             result = pipeline.process(frame, index, options)
             if index < start or (index - start) % every:
                 continue
-            held.append(result.holder_id)
+            holder = (
+                None
+                if result.holder_id is None
+                else (result.possession_colour or UNKNOWN_TEAM_COLOUR, result.holder_id)
+            )
+            if held and held[-1] != holder:
+                # A change is confirmed a moment after it happened: the strip is put right
+                for back in range(
+                    1, min(len(held), (index - result.possession_since) // every) + 1
+                ):
+                    held[-back] = holder
+            held.append(holder)
             seconds = index / frames_per_second
             clock = f"{int(seconds // 60)}:{int(seconds % 60):02d}"
             writer.write(compose(result, held, out_rate, args.title, clock))

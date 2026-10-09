@@ -7,7 +7,6 @@ when the drawing lies on the real lines. Saved frames are verified calibrations,
 training data for a model that finds the field by itself.
 """
 
-import random
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -34,11 +33,12 @@ from ...constants import DEFAULT_PATHS
 from ...processing.camera_motion import CameraMotionEstimator
 from ...processing.field_registration import estimate_field, found_lines
 from ...processing.field_segmentation import reset_segmentation_cache, run_field_segmentation
+from ...processing.inference import detect_players, load_detection_model
 from ...processing.model_lock import MODEL_LOCK
 from ...utils import field_label_files, field_template, label_files
-from ...utils.field_camera import fit_camera
 from ...utils.field_label_files import FieldLabel
 from ...utils.logger import get_logger
+from ...utils.model_files import default_model_path
 from ...utils.painted_lines import painted_line_mask
 from ..widgets.panels import side_panel
 from ..widgets.video_list import VideoListWidget
@@ -48,18 +48,22 @@ from .field_diagram import FieldDiagram, title
 logger = get_logger("FIELD_LABELLING")
 
 DEFAULT_DATASET = "labelled_field_v1"
-RANDOM_FRAME_TRIES = 20
 # Labels are carried over to a frame at most this far away; further off, following the
 # camera through every frame in between takes too long and drifts
 MAX_CARRY_FRAMES = 150
 # How often the field model is asked again when it was busy
 MODEL_RETRY_MS = 300
+# How often a random frame is drawn again when it turns out to show no field
+RANDOM_FRAME_DRAWS = 6
 HELP_TEXT = (
     "Put the corner dots of the drawing on the\n"
     "corners of the field:\n"
     "Drag a dot: move that corner. Dots placed in\n"
     "    this frame (filled) stay where they are,\n"
     "    the rest follows; three or four are enough\n"
+    "The spot under a dot shows magnified beside it\n"
+    "A corner snaps so its line lies on a long painted\n"
+    "    line (turns yellow); Shift: no snapping\n"
     "Wheel: zoom, also out past the frame to reach\n"
     "    corners outside it\n"
     "Drag elsewhere: move the picture, 0: whole frame\n"
@@ -86,6 +90,7 @@ class FieldLabellingWidget(QWidget):
         self._model_lines: Optional[tuple] = None
         # (video, frame) shown without the field model's view because the model was busy
         self._awaiting_model: Optional[Tuple[str, int]] = None
+        self._player_model = None  # An own copy, loaded when first needed
         self._saved = False  # The shown frame is in the dataset
         self._edited = False
         self._template = field_template.TEMPLATES[field_template.DEFAULT_RULESET]
@@ -173,7 +178,8 @@ class FieldLabellingWidget(QWidget):
         self.painted_check.setToolTip(
             "Thin white streaks on the grass, found in the picture and marked in yellow:\n"
             "faint lines are easier to see, and the corners are where they meet.\n"
-            "A guide for the eye: far lines come out in parts, and other streaks too."
+            "A guide for the eye: far lines come out in parts, and other streaks too.\n"
+            "Streaks on players are left out, so a line has a gap where a player stands."
         )
         self.painted_check.toggled.connect(self._show_painted_lines)
         field_layout.addWidget(self.painted_check)
@@ -329,24 +335,26 @@ class FieldLabellingWidget(QWidget):
                 capture = cv2.VideoCapture(video)
                 self._frame_counts[video] = max(0, int(capture.get(cv2.CAP_PROP_FRAME_COUNT)))
                 capture.release()
-        counts = [self._frame_counts[video] for video in videos]
-        if not any(counts):
-            return
-        # Videos with few labels for their length come up more often
-        labelled = [
-            len(field_label_files.labelled_frames(self._dataset_dir(), video)) for video in videos
-        ]
-        weights = label_files.random_video_weights(counts, labelled)
-        for _ in range(RANDOM_FRAME_TRIES):
-            row = random.choices(range(len(videos)), weights=weights)[0]
-            index = random.randrange(counts[row])
-            name = label_files.frame_name(videos[row], index)
-            if field_label_files.load_label(self._dataset_dir(), name) is not None:
-                continue
+        # Edited games cut to close-ups; a few more draws find drone footage again
+        for _ in range(RANDOM_FRAME_DRAWS):
+            picked = label_files.random_unlabelled_frame(
+                videos,
+                [self._frame_counts[video] for video in videos],
+                [field_label_files.labelled_frames(self._dataset_dir(), video) for video in videos],
+            )
+            if picked is None:
+                return
+            row, index = picked
             if row != self.video_list.currentRow():
-                self.video_list.setCurrentRow(row)
+                self.video_list.setCurrentRow(row)  # Opens the video at its first frame
             self._go_to(index)
-            return
+            # A frame in which the field model sees no field at all is no drone footage.
+            # While the model is busy that cannot be told, and the frame is taken
+            if self._awaiting_model is not None or self._model_lines is None:
+                return
+            named, unnamed = self._model_lines
+            if named or unnamed:
+                return
 
     def _show_frame(self, carried: Optional[np.ndarray] = None) -> None:
         """Read the current frame and show it with its saved field, or one to start from."""
@@ -428,14 +436,7 @@ class FieldLabellingWidget(QWidget):
         known = self._focals.get(self._video_path)
         if known is not None and known[0] == names:
             return known[1]
-        size = (self._frame.shape[1], self._frame.shape[0])
-        focals = []
-        for name in names:
-            label = field_label_files.load_label(self._dataset_dir(), name)
-            fit = fit_camera(self._template, {}, label.points, size) if label else None
-            if fit is not None:
-                focals.append(fit.focal)
-        focal = float(np.median(focals)) if focals else None
+        focal = field_label_files.video_focal(self._dataset_dir(), self._video_path, self._template)
         self._focals[self._video_path] = (names, focal)
         return focal
 
@@ -482,7 +483,27 @@ class FieldLabellingWidget(QWidget):
         if self._frame is None or not self.painted_check.isChecked():
             self.canvas.set_painted_lines(None)
             return
-        self.canvas.set_painted_lines(painted_line_mask(self._frame))
+        self.canvas.set_painted_lines(painted_line_mask(self._frame, self._player_boxes()))
+
+    def _player_boxes(self) -> Optional[list]:
+        """Boxes of the players in the frame shown, to keep them out of the painted lines.
+
+        None while the models are busy (waiting would freeze the window) or without a
+        player model: the lines are then shown with what is found on the players.
+        """
+        if not MODEL_LOCK.acquire(blocking=False):
+            return None
+        try:
+            if self._player_model is None:
+                self._player_model = load_detection_model(default_model_path("player_detection"))
+            if self._player_model is None:
+                return None
+            return [found["bbox"] for found in detect_players(self._frame, *self._player_model)]
+        except Exception as e:
+            logger.exception(f"Could not find the players: {e}")
+            return None
+        finally:
+            MODEL_LOCK.release()
 
     def _show_model_lines(self) -> None:
         shown = self.model_lines_check.isChecked() and self._model_lines is not None
