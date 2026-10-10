@@ -21,15 +21,42 @@ of each cause. Every labelled frame is written to frames.csv in a new folder.
 
     python scripts/benchmark_possession.py possession_breakdown_v1 \\
         --labels labelled_players_discs_v1 labelled_discs_v1
+
+A run takes half an hour, nearly all of it detecting and tracking. With --record it
+also writes down what the possession tracking was told (recording.pkl in the folder),
+and a change to the possession logic or its settings is then scored on that in a
+minute, without the videos:
+
+    python scripts/benchmark_possession.py possession_recorded_v1 --record \\
+        --labels labelled_players_discs_v1 labelled_discs_v1
+    python scripts/benchmark_possession.py possession_reach_half \\
+        --replay possession_recorded_v1 --set models.possession.reach=0.5
+
+A replay with nothing changed says what the recorded run said, frame for frame; at how
+many frames it does is printed. A recording is of no use once the detections or the
+tracks change: that takes a new run.
+
+With --perfect-disc SECONDS a replay is given the disc where the label has it in place
+of what the disc model found: how far the rest gets with a disc model that misses
+nothing. The label is of one frame. For the time before it, the disc is taken to have
+been where the label has it on the labelled holder (at the same spot of their box) for
+that long already, which is not known: a catch a moment before the labelled frame is
+held longer by this than in the game. Where nobody holds the disc, only the labelled
+frame itself is given.
+
+    python scripts/benchmark_possession.py possession_perfect_disc_05 \
+        --replay possession_recorded_v1 --perfect-disc 0.5
 """
 
 import argparse
 import csv
+import json
 import os
+import pickle
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 os.environ.setdefault("YOLO_AUTOINSTALL", "false")
 
@@ -53,6 +80,10 @@ from ultimate_analysis.config.settings import get_config, get_setting  # noqa: E
 from ultimate_analysis.constants import DEFAULT_PATHS  # noqa: E402
 from ultimate_analysis.pipeline import AnalysisPipeline, PipelineOptions  # noqa: E402
 from ultimate_analysis.processing.possession import player_at_disc  # noqa: E402
+from ultimate_analysis.processing.possession_replay import (  # noqa: E402
+    RecordingPossessionTracker,
+    replay,
+)
 
 # A detection is of the labelled disc if it is within this share of a player's height of it
 NEAR_LABEL = 0.3
@@ -183,162 +214,294 @@ def a_few(rows: list) -> list:
     return [row for turn in turns for row in turn][:EXAMPLES]
 
 
+def watch(anchor_of: tuple, options: PipelineOptions, record: bool) -> Union[dict, str]:
+    """Analyse the video around a labelled frame. Gives what was seen, for `judged`, or
+    why the frame is left out."""
+    video, anchor, disc_share = anchor_of
+    path = REPO / "data" / "raw" / "videos" / f"{video}.mp4"
+    if not path.exists():
+        return "video not found"
+    capture = cv2.VideoCapture(str(path))
+    rate = capture.get(cv2.CAP_PROP_FPS)
+    before = int(BEFORE_SECONDS * rate) // STEP * STEP
+    start = max(anchor % STEP, anchor - before)
+    capture.set(cv2.CAP_PROP_POS_FRAMES, start)
+    pipeline = AnalysisPipeline()
+    if record:
+        # In place of the pipeline's own: the same tracker, writing down what it is told
+        pipeline._possession = RecordingPossessionTracker()
+    pipeline.reset()
+    pipeline.set_frame_rate(rate)
+    margin = float(get_setting("models.possession.box_margin", 0.15))
+
+    # Per analysed frame: what the pipeline says of the holder, the player boxes by
+    # track, the discs detected, and whether the frame was taken for drone footage
+    said, boxes, discs_at, wide = [], {}, {}, {}
+    at: Optional[dict] = None
+    for number in range(start, anchor + int(AFTER_SECONDS * rate) + 1):
+        ok, frame = capture.read()
+        if not ok:
+            break
+        if (number - start) % STEP:
+            continue
+        result = pipeline.process(frame, number, options)
+        if record:
+            pipeline._possession.frame_done(number)
+        said.append((number, result.holder_id, result.possession_since, result.possession_team))
+        wide[number] = bool(result.wide_shot)
+        players = [track for track in result.tracks if track.class_name == "player"]
+        boxes[number] = {
+            track.track_id: tuple(float(v) for v in track.to_ltrb()) for track in players
+        }
+        discs = [d for d in result.detections if d["class_name"] == "disc"]
+        discs_at[number] = [
+            ((d["bbox"][0] + d["bbox"][2]) / 2, (d["bbox"][1] + d["bbox"][3]) / 2) for d in discs
+        ]
+        if number != anchor or not players:
+            continue
+        height, width = frame.shape[:2]
+        disc = (disc_share[0] * width, disc_share[1] * height)
+        labelled, clear = holder_by_label(disc, list(boxes[number].items()))
+        near = NEAR_LABEL * float(np.median([b[3] - b[1] for b in boxes[number].values()]))
+        used = max(discs, key=lambda d: d.get("confidence", 0.0), default=None)
+        teams = {track.track_id: getattr(track, "team", None) for track in players}
+        at = {
+            "disc": disc,
+            "near": near,
+            "labelled": labelled,
+            "clear": clear,
+            "detected": any(
+                np.hypot(x - disc[0], y - disc[1]) <= near for x, y in discs_at[number]
+            ),
+            "used_is_labelled": used is not None
+            and np.hypot(
+                (used["bbox"][0] + used["bbox"][2]) / 2 - disc[0],
+                (used["bbox"][1] + used["bbox"][3]) / 2 - disc[1],
+            )
+            <= near,
+            "put_at": None if used is None else player_at_disc(used["bbox"], players, margin),
+            "untracked_at_disc": any(
+                d["class_name"] == "player"
+                and on_box(disc, d["bbox"])
+                and not any(overlap(d["bbox"], box) for box in boxes[number].values())
+                for d in result.detections
+            ),
+            "holder_team": teams.get(labelled),
+        }
+
+    if at is None:
+        return "no players followed at the labelled frame"
+    if not at["clear"]:
+        return "the label does not say whose the disc is"
+    return {
+        "video": video,
+        "anchor": anchor,
+        "rate": rate,
+        "at": at,
+        "boxes": boxes,
+        "discs_at": discs_at,
+        "wide": wide,
+        "said": said,
+        "calls": pipeline._possession.calls if record else None,
+    }
+
+
+def with_perfect_disc(case: dict, seconds: float) -> list:
+    """What possession was told around a labelled frame, with the disc where the label
+    has it: at the labelled frame, and on the labelled holder for `seconds` before."""
+    anchor, labelled, disc = case["anchor"], case["at"]["labelled"], case["at"]["disc"]
+
+    def a_disc(x: float, y: float) -> list:
+        return [{"class_name": "disc", "confidence": 1.0, "bbox": [x - 5, y - 5, x + 5, y + 5]}]
+
+    names = {labelled}
+    if labelled is not None:
+        # The holder under the names they had before the tracker joined them with another
+        renames = [call[1:] for call in case["calls"] if call[0] == "rename"]
+        for _ in renames:
+            names |= {was for was, now in renames if now in names}
+        x1, y1, x2, y2 = case["boxes"][anchor][labelled]
+        share = ((disc[0] - x1) / (x2 - x1), (disc[1] - y1) / (y2 - y1))
+    first = anchor - seconds * case["rate"]
+    # The holder's box in every frame they are followed in, to stand in where they are not
+    stood = {
+        call[3]: box
+        for call in case["calls"]
+        if call[0] == "update"
+        for track, box, _, _ in call[2]
+        if labelled is not None and track in names
+    }
+    calls = []
+    for call in case["calls"]:
+        if call[0] == "update" and call[3] == anchor and labelled is None:
+            call = ("update", a_disc(*disc), call[2], call[3])
+        elif call[0] == "update" and labelled is not None and first <= call[3] <= anchor and stood:
+            nearest = min(stood, key=lambda frame: abs(frame - call[3]))
+            x1, y1, x2, y2 = stood[nearest]
+            place = (x1 + share[0] * (x2 - x1), y1 + share[1] * (y2 - y1))
+            call = ("update", a_disc(*(disc if call[3] == anchor else place)), call[2], call[3])
+        calls.append(call)
+    return calls
+
+
+def judged(case: dict, said: list) -> dict:
+    """The row of a labelled frame: what the label says, what the possession tracking
+    says (`said`: frame, holder, since when, team after every analysed frame), and the
+    cause where the two differ."""
+    anchor, rate, boxes = case["anchor"], case["rate"], case["boxes"]
+    at = dict(case["at"])
+    # The holder and the team of every frame, dated back as the pipeline dates them
+    holder_at, team_at, frames = {}, {}, []
+    for number, holder, since, team in said:
+        frames.append(number)
+        for earlier in frames[::-1]:
+            if earlier < since:
+                break
+            holder_at[earlier] = holder if case["wide"][number] else "unknown"
+            team_at[earlier] = team
+    live = {number: holder for number, holder, _, _ in said}.get(anchor)
+    at["live"] = live if case["wide"].get(anchor) else "unknown"
+    labelled = at["labelled"]
+    at["says"] = holder_at.get(anchor, "unknown")
+    at["possession_team"] = team_at.get(anchor)
+    # In how many frames of the second before the disc was detected where the label
+    # has it: on the labelled holder, or at the labelled place
+    lately = [f for f in frames if 0 <= anchor - f <= AROUND_SECONDS * rate]
+    at["label_seen_lately"] = sum(
+        any(
+            on_box(d, boxes[f][labelled])
+            if labelled is not None
+            else np.hypot(d[0] - at["disc"][0], d[1] - at["disc"][1]) <= at["near"]
+            for d in case["discs_at"][f]
+        )
+        for f in lately
+        if labelled is None or labelled in boxes[f]
+    )
+    if at["says"] != labelled:
+        cause, note = cause_of(at, boxes, anchor, rate)
+    elif labelled is not None and at["holder_team"] not in (None, at["possession_team"]):
+        known = at["possession_team"] is not None
+        cause = CAUSES[3]
+        note = "the other team" if known else "no team in possession"
+    else:
+        cause, note = RIGHT, ""
+    return {
+        "video": case["video"],
+        "frame": anchor,
+        "label": "nobody" if labelled is None else "held",
+        "labelled_holder": "" if labelled is None else labelled,
+        "pipeline_holder": "" if at["says"] is None else at["says"],
+        "holder_in_that_frame": "" if at["live"] is None else at["live"],
+        "cause": cause,
+        "note": note,
+        "disc_detected": int(at["detected"]),
+        "disc_put_at": "" if at["put_at"] is None else at["put_at"],
+        "holder_team": "" if at["holder_team"] is None else at["holder_team"],
+        "possession_team": "" if at["possession_team"] is None else at["possession_team"],
+        "disc_at_label_last_second": f"{at['label_seen_lately']}/{len(lately)}",
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("name", help="New folder in data/benchmarks")
-    parser.add_argument("--labels", nargs="+", required=True, help="Datasets with disc labels")
+    parser.add_argument("--labels", nargs="+", default=[], help="Datasets with disc labels")
     parser.add_argument("--videos", nargs="+", default=[], help="Only these (parts of names)")
+    parser.add_argument("--record", action="store_true", help="Keep what possession was told")
+    parser.add_argument("--replay", help="Folder in data/benchmarks of a run with --record")
+    parser.add_argument("--set", action="append", default=[], help="setting=value, as JSON")
+    parser.add_argument(
+        "--perfect-disc",
+        type=float,
+        help="With --replay: the disc as labelled, on the holder for so many seconds before",
+    )
     args = parser.parse_args()
+    if bool(args.labels) == bool(args.replay):
+        parser.error("give either --labels, for a run over the videos, or --replay")
+    if args.perfect_disc is not None and not args.replay:
+        parser.error("--perfect-disc needs --replay")
 
     data = REPO / DEFAULT_PATHS["TRAINING_DATA"]
-    out = REPO / "data" / "benchmarks" / args.name
+    benchmarks = REPO / "data" / "benchmarks"
+    out = benchmarks / args.name
     if out.exists():
         sys.exit(f"{out} exists: results are not overwritten, choose another name")
-    anchors = sorted(
-        {a[:2]: a for name in args.labels for a in labelled_discs(data / name)}.values()
-    )
-    if args.videos:
-        anchors = [a for a in anchors if any(part in a[0] for part in args.videos)]
-    out.mkdir(parents=True)
-    get_config()["models"]["reid"]["enabled"] = False
-    options = PipelineOptions(player_id=False, top_down_view=False)
-    margin = float(get_setting("models.possession.box_margin", 0.15))
+    config = get_config()
+    config["models"]["reid"]["enabled"] = False
+    for item in args.set:
+        key, value = item.split("=", 1)
+        node = config
+        *path, last = key.split(".")
+        for part in path:
+            node = node[part]
+        node[last] = json.loads(value)
+
     left_out = Counter()
-    rows = []
+    rows, cases, as_recorded = [], [], None
+    if args.replay:
+        with open(benchmarks / args.replay / "recording.pkl", "rb") as file:
+            recording = pickle.load(file)
+        left_out.update(recording["left_out"])
+        chosen = [
+            case
+            for case in recording["cases"]
+            if not args.videos or any(part in case["video"] for part in args.videos)
+        ]
+        out.mkdir(parents=True)
+        perfect = args.perfect_disc
+        rows = [
+            judged(
+                case,
+                replay(case["calls"] if perfect is None else with_perfect_disc(case, perfect)),
+            )
+            for case in chosen
+        ]
+        as_recorded = sum(
+            row["pipeline_holder"] == judged(case, case["said"])["pipeline_holder"]
+            for case, row in zip(chosen, rows)
+        )
+    else:
+        anchors = sorted(
+            {a[:2]: a for name in args.labels for a in labelled_discs(data / name)}.values()
+        )
+        if args.videos:
+            anchors = [a for a in anchors if any(part in a[0] for part in args.videos)]
+        out.mkdir(parents=True)
+        options = PipelineOptions(player_id=False, top_down_view=False, draw=False)
+        for count, anchor_of in enumerate(anchors):
+            case = watch(anchor_of, options, args.record)
+            if count % 20 == 19:
+                done = dict(Counter(r["cause"].split()[0] for r in rows))
+                print(f"{count + 1} of {len(anchors)} labelled frames: {done}", flush=True)
+            if isinstance(case, str):
+                left_out[case] += 1
+                continue
+            rows.append(judged(case, case["said"]))
+            if args.record:
+                cases.append(case)
+        if args.record:
+            with open(out / "recording.pkl", "wb") as file:
+                pickle.dump({"labels": args.labels, "cases": cases, "left_out": left_out}, file)
 
     with open(out / "frames.csv", "w", newline="") as file:
         index = csv.DictWriter(file, COLUMNS, extrasaction="ignore")
         index.writeheader()
-        for count, (video, anchor, disc_share) in enumerate(anchors):
-            path = REPO / "data" / "raw" / "videos" / f"{video}.mp4"
-            if not path.exists():
-                left_out["video not found"] += 1
-                continue
-            capture = cv2.VideoCapture(str(path))
-            rate = capture.get(cv2.CAP_PROP_FPS)
-            before = int(BEFORE_SECONDS * rate) // STEP * STEP
-            start = max(anchor % STEP, anchor - before)
-            capture.set(cv2.CAP_PROP_POS_FRAMES, start)
-            pipeline = AnalysisPipeline()
-            pipeline.reset()
-            pipeline.set_frame_rate(rate)
+        index.writerows(rows)
 
-            # Per analysed frame: the holder and the team in possession (dated back as
-            # the pipeline dates them), the player boxes by track, and the discs detected
-            holder_at, team_at, boxes, discs_at, frames = {}, {}, {}, {}, []
-            at: Optional[dict] = None
-            for number in range(start, anchor + int(AFTER_SECONDS * rate) + 1):
-                ok, frame = capture.read()
-                if not ok:
-                    break
-                if (number - start) % STEP:
-                    continue
-                result = pipeline.process(frame, number, options)
-                frames.append(number)
-                for earlier in frames[::-1]:
-                    if earlier < result.possession_since:
-                        break
-                    holder_at[earlier] = result.holder_id if result.wide_shot else "unknown"
-                    team_at[earlier] = result.possession_team
-                players = [track for track in result.tracks if track.class_name == "player"]
-                boxes[number] = {
-                    track.track_id: tuple(float(v) for v in track.to_ltrb()) for track in players
-                }
-                discs = [d for d in result.detections if d["class_name"] == "disc"]
-                discs_at[number] = [
-                    ((d["bbox"][0] + d["bbox"][2]) / 2, (d["bbox"][1] + d["bbox"][3]) / 2)
-                    for d in discs
-                ]
-                if number != anchor or not players:
-                    continue
-                height, width = frame.shape[:2]
-                disc = (disc_share[0] * width, disc_share[1] * height)
-                labelled, clear = holder_by_label(disc, list(boxes[number].items()))
-                near = NEAR_LABEL * float(np.median([b[3] - b[1] for b in boxes[number].values()]))
-                used = max(discs, key=lambda d: d.get("confidence", 0.0), default=None)
-                teams = {track.track_id: getattr(track, "team", None) for track in players}
-                at = {
-                    "disc": disc,
-                    "near": near,
-                    "labelled": labelled,
-                    "clear": clear,
-                    "live": result.holder_id if result.wide_shot else "unknown",
-                    "detected": any(
-                        np.hypot(x - disc[0], y - disc[1]) <= near for x, y in discs_at[number]
-                    ),
-                    "used_is_labelled": used is not None
-                    and np.hypot(
-                        (used["bbox"][0] + used["bbox"][2]) / 2 - disc[0],
-                        (used["bbox"][1] + used["bbox"][3]) / 2 - disc[1],
-                    )
-                    <= near,
-                    "put_at": None
-                    if used is None
-                    else player_at_disc(used["bbox"], players, margin),
-                    "untracked_at_disc": any(
-                        d["class_name"] == "player"
-                        and on_box(disc, d["bbox"])
-                        and not any(overlap(d["bbox"], box) for box in boxes[number].values())
-                        for d in result.detections
-                    ),
-                    "holder_team": teams.get(labelled),
-                }
-
-            if at is None:
-                left_out["no players followed at the labelled frame"] += 1
-                continue
-            if not at["clear"]:
-                left_out["the label does not say whose the disc is"] += 1
-                continue
-            labelled = at["labelled"]
-            at["says"] = holder_at.get(anchor, "unknown")
-            at["possession_team"] = team_at.get(anchor)
-            # In how many frames of the second before the disc was detected where the
-            # label has it: on the labelled holder, or at the labelled place
-            lately = [f for f in frames if 0 <= anchor - f <= AROUND_SECONDS * rate]
-            at["label_seen_lately"] = sum(
-                any(
-                    on_box(d, boxes[f][labelled])
-                    if labelled is not None
-                    else np.hypot(d[0] - at["disc"][0], d[1] - at["disc"][1]) <= at["near"]
-                    for d in discs_at[f]
-                )
-                for f in lately
-                if labelled is None or labelled in boxes[f]
-            )
-            if at["says"] != labelled:
-                cause, note = cause_of(at, boxes, anchor, rate)
-            elif labelled is not None and at["holder_team"] not in (None, at["possession_team"]):
-                known = at["possession_team"] is not None
-                cause = CAUSES[3]
-                note = "the other team" if known else "no team in possession"
-            else:
-                cause, note = RIGHT, ""
-            row = {
-                "video": video,
-                "frame": anchor,
-                "label": "nobody" if labelled is None else "held",
-                "labelled_holder": "" if labelled is None else labelled,
-                "pipeline_holder": "" if at["says"] is None else at["says"],
-                "holder_in_that_frame": "" if at["live"] is None else at["live"],
-                "cause": cause,
-                "note": note,
-                "disc_detected": int(at["detected"]),
-                "disc_put_at": "" if at["put_at"] is None else at["put_at"],
-                "holder_team": "" if at["holder_team"] is None else at["holder_team"],
-                "possession_team": "" if at["possession_team"] is None else at["possession_team"],
-                "disc_at_label_last_second": f"{at['label_seen_lately']}/{len(lately)}",
-            }
-            rows.append(row)
-            index.writerow(row)
-            file.flush()
-            if count % 20 == 19:
-                done = dict(Counter(r["cause"].split()[0] for r in rows))
-                print(f"{count + 1} of {len(anchors)} labelled frames: {done}", flush=True)
-
-    lines = ["The holder against the label (the team aside):"]
+    lines = [f"Settings changed: {', '.join(args.set)}"] if args.set else []
+    if args.perfect_disc is not None:
+        lines.append(
+            f"The disc as labelled in place of the disc model's: at the labelled frame, and "
+            f"on the labelled holder for {args.perfect_disc:g} s before"
+        )
+    if as_recorded is not None:
+        lines.append(
+            f"Replayed from {args.replay}: the holder as in the recorded run at "
+            f"{as_recorded} of {len(rows)} frames"
+        )
+    lines.append("The holder against the label (the team aside):")
     for label in ("held", "nobody"):
         chosen = [row for row in rows if row["label"] == label]
         same = sum(row["cause"] in (RIGHT, CAUSES[3]) for row in chosen)

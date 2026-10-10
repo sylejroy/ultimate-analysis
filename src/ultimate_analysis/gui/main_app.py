@@ -5,13 +5,15 @@ for video analysis functionality.
 """
 
 import sys
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QColor, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
     QLabel,
     QMainWindow,
+    QSplashScreen,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -25,8 +27,12 @@ from ..constants import (
     MIN_WINDOW_WIDTH,
 )
 from ..utils.logger import get_logger
-from .main.main_tab import MainTab
-from .theme import apply_dark_theme
+from .theme import GROUND, TEXT, apply_dark_theme
+
+if TYPE_CHECKING:
+    # Imported when the window is built: with it come PyTorch and the detectors, ten
+    # seconds and more, during which a notice is on screen
+    from .main.main_tab import MainTab
 
 logger = get_logger("APP")
 
@@ -114,7 +120,7 @@ class UltimateAnalysisApp(QMainWindow):
         # Application state
 
         # Tab references for lazy loading
-        self.main_tab: Optional[MainTab] = None
+        self.main_tab: Optional["MainTab"] = None
         self.easyocr_tab: Optional[LazyLoadingTab] = None
         self.model_training_tab: Optional[LazyLoadingTab] = None
         self.homography_tab: Optional[LazyLoadingTab] = None
@@ -173,6 +179,8 @@ class UltimateAnalysisApp(QMainWindow):
         layout.addWidget(self.tab_widget)
 
         # Create main tab (always loaded immediately)
+        from .main.main_tab import MainTab
+
         self.main_tab = MainTab()
         self.main_tab.video_changed.connect(self._on_video_changed)
         self.tab_widget.addTab(self.main_tab, "Main Analysis")
@@ -285,9 +293,20 @@ def main():
     # Create application
     app = create_application()
 
+    # Something to look at while the libraries are loaded, which takes the longest
+    notice = QPixmap(440, 130)
+    notice.fill(QColor(GROUND))
+    splash = QSplashScreen(notice)
+    name = get_setting("app.name", "Ultimate Analysis")
+    splash.showMessage(f"{name}\n\nLoading...", Qt.AlignCenter, QColor(TEXT))
+    splash.show()
+    app.processEvents()
+    from .main import main_tab  # noqa: F401  (the slow import, before the window opens)
+
     # Create main window
     main_window = UltimateAnalysisApp()
     main_window.show()
+    splash.finish(main_window)
 
     logger.info("Application started, entering event loop")
 

@@ -92,6 +92,18 @@ def find_segmentation_models() -> List[str]:
     return sorted(str(weights) for weights in (models_root() / "segmentation").rglob("best.pt"))
 
 
+def find_reid_models() -> List[str]:
+    """Paths of the networks that know players by their looks (scripts/train_reid.py)."""
+    return sorted(str(weights) for weights in (models_root() / "reid").glob("*/best.pt"))
+
+
+def find_holder_models() -> List[str]:
+    """Paths of the networks that tell from a picture of a player whether they hold the
+    disc (scripts/train_holder.py), the newest first."""
+    found = (models_root() / "holder").glob("*/best.pt")
+    return [str(w) for w in sorted(found, key=lambda w: w.stat().st_mtime, reverse=True)]
+
+
 def model_display_name(weights: PathLike) -> str:
     """Short name of a training run for model dropdowns: "<run>" or "<run>/<finetune>"."""
     weights = Path(weights)

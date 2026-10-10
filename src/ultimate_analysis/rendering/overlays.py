@@ -9,6 +9,54 @@ from ..utils.logger import get_logger
 logger = get_logger("RENDERING")
 
 
+# What is written on the picture stands on a dark ground the picture shows through
+LABEL_GROUND = 20
+LABEL_SHOWS_THROUGH = 0.45
+LABEL_FONT = cv2.FONT_HERSHEY_SIMPLEX
+
+
+def draw_label(
+    frame: np.ndarray,
+    text: str,
+    left: int,
+    bottom: int,
+    scale: float = 0.45,
+    colour: tuple = (255, 255, 255),
+    bar: tuple = None,
+) -> None:
+    """Write a small label on the frame (in place): thin text on a dark ground that the
+    picture shows through, so that it hides little of what goes on behind it.
+
+    Args:
+        frame: The frame to write on
+        text: What to say
+        left, bottom: The label's lower left corner
+        scale: Size of the text
+        colour: Of the text (BGR)
+        bar: A colour to mark the label with at its left edge (a track's), if any
+    """
+    (width, height), _ = cv2.getTextSize(text, LABEL_FONT, scale, 1)
+    pad, bar_width = 3, 3 if bar is not None else 0
+    x1, y1 = max(0, left), max(0, bottom - height - 2 * pad)
+    x2 = min(frame.shape[1], x1 + bar_width + width + 2 * pad)
+    y2 = min(frame.shape[0], y1 + height + 2 * pad)
+    if x2 <= x1 or y2 <= y1:
+        return
+    ground = frame[y1:y2, x1:x2]
+    ground[:] = cv2.addWeighted(
+        ground,
+        LABEL_SHOWS_THROUGH,
+        np.full_like(ground, LABEL_GROUND),
+        1.0 - LABEL_SHOWS_THROUGH,
+        0,
+    )
+    if bar is not None:
+        frame[y1:y2, x1 : x1 + bar_width] = bar
+    cv2.putText(
+        frame, text, (x1 + bar_width + pad, y2 - pad), LABEL_FONT, scale, colour, 1, cv2.LINE_AA
+    )
+
+
 def draw_notice(frame: np.ndarray, text: str, line: int = 0, alarm: bool = False) -> None:
     """Write a short notice at the top left of the frame (in place).
 
@@ -36,36 +84,10 @@ def draw_fps_overlay(frame: np.ndarray, fps: float) -> None:
     if fps <= 0:
         return
 
-    # Format FPS text
-    fps_text = f"Processing: {fps:.1f} FPS"
-
-    # Get frame dimensions
-    height, width = frame.shape[:2]
-
-    # Set text properties
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    font_scale = 0.7
-    color = (0, 255, 0)  # Green color
-    thickness = 2
-
-    # Get text size for positioning
-    (text_width, text_height), baseline = cv2.getTextSize(fps_text, font, font_scale, thickness)
-
-    # Position in top right with some padding, moved down slightly
-    x = width - text_width - 15
-    y = text_height + 45  # Increased from 15 to 45 to lower the position
-
-    # Draw background rectangle for better visibility
-    cv2.rectangle(
-        frame,
-        (x - 5, y - text_height - 5),
-        (x + text_width + 5, y + baseline + 5),
-        (0, 0, 0),
-        -1,
-    )  # Black background
-
-    # Draw the FPS text
-    cv2.putText(frame, fps_text, (x, y), font, font_scale, color, thickness)
+    fps_text = f"{fps:.1f} FPS"
+    (text_width, _), _ = cv2.getTextSize(fps_text, LABEL_FONT, 0.5, 1)
+    # In the top right corner, small: it is there to be glanced at
+    draw_label(frame, fps_text, frame.shape[1] - text_width - 18, 34, 0.5, (210, 210, 210))
 
 
 def draw_jersey_table(frame: np.ndarray) -> None:

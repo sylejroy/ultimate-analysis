@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List
 from PyQt5.QtCore import QEvent, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
+    QApplication,
     QComboBox,
     QFormLayout,
     QGroupBox,
@@ -40,6 +41,8 @@ from ..widgets.controls import StageBars, ToggleSwitch
 from ..widgets.images import frame_to_pixmap
 from ..widgets.model_selection import (
     populate_detection_model_combo,
+    populate_holder_model_combo,
+    populate_reid_model_combo,
     populate_segmentation_model_combo,
 )
 from ..widgets.panels import PANEL_WIDTH, collapsible, compact_combo, side_panel
@@ -57,6 +60,13 @@ MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
 def clock(seconds: float) -> str:
     """Seconds as m:ss."""
     return f"{int(seconds // 60)}:{int(seconds % 60):02d}"
+
+
+def frame_code(video_path: str, frame_index: int, rate: float) -> str:
+    """What names a frame of a video to somebody else: the video's file name without
+    its ending, the frame's number, and the time for whoever reads it."""
+    time_shown = f" ({clock(frame_index / rate)})" if rate > 0 else ""
+    return f"frame:{Path(video_path).stem}@{frame_index}{time_shown}"
 
 
 def faint(text: str) -> QLabel:
@@ -128,6 +138,7 @@ class MainTab(QWidget):
 
         # Results of the frame on screen
         self.current_detections: List[Dict] = []
+        self._shown_frame = -1  # Its number in the video; -1: none shown yet
 
         # Frames in flight become stale when the video position or the models change;
         # their generation number then no longer matches and they are not shown.
@@ -345,6 +356,41 @@ class MainTab(QWidget):
         self.player_id_method_combo.currentIndexChanged.connect(self._on_player_id_method_changed)
         models_layout.addRow(faint("Numbers"), self.player_id_method_combo)
 
+        # The network that knows players by their looks
+        self.looks_model_combo = compact_combo(QComboBox())
+        populate_reid_model_combo(self.looks_model_combo, get_setting("models.reid.weights", ""))
+        self.looks_model_combo.setToolTip(
+            "The network that tells players apart by their looks (scripts/train_reid.py).\n"
+            "Another one learns the players of the video anew and keeps its own roster."
+        )
+        self.looks_model_combo.currentIndexChanged.connect(self._on_looks_model_changed)
+        models_layout.addRow(faint("Looks"), self.looks_model_combo)
+
+        # The network that tells a holder from a picture of a player
+        self.holder_model_combo = compact_combo(QComboBox())
+        populate_holder_model_combo(
+            self.holder_model_combo, get_setting("models.holder.weights", "") or None
+        )
+        self.holder_model_combo.setToolTip(
+            "A network that tells from a picture of a player whether they hold the disc\n"
+            "(scripts/train_holder.py). Used where the disc is in the boxes of two players\n"
+            "or more: the one it is clearly surest of is taken for the holder.\n"
+            "Off: the one whose middle the disc is nearest to."
+        )
+        self.holder_model_combo.currentIndexChanged.connect(self._on_holder_model_changed)
+        models_layout.addRow(faint("Holder"), self.holder_model_combo)
+        self.holder_guess_checkbox = ToggleSwitch("Show the holder network's guess")
+        self.holder_guess_checkbox.setChecked(bool(get_setting("models.holder.show_guess", False)))
+        self.holder_guess_checkbox.setToolTip(
+            "Light-blue corner marks around the player the holder network is surest of, with\n"
+            "how sure it is. Always, however unsure: this is what the network says, with\n"
+            "nothing held back. The thick box is the holder possession names: the\n"
+            "two can be seen to agree or not. The network then looks at every player in\n"
+            "every frame, which costs a few milliseconds a frame."
+        )
+        self.holder_guess_checkbox.stateChanged.connect(self._on_holder_guess_toggled)
+        models_layout.addRow(self.holder_guess_checkbox)
+
         # Disc detection model dropdown
         self.disc_model_combo = compact_combo(QComboBox())
         populate_detection_model_combo(
@@ -494,6 +540,15 @@ class MainTab(QWidget):
         controls_layout.addWidget(self.time_label)
         controls_layout.addWidget(self.progress_bar, 1)
         controls_layout.addWidget(self.length_label)
+
+        # For reporting a problem: what names the frame on screen, to paste elsewhere
+        self.copy_frame_button = QPushButton("Copy frame")
+        self.copy_frame_button.setToolTip(
+            "Copy a code for the frame on screen (video and frame number) to the clipboard"
+        )
+        self.copy_frame_button.clicked.connect(self._copy_frame_code)
+        self.copy_frame_button.setFixedHeight(40)
+        controls_layout.addWidget(self.copy_frame_button)
 
         # Reset tracker button
         reset_button = QPushButton("Reset Tracker")
@@ -653,6 +708,7 @@ class MainTab(QWidget):
     def _show_frame(self, processed: ProcessedFrame) -> None:
         result = processed.result
         self.current_detections = result.detections
+        self._shown_frame = result.frame_index
 
         display_start = time.perf_counter()
         self.video_label.set_image(frame_to_pixmap(result.main_view))
@@ -805,6 +861,7 @@ class MainTab(QWidget):
             return
 
         video_path = self.video_files[self.current_video_index]
+        self._shown_frame = -1
         self._stop_playback()
         self._generation += 1
         self.video_info = {}
@@ -883,6 +940,17 @@ class MainTab(QWidget):
         )
         self._request_display_update(immediate=True)
 
+    def _copy_frame_code(self) -> None:
+        """Put what names the frame on screen on the clipboard."""
+        if self._shown_frame < 0 or not self.video_files:
+            return
+        rate = self.video_info.get("fps", 0) if self.video_info else 0
+        code = frame_code(self.video_files[self.current_video_index], self._shown_frame, rate)
+        QApplication.clipboard().setText(code)
+        logger.info(f"Copied {code}")
+        self.copy_frame_button.setText("Copied")
+        QTimer.singleShot(1200, lambda: self.copy_frame_button.setText("Copy frame"))
+
     def _reset_tracker(self):
         """Reset the object tracker and everything derived from earlier frames."""
         self._run_on_worker(lambda worker: worker.pipeline.reset())
@@ -943,6 +1011,25 @@ class MainTab(QWidget):
         if model_path:
             full_path = str(models_root() / model_path)
             self._run_on_worker(lambda worker: worker.set_disc_model(full_path))
+            self._request_display_update()
+
+    def _on_holder_guess_toggled(self, _state: int):
+        """Show or hide what the holder network makes of the players."""
+        shown = self.holder_guess_checkbox.isChecked()
+        self._run_on_worker(lambda worker: worker.show_holder_guess(shown))
+        self._request_display_update()
+
+    def _on_holder_model_changed(self, _index: int):
+        """Handle a change of the network that tells a holder from a picture."""
+        model_path = self.holder_model_combo.currentData()
+        self._run_on_worker(lambda worker: worker.set_holder_model(model_path))
+        self._request_display_update()
+
+    def _on_looks_model_changed(self, _index: int):
+        """Handle a change of the network that knows players by their looks."""
+        model_path = self.looks_model_combo.currentData()
+        if model_path:
+            self._run_on_worker(lambda worker: worker.set_looks_model(model_path))
             self._request_display_update()
 
     def _on_player_id_method_changed(self, index: int):

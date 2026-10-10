@@ -34,9 +34,10 @@ from .processing.game_state import GameStateTracker, Player
 from .processing.homography import output_canvas_size
 from .processing.inference import reset_inference_state, run_inference
 from .processing.jersey_tracker import get_best_jersey_number
+from .processing.model_lock import GPU_SETUP_LOCK
 from .processing.player_looks import PlayerLooks
 from .processing.player_numbers import PlayerNumbers
-from .processing.possession import PossessionTracker
+from .processing.possession import PossessionTracker, players_at_disc
 from .processing.shot_type import ShotWatcher, players_are_elsewhere
 from .processing.tracking import (
     apply_camera_motion,
@@ -66,6 +67,7 @@ from .rendering.top_down import (
 )
 from .rendering.tracks import (
     draw_detections,
+    draw_holder_guess,
     draw_possession,
     draw_tracks,
     draw_tracks_with_player_ids,
@@ -119,6 +121,9 @@ class PipelineOptions:
     # Homography tab, moved with the camera) or "field" (where the field model sees the
     # field in each frame)
     top_down_source: str = "field"
+    # Whether the views are drawn. Without, the camera view of a result is the frame as
+    # it came and there is no top-down view: for a run that only reads the results
+    draw: bool = True
 
     @property
     def analysis_key(self) -> Tuple[bool, bool, bool, bool]:
@@ -248,6 +253,15 @@ class AnalysisPipeline:
         self._numbers.could_be = self._looks.could_be
 
         self._possession = PossessionTracker()
+        # A network that tells from a picture of a player whether they hold the disc:
+        # its weights (None: not used), and the network once it is loaded
+        weights = str(get_setting("models.holder.weights", "") or "")
+        self._holder_weights: Optional[str] = weights or None
+        self._holder_net: Any = None
+        # Whether the network's guess is drawn on the camera view (it then looks at
+        # every player in every frame), and what it said of the players of this frame
+        self.show_holder_guess = bool(get_setting("models.holder.show_guess", False))
+        self.holder_scores: Optional[Dict[int, float]] = None
         self._camera_motion = CameraMotionEstimator()
         # Close-ups and title cards of an edited game are not analysed
         self._shot = ShotWatcher()
@@ -353,6 +367,62 @@ class AnalysisPipeline:
                 FIELD_UNSEEN_SECONDS * float(frames_per_second)
             )
 
+    def set_holder_model(self, weights: Optional[str]) -> None:
+        """Tell who holds a disc that is in two players' boxes with a network that looks
+        at the players (None: by where the disc is alone)."""
+        if weights != self._holder_weights:
+            self._holder_weights, self._holder_net = weights or None, None
+            self._analysed_key = None
+
+    def _holder_scores(self, frame: np.ndarray) -> Optional[Dict[int, float]]:
+        """How sure the holder network is that each player holds the disc: of the players
+        at a disc that is in the boxes of two or more, and, where the network stands in
+        for a disc that is not found (models.holder.sure), of everybody in a frame
+        without one. None where it has nothing to say, or there is none."""
+        if self._holder_weights is None:
+            return None
+        margin = float(get_setting("models.possession.box_margin", 0.15))
+        players = [t for t in self.tracks if t.class_name == "player"]
+        discs = [d for d in self.detections if d["class_name"] == "disc"]
+        asked: Dict[int, Any] = {}
+        for detection in discs:
+            at = set(players_at_disc(detection["bbox"], self.tracks, margin))
+            if len(at) > 1:
+                asked.update({t.track_id: t for t in players if t.track_id in at})
+        # Without a disc, or with one that may be a thing left lying: everybody. And
+        # in every frame where the guess is shown
+        if self.show_holder_guess or (
+            float(get_setting("models.holder.sure", 0.0)) > 0
+            and (not discs or self._possession.strays)
+        ):
+            asked.update({t.track_id: t for t in players})
+        if not asked:
+            return None
+        try:
+            from .processing.holder import BOX_ALONE, crop_around, holding, load_holder_net
+
+            with GPU_SETUP_LOCK.work():
+                if self._holder_net is None:
+                    self._holder_net = load_holder_net(Path(self._holder_weights))
+                crops = [
+                    crop_around(frame, track.to_ltrb(), BOX_ALONE)[0] for track in asked.values()
+                ]
+                sure = holding(self._holder_net, crops)
+        except Exception as error:  # No PyTorch, or weights that do not load
+            logger.exception(f"The holder network failed: {error}")
+            health.report("Possession", "the holder network failed; going by the disc alone")
+            self._holder_weights = None
+            return None
+        return {track_id: float(score) for track_id, score in zip(asked, sure)}
+
+    def set_looks_model(self, weights: Optional[str]) -> None:
+        """Know the players by their looks with another network (None: the one in the
+        settings). The tracks go on; what they look like is learned anew."""
+        if self._looks.set_weights(weights):
+            self.numbers_by_looks = {}
+            self._shirts_by_looks, self._colours_by_looks = [[], []], None
+            self._analysed_key = None
+
     def reset_player_ids(self) -> None:
         """Forget the jersey numbers read so far (e.g. after switching the reader)."""
         self._numbers.reset(readings_too=True)
@@ -412,26 +482,28 @@ class AnalysisPipeline:
         # The trails both draw are worked out before they part.
         side_by_side = bool(get_setting("app.draw_views_side_by_side", True))
         top_down = None
-        if options.top_down_view and side_by_side:
+        if options.top_down_view and side_by_side and options.draw:
             if options.tracking and self.tracks:
                 self._trails()
             top_down = self._threads.submit(self._draw_top_down_view, frame, options)
 
         # The copy of the frame that is drawn on belongs to the drawing. None is needed
         # of a frame that is ours, unless the top-down view is made of the frame itself.
-        copy_start = time.perf_counter()
-        warped = options.top_down_view and not self._top_down_is_drawn(options)
-        drawn_on = frame if frame_is_ours and not warped else frame.copy()
-        self._record("Visualization", copy_start)
-        main_view = self._draw_main_view(drawn_on, options)
+        main_view = frame
+        if options.draw:
+            copy_start = time.perf_counter()
+            warped = options.top_down_view and not self._top_down_is_drawn(options)
+            drawn_on = frame if frame_is_ours and not warped else frame.copy()
+            self._record("Visualization", copy_start)
+            main_view = self._draw_main_view(drawn_on, options)
         problems = health.problems()
-        for line, problem in enumerate(problems):
+        for line, problem in enumerate(problems if options.draw else ()):
             draw_notice(main_view, problem, line=line + 1, alarm=True)
 
         top_down_view, top_down_message = None, "Homography view disabled"
         if top_down is not None:
             top_down_view, top_down_message = top_down.result()
-        elif options.top_down_view:
+        elif options.top_down_view and options.draw:
             top_down_view, top_down_message = self._draw_top_down_view(frame, options)
 
         total_ms = (time.perf_counter() - start) * 1000
@@ -776,7 +848,8 @@ class AnalysisPipeline:
             # What is worked out from the tracks: who has the disc, where it flies, and
             # the phase of the game
             start = time.perf_counter()
-            self._possession.update(self.detections, self.tracks, frame_index)
+            self.holder_scores = self._holder_scores(frame)
+            self._possession.update(self.detections, self.tracks, frame_index, self.holder_scores)
             self._follow_flight(frame.shape[:2], frame_index)
             self._follow_game(frame_index)
             self._record("Possession", start)
@@ -1136,6 +1209,10 @@ class AnalysisPipeline:
                 self._possession.holder_box,
                 self._possession_colour(),
             )
+            # As the network says it, in every frame: nothing is held back, so that what
+            # it gets wrong can be seen
+            if self.show_holder_guess:
+                draw_holder_guess(frame, self.tracks, self.holder_scores)
 
         draw_fps_overlay(frame, self.fps)
         if (

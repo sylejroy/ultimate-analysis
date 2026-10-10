@@ -10,6 +10,7 @@ from ..constants import VISUALIZATION_COLORS
 from ..processing.appearance import shirt_kind
 from ..processing.tracking import DISC_ID_OFFSET
 from ..utils.logger import get_logger
+from .overlays import draw_label
 
 logger = get_logger("RENDERING")
 
@@ -157,24 +158,8 @@ def draw_tracks_with_player_ids(
             # Show compact "?" for unknown tracks
             jersey_label = f"{track_id}:?"
 
-        # Calculate label size and position using smaller font
-        label_size = cv2.getTextSize(jersey_label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)[0]
-
-        # Draw label background
-        cv2.rectangle(
-            vis_frame, (x1, y1 - label_size[1] - 10), (x1 + label_size[0] + 10, y1), color, -1
-        )
-
-        # Draw jersey number text using smaller, slightly bold font
-        cv2.putText(
-            vis_frame,
-            jersey_label,
-            (x1 + 5, y1 - 5),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (255, 255, 255),
-            2,
-        )
+        # A small label above the box, marked with the track's colour
+        draw_label(vis_frame, jersey_label, x1, y1 - 1, bar=color)
 
         # Draw detection regions if OCR results are available for known players AND not finalized
         if (
@@ -285,13 +270,9 @@ def draw_tracks_with_player_ids(
         if track_histories and track_id in track_histories:
             history = track_histories[track_id]
             if len(history) > 1:
-                # Draw trajectory line
+                # A thin line: where they came from, without covering the grass
                 points = np.asarray(history, dtype=np.int32)
-                cv2.polylines(vis_frame, [points], False, color, 2)
-
-                # Draw trajectory points
-                for point in points[-10:].tolist():  # Show last 10 points
-                    cv2.circle(vis_frame, tuple(point), 3, color, -1)
+                cv2.polylines(vis_frame, [points], False, color, 1, cv2.LINE_AA)
 
     return vis_frame
 
@@ -340,7 +321,7 @@ def draw_tracks(
         color = get_track_color(track_id)
 
         # Draw bounding box with unique track color
-        cv2.rectangle(vis_frame, (x1, y1), (x2, y2), color, 3)  # Thicker line for better visibility
+        cv2.rectangle(vis_frame, (x1, y1), (x2, y2), color, 2)
 
         # Add model type indicator in corner if available
         model_type = getattr(track, "model_type", None)
@@ -428,7 +409,7 @@ def draw_tracks(
 
                     # Calculate line thickness and opacity based on recency
                     alpha = min(1.0, (i / len(history)) + 0.3)  # Newer points more visible
-                    thickness = max(1, int(3 * alpha))
+                    thickness = max(1, int(2 * alpha))
 
                     # Draw trajectory line (foot-level tracking)
                     cv2.line(vis_frame, pt1, pt2, color, thickness)
@@ -436,7 +417,7 @@ def draw_tracks(
                 # Draw small circles at trajectory points (representing foot positions)
                 for i, point in enumerate(history[-10:]):  # Only last 10 points
                     alpha = (i + 1) / min(10, len(history))
-                    radius = max(2, int(4 * alpha))  # Slightly larger for foot positions
+                    radius = max(1, int(3 * alpha))
                     cv2.circle(vis_frame, point, radius, color, -1)
 
                     # Add small ground indicator for most recent position
@@ -481,6 +462,48 @@ def possession_colour(track: Any) -> Tuple[int, int, int]:
     return UNKNOWN_TEAM_COLOUR if shirt is None else team_display_colour(shirt)
 
 
+# The colour the holder network's guess is drawn in (BGR): a light blue no team wears
+HOLDER_GUESS_COLOUR = (255, 200, 60)
+
+
+def draw_holder_guess(frame: np.ndarray, tracks: List[Any], scores: Optional[dict]) -> None:
+    """Mark the player a holder network takes for the holder (in place): corner marks
+    around the one it is surest of, with how sure, and under every other player how sure
+    it is of them. Always, however unsure it is: this shows what the network says, not
+    what is made of it. Apart from the box of the
+    holder the possession tracking names, so the two can be seen to agree or not.
+
+    Args:
+        frame: The picture
+        tracks: The frame's tracks
+        scores: Track -> how sure the network is that they hold the disc (0 to 1)
+    """
+    if not scores:
+        return
+    best = max(scores, key=scores.get)
+    track = next((t for t in tracks if getattr(t, "track_id", None) == best), None)
+    if track is None:
+        return
+    x1, y1, x2, y2 = (int(value) for value in track.to_ltrb())
+    x1, y1, x2, y2 = x1 - 7, y1 - 7, x2 + 7, y2 + 7
+    arm = max(6, (x2 - x1) // 4)
+    for (x, y), (dx, dy) in (
+        ((x1, y1), (1, 1)),
+        ((x2, y1), (-1, 1)),
+        ((x1, y2), (1, -1)),
+        ((x2, y2), (-1, -1)),
+    ):
+        cv2.line(frame, (x, y), (x + dx * arm, y), HOLDER_GUESS_COLOUR, 2, cv2.LINE_AA)
+        cv2.line(frame, (x, y), (x, y + dy * arm), HOLDER_GUESS_COLOUR, 2, cv2.LINE_AA)
+    draw_label(frame, f"{scores[best]:.0%}", x1, y2 + 18, colour=HOLDER_GUESS_COLOUR)
+    # ... and what it says of everybody else, smaller, under each
+    for other in tracks:
+        player = getattr(other, "track_id", None)
+        if player in scores and player != best:
+            left, _, _, bottom = (int(value) for value in other.to_ltrb())
+            draw_label(frame, f"{scores[player]:.0%}", left, bottom + 14, 0.35, HOLDER_GUESS_COLOUR)
+
+
 def draw_possession(
     frame: np.ndarray,
     tracks: List[Any],
@@ -508,8 +531,8 @@ def draw_possession(
         return
     x1, y1, x2, y2 = (int(value) for value in box)
     # A dark rim keeps the box apart from grass and from a white shirt
-    cv2.rectangle(frame, (x1 - 4, y1 - 4), (x2 + 4, y2 + 4), (20, 20, 20), 6)
-    cv2.rectangle(frame, (x1 - 4, y1 - 4), (x2 + 4, y2 + 4), shown, 3)
+    cv2.rectangle(frame, (x1 - 3, y1 - 3), (x2 + 3, y2 + 3), (20, 20, 20), 4)
+    cv2.rectangle(frame, (x1 - 3, y1 - 3), (x2 + 3, y2 + 3), shown, 2)
 
 
 # The colours tracks are drawn in, as RGB: far apart from each other, from the grass, and

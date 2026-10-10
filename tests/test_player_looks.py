@@ -63,6 +63,23 @@ class PlayerLooksTest(unittest.TestCase):
             found = self.looks.update(self.frame, tracks, frame_index, numbers, holder)
         return found
 
+    def test_another_network_keeps_a_roster_of_its_own(self):
+        enough = self.roster_module.MIN_LOOKS + 2
+        self.looks.new_video("game.mp4")
+        self.watch([player(1, self.boxes["anna"])], {1: "17"}, enough)
+        self.assertTrue(self.looks.set_weights("models/another_run/best.pt"))
+        self.assertFalse(self.looks.set_weights("models/another_run/best.pt"))
+        # What the first network knew is written down, and is not this one's
+        self.assertTrue((Path(self.folder.name) / "game.json").exists())
+        self.assertEqual(self.looks.roster.entries, {})
+        self.looks._embedder, self.looks._tried_to_load = object(), True
+        self.watch([player(1, self.boxes["anna"])], {1: "17"}, enough, start=100)
+        self.looks.save()
+        self.assertTrue((Path(self.folder.name) / "another_run" / "game.json").exists())
+        # Back to the network of the settings: its roster is there again
+        self.assertTrue(self.looks.set_weights(None))
+        self.assertEqual(len(self.looks.roster.entries), 1)
+
     def test_nothing_is_done_without_the_network(self):
         looks = self.module.PlayerLooks()
         looks._tried_to_load = True

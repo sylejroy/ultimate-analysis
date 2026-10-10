@@ -16,6 +16,32 @@ epochs as `benchmark_reid.py` scores them, and the epoch that does best on them 
 Games named with --test are left out altogether, for measuring the kept model on
 afterwards. Which network is trained is chosen with --architecture.
 
+Two tracks are two players only as far as that is known. The tracker loses a player and
+begins again under a new number: a stretch has several times as many tracks as players,
+and of the pairs of tracks of one stretch that somebody looked at, more than a quarter
+were one player. With --sure-others a crop is only told apart from players who are
+known to be others: in the picture at the same time, in the other kind of shirt, or with
+another number read. --classify weighs the part of the loss that names the player of a
+crop among all tracks, which has the same flaw (0: left out).
+
+The hardest pair of a step is nearly always two teammates, so the other team and the
+players of other games are told apart only by the naming of the player. With
+--all-others every crop is also to be nearer its own player's crops than to every other
+crop of the step, each counted (--players many players of several stretches: 32 and up
+puts several games in a step).
+
+With --answers, what was said on the "Same player?" page of the Labelling tab is taken
+in for the games trained on: two tracks said to be one player are one player, a track
+said to show several people is left out, and so is a picture taken out of its track.
+Two tracks said to be different players are two players without being told, but they
+are of different stretches for the most part and so hardly ever in one step, where
+players are told apart. They are the pairs the network was unsure of: --said-apart puts
+so many of them into every step (2 unless told otherwise).
+
+--also names further datasets of the same kind, of other games, to train on as well:
+the answers are about the tracks of one dataset, which is why more games come as a
+dataset of their own.
+
     python scripts/train_reid.py reid_players_v1 --validate chicago_vs_san_francisco \
         --test san_francisco_vs_colorado --architecture resnet18_s3
 
@@ -32,6 +58,7 @@ import sys
 import time
 from collections import defaultdict
 from pathlib import Path
+from typing import Optional
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
@@ -55,6 +82,7 @@ from ultimate_analysis.processing.reid import (  # noqa: E402
     fit,
     save_embedder,
 )
+from ultimate_analysis.utils.judgement_files import _read, what_was_said  # noqa: E402
 
 MARGIN = 0.3  # How much nearer a crop of the same player must be than one of another
 
@@ -64,6 +92,46 @@ def identity_of(row: dict) -> tuple:
     if row["number"]:
         return (row["video"], "number", row["light_shirt"], row["number"])
     return (row["video"], row["stretch"], row["player"])
+
+
+def with_answers(rows: list, folder: Path) -> dict:
+    """Take in what was said by hand of the tracks of some crops: the crops left (in
+    place), and for the players said to be one, which player each of them now is."""
+    same, mixed, others = what_was_said(folder)
+
+    def track_of(row: dict) -> tuple:
+        return (row["video"], str(row["stretch"]), row["player"])
+
+    before = len(rows)
+    rows[:] = [
+        row
+        for row in rows
+        if track_of(row) not in mixed and (*track_of(row), row["frame"]) not in others
+    ]
+    players_of = defaultdict(set)
+    for row in rows:
+        players_of[track_of(row)].add(identity_of(row))
+    one = {}
+
+    def found(player: tuple) -> tuple:
+        while one.get(player, player) != player:
+            player = one[player]
+        return player
+
+    joined = 0
+    for first, second in same:
+        players = sorted(players_of[first] | players_of[second], key=str)
+        if not players_of[first] or not players_of[second]:
+            continue
+        joined += 1
+        for player in players[1:]:
+            one[found(player)] = found(players[0])
+    print(
+        f"By hand: {before - len(rows)} crops left out (of {len(mixed)} tracks of several "
+        f"people and {len(others)} pictures taken out), {joined} pairs of tracks joined",
+        flush=True,
+    )
+    return {player: found(player) for player in one}
 
 
 def augmented(
@@ -105,14 +173,86 @@ def augmented(
     return ((rgb - MEAN) / SPREAD).transpose(2, 0, 1).astype(np.float32)
 
 
-def hardest_triplets(vectors: torch.Tensor, who: torch.Tensor) -> torch.Tensor:
+def nearer_than_all(
+    vectors: torch.Tensor,
+    who: torch.Tensor,
+    others: Optional[torch.Tensor] = None,
+    warmth: float = 0.1,
+) -> torch.Tensor:
+    """For each crop: its player's other crops must be more alike to it than every other
+    crop of the step is, each of those counted and not the hardest alone (a contrast
+    over the whole step). `others` as for `hardest_triplets`: a crop not known to be of
+    another player is left out of what a crop is told apart from."""
+    alike = vectors @ vectors.T / warmth
+    same = who[:, None] == who[None, :]
+    if others is None:
+        others = ~same
+    itself = torch.eye(len(who), dtype=torch.bool, device=who.device)
+    partners = same & ~itself
+    counted = partners | others
+    # Of what a crop is compared with, how much of the likeness falls on its own player
+    spread = torch.logsumexp(alike.masked_fill(~counted, -1e9), dim=1, keepdim=True)
+    share = (alike - spread).masked_fill(~partners, 0.0).sum(dim=1) / partners.sum(dim=1).clamp(
+        min=1
+    )
+    has_both = partners.any(dim=1) & others.any(dim=1)
+    if not bool(has_both.any()):
+        return vectors.sum() * 0.0
+    return -share[has_both].mean()
+
+
+def hardest_triplets(
+    vectors: torch.Tensor, who: torch.Tensor, others: Optional[torch.Tensor] = None
+) -> torch.Tensor:
     """For each crop: its furthest crop of the same player must be nearer than its
-    nearest crop of another, by a margin."""
+    nearest crop of another, by a margin. `others` says which crops are known to be of
+    another player (all of another track, where it is not given); a crop with none in
+    the step is left out."""
     distance = torch.cdist(vectors, vectors)
     same = who[:, None] == who[None, :]
+    if others is None:
+        others = ~same
     furthest_same = (distance - 1e6 * (~same)).max(dim=1).values
-    nearest_other = (distance + 1e6 * same).min(dim=1).values
-    return torch.relu(furthest_same - nearest_other + MARGIN).mean()
+    nearest_other = (distance + 1e6 * (~others)).min(dim=1).values
+    has_one = others.any(dim=1)
+    if not bool(has_one.any()):
+        return vectors.sum() * 0.0
+    return torch.relu(furthest_same - nearest_other + MARGIN)[has_one].mean()
+
+
+def known_of(crops_of: dict) -> dict:
+    """What says who a player is not: per player the game, the kind of shirt, the number
+    if they are known by one, and from when to when they are in each stretch."""
+    known = {}
+    for who, stretches in crops_of.items():
+        rows = [row for crops in stretches.values() for row in crops]
+        known[who] = {
+            "video": rows[0]["video"],
+            "shirt": rows[0]["light_shirt"],
+            "number": who[3] if who[1] == "number" else None,
+            "spans": {
+                stretch: (min(r["frame"] for r in crops), max(r["frame"] for r in crops))
+                for stretch, crops in stretches.items()
+            },
+        }
+    return known
+
+
+def surely_others(first: dict, second: dict) -> bool:
+    """Whether two players are known to be two: of one game and in the other kind of
+    shirt, with another number, or in the picture at the same time. Players of different
+    games are not known to be: a team plays in several of them."""
+    if first["video"] != second["video"]:
+        return False
+    if first["shirt"] != second["shirt"]:
+        return True
+    if first["number"] and second["number"] and first["number"] != second["number"]:
+        return True
+    return any(
+        span[0] <= second["spans"][stretch][1] and second["spans"][stretch][0] <= span[1]
+        for stretch, span in first["spans"].items()
+        if stretch in second["spans"]
+    )
 
 
 def main() -> None:
@@ -149,6 +289,33 @@ def main() -> None:
         metavar=("LOW", "HIGH"),
         help="Shrink crops to a random height in this range (pixels) and back while training",
     )
+    parser.add_argument(
+        "--answers", default="", help="Folder in data/raw/training_data of answers given by hand"
+    )
+    parser.add_argument(
+        "--sure-others",
+        action="store_true",
+        help="Tell a crop apart only from players known to be others",
+    )
+    parser.add_argument(
+        "--classify", type=float, default=1.0, help="Weight of naming the player of a crop"
+    )
+    parser.add_argument(
+        "--all-others",
+        type=float,
+        default=0.0,
+        help="Weight of telling a crop from every other crop of the step, not the hardest alone",
+    )
+    parser.add_argument(
+        "--also", nargs="+", default=[], help="Further datasets, of other games, to train on"
+    )
+    parser.add_argument(
+        "--said-apart",
+        type=int,
+        default=2,
+        help="Pairs said by hand to be different players put into every step (with --answers)",
+    )
+    parser.add_argument("--name", default="", help="Added to the name of the run's folder")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--steps", type=int, default=150, help="Steps per epoch")
     parser.add_argument("--players", type=int, default=16, help="Players per step")
@@ -158,12 +325,24 @@ def main() -> None:
 
     dataset = REPO / DEFAULT_PATHS["TRAINING_DATA"] / args.dataset
     rows = load_index(dataset)
+    for other in args.also:
+        rows += load_index(REPO / DEFAULT_PATHS["TRAINING_DATA"] / other)
     held_out = [row for row in rows if any(part in row["video"] for part in args.validate)]
     training = [
         row for row in rows if not any(part in row["video"] for part in args.validate + args.test)
     ]
     if not held_out or not training:
         sys.exit("Both the training and the held-out part need crops")
+
+    said_one = (
+        with_answers(training, REPO / DEFAULT_PATHS["TRAINING_DATA"] / args.answers)
+        if args.answers
+        else {}
+    )
+
+    def player_of(row: dict) -> tuple:
+        who = identity_of(row)
+        return said_one.get(who, who)
 
     rng = random.Random(args.seed)
     torch.manual_seed(args.seed)
@@ -173,7 +352,7 @@ def main() -> None:
     crops_of = defaultdict(lambda: defaultdict(list))
     for row, sharp in zip(training, sharp_enough(training, args.skip_blurred)):
         if sharp:
-            crops_of[identity_of(row)][row["stretch"]].append(row)
+            crops_of[player_of(row)][row["stretch"]].append(row)
     crops_of = {
         who: dict(stretches)
         for who, stretches in crops_of.items()
@@ -181,14 +360,35 @@ def main() -> None:
     }
     identities = sorted(crops_of, key=str)
     number_of = {who: index for index, who in enumerate(identities)}
+    known = known_of(crops_of) if args.sure_others else {}
+    apart = {}  # Pair of players -> known to be two
     # Players that are seen together: those of one stretch, and a numbered player with
     # every stretch they are in
     together = defaultdict(set)
     for row in training:
-        who = identity_of(row)
+        who = player_of(row)
         if who in crops_of:
             together[(row["video"], row["stretch"])].add(who)
     groups = [sorted(group, key=str) for group in together.values() if len(group) >= 4]
+    # The pairs said by hand to be different players, as the players they are here
+    said_apart = []
+    if args.answers and args.said_apart > 0:
+        player_of_track = {}
+        for row in training:
+            track = (row["video"], str(row["stretch"]), row["player"])
+            player_of_track.setdefault(track, player_of(row))
+        for line in _read(REPO / DEFAULT_PATHS["TRAINING_DATA"] / args.answers / "pairs.csv"):
+            if line["answer"] != "different":
+                continue
+            pair = [
+                player_of_track.get(
+                    (line["video"], line[f"{which}_stretch"], line[f"{which}_player"])
+                )
+                for which in ("first", "second")
+            ]
+            if pair[0] != pair[1] and all(player in crops_of for player in pair):
+                said_apart.append(pair)
+        print(f"By hand: {len(said_apart)} pairs of different players to tell apart", flush=True)
     print(
         f"{len(training)} crops of {len(identities)} players to train on "
         f"({sum(1 for who in identities if who[1] == 'number')} known by number, "
@@ -217,9 +417,18 @@ def main() -> None:
     name += "_proportions" if args.keep_proportions else ""
     name += f"_sharp{round(100 * (1 - args.skip_blurred))}" if args.skip_blurred else ""
     name += f"_down{args.downsample_to[0]}to{args.downsample_to[1]}" if args.downsample_to else ""
+    name += f"_{args.answers}" if args.answers else ""
+    name += "_sure_others" if args.sure_others else ""
+    name += f"_classify{args.classify:g}" if args.classify != 1.0 else ""
+    name += f"_all_others{args.all_others:g}" if args.all_others else ""
+    name += f"_{args.players}players" if args.players != 16 else ""
+    name += "".join(f"_and_{other}" for other in args.also)
+    name += f"_{args.name}" if args.name else ""
     output = (
         REPO / "data" / "models" / "reid" / f"{time.strftime('%Y%m%d')}_reid_{name}_{args.dataset}"
     )
+    if (output / "best.pt").exists():
+        sys.exit(f"{output} holds a model: runs are not overwritten, give another --name")
     output.mkdir(parents=True, exist_ok=True)
     best, best_line = -1.0, {}
     history = []
@@ -229,6 +438,8 @@ def main() -> None:
         losses = []
         for _ in range(args.steps):
             chosen = []
+            for pair in rng.sample(said_apart, min(len(said_apart), args.said_apart)):
+                chosen += pair
             while len(chosen) < args.players:
                 group = rng.choice(groups)
                 chosen += rng.sample(group, min(len(group), args.players - len(chosen), 8))
@@ -252,7 +463,24 @@ def main() -> None:
             who = torch.tensor(who, device=device)
             vectors = model(batch)
             # The vectors have length 1: scaled up before a player is read from them
-            loss = hardest_triplets(vectors, who) + which_player(model.who(vectors) * 16.0, who)
+            others = None
+            if args.sure_others:
+                for first in chosen:
+                    for second in chosen:
+                        if (first, second) not in apart:
+                            apart[first, second] = first != second and surely_others(
+                                known[first], known[second]
+                            )
+                players = torch.tensor(
+                    [[apart[first, second] for second in chosen] for first in chosen],
+                    device=device,
+                )
+                others = players.repeat_interleave(args.crops, 0).repeat_interleave(args.crops, 1)
+            loss = hardest_triplets(vectors, who, others)
+            if args.all_others > 0:
+                loss = loss + args.all_others * nearer_than_all(vectors, who, others)
+            if args.classify > 0:
+                loss = loss + args.classify * which_player(model.who(vectors) * 16.0, who)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()

@@ -5,6 +5,7 @@ or by one of the readers in jersey_readers.py (models.player_id.method), and com
 over time by probabilistic tracking.
 """
 
+import importlib.util
 import threading
 import time
 from pathlib import Path
@@ -36,13 +37,14 @@ from .model_lock import GPU_SETUP_LOCK
 
 logger = get_logger("PLAYER_ID")
 
-try:
-    import easyocr
-
-    EASYOCR_AVAILABLE = True
-except ImportError:
-    EASYOCR_AVAILABLE = False
+# EasyOCR is imported when its reader is first set up: the import takes seconds, and the
+# window would wait for it
+EASYOCR_AVAILABLE = importlib.util.find_spec("easyocr") is not None
+if not EASYOCR_AVAILABLE:
     logger.warning("EasyOCR not available; jersey numbers will not be read")
+# Held while the readers are loaded: they are loaded once, whoever asks first
+_setting_up = threading.RLock()
+_loader: Optional[threading.Thread] = None  # Loads them beside the frames
 
 # Global player ID state
 _easyocr_config_checked = 0.0  # When the settings file was last looked at (monotonic s)
@@ -81,7 +83,8 @@ def _get_active_reader() -> Optional[Any]:
     method = get_player_id_method()
     if method == "easyocr":
         return None
-    return get_reader(method, _get_text_detector)
+    with _setting_up:
+        return get_reader(method, _get_text_detector)
 
 
 def run_player_id_on_tracks(
@@ -181,10 +184,6 @@ def run_player_id_on_tracks(
 
     if not tracks:
         return player_identifications, total_timing, finalized_tracks
-
-    # Initialize EasyOCR if needed
-    if _easyocr_reader is None:
-        _initialize_easyocr()
 
     # Prepare player crops for batch processing
     player_crops = []
@@ -685,6 +684,13 @@ def _initialize_easyocr() -> None:
     """Initialize EasyOCR reader for text detection."""
     global _easyocr_reader
 
+    with _setting_up:
+        _set_up_easyocr()
+
+
+def _set_up_easyocr() -> None:
+    global _easyocr_reader
+
     if _easyocr_reader is not None:
         return
 
@@ -693,6 +699,8 @@ def _initialize_easyocr() -> None:
 
     try:
         if EASYOCR_AVAILABLE:
+            import easyocr
+
             # Load user configuration for language settings
             user_config = _load_easyocr_config()
             easyocr_config = user_config.get("easyocr", {})
@@ -729,18 +737,34 @@ def _validate_jersey_number(number_str: str) -> bool:
         return False
 
 
-def initialize_player_id_system() -> None:
-    """Pre-initialize EasyOCR to avoid first-frame delay.
+def initialize_player_id_system(wait: bool = True) -> None:
+    """Load the jersey readers before they are first asked to read.
 
-    This function should be called during application startup or video load
-    to avoid the 2-5 second initialization delay that would otherwise occur
-    during the first frame with player ID enabled.
+    Loading takes far longer than anything else at the start (half a minute on a busy
+    machine). Where the numbers are read beside the frames anyway
+    (`models.player_id.background_reading`) nothing needs to wait for it:
+
+    Args:
+        wait: False: load on a thread of its own and return at once; the first crops
+            are read when the readers are there. Only after the detection engines are
+            set up: an engine cannot be set up while another thread uses the GPU.
 
     Safe to call multiple times - initialization only happens once.
     """
+    global _loader
+    if wait:
+        _load_readers()
+    elif _loader is None:
+        _loader = threading.Thread(target=_load_readers, name="jersey-reader-load", daemon=True)
+        _loader.start()
+
+
+def _load_readers() -> None:
     logger.info("Pre-initializing player ID system...")
-    _initialize_easyocr()
-    _get_active_reader()
+    # The gate before the lock, as a reading takes them
+    with GPU_SETUP_LOCK.work(), _setting_up:
+        _initialize_easyocr()
+        _get_active_reader()
     if EASYOCR_AVAILABLE and _easyocr_reader is not None:
         logger.info("Player ID system pre-initialized successfully")
     else:

@@ -69,8 +69,6 @@ class PipelineWorker(QObject):
                     info = self.video_player.get_video_info()
                     self.pipeline.set_frame_rate(info.get("fps", 0))
                     # Loading models here keeps the first frame from stalling playback
-                    if options.player_id:
-                        initialize_player_id_system()
                     if options.detection and get_setting("models.inference.warmup_on_load", True):
                         warmup_models()
                     # The engines of all three models are loaded here, one after the
@@ -81,6 +79,13 @@ class PipelineWorker(QObject):
                     run_inference(np.zeros(shape, dtype=np.uint8))
                     reset_inference_state()
                     warmup_field_model(shape)
+                    if options.player_id:
+                        # The jersey readers take longest by far. Read beside the
+                        # frames, they are loaded beside them too: the first frame
+                        # does not wait, the first numbers come when they are there
+                        initialize_player_id_system(
+                            wait=not get_setting("models.player_id.background_reading", True)
+                        )
         except Exception:
             logger.exception(f"Error loading video {video_path}")
         self.video_loaded.emit(info)
@@ -145,6 +150,16 @@ class PipelineWorker(QObject):
     def set_field_model(self, model_path: str) -> None:
         if set_field_model(model_path):
             self.pipeline.invalidate()
+
+    def set_holder_model(self, model_path: Optional[str]) -> None:
+        self.pipeline.set_holder_model(model_path)
+
+    def show_holder_guess(self, shown: bool) -> None:
+        self.pipeline.show_holder_guess = shown
+        self.pipeline.invalidate()
+
+    def set_looks_model(self, model_path: str) -> None:
+        self.pipeline.set_looks_model(model_path)
 
     def set_player_id_method(self, method: str) -> None:
         """Switch the jersey number reader; numbers from the previous reader are dropped."""

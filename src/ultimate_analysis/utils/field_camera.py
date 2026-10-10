@@ -16,7 +16,6 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
-from scipy.optimize import least_squares
 
 from .field_template import FieldTemplate, Point, _line_through, fit_field
 
@@ -159,6 +158,14 @@ def _starts(
     return found
 
 
+def _least_squares() -> Callable:
+    """SciPy's solver, imported when a camera is first fitted: the import takes over a
+    second, and the window would wait for it."""
+    from scipy.optimize import least_squares
+
+    return least_squares
+
+
 def fit_camera(
     template: FieldTemplate,
     lines: Dict[str, Sequence[Point]],
@@ -212,7 +219,7 @@ def fit_camera(
             # of 480 frames of six clips is still found, in the same place to a hundredth
             # of a yard, in 15 ms instead of 37 (docs/MEASUREMENTS.md). Tighter limits
             # lose estimates: without a known focal length some good fits come slowly.
-            solved = least_squares(
+            solved = _least_squares()(
                 lambda values: misfits(mapping_of(values)),
                 first,
                 method="lm",
@@ -288,7 +295,7 @@ def move_camera(
     best: Optional[Tuple[float, np.ndarray]] = None
     for start in [before, *([*turn, *place] for _, turn, place in _starts(template, size, focal))]:
         try:
-            solved = least_squares(residuals, start, method="lm", ftol=1e-12, xtol=1e-12)
+            solved = _least_squares()(residuals, start, method="lm", ftol=1e-12, xtol=1e-12)
         except (ValueError, np.linalg.LinAlgError):
             continue
         mapping = camera_mapping(focal, solved.x[:3], solved.x[3:], size)

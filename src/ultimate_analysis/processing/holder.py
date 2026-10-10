@@ -26,6 +26,9 @@ if TORCH_AVAILABLE:
 # crops take in some of what is beside the box, where a held disc often is.
 CROP_SIZE = (96, 128)
 CROP_PAD = 0.25  # Share of the box added around it in a crop
+# ... in the first datasets. Those since (holder_sighted_v1 and what is made of it) have
+# crops of the boxes themselves, and a network must be shown what it learned from
+BOX_ALONE = 0.0
 DEFAULT_ARCHITECTURE = "resnet18_s3"
 # A player's speed over the ground is taken over this long
 SPEED_SECONDS = 0.5

@@ -64,7 +64,7 @@ models:
       min_area: 5000             # Minimum contour area to consider
       line_color: [255, 255, 0]  # BGR color for contour lines (yellow)
       point_color: [0, 255, 255] # BGR color for contour points (cyan)
-      line_thickness: 3          # Thickness of contour lines
+      line_thickness: 2          # Thickness of contour lines
       point_radius: 5            # Radius of contour points
       draw_points: false         # Dots on the corners of the simplified outline (for checking the outline)
       
@@ -140,13 +140,26 @@ models:
   # Possession: the disc belongs to the player whose box it is in
   possession:
     confirm_seconds: 0.25        # How long the disc must be seen at another player (or at none) before the holder changes
+    teammate_seconds: 0.15       # ... and at a teammate of the last holder, for this long only: a pass to a teammate is what happens nearly every time. 0: as long as any other
     beside_holder_seconds: 1.5   # The same for a player standing right by the holder: the mark, who has not been passed the disc
     holder_memory_seconds: 2.0   # A holder who is not found (covered by the mark) keeps the disc where they were last seen for this long
     other_team_seconds: 1.0      # The same for a player of the team without the disc who stands right by one of the team with it: a defender at the catch far more often than an interception
     reach: 1.0                   # A disc at no player this near to the holder (share of their height) is still the holder's: held out, or badly placed by the detector; a throw is further off within a moment
     thrown_speed: 3.0            # ... unless it moves away from them at this speed or faster (heights of the holder a second): thrown, not held out. 0: off
     ground_seconds: 1.0          # A disc lying still at no player for this long is on the ground: a turnover, the other team has it
+    covered_seconds: 2.0         # A disc at a player of the team without it, where a player of the team with it was lost up to this long ago (covered by that player, the mark), is the lost player's. 0: off
+    stray_seconds: 5.0           # Something the disc model sees lying at the same place for this long is not listened to any more: a cap or a cone, or a disc nobody picks up, which then counts again once it is moved. 0: off
     box_margin: 0.15             # Player boxes are widened by this fraction; a held disc is often just outside
+
+  holder:
+    # A network that tells from a picture of a player whether they hold the disc
+    # (scripts/train_holder.py). Used only where the disc is in the boxes of two
+    # players or more: the mark in front of the thrower
+    weights: "data/models/holder/20261010_holder_resnet18_s3_holder_by_hand_v2_by_hand744_more_all/best.pt"  # "" = not used: the player whose middle the disc is nearest to
+    min_lead: 0.2                       # The network's choice counts if it is this much surer of one player than of the next (0 to 1)
+    show_guess: true                    # Draw the network's guess on the video: corner marks in light blue around the player it is surest of, with how sure, in every frame and however unsure: what the network says, nothing held back. It then looks at every player in every frame
+    sure: 0.0                           # In a frame without a disc, a player the network is at least this sure of counts as the disc seen at them. 0 = never
+    weight: 0.5                         # ... for this much of a frame in which the disc itself is seen
 
   reid:
     # Knowing players by their looks (prototype): a track whose number is never read

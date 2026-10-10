@@ -14,6 +14,12 @@ rest. Progress is printed per epoch:
 
     python scripts/train_holder.py holder_players_v1 --validate chicago_vs_san_francisco \\
         --test san_francisco_vs_colorado
+
+With --answers, what was said on the "Holding the disc?" page of the Labelling tab
+replaces the dataset's own marks for the crops learned from, and those crops are all
+learned from, however many others are left out with --max-crops. With --only-answers
+nothing else is learned from: the dataset's own marks are wrong for a quarter of the
+holders that were looked at. A box said to show two players is not learned from.
 """
 
 import argparse
@@ -26,7 +32,7 @@ import time
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Sequence
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
@@ -46,6 +52,7 @@ from ultimate_analysis.processing.holder import (  # noqa: E402
     save_holder_net,
 )
 from ultimate_analysis.processing.reid import MEAN, SPREAD, fit  # noqa: E402
+from ultimate_analysis.utils.judgement_files import boxes_of_two, holders_said  # noqa: E402
 
 # At this speed over the ground (field units a second) a player is half as likely to be
 # the holder as one who stands, going by speed alone
@@ -70,15 +77,39 @@ def load_index(dataset: Path) -> List[dict]:
     return rows
 
 
-def pictures_of(rows: List[dict]) -> List[np.ndarray]:
-    """The crops of some rows, read once and kept at about the size they are used at."""
-    pictures = []
-    for row in rows:
-        crop = cv2.imread(str(row["path"]))
+class Pictures:
+    """The crops of some rows at about the size they are used at, read when they are
+    asked for: the crops of a few games do not fit in memory beside the training crops."""
+
+    def __init__(self, rows: List[dict], size: Sequence[int] = CROP_SIZE, padded: float = 0.0):
+        self.paths = [row["path"] for row in rows]
+        self.size = (size[0] + 12, size[1] + 16)
+        # Crops made wider than the box by this share of it on every side are cut back
+        # to the box: for a network that learned from crops of the boxes themselves
+        self.cut = padded / (1.0 + 2.0 * padded)
+
+    def __len__(self) -> int:
+        return len(self.paths)
+
+    def _read(self, path: Path) -> np.ndarray:
+        crop = cv2.imread(str(path))
         if crop is None:
-            raise FileNotFoundError(f"No crop at {row['path']}")
-        pictures.append(cv2.resize(crop, (CROP_SIZE[0] + 12, CROP_SIZE[1] + 16)))
-    return pictures
+            raise FileNotFoundError(f"No crop at {path}")
+        if self.cut:
+            height, width = crop.shape[:2]
+            x, y = round(self.cut * width), round(self.cut * height)
+            crop = crop[y : height - y, x : width - x]
+        return cv2.resize(crop, self.size)
+
+    def __getitem__(self, which):
+        if isinstance(which, slice):
+            return [self._read(path) for path in self.paths[which]]
+        return self._read(self.paths[which])
+
+
+def pictures_of(rows: List[dict], size: Sequence[int] = CROP_SIZE, padded: float = 0.0) -> Pictures:
+    """The crops of some rows, read as they are needed."""
+    return Pictures(rows, size, padded)
 
 
 def augmented(crop: np.ndarray, rng: random.Random, size: tuple) -> np.ndarray:
@@ -143,6 +174,7 @@ def _score(sure: np.ndarray, rows: List[dict]) -> Dict[str, float]:
         picked["disc seen" if rows[holders[0]]["disc_seen"] else "disc not seen"].append(right)
     hidden = np.array([bool(row["holding"]) and not row["disc_seen"] for row in rows])
     others = truth == 0
+    said = sure >= 0.5
     return {
         "average_precision": average_precision(sure, truth),
         "holder_picked": float(np.mean(picked["all"])) if picked["all"] else 0.0,
@@ -154,7 +186,10 @@ def _score(sure: np.ndarray, rows: List[dict]) -> Dict[str, float]:
         "holder_picked_disc_seen": (
             float(np.mean(picked["disc seen"])) if picked["disc seen"] else 0.0
         ),
-        # Of the crops over a half: holders found, and others taken for holders
+        # Of the crops over a half: how many are holders, and how many crops are said right
+        "precision": float(truth[said].mean()) if said.any() else 0.0,
+        "accuracy": float((said == (truth == 1)).mean()) if len(truth) else 0.0,
+        # ... holders found, and others taken for holders
         "holders_found": float((sure[truth == 1] >= 0.5).mean()) if truth.any() else 0.0,
         "hidden_holders_found": float((sure[hidden] >= 0.5).mean()) if hidden.any() else 0.0,
         "others_taken_for_holders": float((sure[others] >= 0.5).mean()) if others.any() else 0.0,
@@ -177,6 +212,39 @@ def main() -> None:
         help="Crops marked as holding of a player faster than this are not learned from",
     )
     parser.add_argument("--also", nargs="*", default=[], help="More datasets to learn from")
+    parser.add_argument(
+        "--size",
+        type=int,
+        nargs=2,
+        default=list(CROP_SIZE),
+        metavar=("WIDTH", "HEIGHT"),
+        help="What the crops are brought to",
+    )
+    parser.add_argument(
+        "--holding-share",
+        type=float,
+        default=0.5,
+        help="Share of a batch that holds the disc (a half: far more than in the data)",
+    )
+    parser.add_argument(
+        "--max-crops",
+        type=int,
+        default=0,
+        help="Learn from this many crops at most, the holders first: all are kept in memory",
+    )
+    parser.add_argument(
+        "--answers", default="", help="Folder in data/raw/training_data of answers given by hand"
+    )
+    parser.add_argument(
+        "--only-answers", action="store_true", help="Learn from the crops answered by hand alone"
+    )
+    parser.add_argument(
+        "--holders-by-hand",
+        action="store_true",
+        help="Of the dataset's holders, learn only from those answered by hand: its other "
+        "holders are left out, its players who do not hold the disc are kept",
+    )
+    parser.add_argument("--name", default="", help="Added to the name of the run's folder")
     parser.add_argument("--epochs", type=int, default=12)
     parser.add_argument("--batch", type=int, default=128)
     parser.add_argument("--seed", type=int, default=0)
@@ -198,19 +266,66 @@ def main() -> None:
         # A player at a run marked as holding the disc is a mistake of the marking
         and not (row["holding"] and (row["speed"] or 0.0) > args.max_holder_speed)
     ]
+    said = (
+        holders_said(REPO / DEFAULT_PATHS["TRAINING_DATA"] / args.answers / "holders.csv")
+        if args.answers
+        else {}
+    )
+    if args.answers:
+        # A box of two players shows a holder and one who is none: no crop to learn from
+        two = boxes_of_two(REPO / DEFAULT_PATHS["TRAINING_DATA"] / args.answers / "holders.csv")
+        before = len(training)
+        training = [
+            row
+            for row in training
+            if (row["video"], str(row["stretch"]), str(row["frame"]), row["player"]) not in two
+        ]
+        if two:
+            print(f"Boxes of two players left out: {before - len(training)}", flush=True)
+    changed = 0
+    for row in training:
+        answer = said.get((row["video"], str(row["stretch"]), str(row["frame"]), row["player"]))
+        row["by_hand"] = answer is not None
+        if answer is not None:
+            changed += answer != row["holding"]
+            row["holding"] = answer
+    if said:
+        by_hand = sum(row["by_hand"] for row in training)
+        print(f"By hand: {by_hand} crops, {changed} of them marked otherwise before", flush=True)
+    if args.holders_by_hand:
+        # A quarter of the dataset's own holders do not hold the disc by eye; nearly all
+        # of its others (99%) do not, as it says
+        training = [row for row in training if row["by_hand"] or not row["holding"]]
+    if args.only_answers:
+        training = [row for row in training if row["by_hand"]]
+        if len(training) < args.batch:
+            sys.exit(f"Only {len(training)} crops answered by hand to learn from")
+    rng = random.Random(args.seed)
+    if args.max_crops and len(training) > args.max_crops:
+        holders = [row for row in training if row["holding"] or row["by_hand"]]
+        others = [row for row in training if not (row["holding"] or row["by_hand"])]
+        training = holders + rng.sample(others, max(0, args.max_crops - len(holders)))
     validation, testing = of(args.validate), of(args.test)
     print(
         f"{len(training)} crops to learn from ({sum(r['holding'] for r in training)} holding), "
         f"{len(validation)} to choose by, {len(testing)} left out",
         flush=True,
     )
-    train_pictures = pictures_of(training)
-    validation_pictures, test_pictures = pictures_of(validation), pictures_of(testing)
+    name = f"{datetime.now():%Y%m%d}_holder_{args.architecture}_{args.dataset}"
+    name += "_from_nothing" if args.from_nothing else ""
+    name += f"_{args.name}" if args.name else ""
+    run = REPO / DEFAULT_PATHS["MODELS"] / "holder" / name
+    if run.exists():
+        sys.exit(f"{run} exists: runs are not overwritten, give another --name")
 
-    rng = random.Random(args.seed)
+    train_pictures = pictures_of(training, args.size)[:]
+    validation_pictures = pictures_of(validation, args.size)
+    test_pictures = pictures_of(testing, args.size)
+
     torch.manual_seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = HolderNet(args.architecture, pretrained=not args.from_nothing).to(device)
+    model = HolderNet(args.architecture, pretrained=not args.from_nothing, size=args.size)
+    model = model.to(device)
     positives = [i for i, row in enumerate(training) if row["holding"]]
     negatives = [i for i, row in enumerate(training) if not row["holding"]]
     steps = len(training) // args.batch
@@ -220,19 +335,17 @@ def main() -> None:
     )
     loss_of = nn.BCEWithLogitsLoss()
 
-    name = f"{datetime.now():%Y%m%d}_holder_{args.architecture}_{args.dataset}"
-    name += "_from_nothing" if args.from_nothing else ""
-    run = REPO / DEFAULT_PATHS["MODELS"] / "holder" / name
-    run.mkdir(parents=True, exist_ok=True)
+    run.mkdir(parents=True)
     best, history = None, []
     began = time.perf_counter()
     for epoch in range(1, args.epochs + 1):
         model.train()
         total = 0.0
         for _ in range(steps):
-            # Half of a batch holds the disc: one player in fourteen does
-            chosen = rng.choices(positives, k=args.batch // 2) + rng.choices(
-                negatives, k=args.batch - args.batch // 2
+            # Half of a batch holds the disc, as a rule: one player in fourteen does
+            holding_ones = round(args.holding_share * args.batch)
+            chosen = rng.choices(positives, k=holding_ones) + rng.choices(
+                negatives, k=args.batch - holding_ones
             )
             batch = torch.from_numpy(
                 np.stack([augmented(train_pictures[i], rng, model.size) for i in chosen])
@@ -269,6 +382,10 @@ def main() -> None:
             {
                 "architecture": args.architecture,
                 "dataset": args.dataset,
+                "also": args.also,
+                "size": list(args.size),
+                "holding_share": args.holding_share,
+                "crops": len(training),
                 "validate": args.validate,
                 "test": args.test,
                 "parameters": sum(p.numel() for p in model.parameters()),

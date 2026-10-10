@@ -125,6 +125,20 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(first.player_ids, {7: ("17", {})})
         self.assertIn("Inference", first.timings)
 
+    def test_a_frame_is_analysed_alike_with_the_views_left_undrawn(self):
+        undrawn = self.module.PipelineOptions(top_down_view=False, draw=False)
+        result = self.pipeline.process(self.frame, 0, undrawn)
+
+        self.assertIs(result.main_view, self.frame)
+        self.assertIsNone(result.top_down_view)
+        for name in ("draw_tracks", "draw_tracks_with_player_ids", "draw_possession"):
+            self.mocks[name].assert_not_called()
+        self.assertEqual(self.mocks["run_tracking"].call_count, 1)
+        self.assertEqual(result.player_ids, {7: ("17", {})})
+        # Whether the views are drawn is no new analysis of the frame
+        self.pipeline.process(self.frame, 0, self.options)
+        self.assertEqual(self.mocks["run_tracking"].call_count, 1)
+
     def test_changed_options_and_reset_analyse_the_frame_again(self):
         self.pipeline.process(self.frame, 3, self.options)
 

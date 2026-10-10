@@ -291,5 +291,7 @@ bandit-report.json
 docs/MEASUREMENTS.md
 docs/DEVELOPMENT_GUIDELINES.md
 docs/DATA.md
+docs/ALGORITHM.md
+docs/algorithm_*.svg
 docs/REVIEW_*.md
 CLAUDE.local.md

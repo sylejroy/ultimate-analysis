@@ -12,6 +12,7 @@ BESIDE_FRAMES = 12
 MEMORY_FRAMES = 20
 GROUND_FRAMES = 15
 OTHER_TEAM_FRAMES = 8
+STRAY_FRAMES = 200
 FRAME_RATE = 10.0
 
 
@@ -22,6 +23,58 @@ def player(track_id, x1, y1, x2, y2, team=None):
 
 def disc(x, y, confidence=0.8):
     return {"class_name": "disc", "confidence": confidence, "bbox": [x - 5, y - 5, x + 5, y + 5]}
+
+
+class HolderNetworkTest(unittest.TestCase):
+    """A disc in two players' boxes: the one a holder network is clearly surest of."""
+
+    def setUp(self):
+        self.module = load_module("processing.possession")
+        self.tracks = [player(1, 0, 0, 100, 200), player(2, 60, 0, 160, 200)]
+        self.disc = (75, 95, 85, 105)  # In both boxes, nearer the middle of the first
+
+    def test_without_a_network_the_nearest_middle_decides(self):
+        self.assertEqual(self.module.player_at_disc(self.disc, self.tracks, 0.15), 1)
+        self.assertEqual(self.module.players_at_disc(self.disc, self.tracks, 0.15), [1, 2])
+
+    def test_the_network_decides_where_it_is_clearly_surer_of_one(self):
+        at = self.module.player_at_disc
+        self.assertEqual(at(self.disc, self.tracks, 0.15, {1: 0.2, 2: 0.9}), 2)
+        # Not clearly, or only one of them looked at: as without
+        self.assertEqual(at(self.disc, self.tracks, 0.15, {1: 0.6, 2: 0.7}), 1)
+        self.assertEqual(at(self.disc, self.tracks, 0.15, {2: 0.9}), 1)
+
+    def looking(self, sure, scores, frames=40):
+        settings = {"models.holder.sure": sure, "models.holder.weight": 0.5}
+        get = self.module.get_setting
+        with patch.object(
+            self.module,
+            "get_setting",
+            lambda key, default=None: settings.get(key, get(key, default)),
+        ):
+            tracker = self.module.PossessionTracker()
+            for frame in range(frames):
+                tracker.update([], self.tracks, frame, scores)
+        return tracker.holder_id
+
+    def test_without_a_disc_a_player_the_network_is_sure_of_becomes_the_holder(self):
+        self.assertEqual(self.looking(0.8, {1: 0.1, 2: 0.95}), 2)
+        # Switched off, not sure enough, or two it is about as sure of: nobody
+        self.assertIsNone(self.looking(0.0, {1: 0.1, 2: 0.95}))
+        self.assertIsNone(self.looking(0.8, {1: 0.1, 2: 0.7}))
+        self.assertIsNone(self.looking(0.8, {1: 0.9, 2: 0.95}))
+        # It takes twice as long as with the disc itself in sight
+        self.assertIsNone(self.looking(0.8, {1: 0.1, 2: 0.95}, frames=10))
+
+    def test_what_the_network_said_is_recorded_and_played_back(self):
+        replaying = load_module("processing.possession_replay")
+        tracker = replaying.RecordingPossessionTracker()
+        discs = [{"class_name": "disc", "confidence": 0.9, "bbox": list(self.disc)}]
+        for frame in range(30):
+            tracker.update(discs, self.tracks, frame, {1: 0.1, 2: 0.9})
+            tracker.frame_done(frame)
+        self.assertEqual(tracker.holder_id, 2)
+        self.assertEqual(replaying.replay(tracker.calls)[-1][1], 2)
 
 
 class PossessionTests(unittest.TestCase):
@@ -35,7 +88,11 @@ class PossessionTests(unittest.TestCase):
             "models.possession.other_team_seconds": OTHER_TEAM_FRAMES / FRAME_RATE,
             "models.possession.reach": 1.0,
             "models.possession.thrown_speed": 0.0,
+            "models.possession.stray_seconds": STRAY_FRAMES / FRAME_RATE,
+            "models.possession.covered_seconds": MEMORY_FRAMES / FRAME_RATE,
+            "models.possession.teammate_seconds": 0.0,
             "models.possession.box_margin": 0.1,
+            "models.holder.sure": 0.0,
         }
         patcher = patch.object(
             self.module, "get_setting", side_effect=lambda key, d=None: settings[key]
@@ -206,6 +263,15 @@ class PossessionTests(unittest.TestCase):
         self.assertEqual(self.see(disc(400, 400), frames=CONFIRM_FRAMES), 3)
         self.assertEqual((self.tracker.team, self.tracker.on_ground), (1, False))
 
+    def test_a_pass_to_a_teammate_is_confirmed_sooner_than_one_to_the_other_team(self):
+        self.settings["models.possession.teammate_seconds"] = 1 / FRAME_RATE
+        self.see(disc(130, 150), frames=CONFIRM_FRAMES)
+        self.assertEqual(self.see(disc(630, 150)), 2)  # A teammate: at the first sighting
+
+        self.tracks.append(player(3, 900, 100, 960, 300, team=1))
+        self.assertEqual(self.see(disc(930, 150), frames=CONFIRM_FRAMES - 1), 2)
+        self.assertEqual(self.see(disc(930, 150)), 3)
+
     def test_a_defender_beside_a_receiver_takes_longer_to_become_the_holder(self):
         self.see(disc(130, 150), frames=CONFIRM_FRAMES)
         # A defender whose box touches that of a player of the team with the disc
@@ -288,6 +354,75 @@ class PossessionTests(unittest.TestCase):
         self.see(frames=30)
         self.see(disc(300, 400), frames=GROUND_FRAMES * 3)
         self.assertEqual((self.tracker.team, self.tracker.on_ground), (0, False))
+
+    def covered_catch(self):
+        """A pass to a teammate whose track ends as the mark steps in front of them."""
+        self.see(disc(130, 150), frames=CONFIRM_FRAMES)
+        self.see(disc(380, 150), frames=2)
+        self.see(disc(630, 150))
+        mark = player(3, 610, 110, 670, 310, team=1)
+        self.tracks = [self.thrower, mark]
+        return self.see(disc(632, 152), frames=CONFIRM_FRAMES + 2)
+
+    def test_a_disc_at_the_mark_is_the_covered_receivers(self):
+        self.assertEqual(self.covered_catch(), 2)
+        self.assertEqual(self.tracker.team, 0)
+        # Seen again under a new number, they are the holder still
+        self.tracks.append(player(9, 600, 100, 660, 300, team=0))
+        self.assertEqual(self.see(disc(630, 150), frames=2), 9)
+
+    def test_a_disc_at_a_defender_nobody_stood_behind_is_theirs(self):
+        self.settings["models.possession.covered_seconds"] = 0.0
+        self.assertEqual(self.covered_catch(), 3)
+        self.assertEqual(self.tracker.team, 1)
+
+    def test_what_lies_at_one_place_for_long_is_not_listened_to(self):
+        self.see(disc(130, 150), frames=CONFIRM_FRAMES)
+        cap = disc(400, 420, confidence=0.9)
+        # A cap on the grass, surer than the disc: taken for the disc at first
+        self.see(cap, disc(130, 150, 0.5), frames=STRAY_FRAMES)
+        self.assertIsNone(self.tracker.holder_id)
+        self.assertEqual(self.tracker.strays, [])
+
+        # ... and after that the disc in the thrower's hands is, though it is less sure
+        self.see(cap, disc(130, 150, 0.5), frames=CONFIRM_FRAMES + 1)
+        self.assertEqual(self.tracker.holder_id, 1)
+        self.assertEqual(self.tracker.strays, [(400.0, 420.0)])
+        # Alone in the picture it says nothing, nor when somebody walks over it
+        self.assertEqual(self.see(cap, frames=GROUND_FRAMES * 2), 1)
+        self.tracks.append(player(3, 370, 250, 430, 450, team=1))
+        self.assertEqual(self.see(cap, frames=BESIDE_FRAMES * 2), 1)
+        self.assertEqual((self.tracker.team, self.tracker.on_ground), (0, False))
+
+    def test_a_disc_left_lying_for_long_counts_again_once_it_is_picked_up(self):
+        self.see(disc(130, 150), frames=CONFIRM_FRAMES)
+        self.see(disc(400, 420), frames=STRAY_FRAMES + 5)
+        self.assertEqual((self.tracker.team, self.tracker.on_ground), (1, True))
+        self.assertEqual(len(self.tracker.strays), 1)
+
+        # Walked up to, it still lies; lifted, it is in their hands
+        self.tracks.append(player(3, 370, 250, 430, 450, team=1))
+        self.assertIsNone(self.see(disc(400, 420), frames=CONFIRM_FRAMES * 2))
+        self.assertTrue(self.tracker.on_ground)
+        self.assertEqual(self.see(disc(405, 340), frames=CONFIRM_FRAMES), 3)
+        self.assertEqual((self.tracker.team, self.tracker.on_ground), (1, False))
+
+    def test_a_thing_lying_for_long_is_followed_when_the_camera_moves(self):
+        self.see(disc(130, 150), frames=CONFIRM_FRAMES)
+        self.see(disc(400, 420), frames=STRAY_FRAMES + 1)
+        shift = self.module.np.array([[1.0, 0.0, 300.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        self.tracker.move(shift)
+
+        self.assertEqual(self.tracker.strays, [(700.0, 420.0)])
+        # It is known where it now shows, and what shows where it was is not it
+        self.tracker.update([disc(700, 420), disc(400, 420, 0.5)], self.tracks)
+        self.assertEqual(self.tracker._last_sighting[1], (400.0, 420.0))
+
+    def test_nothing_is_taken_for_lying_where_that_is_turned_off(self):
+        self.settings["models.possession.stray_seconds"] = 0.0
+        self.see(disc(400, 420), frames=STRAY_FRAMES * 2)
+        self.assertEqual(self.tracker.strays, [])
+        self.assertEqual(self.tracker._disc_seen, self.tracker._frame)
 
     def test_a_resting_disc_is_followed_when_the_camera_moves(self):
         import numpy as np

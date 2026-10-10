@@ -78,3 +78,95 @@ through the Windows firewall for private networks when asked). From anywhere els
 Tailscale on the PC and the phone and sign in with the same account; the script then
 prints a second address that works over that private link. Do not forward the port on
 your router.
+
+## Same player?
+
+The "Same player?" page of the Labelling tab shows two tracks of a dataset of player
+crops (`reid_players_v2`), eight pictures of each, and takes one key per answer:
+
+- `1` same player, `2` different players
+- `Space` cannot tell
+
+A picture that shows somebody else than the rest of its track is clicked to take it out
+(click again to put it back); the answer is then about the pictures left.
+
+The two tracks are of the same game and the same kind of shirt. Seven pairs in ten are
+ones the network that tells players apart is unsure of, the rest are drawn at random;
+which it is stands above the pictures. (For the first minute after a dataset is first
+opened all are drawn at random: the network is looking at the tracks.) Answers are added to
+`pairs.csv` in the dataset named on the page (`labelled_pairs_v1`); a pair is asked once.
+Every picture shown is added to `pictures.csv` beside it, as the track's player or as
+somebody else.
+
+## Holding the disc?
+
+The "Holding the disc?" page shows a player of a frame of a holder dataset
+(`holder_sighted_v1`): on the left the player made larger, on the right where they
+stand. `Y` holds the disc, `N` does not, `Space` cannot tell.
+
+Seven frames in ten are ones in which another player stands in the holder's box (the mark
+in front of the thrower, a defender at the catch), the rest are drawn at random; which
+it is stands above the pictures. The player the dataset takes for the holder is asked
+about first. A yes also writes
+every other player of that frame down as not holding it, since one disc is in play, and
+goes on to another frame; after a no the next player of the frame is asked about.
+The last ten answers stand in a row below the pictures, framed green for a yes and red
+for a no. A click on one takes that answer back (it is removed from the file, with what
+it said of the other players of the frame) and asks about that player again.
+Where the box shows two players (the thrower and the mark in one box, mostly), press
+T: neither a yes nor a no is true of it. The page then waits for a click on the one who
+holds the disc, in the left picture; Space says that neither does, or that it cannot be
+told. Such a box is written to `two_in_box.csv` beside the answers, with the place
+clicked, and is not learned from. A place clicked makes every player whose box it is
+not in a no.
+
+Answers given for wide boxes before this could be said are asked about again first,
+the widest first, with what was answered then. A new answer replaces the old one (the
+answers as they were are kept once as `holders.csv.before_recheck`); Space leaves it.
+
+A bar at the bottom counts the holders confirmed so far towards a first goal of 1,000.
+
+Above the pictures stands what a holder network makes of the player ("87% sure that this
+player holds the disc"): the newest network, or the one chosen beside it; "Off" to answer
+without being led. A network taught on these answers knows the players already answered.
+
+### Click the holder
+
+The "Click the holder" page asks about the same frames another way. It plays the second
+of the game before the frame, stops on the frame with a box around every player the
+player model finds, and takes one click. The whole frame is shown, always: that nobody
+holds the disc can only be said of a picture that shows everybody.
+
+- a click on the player who holds the disc: a yes for them and a no for the others
+- a right-click on a box that shows two players, one of them with the disc: the box
+  opens large in a window of its own, for a click on that one (Space: cannot tell which
+  of them; Esc: not two players after all)
+- N: nobody holds it; Space: cannot tell; R: play the second again; Backspace: take
+  the last answer back
+
+The player a holder network takes for the holder is marked in light blue, with how
+sure it is (a thin line under one half: its best guess only): by the newest network, or the one chosen above
+the picture; "Off" to answer without being led.
+
+What was stored shows on the frame for a moment before the next one comes: the box
+clicked in green as the holder (yellow as a box of two), and in red everybody who does
+not hold the disc: all players found where nobody holds it, and all whose box does not
+touch the holder's where somebody does. Those become crops to learn from when the
+dataset is made, not only the four the source dataset has.
+
+About one frame in three is one in which the disc was found flying: N there, if nobody
+holds it. These are looked for beforehand with `scripts/find_flying_disc_frames.py`
+(the dataset's own "the disc flies" is right for a third of its frames). Without such frames a network never
+learns that there may be no holder, and names one all the same. Tick "Only show frames with a
+flying disc" to be asked about nothing else: the frame is then shown at once, without
+the second before it. A yellow ring marks where the disc was found flying.
+
+The games are asked about in equal measure: a game is drawn first, then a frame of it.
+
+It writes what the other page writes, to the same files. The dataset knows four players
+of a frame at most: a click on a player it does not know makes those four a no, and the
+box clicked is kept in `clicked_holders.csv`.
+
+Answers are added to `holders.csv` in the dataset named on the page
+(`labelled_holders_v1`). The first picture takes some seconds: the network that enlarges
+the players is loaded then.

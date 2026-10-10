@@ -130,6 +130,9 @@ class PlayerLooks:
         self.frame_rate = 30.0
         self._embedder: Any = None
         self._tried_to_load = False
+        # The network chosen in place of the one in the settings, and the video
+        self._weights: Optional[Path] = None
+        self._video_path: Optional[str] = None
         self._roster_path: Optional[Path] = None
         self._thread: Optional[ThreadPoolExecutor] = None
         self._looked_at: Optional[int] = None  # The frame the players were last looked at
@@ -164,17 +167,39 @@ class PlayerLooks:
     def new_video(self, video_path: Optional[str]) -> None:
         """Another video: its roster is read if there is one, the last one's written."""
         self.save()
+        self._video_path = video_path
         self.roster = PlayerRoster()
         self._roster_path = None
         self._forget_tracks()
         folder = get_setting("models.reid.roster_folder", "data/cache/rosters")
         if video_path and folder:
-            self._roster_path = Path(folder) / f"{Path(video_path).stem}.json"
+            # A roster holds what the players look like to one network, which says
+            # nothing to another: one chosen in place of the settings' keeps its own
+            folder = (
+                Path(folder) if self._weights is None else Path(folder) / self._weights.parent.name
+            )
+            self._roster_path = folder / f"{Path(video_path).stem}.json"
             if self._roster_path.exists():
                 try:
                     self.roster = PlayerRoster.load(self._roster_path)
                 except (OSError, ValueError, KeyError) as error:
                     logger.warning(f"Roster not read, starting a new one: {error}")
+
+    def set_weights(self, weights: Optional[str]) -> bool:
+        """Look at the players with another network (None: the one in the settings).
+        What was known of the players by the last one does not hold for this one: the
+        tracks are looked at anew, and the video's roster is that of this network.
+        Returns whether anything changed."""
+        chosen = None if weights is None else Path(weights)
+        if chosen is not None and chosen == Path(str(get_setting("models.reid.weights", ""))):
+            chosen = None
+        if chosen == self._weights:
+            return False
+        self.roster.tracks_ended()
+        self._weights = chosen
+        self._embedder, self._tried_to_load = None, False
+        self.new_video(self._video_path)
+        return True
 
     def cut(self) -> None:
         """The tracker starts again (a cut, a seek): its tracks are over, the players stay."""
@@ -241,7 +266,7 @@ class PlayerLooks:
     def _network(self) -> Any:
         if not self._tried_to_load:
             self._tried_to_load = True
-            weights = Path(str(get_setting("models.reid.weights", "")))
+            weights = self._weights or Path(str(get_setting("models.reid.weights", "")))
             try:
                 from .reid import load_embedder
 
