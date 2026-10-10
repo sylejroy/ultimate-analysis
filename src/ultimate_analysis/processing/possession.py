@@ -16,7 +16,9 @@ These keep the disc with the thrower then:
 - While the disc is in the holder's box it is the holder's, however near it is to someone
   else. So is a disc at no player but within a body's height of the holder: a throw is
   further away than that within a moment, and a disc held out or badly placed by the
-  detector is not.
+  detector is not. Unless it is flying away from them (`thrown_speed`): a disc held
+  out stays where the hand is, a thrown one is further from the holder at every
+  sighting, and is then nobody's from the sighting it set off at.
 - A holder whose track the tracker loses and begins again under a new number stays
   the holder.
 - A holder who is not found for a moment (covered by the mark) is remembered where they
@@ -63,6 +65,14 @@ SAME_PLAYER_OVERLAP = 0.5
 ELSEWHERE = 0.5
 # What a frame with the disc at the holder takes from every other place's count
 AT_HOLDER = 2.0
+# A disc is moving away from the holder for as long as each sighting is further from
+# their box than the one before by at least this share of the speed of a throw, with
+# no longer than this (seconds) between two sightings
+AWAY_SHARE = 0.5
+AWAY_UNSEEN_SECONDS = 0.25
+# ... and it is thrown once it has got this far that way (share of the holder's height):
+# the detector places a disc that is held still a little differently in every frame
+MIN_AWAY = 0.2
 
 
 def _widened(box: Sequence[float], margin: float) -> Box:
@@ -164,6 +174,10 @@ class PossessionTracker:
         # is the disc of the game: followed from a player's hands without a break
         self._last_sighting: Optional[Tuple[int, Tuple[float, float]]] = None
         self._followed_from_a_player = False
+        # How far the disc was from the holder's box (frame, share of their height) at
+        # the last sighting, and at the sighting it began to move away from them
+        self._last_away: Optional[Tuple[int, float]] = None
+        self._away_since: Optional[Tuple[int, float]] = None
 
     @property
     def disc_state(self) -> str:
@@ -282,6 +296,31 @@ class PossessionTracker:
                 self._followed_from_a_player = False
         self._last_sighting = (self._frame, disc)
 
+    def _thrown(self, disc: Tuple[float, float]) -> bool:
+        """Whether the disc is flying away from the holder: further from their box at
+        every sighting, at the speed of a throw (`thrown_speed`, heights of the holder
+        a second; 0: never said). A disc held out at arm's length is as far from the
+        box, but stays there."""
+        x1, y1, x2, y2 = self._holder_box
+        distance = float(
+            np.hypot(max(x1 - disc[0], 0.0, disc[0] - x2), max(y1 - disc[1], 0.0, disc[1] - y2))
+        ) / max(y2 - y1, 1.0)
+        before, self._last_away = self._last_away, (self._frame, distance)
+        speed = float(get_setting("models.possession.thrown_speed", 3.0))
+        seconds = 0.0 if before is None else (self._frame - before[0]) / self.frame_rate
+        if (
+            speed <= 0
+            or before is None
+            or self._away_since is None
+            or seconds > AWAY_UNSEEN_SECONDS
+            or distance - before[1] < AWAY_SHARE * speed * seconds
+        ):
+            # Not further away than before, or not by enough: from here, if at all
+            self._away_since = self._last_away
+            return False
+        seconds = (self._frame - self._away_since[0]) / self.frame_rate
+        return distance - self._away_since[1] >= max(MIN_AWAY, speed * seconds)
+
     def _watch_ground(self, disc: Optional[Tuple[float, float]], tracks: List[Any]) -> None:
         """Follow a disc that is at no player (None: it is at one): does it lie still?"""
         if disc is None:
@@ -380,12 +419,18 @@ class PossessionTracker:
         margin = float(get_setting("models.possession.box_margin", 0.15))
         at_disc = player_at_disc(disc["bbox"], tracks, margin)
 
+        thrown = self._holder_box is not None and self._thrown(centre)
         if self._holder_box is not None and at_disc != self.holder_id:
             reach = float(get_setting("models.possession.reach", 1.0))
             arm = reach * (self._holder_box[3] - self._holder_box[1])
             x1, y1, x2, y2 = self._holder_box
             if _contains(_widened(self._holder_box, margin), *centre):
                 at_disc = self.holder_id  # Still in the holder's box, or where they were
+            elif at_disc is None and thrown:
+                # On its way: nobody's from the sighting it set off at
+                self._first_seen[None] = min(
+                    self._first_seen.get(None, self._frame), self._away_since[0]
+                )
             elif at_disc is None and _contains((x1 - arm, y1 - arm, x2 + arm, y2 + arm), *centre):
                 at_disc = self.holder_id  # Held out at arm's length
 
@@ -417,6 +462,7 @@ class PossessionTracker:
             self._seen_at.clear()
             self._first_seen.clear()
             self._holder_box = None
+            self._last_away = self._away_since = None
             if at_disc is not None:
                 self._turned_over = False
             self._follow_holder(tracks)

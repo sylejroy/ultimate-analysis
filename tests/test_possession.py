@@ -27,13 +27,14 @@ def disc(x, y, confidence=0.8):
 class PossessionTests(unittest.TestCase):
     def setUp(self):
         self.module = load_module("processing.possession")
-        settings = {
+        self.settings = settings = {
             "models.possession.confirm_seconds": CONFIRM_FRAMES / FRAME_RATE,
             "models.possession.beside_holder_seconds": BESIDE_FRAMES / FRAME_RATE,
             "models.possession.holder_memory_seconds": MEMORY_FRAMES / FRAME_RATE,
             "models.possession.ground_seconds": GROUND_FRAMES / FRAME_RATE,
             "models.possession.other_team_seconds": OTHER_TEAM_FRAMES / FRAME_RATE,
             "models.possession.reach": 1.0,
+            "models.possession.thrown_speed": 0.0,
             "models.possession.box_margin": 0.1,
         }
         patcher = patch.object(
@@ -133,6 +134,29 @@ class PossessionTests(unittest.TestCase):
         # 50 px beside a box 200 px tall: outside the box and its margin, within reach
         self.assertEqual(self.see(disc(210, 150), frames=CONFIRM_FRAMES * 5), 1)
         self.assertEqual(self.tracker.disc_state, "held")
+
+    def test_a_disc_flying_away_within_reach_is_thrown_where_that_is_asked_for(self):
+        # 50 px further from a box 200 px tall in every frame: 2.5 heights a second
+        flight = [disc(x, 150) for x in (190, 240, 290, 340)]
+        self.see(disc(130, 150), frames=CONFIRM_FRAMES)
+        for sighting in flight:
+            self.assertEqual(self.see(sighting), 1)  # Within reach: held out, as far as is asked
+
+        self.tracker.reset()
+        self.settings["models.possession.thrown_speed"] = 1.5
+        self.see(disc(130, 150), frames=CONFIRM_FRAMES)
+        for sighting in flight[:-1]:
+            self.assertEqual(self.see(sighting), 1)
+        self.assertIsNone(self.see(flight[-1]))
+        # Nobody's from the first sighting outside the box, not from when it was sure
+        self.assertEqual(self.tracker.since, CONFIRM_FRAMES)
+
+    def test_a_disc_held_out_and_moved_about_is_not_thrown(self):
+        self.settings["models.possession.thrown_speed"] = 1.5
+        self.see(disc(130, 150), frames=CONFIRM_FRAMES)
+        # A fake: out fast, and back; then held out, placed a little differently each time
+        for x in (190, 240, 250, 200, 215, 208, 222, 210, 218, 206):
+            self.assertEqual(self.see(disc(x, 150)), 1)
 
     def test_a_holder_who_gets_a_new_track_number_stays_the_holder(self):
         self.see(disc(130, 150), frames=CONFIRM_FRAMES)
