@@ -32,12 +32,12 @@ DISC, PLAYER = 0, 1
 # Source dataset -> {source class id: merged class id}
 SOURCES = {
     # names: ['disc', 'player'] (referees were annotated as players)
-    "roboflow_object_detection_v3i": {0: DISC, 1: PLAYER},
+    "external_object_detection": {0: DISC, 1: PLAYER},
     # names: ['disc', 'player', 'player in possession', 'ref']
-    "roboflow_player_disc_detection_v4i": {0: DISC, 1: PLAYER, 2: PLAYER, 3: PLAYER},
+    "external_player_disc_detection": {0: DISC, 1: PLAYER, 2: PLAYER, 3: PLAYER},
 }
 # names: ['disc']; players are not annotated
-DISC_ONLY_SOURCE = "roboflow_object_detection_disc_v1i"
+DISC_ONLY_SOURCE = "external_object_detection_disc"
 SPLITS = ("train", "valid", "test")
 
 

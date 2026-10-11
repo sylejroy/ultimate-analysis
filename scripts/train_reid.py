@@ -42,7 +42,7 @@ so many of them into every step (2 unless told otherwise).
 the answers are about the tracks of one dataset, which is why more games come as a
 dataset of their own.
 
-    python scripts/train_reid.py reid_players_v1 --validate chicago_vs_san_francisco \
+    python scripts/train_reid.py generated_reid --validate chicago_vs_san_francisco \
         --test san_francisco_vs_colorado --architecture resnet18_s3
 
 The model goes to data/models/reid/<date>_reid_<architecture>_<dataset>/best.pt. This is

@@ -74,7 +74,8 @@ def _near_field(place: np.ndarray, template: FieldTemplate) -> bool:
 def scene_of(result: Any, template: FieldTemplate) -> Optional[GameScene]:
     """The scene of a frame's results (FrameResult); None where the field is not known.
 
-    A player stands where the middle of their box's lower edge is on the ground. A held
+    A player stands where the pipeline has them (FrameResult.places, held steady over
+    the frames), or else where the middle of their box's lower edge is on the ground. A held
     disc is with its holder, a flying one over the spot the pipeline worked out, both at
     the height a disc is thrown and caught at; any other lies where it is seen.
     """
@@ -86,7 +87,12 @@ def scene_of(result: Any, template: FieldTemplate) -> Optional[GameScene]:
         if track.class_name != "player":
             continue
         x1, _, x2, y2 = track.bbox
-        place = _on_ground(to_field, ((x1 + x2) / 2, y2))
+        steady = getattr(result, "places", {}).get(track.track_id)
+        place = (
+            np.asarray(steady, dtype=np.float64)
+            if steady is not None
+            else _on_ground(to_field, ((x1 + x2) / 2, y2))
+        )
         if place is None or not _near_field(place, template):
             continue
         number = str(result.player_ids.get(track.track_id, ("", None))[0] or "")

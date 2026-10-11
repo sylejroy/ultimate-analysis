@@ -8,6 +8,7 @@ No training or export runs are started and existing model engines are reused.
     python scripts/benchmark_pipeline.py --output before.json
     python scripts/benchmark_pipeline.py --compare before.json     # after a change
     python scripts/benchmark_pipeline.py --profile                  # where the time goes
+    python scripts/benchmark_pipeline.py --ahead                    # as the app plays
 
 --compare reports on how many frames the track IDs, jersey numbers, or disc holder differ
 from a saved run, and the largest box difference. Timings are only meaningful with
@@ -53,6 +54,11 @@ def main():
     parser.add_argument("--warmup", type=int, default=30)
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--threads", type=int)
+    parser.add_argument(
+        "--ahead",
+        action="store_true",
+        help="Give the pipeline the next frame as well, as the app does while it plays",
+    )
     parser.add_argument("--output", type=Path, help="Optional JSON timings and track snapshots")
     parser.add_argument(
         "--compare", type=Path, help="Compare track snapshots with a saved reference"
@@ -99,7 +105,10 @@ def main():
         if use_cuda:
             torch.cuda.synchronize()
         start = time.perf_counter()
-        result = pipeline.process(frame, index, options)
+        following = frames[index + 1] if args.ahead and index + 1 < len(frames) else None
+        result = pipeline.process(
+            frame, index, options, next_frame=None if following is None else lambda: following
+        )
         if use_cuda:
             torch.cuda.synchronize()
         elapsed = (time.perf_counter() - start) * 1000

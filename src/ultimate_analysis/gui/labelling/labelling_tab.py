@@ -41,7 +41,7 @@ from .box_canvas import BoxCanvas
 
 logger = get_logger("LABELLING")
 
-DEFAULT_DATASET = "labelled_players_discs_v1"
+DEFAULT_DATASET = "hand_players_discs"
 # How often a random frame is drawn again when it turns out to be a close-up
 RANDOM_FRAME_DRAWS = 6
 HELP_TEXT = (

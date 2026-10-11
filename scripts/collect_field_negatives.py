@@ -12,7 +12,7 @@ drone footage. So the result has to be looked through by hand. Frames that do sh
 field from above are listed in `excluded.txt` of the result (one name per line) and are
 then left out by `build_field_mask_dataset.py --negatives`.
 
-    python scripts/collect_field_negatives.py field_negatives_v1 --videos Machine Ring_of_Fire
+    python scripts/collect_field_negatives.py generated_field_negatives --videos Machine Ring_of_Fire
 
 The videos are read-only; the result is written to a new folder:
 

@@ -4,10 +4,10 @@
 For the crops made from hand-labelled discs (scripts/build_holder_ground_truth.py) the
 anchors, marked by the label alone, and the possessions around them are scored apart.
 
-    python scripts/benchmark_holder.py data/models/holder/<run>/best.pt holder_anchored_v1 \\
+    python scripts/benchmark_holder.py data/models/holder/<run>/best.pt train_holders \\
         --without chicago portland
 
-A network that learned from crops of the boxes themselves (holder_sighted_v1) is scored
+A network that learned from crops of the boxes themselves (generated_holders) is scored
 on crops made wider than the boxes with --padded 0.25.
 """
 

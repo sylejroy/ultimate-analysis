@@ -16,10 +16,10 @@ named holder's. Otherwise, the first that holds:
 - a teammate / an opponent: somebody else of the same team, or of the other
 - other: the teams are not known
 
-    python scripts/benchmark_possession_holders.py possession_holders_v1 --record \\
-        --answers labelled_holders_v1 --dataset holder_sighted_v1
+    python scripts/benchmark_possession_holders.py possession_holders_recording --record \\
+        --answers hand_holders --dataset generated_holders
     python scripts/benchmark_possession_holders.py possession_holders_try \\
-        --replay possession_holders_v1 --set models.possession.confirm_seconds=0.2
+        --replay possession_holders_recording --set models.possession.confirm_seconds=0.2
 
 With --record what the possession tracking was told is kept, and a change to its logic or
 settings is scored on that in a moment with --replay, as in benchmark_possession.py.

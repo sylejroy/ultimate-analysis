@@ -47,7 +47,7 @@ from .field_diagram import FieldDiagram, title
 
 logger = get_logger("FIELD_LABELLING")
 
-DEFAULT_DATASET = "labelled_field_v1"
+DEFAULT_DATASET = "hand_field"
 # Labels are carried over to a frame at most this far away; further off, following the
 # camera through every frame in between takes too long and drifts
 MAX_CARRY_FRAMES = 150

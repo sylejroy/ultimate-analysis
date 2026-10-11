@@ -18,8 +18,8 @@ a recorded run of that benchmark, and counted per threshold:
 
 Measures only; nothing in the pipeline uses the lower thresholds.
 
-    python scripts/benchmark_disc_confidence.py disc_confidence_v1 \\
-        --recording possession_recorded_v1 --labels labelled_players_discs_v1 labelled_discs_v1
+    python scripts/benchmark_disc_confidence.py disc_confidence \\
+        --recording possession_discs_recording --labels hand_players_discs hand_discs
 """
 
 import argparse

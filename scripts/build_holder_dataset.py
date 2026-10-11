@@ -23,7 +23,7 @@ The videos are read-only; the result is written to a new folder:
                            disc was detected on the crop), nearest (the one nearest to
                            the holder), x1, y1, x2, y2
 
-    python scripts/build_holder_dataset.py holder_players_v1 --from-dataset reid_players_v2
+    python scripts/build_holder_dataset.py generated_holders_by_possession --from-dataset generated_reid
 """
 
 import argparse

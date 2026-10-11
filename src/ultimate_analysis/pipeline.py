@@ -8,7 +8,7 @@ this module: the GUI owns one AnalysisPipeline and runs it on a worker thread.
 
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -20,7 +20,7 @@ from .constants import DEFAULT_PATHS
 from .processing import appearance, health
 from .processing.camera_motion import CameraMotionEstimator
 from .processing.camera_motion import is_enabled as camera_motion_enabled
-from .processing.disc_flight import DiscPath, place_under_disc
+from .processing.disc_flight import DiscPath, FlyingDisc, place_under_disc
 from .processing.field_analysis import create_unified_field_mask, fit_lines_from_mask
 from .processing.field_line_filter import FieldLineFilter
 from .processing.field_registration import FieldFollower, OffFieldWatcher, field_to_canvas
@@ -39,6 +39,7 @@ from .processing.player_looks import PlayerLooks
 from .processing.player_numbers import PlayerNumbers
 from .processing.possession import PossessionTracker, players_at_disc
 from .processing.shot_type import ShotWatcher, players_are_elsewhere
+from .processing.steady_places import SteadyPlaces
 from .processing.tracking import (
     apply_camera_motion,
     get_track_histories,
@@ -105,7 +106,7 @@ STATS_EVERY_FRAMES = 30
 
 Line = Tuple[np.ndarray, np.ndarray]
 # The dataset of field labels that a video's focal length is taken from
-FIELD_LABELS = "labelled_field_v1"
+FIELD_LABELS = "hand_field"
 
 
 @dataclass(frozen=True)
@@ -164,6 +165,9 @@ class FrameResult:
     possession_team: Optional[int] = None
     image_to_field: Optional[np.ndarray] = None
     disc_place: Optional[Tuple[float, float]] = None
+    # Track -> where the player stands on the field (x across, y along), held steady
+    # over the frames; empty where the field's place is not known
+    places: Dict[int, Tuple[float, float]] = field(default_factory=dict)
     # The phase of the game: "unknown", "between points", "lined up", "pull", "live" or
     # "score" (processing/game_state.py)
     game_state: str = "unknown"
@@ -210,15 +214,22 @@ class AnalysisPipeline:
             )
         )
         self._off_field = OffFieldWatcher(self._field_follower.template)
+        self._steady = SteadyPlaces()
+        self.places: Dict[int, Tuple[float, float]] = {}
         template = self._field_follower.template
         self._game = GameStateTracker(template.length, template.end_zone)
         self._score: List[list] = []  # [a team's colour (BGR), its points]
         self._disc_path = DiscPath(float(get_setting("homography.disc_path_seconds", 8.0)))
+        # Whether the disc is seen to fly: the holder network is not asked meanwhile
+        self._flying = FlyingDisc()
+        self.disc_seen_flying = False
         self._looks = PlayerLooks()
         self.numbers_by_looks: Dict[int, str] = {}
         # For what can be done beside the main work of a frame
         self._threads = ThreadPoolExecutor(max_workers=3, thread_name_prefix="pipeline")
         self._ahead: Optional[Any] = None  # The detectors' work on the next frame
+        # ... and with it how the camera moved to that frame, looked at but not taken in
+        self._motion_ahead: Optional[tuple] = None
         # The field model's work beside the frames: the job under way, the frame and
         # frame size the last one was begun at, and the masks last taken in
         self._field_job: Optional[dict] = None
@@ -240,6 +251,7 @@ class AnalysisPipeline:
         self._motion_known = False
         self._players_before = np.zeros((0, 4))
         self._follow_field = False
+        self._joined_at = 0  # The frame the tracks were last looked back over
 
         # Results for the current frame
         self.detections: List[Dict[str, Any]] = []
@@ -326,11 +338,14 @@ class AnalysisPipeline:
         """Forget everything derived from earlier frames."""
         self._field_follower.reset()
         self._off_field.reset()
+        self._steady.reset()
+        self.places = {}
         self._game.cut()
         self._looks.cut()
         self._forget_side_work()
         self.disc_place = None
         self._disc_path.reset()
+        self._flying.reset()
         self._numbers.reset()
         self._shot.reset()
         reset_tracker()
@@ -374,16 +389,23 @@ class AnalysisPipeline:
             self._holder_weights, self._holder_net = weights or None, None
             self._analysed_key = None
 
-    def _holder_scores(self, frame: np.ndarray) -> Optional[Dict[int, float]]:
+    def _holder_scores(self, frame: np.ndarray, frame_index: int) -> Optional[Dict[int, float]]:
         """How sure the holder network is that each player holds the disc: of the players
         at a disc that is in the boxes of two or more, and, where the network stands in
         for a disc that is not found (models.holder.sure), of everybody in a frame
-        without one. None where it has nothing to say, or there is none."""
+        without one. None where it has nothing to say, or there is none, and while the
+        disc is seen to fly: the network looks at one player at a time and cannot know
+        that nobody holds the disc."""
+        players = [t for t in self.tracks if t.class_name == "player" and hasattr(t, "to_ltrb")]
+        discs = [d for d in self.detections if d["class_name"] == "disc"]
+        self.disc_seen_flying = self._flying.update(
+            frame_index / self._possession.frame_rate, discs, [t.to_ltrb() for t in players]
+        )
         if self._holder_weights is None:
             return None
+        if self.disc_seen_flying and get_setting("models.holder.not_while_flying", True):
+            return None
         margin = float(get_setting("models.possession.box_margin", 0.15))
-        players = [t for t in self.tracks if t.class_name == "player"]
-        discs = [d for d in self.detections if d["class_name"] == "disc"]
         asked: Dict[int, Any] = {}
         for detection in discs:
             at = set(players_at_disc(detection["bbox"], self.tracks, margin))
@@ -403,7 +425,7 @@ class AnalysisPipeline:
 
             with GPU_SETUP_LOCK.work():
                 if self._holder_net is None:
-                    self._holder_net = load_holder_net(Path(self._holder_weights))
+                    self._holder_net = load_holder_net(Path(self._holder_weights), compiled=True)
                 crops = [
                     crop_around(frame, track.to_ltrb(), BOX_ALONE)[0] for track in asked.values()
                 ]
@@ -531,6 +553,7 @@ class AnalysisPipeline:
             score=tuple((tuple(colour), points) for colour, points in self._score),
             image_to_field=self._field_follower.image_to_field if self._follow_field else None,
             disc_place=self.disc_place,
+            places=self.places,
             timings=self._timings,
             wide_shot=self._shot.wide,
             problems=problems,
@@ -674,7 +697,8 @@ class AnalysisPipeline:
             trail = histories.get(track.track_id)
             players.append(
                 {
-                    "place": tuple(on_field(np.array([[(x1 + x2) / 2, y2]]))[0]),
+                    "place": self.places.get(track.track_id)
+                    or tuple(on_field(np.array([[(x1 + x2) / 2, y2]]))[0]),
                     "colour": None if shirt is None else team_display_colour(shirt),
                     # A number with a tilde is known by the player's looks, not read
                     "label": f"#{number}"
@@ -746,10 +770,12 @@ class AnalysisPipeline:
         """The players and discs of a frame: found ahead, if it was this frame that was
         looked at ahead, or found now."""
         ahead, self._ahead = self._ahead, None
+        self._motion_ahead = None
         if ahead is not None:
             # Waited for also when it is of another frame (after a seek, say)
-            looked_at, found = ahead.result()
+            looked_at, found, motion = ahead.result()
             if looked_at is frame:
+                self._motion_ahead = motion
                 return found
         return run_inference(frame, weak_players_from=self._weak_from())
 
@@ -759,11 +785,44 @@ class AnalysisPipeline:
         sure of (0: not at all)."""
         return float(get_setting("models.tracking.weak_detections_from", 0.0))
 
-    def _detect_ahead(self, next_frame: Callable[[], Optional[np.ndarray]]) -> tuple:
+    def _detect_ahead(
+        self, next_frame: Callable[[], Optional[np.ndarray]], with_motion: bool
+    ) -> tuple:
         frame = next_frame()
         if frame is None:
-            return None, []
-        return frame, run_inference(frame, weak_players_from=self._weak_from())
+            return None, [], None
+        found = run_inference(frame, weak_players_from=self._weak_from())
+        motion = None
+        if with_motion:
+            # How the camera moved to that frame needs the frame and its boxes and
+            # nothing else: looked at here, taken in when it is the frame's turn
+            boxes = [detection["bbox"] for detection in found if not detection.get("weak")]
+            try:
+                motion = self._camera_motion.look(frame, boxes)
+            except cv2.error:
+                motion = None  # Worked out again, and failing again, on the frame's turn
+        return frame, found, motion
+
+    def _begin_ahead(
+        self, next_frame: Optional[Callable[[], Optional[np.ndarray]]], options: PipelineOptions
+    ) -> None:
+        """Put the next frame before the detectors while this one is followed and
+        drawn: by the time it is that frame's turn, they are done."""
+        if next_frame is not None and get_setting("models.inference.detect_ahead", True):
+            self._ahead = self._threads.submit(
+                self._detect_ahead, next_frame, self._follows_camera(options)
+            )
+
+    @staticmethod
+    def _follows_camera(options: PipelineOptions) -> bool:
+        return (options.tracking or options.top_down_view) and camera_motion_enabled()
+
+    def _camera_motion_of(self, frame: np.ndarray, boxes: List[Any]) -> Optional[np.ndarray]:
+        """How the camera moved to this frame: as looked at ahead, or worked out now."""
+        looked, self._motion_ahead = self._motion_ahead, None
+        if looked is not None and self._camera_motion.take(looked[1]):
+            return looked[0]
+        return self._camera_motion.update(frame, boxes)
 
     def _analyse(
         self,
@@ -785,19 +844,18 @@ class AnalysisPipeline:
             self.detections = [detection for detection in found if not detection.get("weak")]
             self._weak_players = [detection for detection in found if detection.get("weak")]
             self._record("Inference", start)
-            # The detectors know nothing of what follows here, so the next frame can be
-            # put before them now: by the time it is this frame's turn, they are done
-            if next_frame is not None and get_setting("models.inference.detect_ahead", True):
-                self._ahead = self._threads.submit(self._detect_ahead, next_frame)
             if get_setting("models.shot_type.enabled", True) and not self._watch_shot():
+                self._begin_ahead(next_frame, options)
                 return  # A close-up or a title card: nothing to follow
+            if not self._follows_camera(options):
+                self._begin_ahead(next_frame, options)
 
-        if (options.tracking or options.top_down_view) and camera_motion_enabled():
+        if self._follows_camera(options):
             # Before tracking adds this frame's positions: the trails from earlier frames
             # follow the picture when the camera moves, and so does the top-down calibration
             start = time.perf_counter()
             boxes = [detection["bbox"] for detection in self.detections]
-            motion = self._camera_motion.update(frame, boxes)
+            motion = self._camera_motion_of(frame, boxes)
             players = np.array(
                 [d["bbox"] for d in self.detections if d["class_name"] == "player"]
             ).reshape(-1, 4)
@@ -813,6 +871,10 @@ class AnalysisPipeline:
                 self.reset()
                 self.detections = detections
             self._motion_known, self._players_before = motion is not None, players
+            if options.detection:
+                # The next frame goes before the detectors only now: what they work out
+                # of the camera's motion starts from this frame's, and a cut forgets it
+                self._begin_ahead(next_frame, options)
             if self._field_job is not None:
                 # What is being worked out of the field is of the frame it was begun in
                 before = self._field_job["since"]
@@ -822,6 +884,7 @@ class AnalysisPipeline:
             if motion is not None:
                 apply_camera_motion(motion)
                 self._possession.move(motion)
+                self._flying.move(motion)
                 self._line_filter.move(motion)
                 self._camera_since_calibration = motion @ self._camera_since_calibration
                 self._field_follower.move(motion)
@@ -844,11 +907,22 @@ class AnalysisPipeline:
                     bool(get_setting("models.tracking.hide_newcomers_off_field", False)),
                 )
                 self.tracks = [track for track in self.tracks if track.track_id not in off_field]
+            self.places = self._steady.update(
+                frame_index / self._possession.frame_rate,
+                {
+                    track.track_id: ((track.bbox[0] + track.bbox[2]) / 2.0, track.bbox[3])
+                    for track in self.tracks
+                    if track.class_name == "player"
+                },
+                self._field_follower.image_to_field if self._follow_field else None,
+            )
             self._record("Tracking", start)
             # What is worked out from the tracks: who has the disc, where it flies, and
             # the phase of the game
             start = time.perf_counter()
-            self.holder_scores = self._holder_scores(frame)
+            self.holder_scores = self._holder_scores(frame, frame_index)
+            self._record("Holder network", start)
+            start = time.perf_counter()
             self._possession.update(self.detections, self.tracks, frame_index, self.holder_scores)
             self._follow_flight(frame.shape[:2], frame_index)
             self._follow_game(frame_index)
@@ -883,6 +957,7 @@ class AnalysisPipeline:
             for was, now in renamed:
                 self._possession.rename(was, now)
                 self._off_field.rename(was, now)
+                self._steady.rename(was, now)
                 self._looks.rename(was, now)
         elif not options.player_id:
             self._numbers.numbers.clear()
@@ -897,8 +972,10 @@ class AnalysisPipeline:
                 self._certain_numbers(),
                 self._possession.holder_id,
                 self._places_on_field(),
+                self.places,
             )
             self._rejoin_by_looks(frame_index)
+            self._join_looking_back(frame_index)
             self._settle_crossings(frame_index)
             self._record("Player ID - Looks", start)
 
@@ -980,10 +1057,43 @@ class AnalysisPipeline:
             self._numbers.join(players[was], now)
             self._possession.rename(was, now)
             self._off_field.rename(was, now)
+            self._steady.rename(was, now)
             self._looks.rename(was, now)
             if was in self.numbers_by_looks:
                 self.numbers_by_looks[now] = self.numbers_by_looks.pop(was)
             logger.info(f"Player {was} is player {now} again (by their looks)")
+
+    def _join_looking_back(self, frame_index: int) -> None:
+        """Give a player the tracker lost and began again their ID back, where the
+        tracks since the last cut, looked back over, turn out to be one player
+        (tracklet_linking.py: never in the picture at once, of one team, within a
+        player's reach of each other on the field, and clearly most alike).
+
+        Every so often (models.reid.join_looking_back_seconds, 0: never), and only into
+        a player the tracker still remembers and does not see.
+        """
+        every = float(get_setting("models.reid.join_looking_back_seconds", 0.0))
+        rate = self._possession.frame_rate
+        if every <= 0 or frame_index - self._joined_at < every * rate:
+            return
+        self._joined_at = frame_index
+        players = {t.track_id: t for t in self.tracks if t.class_name == "player"}
+        naming = self._looks.players_of_tracks()
+        missing = set(missing_players(set(players)))
+        for was, track in list(players.items()):
+            now = naming.get(was, was)
+            if now == was or now in players or now not in missing:
+                continue
+            self._numbers.join(track, now)
+            self._possession.rename(was, now)
+            self._off_field.rename(was, now)
+            self._steady.rename(was, now)
+            self._looks.rename(was, now)
+            if was in self.numbers_by_looks:
+                self.numbers_by_looks[now] = self.numbers_by_looks.pop(was)
+            players[now] = track
+            missing.discard(now)
+            logger.info(f"Player {was} is player {now} again (looking back over the tracks)")
 
     def _places_on_field(self) -> Dict[int, np.ndarray]:
         """Track -> where the player stands on the field, if the field's place is known."""

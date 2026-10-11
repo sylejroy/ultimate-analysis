@@ -155,9 +155,10 @@ models:
     # A network that tells from a picture of a player whether they hold the disc
     # (scripts/train_holder.py). Used only where the disc is in the boxes of two
     # players or more: the mark in front of the thrower
-    weights: "data/models/holder/20261010_holder_resnet18_s3_holder_by_hand_v2_by_hand744_more_all/best.pt"  # "" = not used: the player whose middle the disc is nearest to
+    weights: "data/models/holder/20261010_holder_resnet18_s3_holder_by_hand_v4_everybody_everybody/best.pt"  # "" = not used: the player whose middle the disc is nearest to
     min_lead: 0.2                       # The network's choice counts if it is this much surer of one player than of the next (0 to 1)
     show_guess: true                    # Draw the network's guess on the video: corner marks in light blue around the player it is surest of, with how sure, in every frame and however unsure: what the network says, nothing held back. It then looks at every player in every frame
+    not_while_flying: true              # The network is not asked while the disc is seen to fly (found surely, frame after frame, on a smooth course away from every player): it looks at one player at a time and names a holder in a fifth of such frames
     sure: 0.0                           # In a frame without a disc, a player the network is at least this sure of counts as the disc seen at them. 0 = never
     weight: 0.5                         # ... for this much of a frame in which the disc itself is seen
 
@@ -170,6 +171,7 @@ models:
     in_background: true                 # The network runs beside the frames; what it finds is taken in a frame or two later
     check_crossings: true               # After two players' boxes overlapped, check by their looks whether the tracks changed players, and put them right
     teams_by_looks: true                # A player's team is what they look like, once they have been looked at enough; until then, and without the network, the colour of the shirt
+    join_looking_back_seconds: 1.0      # Every so often, tracks that turn out to be one player looking back over the stretch (never in the picture at once, one team, within reach on the field, clearly most alike) are joined; 0 = never
     rejoin_seconds: 0.0                 # A new track that looks like a teammate lost up to this long ago is that player again; 0 = never. Off: it joined few and some of them wrongly
     roster_folder: "data/cache/rosters" # The players of each video, kept between sessions; "" = not kept
 

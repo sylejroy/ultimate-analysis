@@ -12,9 +12,9 @@ frame next to an old test frame would otherwise let a model train on what it is 
 on. Frames close to old frames of different splits are left out.
 
     python scripts/build_combined_disc_dataset.py combined_discs_v1
-    python scripts/build_combined_disc_dataset.py combined_players_v1 --object player
-    python scripts/build_combined_disc_dataset.py own_discs_v1 --without-roboflow \
-        --labelled labelled_players_discs_v1
+    python scripts/build_combined_disc_dataset.py train_players_combined --object player
+    python scripts/build_combined_disc_dataset.py train_discs_own --without-roboflow \
+        --labelled hand_players_discs
 
 The sources are read-only; the result is written to a new dataset directory.
 """
@@ -34,8 +34,8 @@ sys.path.insert(0, str(REPO / "src"))
 from ultimate_analysis.utils import label_files  # noqa: E402
 
 TRAINING_DATA = REPO / "data" / "raw" / "training_data"
-ROBOFLOW_SOURCES = {"disc": "roboflow_merged_discs_v2", "player": "roboflow_merged_players_v2"}
-LABELLED_SOURCES = ("labelled_players_discs_v1", "labelled_discs_v1")
+ROBOFLOW_SOURCES = {"disc": "external_merged_discs", "player": "train_players"}
+LABELLED_SOURCES = ("hand_players_discs", "hand_discs")
 # The old frames whose names carry no game are all from this one
 UNNAMED_VIDEO = "portland_vs_san_francisco_2024"
 SPLITS = ("train", "valid", "test")

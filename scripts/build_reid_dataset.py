@@ -27,7 +27,7 @@ The videos are read-only; the result is written to a new folder:
 A player is named <part>-<ID>: the part of the stretch between two cuts, and the
 tracker's ID in it.
 
-    python scripts/build_reid_dataset.py reid_players_v2 --videos chicago portland
+    python scripts/build_reid_dataset.py generated_reid --videos chicago portland
 """
 
 import argparse

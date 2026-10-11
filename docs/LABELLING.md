@@ -53,7 +53,7 @@ else from where the field model sees the field ("Start from the field model", se
 [Where the field lies](MEASUREMENTS.md#where-the-field-lies)), else from the nearest labelled frame of the video, else from a
 first guess. "Place from the field model" puts the drawing there again, and the lines the
 field model sees are drawn faintly under it ("Show the field model's lines"). Frames go to
-`labelled_field_v1` (`utils/field_label_files.py`): the picture, the lines and corners of
+`hand_field` (`utils/field_label_files.py`): the picture, the lines and corners of
 the drawing that lie in or near it, and the mapping from picture to field they give. Each
 saved frame is a verified calibration; together they are what a model that finds the field
 by itself would be trained on and measured against.
@@ -69,7 +69,7 @@ address to open in the phone's browser. The page shows one frame of a game at a 
   of what is not a disc.
 
 Frames come from all games in `data/raw/videos`, favouring those the model is unsure
-about. Answers go to the disc-only dataset `labelled_discs_v1`, at full resolution
+about. Answers go to the disc-only dataset `hand_discs`, at full resolution
 and with the same file layout as the Labelling tab. The PC has to stay on.
 
 The address contains a key, kept in `data/cache/phone_labelling.key`; requests without
@@ -82,7 +82,7 @@ your router.
 ## Same player?
 
 The "Same player?" page of the Labelling tab shows two tracks of a dataset of player
-crops (`reid_players_v2`), eight pictures of each, and takes one key per answer:
+crops (`generated_reid`), eight pictures of each, and takes one key per answer:
 
 - `1` same player, `2` different players
 - `Space` cannot tell
@@ -94,14 +94,14 @@ The two tracks are of the same game and the same kind of shirt. Seven pairs in t
 ones the network that tells players apart is unsure of, the rest are drawn at random;
 which it is stands above the pictures. (For the first minute after a dataset is first
 opened all are drawn at random: the network is looking at the tracks.) Answers are added to
-`pairs.csv` in the dataset named on the page (`labelled_pairs_v1`); a pair is asked once.
+`pairs.csv` in the dataset named on the page (`hand_pairs`); a pair is asked once.
 Every picture shown is added to `pictures.csv` beside it, as the track's player or as
 somebody else.
 
 ## Holding the disc?
 
 The "Holding the disc?" page shows a player of a frame of a holder dataset
-(`holder_sighted_v1`): on the left the player made larger, on the right where they
+(`generated_holders`): on the left the player made larger, on the right where they
 stand. `Y` holds the disc, `N` does not, `Space` cannot tell.
 
 Seven frames in ten are ones in which another player stands in the holder's box (the mark
@@ -168,5 +168,5 @@ of a frame at most: a click on a player it does not know makes those four a no, 
 box clicked is kept in `clicked_holders.csv`.
 
 Answers are added to `holders.csv` in the dataset named on the page
-(`labelled_holders_v1`). The first picture takes some seconds: the network that enlarges
+(`hand_holders`). The first picture takes some seconds: the network that enlarges
 the players is loaded then.

@@ -14,7 +14,7 @@ The images are stored stretched to a square, as the app gives frames to the mode
 `processing/field_segmentation.py`); the outlines are stored as shares of the picture, so
 the stretching does not change them.
 
-    python scripts/build_field_mask_dataset.py rendered_field_v1 \\
+    python scripts/build_field_mask_dataset.py generated_field_v2 \\
         --validation chicago_vs_new_york --test san_francisco_vs_colorado Truck_Stop_VS_Revolver
 
 With --negatives, pictures that show no field from above (close-ups; see
@@ -46,7 +46,7 @@ TRAINING_DATA = REPO / DEFAULT_PATHS["TRAINING_DATA"]
 # The classes of the field model, as the app knows them (processing/field_registration.py)
 CLASSES = ["central-field", "endzone"]
 # The existing hand-drawn outlines of one game, added to the training
-ROBOFLOW_SOURCE = "roboflow_field_finder_v8i"
+ROBOFLOW_SOURCE = "external_field_finder"
 MIN_AREA_SHARE = 0.0015  # An area smaller than this share of the picture is not drawn
 OUTLINE_PRECISION = 1.5  # Pixels an outline may be off after thinning out its points
 
@@ -100,7 +100,7 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("name", help="Name of the new dataset folder in data/raw/training_data")
-    parser.add_argument("--source", default="propagated_field_v1")
+    parser.add_argument("--source", default="generated_field_propagated")
     parser.add_argument("--validation", nargs="+", required=True, help="Games (parts of names)")
     parser.add_argument("--test", nargs="+", default=[], help="Games left out altogether")
     parser.add_argument("--size", type=int, default=960, help="Side of the stored square images")

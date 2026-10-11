@@ -17,7 +17,7 @@ in turn, a frame of each.
 Reads:  data/raw/training_data/<source>/index.csv, data/raw/videos
 Writes: data/cache/flying_frames/<source>.csv (video, stretch, frame, kind, x, y)
 
-    python scripts/find_flying_disc_frames.py holder_sighted_v1 --frames 5000
+    python scripts/find_flying_disc_frames.py generated_holders --frames 5000
 """
 
 import argparse

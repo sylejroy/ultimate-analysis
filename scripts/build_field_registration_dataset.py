@@ -14,8 +14,8 @@ the camera moves fast.
 Every frame is stored with the game it is from. Frames of one game look alike, so a model
 must be scored on games it has not seen: leave one game out, train on the others.
 
-    python scripts/build_field_registration_dataset.py propagated_field_v1
-    python scripts/build_field_registration_dataset.py propagated_field_v1 --reach 480 --step 60
+    python scripts/build_field_registration_dataset.py generated_field_propagated
+    python scripts/build_field_registration_dataset.py generated_field_propagated --reach 480 --step 60
 
 The sources are read-only; the result is written to a new dataset directory:
 
@@ -174,7 +174,7 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("name", help="Name of the new dataset folder in data/raw/training_data")
-    parser.add_argument("--source", default="labelled_field_v1", help="The hand labels")
+    parser.add_argument("--source", default="hand_field", help="The hand labels")
     parser.add_argument("--reach", type=int, default=480, help="Frames to go each way at most")
     parser.add_argument("--step", type=int, default=60, help="A frame every so many frames")
     parser.add_argument("--max-drift", type=float, default=3.0, help="Pixels at the corners")

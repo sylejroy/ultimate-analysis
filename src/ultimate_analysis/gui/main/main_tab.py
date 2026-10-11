@@ -384,8 +384,9 @@ class MainTab(QWidget):
         self.holder_guess_checkbox.setChecked(bool(get_setting("models.holder.show_guess", False)))
         self.holder_guess_checkbox.setToolTip(
             "Light-blue corner marks around the player the holder network is surest of, with\n"
-            "how sure it is. Always, however unsure: this is what the network says, with\n"
-            "nothing held back. The thick box is the holder possession names: the\n"
+            "how sure it is, however unsure: what the network says, with nothing held\n"
+            "back. It is not asked while the disc is seen to fly on a clear course, and\n"
+            "nothing is marked then. The thick box is the holder possession names: the\n"
             "two can be seen to agree or not. The network then looks at every player in\n"
             "every frame, which costs a few milliseconds a frame."
         )
@@ -710,8 +711,8 @@ class MainTab(QWidget):
         result = processed.result
         self.current_detections = result.detections
         self._shown_frame = result.frame_index
-
         self.frame_shown.emit(result)
+
         display_start = time.perf_counter()
         self.video_label.set_image(frame_to_pixmap(result.main_view))
         if result.top_down_view is not None:
@@ -906,11 +907,11 @@ class MainTab(QWidget):
 
     # ------------------------------------------------------------------ playback
 
-    def _toggle_play_pause(self):
     def toggle_playback(self) -> None:
         """Play or pause, asked for from another tab."""
         self._toggle_play_pause()
 
+    def _toggle_play_pause(self):
         """Toggle video playback."""
         if not self.video_info:
             return

@@ -12,7 +12,7 @@ rest. Progress is printed per epoch:
 - the same for the frames in which no disc was detected on the holder: what the
   network is for
 
-    python scripts/train_holder.py holder_players_v1 --validate chicago_vs_san_francisco \\
+    python scripts/train_holder.py train_holders --validate chicago_vs_san_francisco \\
         --test san_francisco_vs_colorado
 
 With --answers, what was said on the "Holding the disc?" page of the Labelling tab

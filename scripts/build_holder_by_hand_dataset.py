@@ -32,8 +32,8 @@ Reads:  data/raw/training_data/<source>/index.csv and crops/
 Writes: data/raw/training_data/<name>/index.csv (the source's columns, `holding` as
         answered, and `how` it is known) and crops/, in a new folder
 
-    python scripts/build_holder_by_hand_dataset.py holder_by_hand_v1 \\
-        --source holder_sighted_v1 --answers labelled_holders_v1
+    python scripts/build_holder_by_hand_dataset.py train_holders_v2 \\
+        --source generated_holders --answers hand_holders
 """
 
 import argparse

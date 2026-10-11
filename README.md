@@ -16,7 +16,8 @@ Built with PyQt5 and YOLO.
 - **3D view** of the same: the field with players, disc and camera, seen from any side.
 - **Player statistics**: time on the field, distance run, passes thrown and caught.
 - **Export** of what the analysis finds, frame by frame, as tables.
-- **Labelling** of players, discs, and the field on frames of your own videos.
+- **Labelling** of players, discs, and the field on frames of your own videos, and of
+  who holds the disc and which tracks are one player, with a key or a click per answer.
 - **Training** of detection and segmentation models on those labels from the app.
 
 | Labelling players and discs | Labelling the field |

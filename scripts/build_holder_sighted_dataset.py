@@ -28,8 +28,8 @@ by build_holder_dataset.py (train_holder.py reads it), with three more columns i
 index.csv: kind ("held" or "flight"), gap (seconds between the two sightings) and
 labelled (1 for the stretches around a hand-labelled frame).
 
-    python scripts/build_holder_sighted_dataset.py holder_sighted_v1 \\
-        --labels labelled_players_discs_v1 labelled_discs_v1
+    python scripts/build_holder_sighted_dataset.py generated_holders \\
+        --labels hand_players_discs hand_discs
 """
 
 import argparse

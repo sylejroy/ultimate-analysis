@@ -712,7 +712,7 @@ class ModelTrainingTab(QWidget):
                         if yaml_files:
                             available_datasets.append(str(yaml_files[0]))
 
-        # By name: the names start with where a dataset comes from (labelled_, roboflow_)
+        # By name: the names start with where a dataset comes from (external_, hand_, train_)
         available_datasets.sort()
 
         self.data_combo.addItems(available_datasets)

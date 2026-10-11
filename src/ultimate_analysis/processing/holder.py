@@ -1,12 +1,15 @@
-"""Whether a player holds the disc, from a picture of the player (a prototype).
+"""Whether a player holds the disc, from a picture of the player.
 
 Who has the disc is worked out from where the disc is seen (possession.py), and the disc
 is often hidden: by the thrower's body, by the mark. A player with the disc can be told
 without it, by how they stand: on a pivot foot, the arm drawn back, still while the
-others run. A small network is taught that from crops the possession tracking has marked
-(scripts/build_holder_dataset.py, scripts/train_holder.py).
+others run. A small network is taught that from crops of players somebody said hold
+the disc or do not (scripts/build_holder_by_hand_dataset.py, scripts/train_holder.py).
 
-Not used by the app yet.
+The app asks it where the disc is in the boxes of two players or more, and can let it
+stand in for a disc that is not found (pipeline.py, possession.py). It looks at one
+player at a time and so cannot know that nobody holds the disc: it is not asked while
+the disc is seen to fly (disc_flight.FlyingDisc).
 """
 
 from pathlib import Path
@@ -14,7 +17,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from ..utils.logger import get_logger
 from .reid import TORCH_AVAILABLE, prepare
+
+logger = get_logger("HOLDER")
 
 if TORCH_AVAILABLE:
     import torch
@@ -26,7 +32,7 @@ if TORCH_AVAILABLE:
 # crops take in some of what is beside the box, where a held disc often is.
 CROP_SIZE = (96, 128)
 CROP_PAD = 0.25  # Share of the box added around it in a crop
-# ... in the first datasets. Those since (holder_sighted_v1 and what is made of it) have
+# ... in the first datasets. Those since (generated_holders and what is made of it) have
 # crops of the boxes themselves, and a network must be shown what it learned from
 BOX_ALONE = 0.0
 DEFAULT_ARCHITECTURE = "resnet18_s3"
@@ -137,22 +143,51 @@ def save_holder_net(model: "HolderNet", path: Path) -> None:
     )
 
 
-def load_holder_net(weights: Path, device: Optional[str] = None) -> "HolderNet":
-    """A trained network, ready to use."""
+class CompiledHolderNet:
+    """A trained network made into one piece for looking at frame after frame.
+
+    Its layers are run one by one from Python otherwise: twice the time, and four times
+    with the pipeline's other threads busy in Python (2.9 and 4.6 ms for the players of
+    a frame against 1.4 and 1.8). What it says differs by 0.0002 at most.
+    """
+
+    def __init__(self, model: "HolderNet"):
+        self.architecture, self.size = model.architecture, model.size
+        self.device = next(model.parameters()).device
+        example = torch.zeros(2, 3, self.size[1], self.size[0], device=self.device)
+        with torch.no_grad():
+            self._net = torch.jit.optimize_for_inference(torch.jit.trace(model, example))
+            for _ in range(2):  # The first calls are the slow ones
+                self._net(example)
+
+    def __call__(self, batch: "torch.Tensor") -> "torch.Tensor":
+        return self._net(batch)
+
+
+def load_holder_net(
+    weights: Path, device: Optional[str] = None, compiled: bool = False
+) -> "HolderNet":
+    """A trained network, ready to use; `compiled`, as a CompiledHolderNet."""
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     saved = torch.load(str(weights), map_location=device)
     model = HolderNet(saved["architecture"], pretrained=False, size=saved["size"])
     model.load_state_dict(saved["state"])
-    return model.to(device).eval()
+    model = model.to(device).eval()
+    if compiled:
+        try:
+            return CompiledHolderNet(model)
+        except Exception as error:  # Slower, and the same answers
+            logger.warning(f"The holder network runs as it is, not compiled: {error}")
+    return model
 
 
 def holding(model: "HolderNet", crops: Sequence[np.ndarray], batch_size: int = 256) -> np.ndarray:
     """For each crop (BGR, as wide around the player as the training crops) how sure the
     network is that the player holds the disc, 0 to 1."""
-    device = next(model.parameters()).device
+    device = getattr(model, "device", None) or next(model.parameters()).device
     sure: List[np.ndarray] = []
     with torch.no_grad():
         for start in range(0, len(crops), batch_size):
-            batch = prepare(crops[start : start + batch_size], model.size).to(device)
+            batch = prepare(crops[start : start + batch_size], model.size, device=device)
             sure.append(torch.sigmoid(model(batch)).cpu().numpy())
     return np.concatenate(sure) if sure else np.zeros(0, dtype=np.float32)

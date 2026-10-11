@@ -123,5 +123,53 @@ class DiscPathTest(unittest.TestCase):
         self.assertEqual(len(path.stretches()), 1)
 
 
+class FlyingDiscTest(unittest.TestCase):
+    """The disc is seen to fly on a clear, smooth course, found well, away from players."""
+
+    def setUp(self):
+        self.module = load_module("processing.disc_flight")
+        self.flying = self.module.FlyingDisc()
+        self.players = [(100, 100, 140, 200), (600, 100, 640, 200)]  # 100 pixels tall
+
+    def disc(self, x, y, confidence=0.9):
+        return [{"bbox": [x - 5, y - 5, x + 5, y + 5], "confidence": confidence}]
+
+    def watch(self, places, confidence=0.9, rate=30.0):
+        said = False
+        for frame, (x, y) in enumerate(places):
+            said = self.flying.update(frame / rate, self.disc(x, y, confidence), self.players)
+        return said
+
+    def test_a_disc_on_a_straight_course_between_two_players_flies(self):
+        self.assertTrue(self.watch([(200 + 20 * step, 150) for step in range(5)]))
+
+    def test_it_takes_three_sightings(self):
+        self.assertFalse(self.watch([(200, 150), (220, 150)]))
+
+    def test_a_disc_that_lies_still_or_jumps_about_does_not(self):
+        self.assertFalse(self.watch([(300, 300)] * 6))
+        self.flying.reset()
+        self.assertFalse(self.watch([(300, 150), (340, 150), (300, 150), (340, 150)]))
+
+    def test_a_disc_at_a_player_does_not(self):
+        self.assertFalse(self.watch([(60 + 20 * step, 150) for step in range(4)]))
+
+    def test_a_disc_found_unsurely_does_not(self):
+        self.assertFalse(self.watch([(200 + 20 * step, 150) for step in range(5)], confidence=0.3))
+
+    def test_a_course_ends_where_the_disc_is_not_found_for_a_while(self):
+        self.assertTrue(self.watch([(200 + 20 * step, 150) for step in range(4)]))
+        self.assertFalse(self.flying.update(1.0, self.disc(300, 150), self.players))
+
+    def test_the_sightings_move_with_the_picture(self):
+        # The camera pans by 20 pixels a frame against a disc that lies still
+        shift = np.array([[1.0, 0.0, -20.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        said = False
+        for frame in range(5):
+            self.flying.move(shift)
+            said = self.flying.update(frame / 30.0, self.disc(400 - 20 * frame, 300), self.players)
+        self.assertFalse(said)
+
+
 if __name__ == "__main__":
     unittest.main()

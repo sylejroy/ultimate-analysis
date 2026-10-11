@@ -7,7 +7,7 @@ same for the same player throughout the stretch: the jersey number with the team
 letter is handiest ("w7", "d23"); "x" is for people who are not players of the point
 (beside the field, observers).
 
-    python scripts/label_tracks.py labelled_tracks_v1
+    python scripts/label_tracks.py hand_tracks
 
 Keys:
     Right / Left        a frame on, a frame back        Shift: ten frames

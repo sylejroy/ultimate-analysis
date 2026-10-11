@@ -7,13 +7,14 @@ skin, build. A small network turns the crop of a player into a vector such that 
 crops of one player lie near each other and those of two players apart; tracks are then
 matched by how near their vectors are.
 
-A prototype: nothing in the app uses it yet. `scripts/build_reid_dataset.py` collects the
-crops, `scripts/train_reid.py` trains and `scripts/benchmark_reid.py` measures it; how
-well it does, and which of the networks tried does best, is in docs/MEASUREMENTS.md.
+The app looks at the tracked players with it (player_looks.py) and keeps the players
+of a video by it (player_roster.py). `scripts/build_reid_dataset.py` collects the crops,
+`scripts/train_reid.py` trains and `scripts/benchmark_reid.py` measures it; how well it
+does, and which of the networks tried does best, is in docs/MEASUREMENTS.md.
 """
 
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import cv2
 import numpy as np
@@ -70,14 +71,23 @@ def prepare(
     crops: Sequence[np.ndarray],
     size: Sequence[int] = CROP_SIZE,
     keep_proportions: bool = False,
+    device: Optional[Any] = None,
 ) -> "torch.Tensor":
-    """Crops (BGR, any size) as one batch for the network, all at one size."""
-    # Brought to one size one by one, and to the network's numbers all at once
+    """Crops (BGR, any size) as one batch for the network, all at one size, on the
+    device named (the processor without one)."""
+    # Brought to one size one by one, and to the network's numbers all at once, where
+    # the network is: as bytes the pictures are a quarter as much to move there, and
+    # the arithmetic took longer than the network itself on the processor
     pictures = np.empty((len(crops), size[1], size[0], 3), dtype=np.uint8)
     for index, crop in enumerate(crops):
         pictures[index] = fit(crop, size, keep_proportions)
-    rgb = pictures[:, :, :, ::-1].astype(np.float32) / 255.0
-    return torch.from_numpy(np.ascontiguousarray(((rgb - MEAN) / SPREAD).transpose(0, 3, 1, 2)))
+    batch = torch.from_numpy(pictures)
+    if device is not None:
+        batch = batch.to(device)
+    rgb = batch.flip(-1).permute(0, 3, 1, 2).float().div_(255.0)
+    mean = torch.as_tensor(MEAN, device=rgb.device).view(1, 3, 1, 1)
+    spread = torch.as_tensor(SPREAD, device=rgb.device).view(1, 3, 1, 1)
+    return rgb.sub_(mean).div_(spread).contiguous()
 
 
 if TORCH_AVAILABLE:
@@ -221,8 +231,8 @@ def embed(
     with torch.no_grad():
         for start in range(0, len(crops), batch_size):
             batch = prepare(
-                crops[start : start + batch_size], model.size, model.keep_proportions
-            ).to(device)
+                crops[start : start + batch_size], model.size, model.keep_proportions, device
+            )
             vectors.append(model(batch).cpu().numpy())
     return np.concatenate(vectors) if vectors else np.zeros((0, VECTOR_LENGTH), dtype=np.float32)
 

@@ -62,9 +62,6 @@ PLAYER_WIDTH = 0.55  # Field units
 DISC_RADIUS = 0.45  # Drawn three times its size: a disc is a few pixels otherwise
 HOLDER_RING = 1.3
 TRAIL_SECONDS = 2.0
-# A player's place moves this share of the way to where they are seen in a frame: where
-# the lower edge of a box lies shakes by a step or so from frame to frame
-FOLLOW = 0.5
 # Frames skipped, or gone back over, by more than this begin the trails anew
 JUMP_FRAMES = 15
 
@@ -131,9 +128,7 @@ class SceneView(QWidget):
         oldest = scene.frame_index - TRAIL_SECONDS * self.frame_rate
         places = {}
         for player in scene.players:
-            seen = np.array(player.place)
-            before = self._places.get(player.player_id)
-            places[player.player_id] = seen if before is None else before + FOLLOW * (seen - before)
+            places[player.player_id] = np.array(player.place)
             trail = self._trails.setdefault(player.player_id, deque())
             trail.append((scene.frame_index, *places[player.player_id]))
         self._places = places

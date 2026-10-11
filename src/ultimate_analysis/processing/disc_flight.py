@@ -228,3 +228,94 @@ class DiscPath:
             ]
         lost = np.flatnonzero(np.diff(times) > PATH_GAP_SECONDS) + 1
         return [line for line in np.split(places, lost) if len(line) >= 2]
+
+
+# A disc is seen to fly if it was found this surely, in this many frames at least,
+SURE_DISC = 0.5
+FLIGHT_SIGHTINGS = 3
+# ... no longer apart than this (seconds), the first and the last within that time,
+FLIGHT_GAP_SECONDS = 0.12
+FLIGHT_SECONDS = 0.5
+# moved this fast (heights of a player a second: a soft pass is some 6, a pull 15),
+FLIGHT_SPEED = 2.0
+# went on the same way from one sighting to the next (the cosine of the turn), no more
+# than so many times faster or slower than before,
+FLIGHT_TURN = 0.7
+FLIGHT_SPEED_CHANGE = 2.5
+# and is at no player now: outside every box, widened by this share of it
+FLIGHT_BOX_MARGIN = 0.15
+
+
+class FlyingDisc:
+    """Whether the disc is seen to fly: found well, frame after frame, on a clear and
+    smooth course, away from every player.
+
+    Who holds the disc is asked of a network that looks at one player at a time
+    (processing/holder.py), and that network cannot know that nobody does: with the
+    disc in the air it names a holder in a fifth of the frames. It is not asked while
+    the disc is seen to fly. Where the disc is not found, or found only now and then,
+    nothing is said here, and the network is asked: that is what it is for.
+    """
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Forget the sightings (new video, seek, cut)."""
+        self._seen: List[Tuple[float, np.ndarray]] = []  # Time, pixel; moved with the picture
+
+    def move(self, camera_motion: np.ndarray) -> None:
+        """Move the sightings along with the picture (homography from the last frame)."""
+        for index, (seconds, place) in enumerate(self._seen):
+            moved = camera_motion @ [place[0], place[1], 1.0]
+            if abs(moved[2]) > 1e-9:
+                self._seen[index] = (seconds, moved[:2] / moved[2])
+
+    def update(
+        self,
+        seconds: float,
+        discs: Sequence[dict],
+        player_boxes: Sequence[Sequence[float]],
+    ) -> bool:
+        """Take in a frame; returns whether the disc is seen to fly in it.
+
+        Args:
+            seconds: The time of the frame in the video
+            discs: The discs detected (bbox, confidence)
+            player_boxes: The players' boxes (x1, y1, x2, y2)
+        """
+        if self._seen and seconds < self._seen[-1][0]:
+            self.reset()
+        found = max(discs, key=lambda disc: disc.get("confidence", 0.0), default=None)
+        if found is None or found.get("confidence", 0.0) < SURE_DISC:
+            # Not found, or not surely: the course ends here if it is not found again soon
+            self._seen = [s for s in self._seen if seconds - s[0] <= FLIGHT_GAP_SECONDS]
+            return False
+        box = found["bbox"]
+        place = np.array([(box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0])
+        if self._seen and seconds - self._seen[-1][0] > FLIGHT_GAP_SECONDS:
+            self._seen = []
+        self._seen.append((seconds, place))
+        self._seen = [s for s in self._seen if seconds - s[0] <= FLIGHT_SECONDS]
+        for x1, y1, x2, y2 in player_boxes:
+            pad_x, pad_y = FLIGHT_BOX_MARGIN * (x2 - x1), FLIGHT_BOX_MARGIN * (y2 - y1)
+            if x1 - pad_x <= place[0] <= x2 + pad_x and y1 - pad_y <= place[1] <= y2 + pad_y:
+                self._seen = [self._seen[-1]]  # At a player: caught, or about to be thrown
+                return False
+        if len(self._seen) < FLIGHT_SIGHTINGS:
+            return False
+        heights = [box[3] - box[1] for box in player_boxes]
+        height = float(np.median(heights)) if heights else 80.0
+        steps = [
+            (later[1] - earlier[1]) / max(later[0] - earlier[0], 1e-6)
+            for earlier, later in zip(self._seen, self._seen[1:])
+        ]
+        speeds = [float(np.linalg.norm(step)) for step in steps]
+        if min(speeds) < FLIGHT_SPEED * height:
+            return False
+        for before, after, slow, fast in zip(steps, steps[1:], speeds, speeds[1:]):
+            if float(before @ after) < FLIGHT_TURN * slow * fast:
+                return False
+            if max(slow, fast) > FLIGHT_SPEED_CHANGE * min(slow, fast):
+                return False
+        return True

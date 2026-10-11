@@ -18,8 +18,8 @@ frame by frame (Hungarian on IoU, at least 0.5):
 Since the truth boxes come from a run of the same detector, detection is flattered for
 that run; the association numbers are what one tracker is compared with another by.
 
-    python scripts/benchmark_tracking.py labelled_tracks_v1
-    python scripts/benchmark_tracking.py labelled_tracks_v1 --set models.tracking.weak_detections_from=0.25
+    python scripts/benchmark_tracking.py hand_tracks
+    python scripts/benchmark_tracking.py hand_tracks --set models.tracking.weak_detections_from=0.25
 """
 
 import argparse

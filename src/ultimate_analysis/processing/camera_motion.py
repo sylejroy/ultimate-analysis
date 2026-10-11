@@ -10,7 +10,8 @@ key frame) is fitted directly. Fitting every pair of consecutive frames separate
 multiplying the results lets small errors add up twice as fast, and costs twice the time.
 """
 
-from typing import Optional, Sequence
+import copy
+from typing import Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -31,10 +32,13 @@ class CameraMotionEstimator:
     """Estimates the background motion between consecutive frames of a video."""
 
     def __init__(self):
+        self._resets = 0
+        self._updates = 0
         self.reset()
 
     def reset(self) -> None:
         """Forget the previous frame (new video, seek)."""
+        self._resets += 1
         self._previous: Optional[np.ndarray] = None
         self._previous_mask: Optional[np.ndarray] = None
         self._key_points: Optional[np.ndarray] = (
@@ -44,6 +48,25 @@ class CameraMotionEstimator:
         self._key_count = 0
         self._age = 0
         self._since_key = np.eye(3)  # Motion from the key frame to the previous frame
+
+    def look(
+        self, frame: np.ndarray, player_boxes: Sequence[Sequence[float]]
+    ) -> Tuple[Optional[np.ndarray], "CameraMotionEstimator"]:
+        """What `update` would say of a frame, without taking the frame in.
+
+        For another thread to work out a frame's motion before it is the frame's turn.
+        Returns the motion and the estimator as it would be afterwards, for `take`.
+        """
+        after = copy.copy(self)  # update puts new arrays in place of the old, changes none
+        return after.update(frame, player_boxes), after
+
+    def take(self, after: "CameraMotionEstimator") -> bool:
+        """Become what `look` gave. False, and nothing changed, if a frame was taken in
+        or everything forgotten since that look: what it saw is then of another past."""
+        if after._resets != self._resets or after._updates != self._updates + 1:
+            return False
+        self.__dict__.update(after.__dict__)
+        return True
 
     def update(
         self, frame: np.ndarray, player_boxes: Sequence[Sequence[float]]
@@ -59,6 +82,7 @@ class CameraMotionEstimator:
             in this frame, or None when it cannot be told (first frame, a cut, too little
             texture). Positions carried over from earlier frames are then unrelated.
         """
+        self._updates += 1
         frame_h, frame_w = frame.shape[:2]
         # Grey first: a third of the numbers to shrink
         gray = cv2.resize(

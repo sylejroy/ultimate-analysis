@@ -20,17 +20,17 @@ The counts are printed overall, by what the label says and by game, with a few f
 of each cause. Every labelled frame is written to frames.csv in a new folder.
 
     python scripts/benchmark_possession.py possession_breakdown_v1 \\
-        --labels labelled_players_discs_v1 labelled_discs_v1
+        --labels hand_players_discs hand_discs
 
 A run takes half an hour, nearly all of it detecting and tracking. With --record it
 also writes down what the possession tracking was told (recording.pkl in the folder),
 and a change to the possession logic or its settings is then scored on that in a
 minute, without the videos:
 
-    python scripts/benchmark_possession.py possession_recorded_v1 --record \\
-        --labels labelled_players_discs_v1 labelled_discs_v1
+    python scripts/benchmark_possession.py possession_discs_recording --record \\
+        --labels hand_players_discs hand_discs
     python scripts/benchmark_possession.py possession_reach_half \\
-        --replay possession_recorded_v1 --set models.possession.reach=0.5
+        --replay possession_discs_recording --set models.possession.reach=0.5
 
 A replay with nothing changed says what the recorded run said, frame for frame; at how
 many frames it does is printed. A recording is of no use once the detections or the
@@ -45,7 +45,7 @@ held longer by this than in the game. Where nobody holds the disc, only the labe
 frame itself is given.
 
     python scripts/benchmark_possession.py possession_perfect_disc_05 \
-        --replay possession_recorded_v1 --perfect-disc 0.5
+        --replay possession_discs_recording --perfect-disc 0.5
 """
 
 import argparse

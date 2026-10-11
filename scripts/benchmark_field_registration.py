@@ -93,7 +93,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--dataset", default="labelled_field_v1")
+    parser.add_argument("--dataset", default="hand_field")
     parser.add_argument("--wrong", type=float, default=2.0, help="Field units that count as wrong")
     parser.add_argument("--save-pictures", type=Path, help="Folder for the frames as estimated")
     parser.add_argument(

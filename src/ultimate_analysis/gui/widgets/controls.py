@@ -63,6 +63,7 @@ class StageBars(QWidget):
         "Camera": ("Camera Motion",),
         "Tracking": ("Tracking",),
         "Possession": ("Possession",),
+        "Holder": ("Holder network",),
         "Field": ("Field Segmentation", "Mask Unification", "Line Extraction", "Field Estimate"),
         "Numbers": ("Player ID",),
         "Drawing": ("Visualization",),

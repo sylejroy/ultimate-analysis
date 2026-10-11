@@ -25,7 +25,7 @@ the app sees a video frame. --as-stored scores the square images the model was t
 
     python scripts/benchmark_segmentation.py
     python scripts/benchmark_segmentation.py path/to/best.pt --splits test
-    python scripts/benchmark_segmentation.py best.pt --dataset rendered_field_v1 --negatives folder/
+    python scripts/benchmark_segmentation.py best.pt --dataset generated_field --negatives folder/
 """
 
 import argparse

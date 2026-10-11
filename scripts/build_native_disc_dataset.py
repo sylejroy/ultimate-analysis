@@ -4,8 +4,8 @@
 A disc is about 17 pixels wide in a video frame. The Roboflow exports shrink the frames,
 and with them the disc, so this dataset goes back to the original frames:
 
-- `roboflow_object_detection_disc_v1i` already holds unchanged 1920x1080 frames.
-- `roboflow_player_disc_detection_v4i` holds frames of one game stretched to 1280x1280. Their names
+- `external_object_detection_disc` already holds unchanged 1920x1080 frames.
+- `external_player_disc_detection` holds frames of one game stretched to 1280x1280. Their names
   carry the frame number, so the original frame is read from the video in data/raw/videos.
   Validation and test images are otherwise unchanged and keep their labels. Training
   images come in three augmented versions (slightly rotated, sheared, or cropped); the
@@ -33,10 +33,10 @@ REPO = Path(__file__).resolve().parents[1]
 TRAINING_DATA = REPO / "data" / "raw" / "training_data"
 VIDEOS = REPO / "data" / "raw" / "videos"
 
-NATIVE_SOURCE = "roboflow_object_detection_disc_v1i"  # 1920x1080 frames, class 0 = disc
+NATIVE_SOURCE = "external_object_detection_disc"  # 1920x1080 frames, class 0 = disc
 # Frames of these sources are held out for testing in roboflow_merged_players_discs_v2
-SAME_FRAMES_SOURCE = "roboflow_object_detection_v3i"  # the frames of NATIVE_SOURCE at 960x960
-STRETCHED_SOURCE = "roboflow_player_disc_detection_v4i"  # class 0 = disc
+SAME_FRAMES_SOURCE = "external_object_detection"  # the frames of NATIVE_SOURCE at 960x960
+STRETCHED_SOURCE = "external_player_disc_detection"  # class 0 = disc
 STRETCHED_VIDEO = "portland_vs_san_francisco_2024.mp4"
 
 SPLITS = ("train", "valid", "test")

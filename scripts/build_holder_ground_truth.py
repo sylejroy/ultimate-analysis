@@ -21,8 +21,8 @@ The result goes to a new folder, laid out as by build_holder_dataset.py, with th
 more columns in index.csv: kind ("anchor" or "possession"), anchor (the labelled frame)
 and agrees (whether the pipeline had the labelled holder at the anchor).
 
-    python scripts/build_holder_ground_truth.py holder_anchored_v1 \\
-        --labels labelled_players_discs_v1 labelled_discs_v1
+    python scripts/build_holder_ground_truth.py generated_holders_anchored \\
+        --labels hand_players_discs hand_discs
 """
 
 import argparse

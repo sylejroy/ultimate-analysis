@@ -37,8 +37,8 @@ from ..widgets.model_selection import populate_holder_model_combo
 
 logger = get_logger("LABELLING")
 
-PAIRS_SOURCE, PAIRS_ANSWERS = "reid_players_v2", "labelled_pairs_v1"
-HOLDER_SOURCE, HOLDER_ANSWERS = "holder_sighted_v1", "labelled_holders_v1"
+PAIRS_SOURCE, PAIRS_ANSWERS = "generated_reid", "hand_pairs"
+HOLDER_SOURCE, HOLDER_ANSWERS = "generated_holders", "hand_holders"
 TRACK_CROPS = 8  # Crops shown of each track
 CROP_HEIGHT = 250  # ... at this height
 PLAYER_HEIGHT = 560  # The height the player asked about is shown at

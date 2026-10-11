@@ -11,7 +11,7 @@ Writes, to a new folder in data/raw/training_data:
                                               "rate": fps, "boxes": {frame: [[id, x1, y1,
                                               x2, y2, number, team], ...]}}
 
-    python scripts/prepare_track_labels.py labelled_tracks_v1 \\
+    python scripts/prepare_track_labels.py hand_tracks \\
         chicago_vs_new_york_2024:77933 chicago_vs_san_francisco_2024:40283 \\
         portland_vs_san_francisco_2024:17744 san_francisco_vs_colorado_2024:42071
 """

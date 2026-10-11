@@ -10,7 +10,7 @@ Only frames that exist at full resolution are used:
 
 - the frames labelled with this app, with the splits they have in a combined dataset
   (scripts/build_combined_disc_dataset.py), so nothing next to a test frame is trained on
-- `roboflow_object_detection_disc_v1i` for training, as in the merged datasets. Some of
+- `external_object_detection_disc` for training, as in the merged datasets. Some of
   its frames are also among the validation and test images of the merged dataset, at a
   lower resolution and under another name; those are left out here as they are there.
 
@@ -34,7 +34,7 @@ import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 TRAINING_DATA = REPO / "data" / "raw" / "training_data"
-ROBOFLOW_SOURCE = "roboflow_object_detection_disc_v1i"  # 1920x1080 frames, class 0 = disc
+ROBOFLOW_SOURCE = "external_object_detection_disc"  # 1920x1080 frames, class 0 = disc
 SPLITS = ("train", "valid", "test")
 TILE = 960
 MIN_VISIBLE = 0.5  # A disc cut by the tile's edge counts if this much of it is inside

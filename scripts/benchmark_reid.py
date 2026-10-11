@@ -24,7 +24,7 @@ Next to the network, two ways without one: the kit colour the tracker already us
 (shirt and shorts, six numbers), and a histogram of the colours of the upper and the
 lower half of the crop.
 
-    python scripts/benchmark_reid.py reid_players_v1 --videos san_francisco_vs_colorado \\
+    python scripts/benchmark_reid.py generated_reid --videos san_francisco_vs_colorado \\
         --weights data/models/reid/<run>/best.pt
 """
 

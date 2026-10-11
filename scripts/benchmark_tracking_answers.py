@@ -24,8 +24,8 @@ whether the tracker of today does what the answer asks for:
 The tracker that made the dataset has, by what the answers are, every track at one
 number, none of the pictures taken out told apart and none of the pairs joined.
 
-    python scripts/benchmark_tracking_answers.py tracking_answers_v1 \\
-        --answers labelled_pairs_v1 --dataset reid_players_v2
+    python scripts/benchmark_tracking_answers.py tracking_answers \\
+        --answers hand_pairs --dataset generated_reid
 
 Pairs of tracks from different stretches are not looked at: they are for telling players
 apart by their looks, not for the tracker.
@@ -33,6 +33,7 @@ apart by their looks, not for the tracker.
 
 import argparse
 import csv
+import json
 import os
 import sys
 from collections import Counter, defaultdict
@@ -46,6 +47,7 @@ os.chdir(REPO)
 
 import cv2  # noqa: E402
 
+from ultimate_analysis.config.settings import get_config  # noqa: E402
 from ultimate_analysis.constants import DEFAULT_PATHS  # noqa: E402
 from ultimate_analysis.pipeline import AnalysisPipeline, PipelineOptions  # noqa: E402
 from ultimate_analysis.utils import judgement_files  # noqa: E402
@@ -144,7 +146,15 @@ def main() -> None:
     parser.add_argument("--dataset", required=True, help="The dataset the answers are about")
     parser.add_argument("--videos", nargs="+", default=[], help="Only these (parts of names)")
     parser.add_argument("--stretches", type=int, default=0, help="This many at most (a trial)")
+    parser.add_argument("--set", action="append", default=[], help="setting=value, as JSON")
     args = parser.parse_args()
+    for item in args.set:
+        key, value = item.split("=", 1)
+        node = get_config()
+        *path, last = key.split(".")
+        for part in path:
+            node = node[part]
+        node[last] = json.loads(value)
 
     out = REPO / "data" / "benchmarks" / args.name
     if out.exists():

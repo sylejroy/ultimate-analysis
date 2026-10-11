@@ -14,7 +14,7 @@ address printed below. Do not forward the port on your router: anybody with the 
 could then try to guess the key.
 
     python scripts/phone_labelling.py
-    python scripts/phone_labelling.py --dataset labelled_discs_v2 --port 8765
+    python scripts/phone_labelling.py --dataset hand_discs_v2 --port 8765
 """
 
 import argparse
@@ -123,7 +123,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--dataset", default="labelled_discs_v1")
+    parser.add_argument("--dataset", default="hand_discs")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
         "--host",

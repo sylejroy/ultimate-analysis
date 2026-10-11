@@ -43,7 +43,7 @@ PROFILE_SECONDS = 10.0
 # A gap longer than this between two frames is not time a player was seen for
 MAX_FRAME_SECONDS = 0.5
 # How far a player ran is added up from where they stand every so often, not frame by
-# frame: the foot of a box jitters by a foot or two, which would count as running
+# frame: what is left of the wobble of a box's foot would count as running
 RUN_STEP_SECONDS = 0.5
 # Faster than this (field units a second) nobody runs: the field's place jumped
 MAX_RUN_SPEED = 12.0
@@ -288,6 +288,7 @@ class PlayerLooks:
         numbers: Dict[int, str],
         holder_id: Optional[int] = None,
         places: Optional[Dict[int, Sequence[float]]] = None,
+        steady_places: Optional[Dict[int, Sequence[float]]] = None,
     ) -> Dict[int, str]:
         """Take in a frame.
 
@@ -300,6 +301,9 @@ class PlayerLooks:
             holder_id: The track holding the disc, if one does
             places: Track -> where the player stands on the field, as far as the field's
                 place is known in this frame
+            steady_places: The same held steady over the frames (steady_places.py), if
+                the caller has that: how far players ran and threw is measured by these,
+                since the places from the boxes alone wobble by a yard at the far end
 
         Returns:
             Track -> jersey number, for the tracks without a number of their own whose
@@ -336,6 +340,10 @@ class PlayerLooks:
             self.roster.match(present)
 
         self._count_time(present, holder_id, frame_index)
+        if steady_places is not None:
+            places = {
+                track: np.asarray(place, dtype=float) for track, place in steady_places.items()
+            }
         self._count_running(frame_index, places)
         self._count_passes(frame_index, holder_id, players, places)
         self._forget_old(frame_index)
