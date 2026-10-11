@@ -185,6 +185,14 @@ class UltimateAnalysisApp(QMainWindow):
         self.main_tab.video_changed.connect(self._on_video_changed)
         self.tab_widget.addTab(self.main_tab, "Main Analysis")
 
+        # The game as the main tab's analysis understands it, on a field to walk around
+        from .scene.scene_tab import SceneTab
+
+        self.scene_tab = SceneTab()
+        self.main_tab.frame_shown.connect(self.scene_tab.show_result)
+        self.scene_tab.play_pause_requested.connect(self.main_tab.toggle_playback)
+        self.tab_widget.addTab(self.scene_tab, "3D View")
+
         # Create lazy loading tabs
         # After the analysis itself, in the order the work is done: label frames, train
         # models on them
@@ -229,6 +237,7 @@ class UltimateAnalysisApp(QMainWindow):
         import os
 
         video_name = os.path.basename(video_path)
+        self.scene_tab.set_frame_rate((self.main_tab.video_info or {}).get("fps", 0))
         app_name = get_setting("app.name", "Ultimate Analysis")
         self.setWindowTitle(f"{app_name} - {video_name}")
 

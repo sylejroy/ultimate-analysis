@@ -13,6 +13,7 @@ Built with PyQt5 and YOLO.
 - **The phase of the game**: pull, live play, score, between points.
 - **Jersey numbers**, collected per player over time.
 - **Top-down view** of the field with the players and the disc.
+- **3D view** of the same: the field with players, disc and camera, seen from any side.
 - **Player statistics**: time on the field, distance run, passes thrown and caught.
 - **Export** of what the analysis finds, frame by frame, as tables.
 - **Labelling** of players, discs, and the field on frames of your own videos.

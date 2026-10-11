@@ -121,6 +121,7 @@ class MainTab(QWidget):
     """Main video analysis tab with video player and processing controls."""
 
     video_changed = pyqtSignal(str)  # Path of the video that was loaded
+    frame_shown = pyqtSignal(object)  # The FrameResult just shown, for the 3D View tab
 
     # Requests to the worker thread; they are queued and run in the order sent
     _load_video_requested = pyqtSignal(str, object, object)  # path, options, homography matrix
@@ -710,6 +711,7 @@ class MainTab(QWidget):
         self.current_detections = result.detections
         self._shown_frame = result.frame_index
 
+        self.frame_shown.emit(result)
         display_start = time.perf_counter()
         self.video_label.set_image(frame_to_pixmap(result.main_view))
         if result.top_down_view is not None:
@@ -905,6 +907,10 @@ class MainTab(QWidget):
     # ------------------------------------------------------------------ playback
 
     def _toggle_play_pause(self):
+    def toggle_playback(self) -> None:
+        """Play or pause, asked for from another tab."""
+        self._toggle_play_pause()
+
         """Toggle video playback."""
         if not self.video_info:
             return
