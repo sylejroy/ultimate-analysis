@@ -44,6 +44,7 @@ from .processing.tracking import (
     apply_camera_motion,
     get_track_histories,
     missing_players,
+    observers_in_view,
     reset_tracker,
     run_tracking,
     set_field,
@@ -168,6 +169,11 @@ class FrameResult:
     # Track -> where the player stands on the field (x across, y along), held steady
     # over the frames; empty where the field's place is not known
     places: Dict[int, Tuple[float, float]] = field(default_factory=dict)
+    # The same for the observers, who are followed but are not among the tracks
+    observers: Dict[int, Tuple[float, float]] = field(default_factory=dict)
+    # The outline on the field of what the frame shows, (N, 2) in field units; None
+    # where the field's place is not known
+    seen_by_camera: Optional[np.ndarray] = None
     # The phase of the game: "unknown", "between points", "lined up", "pull", "live" or
     # "score" (processing/game_state.py)
     game_state: str = "unknown"
@@ -216,6 +222,7 @@ class AnalysisPipeline:
         self._off_field = OffFieldWatcher(self._field_follower.template)
         self._steady = SteadyPlaces()
         self.places: Dict[int, Tuple[float, float]] = {}
+        self.observers: Dict[int, Tuple[float, float]] = {}
         template = self._field_follower.template
         self._game = GameStateTracker(template.length, template.end_zone)
         self._score: List[list] = []  # [a team's colour (BGR), its points]
@@ -339,7 +346,7 @@ class AnalysisPipeline:
         self._field_follower.reset()
         self._off_field.reset()
         self._steady.reset()
-        self.places = {}
+        self.places, self.observers = {}, {}
         self._game.cut()
         self._looks.cut()
         self._forget_side_work()
@@ -554,6 +561,10 @@ class AnalysisPipeline:
             image_to_field=self._field_follower.image_to_field if self._follow_field else None,
             disc_place=self.disc_place,
             places=self.places,
+            observers=self.observers,
+            seen_by_camera=self._seen_by_camera(self._field_follower.image_to_field)
+            if self._follow_field and self._field_follower.image_to_field is not None
+            else None,
             timings=self._timings,
             wide_shot=self._shot.wide,
             problems=problems,
@@ -907,15 +918,21 @@ class AnalysisPipeline:
                     bool(get_setting("models.tracking.hide_newcomers_off_field", False)),
                 )
                 self.tracks = [track for track in self.tracks if track.track_id not in off_field]
-            self.places = self._steady.update(
+            # Players and observers alike: their numbers are the one tracker's
+            watching = observers_in_view()
+            feet = {
+                track.track_id: ((track.bbox[0] + track.bbox[2]) / 2.0, track.bbox[3])
+                for track in self.tracks
+                if track.class_name == "player"
+            }
+            feet.update({who: ((box[0] + box[2]) / 2.0, box[3]) for who, box in watching.items()})
+            steady = self._steady.update(
                 frame_index / self._possession.frame_rate,
-                {
-                    track.track_id: ((track.bbox[0] + track.bbox[2]) / 2.0, track.bbox[3])
-                    for track in self.tracks
-                    if track.class_name == "player"
-                },
+                feet,
                 self._field_follower.image_to_field if self._follow_field else None,
             )
+            self.observers = {who: place for who, place in steady.items() if who in watching}
+            self.places = {who: place for who, place in steady.items() if who not in watching}
             self._record("Tracking", start)
             # What is worked out from the tracks: who has the disc, where it flies, and
             # the phase of the game

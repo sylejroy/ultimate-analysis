@@ -38,6 +38,7 @@ from ...rendering.game_scene import (
     clip_ahead,
     player_height,
     scene_of,
+    within_rectangle,
 )
 from ...utils.field_template import DEFAULT_RULESET, TEMPLATES, FieldTemplate
 from ..theme import FAINT_TEXT
@@ -87,6 +88,7 @@ class SceneView(QWidget):
         self.facts: List[str] = []
         self.team_colour: Optional[QColor] = None  # Of the team in possession
         self.show_trails = True
+        self.show_seen = True
         self.frame_rate = 30.0
         self._places: Dict[int, np.ndarray] = {}  # Player -> where they are drawn
         self._trails: Dict[int, deque] = {}  # Player -> (frame, x, y) of late
@@ -221,6 +223,7 @@ class SceneView(QWidget):
         painter.fillRect(self.rect(), QBrush(sky))
         self._paint_field(painter)
         if self.scene is not None:
+            self._paint_seen(painter)
             self._paint_trails(painter)
             self._paint_shadows(painter)
             self._paint_things(painter)
@@ -255,6 +258,24 @@ class SceneView(QWidget):
             x, y = self.template.points[name]
             self._flat(painter, [(x - 0.5, y - 0.5, 0), (x + 0.5, y + 0.5, 0)], closed=False)
             self._flat(painter, [(x - 0.5, y + 0.5, 0), (x + 0.5, y - 0.5, 0)], closed=False)
+
+    def _paint_seen(self, painter: QPainter) -> None:
+        """The ground the camera's picture shows, lit a little, with its edge drawn."""
+        seen = self.scene.seen
+        if not self.show_seen or seen is None or len(seen) < 3:
+            return
+        # As far as the grass goes: towards the horizon the camera sees for miles
+        seen = within_rectangle(
+            seen,
+            (-BESIDE, -BESIDE),
+            (self.template.width + BESIDE, self.template.length + BESIDE),
+        )
+        if len(seen) < 3:
+            return
+        outline = [(x, y, 0.015) for x, y in seen]
+        painter.setPen(QPen(QColor(CAMERA.red(), CAMERA.green(), CAMERA.blue(), 170), 1.4))
+        painter.setBrush(QColor(255, 255, 255, 26))
+        self._flat(painter, outline)
 
     def _paint_trails(self, painter: QPainter) -> None:
         if not self.show_trails:
@@ -334,6 +355,8 @@ class SceneView(QWidget):
         painter.setBrush(SKIN)
         painter.drawEllipse(head + QPointF(0, -radius * 0.6), radius, radius)
         text = player.number or (f"{player.player_id}" if unit > 9 else "")
+        if player.observer:
+            text = "observer" if unit > 9 else ""
         if text:
             self._label(
                 painter,
@@ -430,6 +453,10 @@ class SceneTab(QWidget):
         self.trails_checkbox.setChecked(True)
         self.trails_checkbox.setToolTip("Where each player and the disc went in the last 2 seconds")
         self.trails_checkbox.toggled.connect(self._on_trails_toggled)
+        self.seen_checkbox = QCheckBox("Camera's view")
+        self.seen_checkbox.setChecked(True)
+        self.seen_checkbox.setToolTip("The ground the camera's picture shows, outlined")
+        self.seen_checkbox.toggled.connect(self._on_seen_toggled)
         hint = QLabel("Drag: turn    Right-drag: move    Wheel: closer    Double-click: back")
         hint.setStyleSheet(f"color: {FAINT_TEXT};")
 
@@ -438,6 +465,7 @@ class SceneTab(QWidget):
         controls.addWidget(QLabel("View"))
         controls.addWidget(self.view_combo)
         controls.addWidget(self.trails_checkbox)
+        controls.addWidget(self.seen_checkbox)
         controls.addStretch(1)
         controls.addWidget(hint)
         layout = QVBoxLayout(self)
@@ -477,6 +505,10 @@ class SceneTab(QWidget):
         self.scene_view.view = self.scene_view.view_named(name)
         self.scene_view.update()
 
+    def _on_seen_toggled(self, on: bool) -> None:
+        self.scene_view.show_seen = on
+        self.scene_view.update()
+
     def _on_trails_toggled(self, on: bool) -> None:
         self.scene_view.show_trails = on
         self.scene_view.update()
@@ -501,5 +533,9 @@ def _facts(result, scene: Optional[GameScene]) -> List[str]:
     if result.score:
         facts.append("Score  " + "  :  ".join(str(points) for _, points in result.score))
     if scene is not None:
-        facts.append(f"{len(scene.players)} players on the field")
+        observers = sum(1 for player in scene.players if player.observer)
+        said = f"{len(scene.players) - observers} players on the field"
+        if observers:
+            said += f", {observers} observer{'s' if observers > 1 else ''}"
+        facts.append(said)
     return facts

@@ -83,6 +83,26 @@ class SceneOfTest(unittest.TestCase):
         )
         self.assertEqual(self.module.scene_of(seen, self.template).disc, (20.0, 40.0, 0.0))
 
+    def test_observers_are_in_the_scene_in_orange_and_are_no_players(self):
+        result = result_of(
+            self.to_field,
+            [player(1, (40, 100), (200, 30, 30))],
+            observers={9: (5.0, 60.0), 10: (400.0, 60.0)},
+        )
+        scene = self.module.scene_of(result, self.template)
+        watching = [p for p in scene.players if p.observer]
+        self.assertEqual([(p.player_id, p.place) for p in watching], [(9, (5.0, 60.0))])
+        self.assertEqual(watching[0].colour, self.module.OBSERVER_COLOUR)
+        self.assertFalse(scene.players[0].observer)
+
+    def test_what_the_camera_shows_is_in_the_scene(self):
+        outline = np.array([[0.0, 10.0], [40.0, 10.0], [60.0, 90.0], [-20.0, 90.0]])
+        scene = self.module.scene_of(
+            result_of(self.to_field, [], seen_by_camera=outline), self.template
+        )
+        np.testing.assert_allclose(scene.seen, outline)
+        self.assertIsNone(self.module.scene_of(result_of(self.to_field, []), self.template).seen)
+
     def test_no_scene_without_the_field_or_on_a_close_up(self):
         self.assertIsNone(self.module.scene_of(result_of(None, []), self.template))
         close_up = result_of(self.to_field, [], wide_shot=False)
@@ -139,6 +159,16 @@ class ViewPointTest(unittest.TestCase):
         self.assertTrue(np.all(left[:, 2] >= self.module.NEAR - 1e-9))
         behind = [(eye[0] + 100, 50, 0), (eye[0] + 100, 60, 0), (eye[0] + 150, 60, 0)]
         self.assertEqual(len(self.module.clip_ahead(self.view.seen(behind))), 0)
+
+    def test_a_polygon_is_cut_to_a_rectangle(self):
+        outline = np.array([[-10.0, 5.0], [50.0, 5.0], [50.0, 300.0], [-10.0, 300.0]])
+        inside = self.module.within_rectangle(outline, (0.0, 0.0), (40.0, 110.0))
+        self.assertEqual(
+            sorted(map(tuple, inside.round(6))),
+            [(0.0, 5.0), (0.0, 110.0), (40.0, 5.0), (40.0, 110.0)],
+        )
+        beside = outline + [100.0, 0.0]
+        self.assertEqual(len(self.module.within_rectangle(beside, (0.0, 0.0), (40.0, 110.0))), 0)
 
     def test_a_line_keeps_its_ends_where_they_are_ahead(self):
         line = self.view.seen([(20, 50, 0), (20, 60, 0)])

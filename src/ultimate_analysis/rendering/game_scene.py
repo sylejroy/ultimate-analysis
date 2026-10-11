@@ -21,6 +21,8 @@ from ..utils.field_template import FieldTemplate
 # Who stands further from the field than this (field units) is left out: spectators,
 # and boxes above the horizon, which map to places that mean nothing
 BESIDE_FIELD = 12.0
+# The colour observers are drawn in (BGR): the orange they wear
+OBSERVER_COLOUR = (0, 140, 255)
 # How tall a player is drawn, in metres
 PLAYER_METRES = 1.8
 # Nothing nearer to the eye than this is drawn (field units)
@@ -36,6 +38,7 @@ class ScenePlayer:
     colour: Optional[Tuple[int, int, int]]  # Their team's shirt colour (BGR), if known
     number: str  # Jersey number, "" while it is not known
     holding: bool = False
+    observer: bool = False  # Watches over the game and plays for neither team
 
 
 @dataclass
@@ -50,6 +53,8 @@ class GameScene:
     # of its picture
     camera: Optional[Tuple[float, float, float]] = None
     looks_at: Optional[Tuple[float, float]] = None
+    # The outline on the ground of what the camera's picture shows, (N, 2)
+    seen: Optional[np.ndarray] = None
 
 
 def player_height(template: FieldTemplate) -> float:
@@ -107,6 +112,19 @@ def scene_of(result: Any, template: FieldTemplate) -> Optional[GameScene]:
                 holding=track.track_id == result.holder_id,
             )
         )
+    for observer, place in getattr(result, "observers", {}).items():
+        if _near_field(np.asarray(place), template):
+            scene.players.append(
+                ScenePlayer(
+                    player_id=observer,
+                    place=(float(place[0]), float(place[1])),
+                    colour=OBSERVER_COLOUR,
+                    number="",
+                    observer=True,
+                )
+            )
+    seen = getattr(result, "seen_by_camera", None)
+    scene.seen = None if seen is None else np.asarray(seen, dtype=np.float64).reshape(-1, 2)
     scene.disc = _disc_of(result, scene, to_field, template)
     scene.camera, scene.looks_at = _camera_of(result, to_field, template)
     return scene
@@ -250,6 +268,28 @@ def clip_ahead(seen: np.ndarray, closed: bool = True, near: float = NEAR) -> np.
     if not closed and count and seen[-1][2] >= near:
         kept.append(seen[-1])
     return np.array(kept).reshape(-1, 3)
+
+
+def within_rectangle(
+    outline: np.ndarray, low: Sequence[float], high: Sequence[float]
+) -> np.ndarray:
+    """What of a flat polygon (N, 2) lies within a rectangle with sides along the axes:
+    its corners (M, 2), none if it lies outside altogether."""
+    corners = [np.asarray(corner, dtype=np.float64) for corner in outline]
+    for axis in (0, 1):
+        for bound, keep_above in ((low[axis], True), (high[axis], False)):
+            kept: List[np.ndarray] = []
+            for index, here in enumerate(corners):
+                there = corners[(index + 1) % len(corners)]
+                here_in = here[axis] >= bound if keep_above else here[axis] <= bound
+                there_in = there[axis] >= bound if keep_above else there[axis] <= bound
+                if here_in:
+                    kept.append(here)
+                if here_in != there_in:
+                    share = (bound - here[axis]) / (there[axis] - here[axis])
+                    kept.append(here + share * (there - here))
+            corners = kept
+    return np.array(corners).reshape(-1, 2)
 
 
 def circle(centre: Sequence[float], radius: float, corners: int = 20) -> np.ndarray:

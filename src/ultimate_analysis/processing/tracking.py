@@ -62,6 +62,9 @@ _history_last_frame: Dict[int, int] = {}
 TRAIL_REACH_PIXELS = 20000.0
 # Player ID -> the team (0 or 1) the tracker last gave them, also once they are missing
 _player_teams: Dict[int, int] = {}
+# Track -> box of those followed in the last frame who are no players: observers and
+# others in neither team's colours, who are not among the tracks handed out
+_observers: Dict[int, List[float]] = {}
 # The video frame analysed last, and how many video frames lie between two analysed ones.
 # Live playback skips frames to keep up, so a trail of a fixed number of points would
 # reach back the further the slower the analysis runs.
@@ -341,8 +344,11 @@ def _run_bytetrack_tracking(frame: np.ndarray, detections: List[Dict[str, Any]])
         teams = tracker.teams_of_tracks() if tracker is _player_tracker else {}
         leanings = tracker.leanings_of_tracks() if tracker is _player_tracker else {}
         team_colours = tracker.shirt_colours() if tracker is _player_tracker else {}
+        if tracker is _player_tracker:
+            _observers.clear()
         for row in rows:
             if int(row[4]) in hidden:
+                _observers[int(row[4])] = [float(value) for value in row[:4]]
                 continue
             tracks.append(
                 Track(
@@ -359,6 +365,11 @@ def _run_bytetrack_tracking(frame: np.ndarray, detections: List[Dict[str, Any]])
             tracks[-1].team_colour = team_colours.get(tracks[-1].team)
     _finish_tracks(frame, tracks)
     return tracks
+
+
+def observers_in_view() -> Dict[int, List[float]]:
+    """Track -> box (x1, y1, x2, y2) of the observers followed in the last frame."""
+    return dict(_observers)
 
 
 def team_shirt_colours() -> Dict[int, Tuple[int, int, int]]:
@@ -672,6 +683,7 @@ def reset_tracker() -> None:
     global _deepsort_tracker, _track_histories, _frame_count, _video_frame, _frames_per_step
 
     logger.info("Resetting tracker state")
+    _observers.clear()
 
     # Reset DeepSORT tracker
     if _deepsort_tracker is not None:
