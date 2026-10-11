@@ -20,13 +20,13 @@ Built with PyQt5 and YOLO.
   who holds the disc and which tracks are one player, with a key or a click per answer.
 - **Training** of detection and segmentation models on those labels from the app.
 
-| Labelling players and discs | Labelling the field |
+| The game in 3D | Labelling players and discs |
 | --- | --- |
-| ![Labelling tab](docs/gui_example_labelling.png) | ![Field labelling](docs/gui_example_field_labelling.png) |
+| ![3D View tab](docs/gui_example_3d_view.png) | ![Labelling tab](docs/gui_example_labelling.png) |
 
-Players are recognised from one point to the next by their looks (a prototype):
-
-![Players matched across points](docs/reid_matching.jpg)
+| Labelling the field | Naming who holds the disc |
+| --- | --- |
+| ![Field labelling](docs/gui_example_field_labelling.png) | ![Click the holder](docs/gui_example_holder_labelling.png) |
 
 ## Quick start
 
