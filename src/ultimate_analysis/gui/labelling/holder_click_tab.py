@@ -54,7 +54,8 @@ LEAD_SECONDS = 1.0  # How much of the game before the frame is played
 PLAYED_EVERY = 2  # Every so many frames of it are shown
 # The height the frame is shown at. All of it, always: "nobody holds the disc" can only
 # be said of a picture that shows everybody
-SHOWN_HEIGHT = 760
+# The frame is shown as large as the window has room for, within these heights
+SHOWN_HEIGHTS = (480, 1300)
 SAME_PLAYER = 0.5  # A box found is a player of the dataset from this overlap (IoU)
 BOX = (255, 255, 255)  # Colour of the boxes drawn (BGR)
 # What was stored is shown on the frame for this long before the next one comes: the
@@ -167,8 +168,10 @@ class HolderClickWidget(_Judging):
         self.picture.right_clicked.connect(lambda x, y: self._clicked(x, y, two=True))
         self.why_label = QLabel("")
         row = QHBoxLayout()
+        row.addStretch(1)
         row.addWidget(self.picture)
         row.addStretch(1)
+        self._shown = SHOWN_HEIGHTS[0]  # The height the frame is shown at
         self.pictures.addWidget(self.why_label)
         self.pictures.addWidget(self.caption)
         # The player a holder network takes for the holder is marked on the frame: by
@@ -351,7 +354,10 @@ class HolderClickWidget(_Judging):
         self.boxes = [
             b for b in found if b[2] > left and b[0] < right and b[3] > top and b[1] < bottom
         ]
-        scale = SHOWN_HEIGHT / (bottom - top)
+        room_wide, room_tall = self.room(beside=250)
+        fits = min(room_tall, room_wide * (bottom - top) / (right - left))
+        self._shown = int(np.clip(fits, *SHOWN_HEIGHTS))
+        scale = self._shown / (bottom - top)
         self._clip = [
             cv2.resize(
                 f[top:bottom, left:right], None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC
@@ -466,7 +472,7 @@ class HolderClickWidget(_Judging):
         )
         self._timer.stop()
         left, top, _, bottom = self._part
-        scale = SHOWN_HEIGHT / (bottom - top)
+        scale = self._shown / (bottom - top)
 
         def corners(box: Box) -> Tuple[Tuple[int, int], Tuple[int, int]]:
             return (

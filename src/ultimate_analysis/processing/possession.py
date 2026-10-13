@@ -580,6 +580,7 @@ class PossessionTracker:
         tracks: List[Any],
         frame_index: Optional[int] = None,
         holder_scores: Optional[Dict[int, float]] = None,
+        sensors: Optional[Dict[str, Any]] = None,
     ) -> Optional[int]:
         """Take a frame's detections and tracks into account; returns the holder's track ID.
 
@@ -589,6 +590,8 @@ class PossessionTracker:
             frame_index: The frame's number in the video, if frames may have been skipped
             holder_scores: Track -> how sure a network is, from a picture of the player,
                 that they hold the disc; for players at a disc that is at several
+            sensors: What the discs among the detections were made of
+                (processing/disc_fusion.py). Not looked at here: a recording keeps it
         """
         previous = self._frame
         if frame_index is not None:

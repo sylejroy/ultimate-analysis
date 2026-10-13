@@ -2,7 +2,7 @@
 
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -104,6 +104,8 @@ class VideoPlayer:
         # not be touched from the main thread.
         self._decode_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="decode")
         self._decode_ahead: Optional[Future] = None
+        # Every so many frames one is handed out; the others are passed over
+        self.frame_step = 1
 
     def _take_decode_ahead(self) -> Optional[Tuple[bool, Optional[np.ndarray]]]:
         """Wait for the pending decode, if any, and return its (ok, frame) result."""
@@ -185,10 +187,26 @@ class VideoPlayer:
             logger.debug("End of video reached")
             return None
 
-        self.current_frame_idx += 1
+        self.current_frame_idx += self.frame_step
         # Decode the following frame while this one is processed
-        self._decode_ahead = self._decode_executor.submit(self.cap.read)
+        self._decode_ahead = self._decode_executor.submit(
+            self._read_a_step_on, self.cap, self.frame_step
+        )
         return frame
+
+    @staticmethod
+    def _read_a_step_on(cap: Any, step: int) -> Tuple[bool, Optional[np.ndarray]]:
+        """The frame `step` frames after the one read last; those between are passed
+        over. Of the video as it was when this was asked for: it may be closed since."""
+        for _ in range(step - 1):
+            if not cap.grab():
+                return False, None
+        return cap.read()
+
+    def set_frame_step(self, step: int) -> None:
+        """Hand out every `step`-th frame from now on (1: every frame). The frame
+        decoded ahead is the one at the current position whatever the step was."""
+        self.frame_step = max(1, int(step))
 
     def peek_next_frame(self) -> Optional[np.ndarray]:
         """The frame `get_next_frame` will return, without taking it: for work that can

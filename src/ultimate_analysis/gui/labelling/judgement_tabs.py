@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QHBoxLayout,
     QLabel,
@@ -40,8 +41,9 @@ logger = get_logger("LABELLING")
 PAIRS_SOURCE, PAIRS_ANSWERS = "generated_reid", "hand_pairs"
 HOLDER_SOURCE, HOLDER_ANSWERS = "generated_holders", "hand_holders"
 TRACK_CROPS = 8  # Crops shown of each track
-CROP_HEIGHT = 250  # ... at this height
-PLAYER_HEIGHT = 560  # The height the player asked about is shown at
+# The pictures are as large as the window has room for, within these heights
+CROP_HEIGHTS = (180, 460)  # A crop of a track
+PLAYER_HEIGHTS = (420, 900)  # The player asked about
 PLAYER_PAD = 0.35  # ... with this share of their box around it: a disc is held out
 ANSWERS_SHOWN = 10  # The last answers that can be taken back
 ANSWER_HEIGHT = 130  # ... each shown as the player's picture at this height
@@ -52,6 +54,10 @@ SAID_TWO = (60, 200, 230)  # ... and around a box said to show two players
 # 13,800, a quarter of them wrong, found most. A first goal, not a measured need
 HOLDER_GOAL = 1000
 GROUND = (34, 31, 30)  # Behind the pictures (BGR): the window's
+# A picture less like the rest of its own track than this (cosine) may show somebody
+# else: the network's word on it is drawn in amber
+OWN_DOUBT = 0.5
+SAME_COLOUR, UNSURE_COLOUR, DIFFERENT_COLOUR = "#48c78e", "#e0a030", "#f06060"
 
 
 def data_folder() -> Path:
@@ -94,6 +100,11 @@ class _Judging(QWidget):
         layout.addLayout(self.pictures, 1)
         layout.addLayout(self.buttons)
         layout.addWidget(self.status)
+
+    def room(self, beside: int) -> Tuple[int, int]:
+        """The width and height the pictures can have: the page's, less the lines of
+        text and buttons around them (`beside`, in pixels of height)."""
+        return max(400, self.width() - 40), max(200, self.height() - beside)
 
     def add_answer(self, text: str, key: str, answer: Callable[[], None]) -> None:
         button = QPushButton(f"{text}  [{key}]")
@@ -179,25 +190,126 @@ class TrackVectors(QThread):
         return dict(zip(self.tracks, vectors))
 
 
+_embedder: dict = {}  # Weights file -> the network, loaded once for the pages
+
+
+class PairLook(QThread):
+    """Works out, beside the window, what the network makes of the pair shown: how
+    alike the two tracks are, how alike each picture is to the rest of its own track,
+    and what each picture's likeness with the other track rests on."""
+
+    looked = pyqtSignal(object)
+
+    def __init__(self, token: int, paths: Tuple[List[Path], List[Path]]):
+        super().__init__()
+        self.token, self.paths = token, paths
+
+    def run(self) -> None:
+        try:
+            self.looked.emit(self._look())
+        except Exception as error:
+            logger.warning(f"The network's view of the pair failed: {error}")
+
+    def _look(self) -> Optional[dict]:
+        weights = Path(get_setting("models.reid.weights", ""))
+        if not weights.is_file():
+            return None
+        from ...processing.reid import embed, likeness_maps, load_embedder, track_vector
+
+        crops = [[cv2.imread(str(path)) for path in paths] for paths in self.paths]
+        if any(crop is None for track in crops for crop in track) or not all(crops):
+            return None
+        with GPU_SETUP_LOCK.work():
+            if weights not in _embedder:
+                _embedder[weights] = load_embedder(weights)
+            model = _embedder[weights]
+            vectors = [embed(model, track) for track in crops]
+            means = [track_vector(track) for track in vectors]
+            heats = [
+                likeness_maps(model, track, [means[1 - side]] * len(track))
+                for side, track in enumerate(crops)
+            ]
+        own = []
+        for track in vectors:
+            # Each picture against the others of its track, itself left out
+            total = track.sum(axis=0)
+            rest = [total - vector for vector in track] if len(track) > 1 else [total]
+            own.append(
+                [
+                    float(vector @ (others / max(float(np.linalg.norm(others)), 1e-12)))
+                    for vector, others in zip(track, rest)
+                ]
+            )
+        return {
+            "token": self.token,
+            "likeness": float(means[0] @ means[1]),
+            "own": own,
+            "heats": heats,
+        }
+
+
 class CropPicture(QLabel):
     """A picture of a track. A click takes it out (it shows somebody else than the
     rest of the track) or puts it back."""
 
-    def __init__(self, frame: int, path: Path):
+    def __init__(self, frame: int, path: Path, height: int):
         super().__init__()
         self.frame = frame
         self.taken_out = False
         crop = cv2.imread(str(path))
         if crop is None:
-            crop = np.full((CROP_HEIGHT, CROP_HEIGHT // 2, 3), GROUND, dtype=np.uint8)
-        width = max(1, round(crop.shape[1] * CROP_HEIGHT / crop.shape[0]))
-        self._crop = cv2.resize(crop, (width, CROP_HEIGHT), interpolation=cv2.INTER_CUBIC)
+            crop = np.full((height, height // 2, 3), GROUND, dtype=np.uint8)
+        width = max(1, round(crop.shape[1] * height / crop.shape[0]))
+        self._crop = cv2.resize(crop, (width, height), interpolation=cv2.INTER_CUBIC)
+        # What the network makes of it, once worked out: how alike it is to the rest
+        # of its track, and what its likeness with the other track rests on
+        self.own: Optional[float] = None
+        self.heat: Optional[np.ndarray] = None
+        self.heat_shown = False
         self.setCursor(Qt.PointingHandCursor)
         self.setToolTip("Click if this is not the player of the rest of the track")
         self._draw()
 
+    def show_look(self, own: float, heat: np.ndarray) -> None:
+        self.own, self.heat = own, heat
+        self.setToolTip(
+            "Click if this is not the player of the rest of the track.\n"
+            f"The network: {own:.2f} like the rest of its track (1 is the same)."
+        )
+        self._draw()
+
+    def show_heat(self, shown: bool) -> None:
+        self.heat_shown = shown
+        self._draw()
+
     def _draw(self) -> None:
         shown = self._crop
+        if self.heat is not None and self.heat_shown:
+            height, width = shown.shape[:2]
+            heat = cv2.resize(self.heat, (width, height), interpolation=cv2.INTER_CUBIC)
+            heat = np.clip(cv2.GaussianBlur(heat, (0, 0), width / 12), 0.0, 1.0)
+            colours = cv2.applyColorMap((255 * heat).astype(np.uint8), cv2.COLORMAP_INFERNO)
+            alpha = (0.75 * heat**0.8)[..., None]
+            shown = (shown * (1 - alpha) + colours * alpha).astype(np.uint8)
+        if self.own is not None:
+            shown = shown.copy()
+            doubted = self.own < OWN_DOUBT
+            colour = (48, 160, 224) if doubted else (235, 235, 235)
+            text = f"{self.own:.2f}" + (" ?" if doubted else "")
+            (text_width, text_height), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+            cv2.rectangle(shown, (0, 0), (text_width + 8, text_height + 8), (22, 20, 20), -1)
+            cv2.putText(
+                shown,
+                text,
+                (4, text_height + 3),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                colour,
+                1,
+                cv2.LINE_AA,
+            )
+            if doubted:
+                cv2.rectangle(shown, (0, 0), (shown.shape[1] - 1, shown.shape[0] - 1), colour, 2)
         if self.taken_out:
             # Dimmed and crossed out
             shown = (shown * 0.3).astype(np.uint8)
@@ -220,16 +332,27 @@ class CropRow(QWidget):
         self._layout = QHBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._layout.setSpacing(6)
+        # In the middle of the page
+        self._layout.addStretch(1)
         self._layout.addStretch(1)
         self.pictures: List[CropPicture] = []
 
-    def show_crops(self, crops: List[Tuple[int, Path]]) -> None:
+    def show_crops(self, crops: List[Tuple[int, Path]], height: int) -> None:
         for picture in self.pictures:
             self._layout.removeWidget(picture)
             picture.deleteLater()
-        self.pictures = [CropPicture(frame, path) for frame, path in crops]
+        self.pictures = [CropPicture(frame, path, height) for frame, path in crops]
         for place, picture in enumerate(self.pictures):
-            self._layout.insertWidget(place, picture)
+            self._layout.insertWidget(1 + place, picture)
+
+    def show_looks(self, own: List[float], heats: List[np.ndarray], heat_shown: bool) -> None:
+        for picture, likeness, heat in zip(self.pictures, own, heats):
+            picture.heat_shown = heat_shown
+            picture.show_look(likeness, heat)
+
+    def show_heat(self, shown: bool) -> None:
+        for picture in self.pictures:
+            picture.show_heat(shown)
 
     @property
     def shown(self) -> List[int]:
@@ -254,6 +377,26 @@ class SamePlayerWidget(_Judging):
         self._working: Optional[TrackVectors] = None
         self.why_label = QLabel("")
         self.pictures.addWidget(self.why_label)
+        # What the network makes of the pair shown, worked out beside the window
+        self._looks: List[PairLook] = []
+        self._asked = 0
+        self.says_label = QLabel("")
+        self.heat_box = QCheckBox("Show what the network looks at  [H]")
+        self.heat_box.setChecked(True)
+        self.heat_box.setToolTip(
+            "Over each picture: what its likeness with the other track rests on. Bright "
+            "is where covering the picture makes the two look less alike. Switch it off "
+            "to see the pictures as they are."
+        )
+        self.heat_box.toggled.connect(self._show_heat)
+        toggle = QShortcut("H", self)
+        toggle.setContext(Qt.WidgetWithChildrenShortcut)
+        toggle.activated.connect(self.heat_box.toggle)
+        says = QHBoxLayout()
+        says.addWidget(self.says_label)
+        says.addStretch(1)
+        says.addWidget(self.heat_box)
+        self.pictures.addLayout(says)
         self.captions = [faint(""), faint("")]
         self.strips = [CropRow(), CropRow()]
         for caption, strip in zip(self.captions, self.strips):
@@ -262,7 +405,8 @@ class SamePlayerWidget(_Judging):
         self.pictures.addWidget(
             faint(
                 "Click a picture that shows somebody else than the rest of its track to "
-                "take it out, then answer for the pictures left."
+                "take it out, then answer for the pictures left. The number on a picture "
+                "is how alike the network finds it to the rest of its track."
             )
         )
         self.pictures.addStretch(1)
@@ -308,7 +452,7 @@ class SamePlayerWidget(_Judging):
             return
         self.pair, self.why = chosen[:2], chosen[2]
         self.why_label.setText(
-            "Asked because the network is unsure whether these are one player"
+            "Asked because the two look alike to the network"
             if self.why == judgement_files.UNSURE
             else "A pair drawn at random"
         )
@@ -322,8 +466,62 @@ class SamePlayerWidget(_Judging):
                 f"{len(track.crops)} pictures over frames {track.crops[0][0]} to "
                 f"{track.crops[-1][0]}{number}"
             )
-            strip.show_crops(track.chosen(TRACK_CROPS))
+            strip.show_crops(track.chosen(TRACK_CROPS), self._crop_height())
         self._show_status()
+        self._look_at_pair()
+
+    def _crop_height(self) -> int:
+        """As tall as two rows of pictures fit under each other, and eight side by
+        side: a crop is about half as wide as it is tall, a wide one more."""
+        width, height = self.room(beside=330)
+        fits = min(height // 2, int(width / (TRACK_CROPS * 0.62)))
+        return int(np.clip(fits, *CROP_HEIGHTS))
+
+    def _look_at_pair(self) -> None:
+        """Have the network look at the pair shown; `_on_looked` shows what it says."""
+        self._asked += 1
+        self.says_label.setText("The network is looking at the two tracks ...")
+        self.says_label.setStyleSheet(f"color: {FAINT_TEXT};")
+        paths = tuple([path for _, path in track.chosen(TRACK_CROPS)] for track in self.pair)
+        look = PairLook(self._asked, paths)
+        look.looked.connect(self._on_looked)
+        look.finished.connect(lambda look=look: self._looks.remove(look))
+        self._looks.append(look)
+        look.start()
+
+    def _on_looked(self, seen: Optional[dict]) -> None:
+        if seen is None:
+            self.says_label.setText("No network to look at the tracks")
+            return
+        if seen["token"] != self._asked or self.pair is None:
+            return  # Of a pair that is no longer shown
+        low, high = judgement_files.UNSURE_LIKENESS
+        likeness = seen["likeness"]
+        if likeness >= high:
+            verdict, colour = "the same player", SAME_COLOUR
+        elif likeness < low:
+            verdict, colour = "different players", DIFFERENT_COLOUR
+        else:
+            verdict, colour = "unsure whether they are one player", UNSURE_COLOUR
+        tracks = []
+        for name, own in zip(("first", "second"), seen["own"]):
+            doubted = [str(place + 1) for place, value in enumerate(own) if value < OWN_DOUBT]
+            tracks.append(
+                f"the {name} track is one player throughout"
+                if not doubted
+                else f"in the {name} track picture {', '.join(doubted)} may be somebody else"
+            )
+        self.says_label.setText(
+            f"The network: likeness {likeness:.2f} of 1, {verdict}.  "
+            f"By it, {tracks[0]}; {tracks[1]}."
+        )
+        self.says_label.setStyleSheet(f"color: {colour}; font-weight: 600;")
+        for strip, own, heats in zip(self.strips, seen["own"], seen["heats"]):
+            strip.show_looks(own, heats, self.heat_box.isChecked())
+
+    def _show_heat(self, shown: bool) -> None:
+        for strip in self.strips:
+            strip.show_heat(shown)
 
     def _answer(self, answer: str) -> None:
         if self.pair is None:
@@ -436,6 +634,7 @@ class HolderWidget(_Judging):
         self.recheck: List[dict] = []
         self._rechecking: Optional[dict] = None
         side_by_side = QHBoxLayout()
+        side_by_side.addStretch(1)
         side_by_side.addWidget(self.player)
         side_by_side.addWidget(self.surroundings)
         side_by_side.addStretch(1)
@@ -661,19 +860,23 @@ class HolderWidget(_Judging):
         left, top, right, bottom = around(4.0, 1.5)
         wide = frame[top:bottom, left:right].copy()
         cv2.rectangle(wide, (x1 - left, y1 - top), (x2 - left, y2 - top), (255, 255, 255), 1)
-        scale = PLAYER_HEIGHT / wide.shape[0]
+        scale = self._player_height() / wide.shape[0]
         wide = cv2.resize(wide, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
         return close, wide, region
+
+    def _player_height(self) -> int:
+        """The height the player asked about is shown at: what the page has room for."""
+        return int(np.clip(self.room(beside=420)[1], *PLAYER_HEIGHTS))
 
     def _large(self, crop: np.ndarray, sharp: bool = True) -> np.ndarray:
         if not sharp:
             # For the small pictures of the answers given: the network is not worth its time
-            scale = PLAYER_HEIGHT / crop.shape[0]
+            scale = self._player_height() / crop.shape[0]
             return cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
         # The network shares the GPU with the analysis of the main tab
         with GPU_SETUP_LOCK.work():
             crop = enlarged(crop)
-        scale = PLAYER_HEIGHT / crop.shape[0]
+        scale = self._player_height() / crop.shape[0]
         return cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
 
     def _two_in_box(self) -> None:

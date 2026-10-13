@@ -36,6 +36,17 @@ A replay with nothing changed says what the recorded run said, frame for frame; 
 many frames it does is printed. A recording is of no use once the detections or the
 tracks change: that takes a new run.
 
+A recording can also keep what each of the three that know of the disc said: the disc
+model (with the discs it is not sure of), the heat map, and the holder network of every
+player in every frame. The discs are then made again at every replay
+(processing/disc_fusion.py), with models.disc_fusion.* and models.holder.sure as set:
+
+    python scripts/benchmark_possession.py possession_three_sensors_recording --record \
+        --labels hand_players_discs hand_discs --set models.disc_fusion.enabled=true \
+        --set models.disc_fusion.weak_from=0.05 --set models.holder.ask_everybody=true
+    python scripts/benchmark_possession.py possession_detector_alone \
+        --replay possession_three_sensors_recording --set models.disc_fusion.enabled=false
+
 With --perfect-disc SECONDS a replay is given the disc where the label has it in place
 of what the disc model found: how far the rest gets with a disc model that misses
 nothing. The label is of one frame. For the time before it, the disc is taken to have

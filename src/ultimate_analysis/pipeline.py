@@ -6,6 +6,7 @@ The results are drawn onto the camera view and onto the top-down view. There is 
 this module: the GUI owns one AnalysisPipeline and runs it on a worker thread.
 """
 
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -21,6 +22,9 @@ from .processing import appearance, health
 from .processing.camera_motion import CameraMotionEstimator
 from .processing.camera_motion import is_enabled as camera_motion_enabled
 from .processing.disc_flight import DiscPath, FlyingDisc, place_under_disc
+from .processing.disc_fusion import fuse_discs, weak_discs_from
+from .processing.disc_fusion import is_enabled as fusion_enabled
+from .processing.disc_heatmap import peaks_of
 from .processing.field_analysis import create_unified_field_mask, fit_lines_from_mask
 from .processing.field_line_filter import FieldLineFilter
 from .processing.field_registration import FieldFollower, OffFieldWatcher, field_to_canvas
@@ -69,13 +73,14 @@ from .rendering.top_down import (
 )
 from .rendering.tracks import (
     draw_detections,
+    draw_disc_heat,
     draw_holder_guess,
     draw_possession,
     draw_tracks,
     draw_tracks_with_player_ids,
     team_display_colour,
 )
-from .utils.field_camera import camera_of
+from .utils.field_camera import camera_of, raised_mapping
 from .utils.field_label_files import video_focal
 from .utils.field_template import DEFAULT_RULESET, TEMPLATES
 from .utils.logger import get_logger
@@ -106,6 +111,8 @@ FIELD_UNSEEN_SECONDS = 20.0
 STATS_EVERY_FRAMES = 30
 
 Line = Tuple[np.ndarray, np.ndarray]
+# A heat map that is only shown is worked out about this often (a second of video)
+HEAT_SHOWN_A_SECOND = 30.0
 # The dataset of field labels that a video's focal length is taken from
 FIELD_LABELS = "hand_field"
 
@@ -233,7 +240,7 @@ class AnalysisPipeline:
         self._looks = PlayerLooks()
         self.numbers_by_looks: Dict[int, str] = {}
         # For what can be done beside the main work of a frame
-        self._threads = ThreadPoolExecutor(max_workers=3, thread_name_prefix="pipeline")
+        self._threads = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pipeline")
         self._ahead: Optional[Any] = None  # The detectors' work on the next frame
         # ... and with it how the camera moved to that frame, looked at but not taken in
         self._motion_ahead: Optional[tuple] = None
@@ -248,6 +255,10 @@ class AnalysisPipeline:
         self._colours_by_looks: Optional[dict] = None
         self._shirt_turn = 0
         self._weak_players: List[Dict[str, Any]] = []
+        # Discs the detector is not sure of, and what the discs of this frame were made
+        # of (processing/disc_fusion.py; None where they are the detector's alone)
+        self._weak_discs: List[Dict[str, Any]] = []
+        self._disc_sensors: Optional[Dict[str, Any]] = None
         self._frame_size: Optional[Tuple[int, int]] = None
         self._trails_now: Optional[Dict[int, np.ndarray]] = None
         self._events_counted = 0
@@ -281,6 +292,21 @@ class AnalysisPipeline:
         # every player in every frame), and what it said of the players of this frame
         self.show_holder_guess = bool(get_setting("models.holder.show_guess", False))
         self.holder_scores: Optional[Dict[int, float]] = None
+        # What the network says of every player, for showing: worked out beside the
+        # frames (track IDs asked about, the work), and so of the frame before
+        self.holder_guess: Optional[Dict[int, float]] = None
+        self._guess_job: Optional[tuple] = None
+        # Whether a heat map of where a disc is likely is drawn on the camera view
+        # (processing/disc_heatmap.py; a network of its own, run only while shown), the
+        # network once it has been asked for (False: it does not load), and the map of
+        # this frame
+        self.show_disc_heat = bool(get_setting("models.disc_heatmap.show", False))
+        self._disc_heatmap: Any = None
+        self.disc_heat: Optional[np.ndarray] = None
+        # The map that is drawn: this frame's, or the last one worked out
+        self.disc_heat_shown: Optional[np.ndarray] = None
+        self._heat_frames = 0
+        self._holder_loading = threading.Lock()
         self._camera_motion = CameraMotionEstimator()
         # Close-ups and title cards of an edited game are not analysed
         self._shot = ShotWatcher()
@@ -347,6 +373,7 @@ class AnalysisPipeline:
         self._off_field.reset()
         self._steady.reset()
         self.places, self.observers = {}, {}
+        self.holder_guess, self._guess_job = None, None  # Of tracks that are no more
         self._game.cut()
         self._looks.cut()
         self._forget_side_work()
@@ -359,6 +386,9 @@ class AnalysisPipeline:
         reset_inference_state()
         reset_segmentation_cache()
         self._possession.reset()
+        if self._disc_heatmap:
+            self._disc_heatmap.reset()
+        self.disc_heat = self.disc_heat_shown = None
         self._camera_motion.reset()
         self._motion_known = False
         self._line_filter.reset()
@@ -394,23 +424,28 @@ class AnalysisPipeline:
         at the players (None: by where the disc is alone)."""
         if weights != self._holder_weights:
             self._holder_weights, self._holder_net = weights or None, None
+            self.holder_guess, self._guess_job = None, None
             self._analysed_key = None
 
     def _holder_scores(self, frame: np.ndarray, frame_index: int) -> Optional[Dict[int, float]]:
-        """How sure the holder network is that each player holds the disc: of the players
-        at a disc that is in the boxes of two or more, and, where the network stands in
-        for a disc that is not found (models.holder.sure), of everybody in a frame
-        without one. None where it has nothing to say, or there is none, and while the
-        disc is seen to fly: the network looks at one player at a time and cannot know
-        that nobody holds the disc."""
+        """How sure the holder network is that each player holds the disc, for possession:
+        of the players at a disc that is in the boxes of two or more, and, where the
+        network stands in for a disc that is not found (models.holder.sure), of everybody
+        in a frame without one. None where it has nothing to say, or there is none, and
+        while the disc is seen to fly: the network looks at one player at a time and
+        cannot know that nobody holds the disc.
+
+        The guess that is shown for every player (`holder_guess`) is worked out beside
+        the frames and is of the frame before: nothing waits for what is only drawn."""
         players = [t for t in self.tracks if t.class_name == "player" and hasattr(t, "to_ltrb")]
         discs = [d for d in self.detections if d["class_name"] == "disc"]
         self.disc_seen_flying = self._flying.update(
             frame_index / self._possession.frame_rate, discs, [t.to_ltrb() for t in players]
         )
-        if self._holder_weights is None:
-            return None
-        if self.disc_seen_flying and get_setting("models.holder.not_while_flying", True):
+        if self._holder_weights is None or (
+            self.disc_seen_flying and get_setting("models.holder.not_while_flying", True)
+        ):
+            self.holder_guess, self._guess_job = None, None
             return None
         margin = float(get_setting("models.possession.box_margin", 0.15))
         asked: Dict[int, Any] = {}
@@ -418,31 +453,53 @@ class AnalysisPipeline:
             at = set(players_at_disc(detection["bbox"], self.tracks, margin))
             if len(at) > 1:
                 asked.update({t.track_id: t for t in players if t.track_id in at})
-        # Without a disc, or with one that may be a thing left lying: everybody. And
-        # in every frame where the guess is shown
-        if self.show_holder_guess or (
+        # Without a disc, or with one that may be a thing left lying: everybody
+        # (or in every frame, for a recording that is to be played back with other
+        # settings: scripts/benchmark_possession.py)
+        if get_setting("models.holder.ask_everybody", False) or (
             float(get_setting("models.holder.sure", 0.0)) > 0
             and (not discs or self._possession.strays)
         ):
             asked.update({t.track_id: t for t in players})
-        if not asked:
-            return None
         try:
-            from .processing.holder import BOX_ALONE, crop_around, holding, load_holder_net
+            from .processing.holder import BOX_ALONE, crop_around
 
-            with GPU_SETUP_LOCK.work():
-                if self._holder_net is None:
-                    self._holder_net = load_holder_net(Path(self._holder_weights), compiled=True)
-                crops = [
-                    crop_around(frame, track.to_ltrb(), BOX_ALONE)[0] for track in asked.values()
-                ]
-                sure = holding(self._holder_net, crops)
+            scores = None
+            if asked:
+                crops = [crop_around(frame, t.to_ltrb(), BOX_ALONE)[0] for t in asked.values()]
+                scores = dict(zip(asked, self._holding(crops)))
+            if self.show_holder_guess:
+                job = self._guess_job
+                if job is not None and job[1].done():
+                    self.holder_guess, self._guess_job = dict(zip(job[0], job[1].result())), None
+                if self._guess_job is None and players:
+                    # The frame is drawn on before the network gets to it: its own copies
+                    crops = [crop_around(frame, t.to_ltrb(), BOX_ALONE)[0].copy() for t in players]
+                    self._guess_job = (
+                        [t.track_id for t in players],
+                        self._threads.submit(self._holding, crops),
+                    )
+                if scores and self.holder_guess is not None:
+                    self.holder_guess.update(scores)  # What possession went by, at once
+            else:
+                self.holder_guess, self._guess_job = None, None
         except Exception as error:  # No PyTorch, or weights that do not load
             logger.exception(f"The holder network failed: {error}")
             health.report("Possession", "the holder network failed; going by the disc alone")
-            self._holder_weights = None
+            self._holder_weights, self.holder_guess, self._guess_job = None, None, None
             return None
-        return {track_id: float(score) for track_id, score in zip(asked, sure)}
+        return scores
+
+    def _holding(self, crops: List[np.ndarray]) -> List[float]:
+        """What the holder network says of some crops; also run beside the frames."""
+        from .processing.holder import holding, load_holder_net
+
+        with GPU_SETUP_LOCK.work():
+            with self._holder_loading:
+                if self._holder_net is None:
+                    self._holder_net = load_holder_net(Path(self._holder_weights), compiled=True)
+                network = self._holder_net
+            return [float(score) for score in holding(network, crops)]
 
     def set_looks_model(self, weights: Optional[str]) -> None:
         """Know the players by their looks with another network (None: the one in the
@@ -594,7 +651,7 @@ class AnalysisPipeline:
         if to_field is None:
             return
         state = self._possession.disc_state
-        ground = raised = holder = None
+        ground = raised = holder = camera = None
         seen = []
         for detection in self.detections:
             if detection["class_name"] == "disc":
@@ -623,6 +680,11 @@ class AnalysisPipeline:
             self.disc_place = raised
         for track in self.tracks:
             if state == "held" and track.track_id == self._possession.holder_id:
+                # Where the player is shown to stand, if that is known: held steady,
+                # and right for one whose legs are covered
+                if track.track_id in self.places:
+                    holder = np.array(self.places[track.track_id])
+                    continue
                 x1, _, x2, y2 = track.to_ltrb()
                 feet = to_field @ [(x1 + x2) / 2, y2, 1.0]
                 if abs(feet[2]) > 1e-12:
@@ -630,7 +692,13 @@ class AnalysisPipeline:
         # The path of the disc, put right once it is known what the disc was doing
         rate = self._possession.frame_rate
         self._disc_path.add(
-            frame_index / rate, state, ground, raised, holder, self._possession.since / rate
+            frame_index / rate,
+            state,
+            ground,
+            raised,
+            holder,
+            self._possession.since / rate,
+            camera,
         )
 
     def _follow_game(self, frame_index: int) -> None:
@@ -788,7 +856,9 @@ class AnalysisPipeline:
             if looked_at is frame:
                 self._motion_ahead = motion
                 return found
-        return run_inference(frame, weak_players_from=self._weak_from())
+        return run_inference(
+            frame, weak_players_from=self._weak_from(), weak_discs_from=weak_discs_from()
+        )
 
     @staticmethod
     def _weak_from() -> float:
@@ -802,7 +872,9 @@ class AnalysisPipeline:
         frame = next_frame()
         if frame is None:
             return None, [], None
-        found = run_inference(frame, weak_players_from=self._weak_from())
+        found = run_inference(
+            frame, weak_players_from=self._weak_from(), weak_discs_from=weak_discs_from()
+        )
         motion = None
         if with_motion:
             # How the camera moved to that frame needs the frame and its boxes and
@@ -828,6 +900,69 @@ class AnalysisPipeline:
     def _follows_camera(options: PipelineOptions) -> bool:
         return (options.tracking or options.top_down_view) and camera_motion_enabled()
 
+    def _look_for_disc_heat(self, frame: np.ndarray, motion: Optional[np.ndarray]) -> None:
+        """Work out the heat map of where a disc is likely (`self.disc_heat`), if it is
+        shown or the discs are found with it. `motion`: how the camera moved to this
+        frame, None if not known."""
+        self.disc_heat, before = None, self.disc_heat_shown
+        self.disc_heat_shown = None
+        wanted = self.show_disc_heat or fusion_enabled()
+        if not wanted or self._disc_heatmap is False:
+            if self._disc_heatmap:
+                self._disc_heatmap.reset()  # Not fed meanwhile: its frames are old
+            return
+        start = time.perf_counter()
+        try:
+            self.disc_heat_shown = before
+            if self._disc_heatmap is None:
+                from .processing.disc_heatmap import load_disc_heatmap
+
+                self._disc_heatmap = load_disc_heatmap(
+                    get_setting("models.disc_heatmap.weights", "")
+                )
+                if self._disc_heatmap is None:
+                    self._disc_heatmap = False
+                    health.report("Disc heat map", "no network to show; see the log")
+                    return
+            # For finding the disc it is asked only where it can change which disc is
+            # gone by: not with one disc the detector is sure of, half the frames. On
+            # the 447 labelled frames that costs 2 of the 16 it wins. For showing, it
+            # is asked about thirty times a second, and the map of the frame before
+            # stays up in between.
+            sure = sum(1 for d in self.detections if d["class_name"] == "disc")
+            needed = fusion_enabled() and sure != 1
+            every = max(1, round(self._possession.frame_rate / HEAT_SHOWN_A_SECOND))
+            self._heat_frames += 1
+            shown = self.show_disc_heat and self._heat_frames % every == 0
+            before = self.disc_heat_shown
+            self.disc_heat = self._disc_heatmap.update(
+                frame, motion, self._possession.frame_rate, needed or shown
+            )
+            if self.show_disc_heat:
+                self.disc_heat_shown = self.disc_heat if needed or shown else before
+        except Exception as error:
+            logger.exception(f"The disc heat map failed: {error}")
+            health.report("Disc heat map", "failed; see the log")
+            self._disc_heatmap = False
+        self._record("Disc Heat Map", start)
+
+    def _put_discs_together(self, frame: np.ndarray) -> None:
+        """The discs of the frame from the detector and the heat map together, in place
+        of the detector's alone (processing/disc_fusion.py), if that is switched on."""
+        if not fusion_enabled():
+            return
+        discs = [d for d in self.detections if d["class_name"] == "disc"]
+        players = [d for d in self.detections if d["class_name"] == "player"]
+        heights = [d["bbox"][3] - d["bbox"][1] for d in players]
+        self._disc_sensors = {
+            "discs": discs,
+            "weak": self._weak_discs,
+            "peaks": peaks_of(self.disc_heat, (frame.shape[1], frame.shape[0])),
+            "height": float(np.median(heights)) if heights else 80.0,
+        }
+        others = [d for d in self.detections if d["class_name"] != "disc"]
+        self.detections = others + fuse_discs(**self._disc_sensors)
+
     def _camera_motion_of(self, frame: np.ndarray, boxes: List[Any]) -> Optional[np.ndarray]:
         """How the camera moved to this frame: as looked at ahead, or worked out now."""
         looked, self._motion_ahead = self._motion_ahead, None
@@ -845,6 +980,7 @@ class AnalysisPipeline:
         """Run the enabled stages and store their results."""
         self.detections = []
         self._weak_players = []
+        self._weak_discs, self._disc_sensors = [], None
         self.tracks = []
         self.field_results = []
 
@@ -853,7 +989,9 @@ class AnalysisPipeline:
             found = self._detect(frame)
             # Players the detector is not sure of are for the tracker alone
             self.detections = [detection for detection in found if not detection.get("weak")]
-            self._weak_players = [detection for detection in found if detection.get("weak")]
+            weak = [detection for detection in found if detection.get("weak")]
+            self._weak_players = [d for d in weak if d["class_name"] == "player"]
+            self._weak_discs = [d for d in weak if d["class_name"] == "disc"]
             self._record("Inference", start)
             if get_setting("models.shot_type.enabled", True) and not self._watch_shot():
                 self._begin_ahead(next_frame, options)
@@ -900,6 +1038,10 @@ class AnalysisPipeline:
                 self._camera_since_calibration = motion @ self._camera_since_calibration
                 self._field_follower.move(motion)
             self._record("Camera Motion", start)
+            self._look_for_disc_heat(frame, motion)
+        else:
+            self._look_for_disc_heat(frame, np.eye(3))  # As if the camera stood still
+        self._put_discs_together(frame)
 
         if options.tracking:
             start = time.perf_counter()
@@ -926,10 +1068,21 @@ class AnalysisPipeline:
                 if track.class_name == "player"
             }
             feet.update({who: ((box[0] + box[2]) / 2.0, box[3]) for who, box in watching.items()})
+            to_field = self._field_follower.image_to_field if self._follow_field else None
+            boxes = camera = None
+            if to_field is not None and get_setting("models.tracking.covered_feet", True):
+                boxes = {t.track_id: t.bbox for t in self.tracks if t.class_name == "player"}
+                boxes.update(watching)
+                try:
+                    camera = raised_mapping(
+                        np.linalg.inv(to_field),
+                        (frame.shape[1], frame.shape[0]),
+                        self._field_follower.focal,
+                    )
+                except (np.linalg.LinAlgError, cv2.error):
+                    pass  # By the players' own boxes alone
             steady = self._steady.update(
-                frame_index / self._possession.frame_rate,
-                feet,
-                self._field_follower.image_to_field if self._follow_field else None,
+                frame_index / self._possession.frame_rate, feet, to_field, boxes, camera
             )
             self.observers = {who: place for who, place in steady.items() if who in watching}
             self.places = {who: place for who, place in steady.items() if who not in watching}
@@ -940,7 +1093,9 @@ class AnalysisPipeline:
             self.holder_scores = self._holder_scores(frame, frame_index)
             self._record("Holder network", start)
             start = time.perf_counter()
-            self._possession.update(self.detections, self.tracks, frame_index, self.holder_scores)
+            self._possession.update(
+                self.detections, self.tracks, frame_index, self.holder_scores, self._disc_sensors
+            )
             self._follow_flight(frame.shape[:2], frame_index)
             self._follow_game(frame_index)
             self._record("Possession", start)
@@ -1339,7 +1494,9 @@ class AnalysisPipeline:
             # As the network says it, in every frame: nothing is held back, so that what
             # it gets wrong can be seen
             if self.show_holder_guess:
-                draw_holder_guess(frame, self.tracks, self.holder_scores)
+                draw_holder_guess(frame, self.tracks, self.holder_guess)
+        if self.show_disc_heat:
+            draw_disc_heat(frame, self.disc_heat_shown)
 
         draw_fps_overlay(frame, self.fps)
         if (

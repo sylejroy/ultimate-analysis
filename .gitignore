@@ -193,12 +193,8 @@ cython_debug/
 /input/cropped_dataset/
 /input/dataset/
 /input/raw_data/
-/data/raw/
-/data/processed/
-/data/interim/
-/data/external/
-/data/models/
-/data/cache/
+# Videos, datasets, models, benchmark runs: none of it is in Git
+/data/
 
 # Model outputs and experiments
 /models/

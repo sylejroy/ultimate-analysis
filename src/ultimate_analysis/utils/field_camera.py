@@ -60,6 +60,31 @@ def camera_mapping(
     return inner @ np.column_stack([turn[:, 0], turn[:, 1], -turn @ np.asarray(position)])
 
 
+def _camera_mappings(
+    focals: np.ndarray, rotations: np.ndarray, positions: np.ndarray, size: Tuple[int, int]
+) -> np.ndarray:
+    """`camera_mapping` for many cameras at once: (N,), (N, 3), (N, 3) -> (N, 3, 3)."""
+    angle = np.linalg.norm(rotations, axis=1)
+    axis = rotations / np.maximum(angle, 1e-300)[:, None]
+    across = np.zeros((len(rotations), 3, 3))
+    across[:, 0, 1], across[:, 0, 2] = -axis[:, 2], axis[:, 1]
+    across[:, 1, 0], across[:, 1, 2] = axis[:, 2], -axis[:, 0]
+    across[:, 2, 0], across[:, 2, 1] = -axis[:, 1], axis[:, 0]
+    # Rodrigues: the turn by an angle about an axis
+    turn = (
+        np.eye(3)
+        + np.sin(angle)[:, None, None] * across
+        + (1.0 - np.cos(angle))[:, None, None] * (across @ across)
+    )
+    outer = np.stack(
+        [turn[:, :, 0], turn[:, :, 1], -(turn @ positions[:, :, None])[:, :, 0]], axis=2
+    )
+    inner = np.zeros((len(rotations), 3, 3))
+    inner[:, 0, 0] = inner[:, 1, 1] = focals
+    inner[:, 0, 2], inner[:, 1, 2], inner[:, 2, 2] = size[0] / 2.0, size[1] / 2.0, 1.0
+    return inner @ outer
+
+
 def focal_of(field_to_image: np.ndarray, size: Tuple[int, int]) -> Optional[float]:
     """The focal length a mapping implies, or None if it is not the view of such a camera.
 
@@ -96,9 +121,27 @@ def camera_of(
     return focal, cv2.Rodrigues(turn)[0].ravel(), -turn.T @ shift
 
 
+def raised_mapping(
+    field_to_image: np.ndarray, size: Tuple[int, int], focal: Optional[float] = None
+) -> Optional[np.ndarray]:
+    """(x, y, height above the ground) -> pixel, 3x4, for the camera nearest to a mapping
+    of the ground; None if that camera is not above the ground."""
+    focal, rotation, position = camera_of(field_to_image, size, focal)
+    if not np.isfinite(position).all() or abs(position[2]) < 1e-9:
+        return None
+    turn = cv2.Rodrigues(rotation)[0]
+    inner = np.array([[focal, 0.0, size[0] / 2.0], [0.0, focal, size[1] / 2.0], [0.0, 0.0, 1.0]])
+    # Up is the side of the ground the camera is on
+    up = turn[:, 2] * np.sign(position[2])
+    return inner @ np.column_stack([turn[:, 0], turn[:, 1], up, -turn @ position])
+
+
 # How often a fit may ask for the misfits, and how exactly it is to be solved
 MAX_FIT_EVALUATIONS = 400
 FIT_TOLERANCE = 1e-4
+# The step by which a number of the camera is changed to see what that does to the
+# misfits, as a share of the number: the solver's own
+STEP = float(np.sqrt(np.finfo(np.float64).eps))
 
 
 def _misfit_function(
@@ -118,13 +161,19 @@ def _misfit_function(
     marks = np.array(list(points.values()), dtype=np.float64).reshape(-1, 2)
 
     def misfits(field_to_image: np.ndarray) -> np.ndarray:
+        """Of one mapping (3, 3), or of many at once (N, 3, 3): a row of misfits each."""
+        many = field_to_image.reshape(-1, 3, 3)
         # A line of the field as a line of the picture: l' = H^-T l
-        in_image = of_lines @ np.linalg.inv(field_to_image)
-        in_image = in_image / np.maximum(np.hypot(in_image[:, 0], in_image[:, 1]), 1e-12)[:, None]
-        from_lines = np.sum(in_image * on_lines, axis=1)
-        mapped = places @ field_to_image.T
-        depth = np.where(np.abs(mapped[:, 2:3]) < 1e-12, 1e-12, mapped[:, 2:3])
-        return np.concatenate([from_lines, (mapped[:, :2] / depth - marks).ravel()])
+        in_image = of_lines @ np.linalg.inv(many)
+        in_image = (
+            in_image / np.maximum(np.hypot(in_image[..., 0], in_image[..., 1]), 1e-12)[..., None]
+        )
+        from_lines = np.sum(in_image * on_lines, axis=2)
+        mapped = places @ many.transpose(0, 2, 1)
+        depth = np.where(np.abs(mapped[..., 2:3]) < 1e-12, 1e-12, mapped[..., 2:3])
+        from_marks = (mapped[..., :2] / depth - marks).reshape(len(many), -1)
+        found = np.concatenate([from_lines, from_marks], axis=1)
+        return found[0] if field_to_image.ndim == 2 else found
 
     return misfits
 
@@ -206,6 +255,22 @@ def fit_camera(
 
     misfits = _misfit_function(template, lines, points)
 
+    def mappings_of(values: np.ndarray) -> np.ndarray:
+        if focal is not None:
+            focals = np.full(len(values), focal)
+            return _camera_mappings(focals, values[:, 0:3], values[:, 3:6], size)
+        focals = np.exp(np.clip(values[:, 0], 4.0, 11.0))
+        return _camera_mappings(focals, values[:, 1:4], values[:, 4:7], size)
+
+    def slopes(values: np.ndarray) -> np.ndarray:
+        # How the misfits change with each number of the camera, by a small step of
+        # each, as the solver would find it by asking seven times: asked once, of all
+        # the stepped cameras together. Most of a fit's time went into the asking.
+        step = STEP * np.where(values == 0.0, 1.0, np.abs(values))
+        stepped = np.vstack([values, values + np.diag(step)])
+        found = misfits(mappings_of(stepped))
+        return ((found[1:] - found[0]) / step[:, None]).T
+
     best: Optional[CameraFit] = None
     for start_focal, rotation, position in starts:
         first = (
@@ -222,6 +287,7 @@ def fit_camera(
             solved = _least_squares()(
                 lambda values: misfits(mapping_of(values)),
                 first,
+                jac=slopes,
                 method="lm",
                 max_nfev=MAX_FIT_EVALUATIONS,
                 ftol=FIT_TOLERANCE,

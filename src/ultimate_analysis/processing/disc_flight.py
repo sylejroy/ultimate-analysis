@@ -10,11 +10,17 @@ higher it flies. It is put where it would be at the height a disc is thrown and 
 at. That is right at both ends of a throw and too far away in between for a throw that
 rises, but nearer than the ground everywhere.
 
-Fitting the whole throw was tried and is worse: a steady flight in a straight line from
-where the thrower stood fixes the height on paper, and on drawn throws it does, but on
-game footage the thrower's place, the moment of release and the camera's place are each
-off by enough that the fit put the disc further from the catcher than the ground does
-(see docs/MEASUREMENTS.md).
+That is while the disc flies. Once a throw has ended, both its ends are known: it left
+the thrower's hands and came to the catcher's, or to the ground. The whole throw is then
+fitted between the two (`fit_flight`): a course from the one to the other that may bend
+to a side, rise and come down, and lose speed as a disc does, laid through the lines of
+sight of all its sightings. That gives the height in between, and the path over the
+ground is put right backwards.
+
+Fitting a throw from the thrower's end alone, before it is known where it ends, was
+tried and is worse than one fixed height: the thrower's place, the moment of release
+and the camera's place are each off by enough that the far end of the throw is put
+yards from the catcher (see docs/MEASUREMENTS.md).
 """
 
 from typing import List, Optional, Sequence, Tuple
@@ -44,6 +50,21 @@ SIGHTING_ROOM = 3.0
 # The places of a carried disc are averaged over this long, as the trails of the
 # players are: a player's box bobs with every step
 CARRIED_SMOOTHING_SECONDS = 0.4
+# A throw is fitted as a whole if it was seen this often, and from within
+# ANCHOR_GAP_SECONDS of both its ends
+FIT_SIGHTINGS = 4
+# What a throw is expected to do, each as far as it usually goes (the fit is held to
+# these as strongly as to a sighting that is a yard off):
+# - be ahead of a steady flight halfway: a disc loses speed. Share of the throw's length
+#   by which it is ahead there, and how much that varies
+FIT_AHEAD = (0.04, 0.04)
+# - bend to a side, and rise: share of the throw's length, and field units on top
+FIT_BEND = (0.1, 1.0)
+FIT_RISE = (0.1, 1.0)
+# A fit that leaves the sightings this far off on the ground (field units, root mean
+# square), or rises higher than this, is not a throw between these two players
+FIT_MISFIT = 3.0
+FIT_MAX_HEIGHT = 20.0
 
 
 def place_under_disc(
@@ -69,6 +90,111 @@ def place_under_disc(
     return float(place[0]), float(place[1])
 
 
+def fit_flight(
+    times: Sequence[float],
+    seen_over: Sequence[Sequence[float]],
+    cameras: Sequence[Sequence[float]],
+    release: Tuple[float, Sequence[float], float],
+    landing: Tuple[float, Sequence[float], float],
+) -> Optional["FittedFlight"]:
+    """The course of a throw between where it was released and where it came down.
+
+    A sighting says that the disc is on the line from the camera to the spot on the
+    ground it is seen over; how high on that line, one camera cannot tell. The course
+    is the straight, steady flight from the release to the landing, and on top of it:
+    being ahead or behind along the way, a bend to a side, and a rise. Each grows from
+    nothing at the ends and may lean towards one of them. The course that lies nearest
+    to all the lines of sight is taken, held to what throws usually do where the
+    sightings leave it open (a throw straight away from the camera looks the same
+    higher as further on).
+
+    Args:
+        times: When the disc was seen (seconds)
+        seen_over: The spots on the ground it was seen over, (N, 2) in field units
+        cameras: Where the camera was at each sighting: x, y and its height
+        release: When, where (x, y) and how high the disc left the thrower
+        landing: The same for where it was caught or came to lie
+
+    Returns:
+        The course, or None if the sightings are not those of such a throw
+    """
+    began, start, start_height = release[0], np.asarray(release[1], dtype=np.float64), release[2]
+    ended, end, end_height = landing[0], np.asarray(landing[1], dtype=np.float64), landing[2]
+    times = np.asarray(times, dtype=np.float64)
+    seen_over = np.asarray(seen_over, dtype=np.float64).reshape(-1, 2)
+    cameras = np.asarray(cameras, dtype=np.float64).reshape(-1, 3)
+    if ended <= began or len(times) < FIT_SIGHTINGS or not np.isfinite(cameras).all():
+        return None
+    camera_height = np.abs(cameras[:, 2])
+    if camera_height.min() < MIN_CAMERA_HEIGHTS * DISC_HEIGHT:
+        return None
+    way = end - start
+    length = float(np.linalg.norm(way))
+    side = np.array([-way[1], way[0]]) / length if length > 1e-6 else np.array([1.0, 0.0])
+    share = np.clip((times - began) / (ended - began), 0.0, 1.0)
+    bump, lean = share * (1.0 - share), share - 0.5
+    # A disc this much higher is seen this much further from the camera
+    per_height = (seen_over - cameras[:, :2]) / camera_height[:, None]
+    level = start_height + (end_height - start_height) * share
+    # Unknown: ahead, bend, bend's lean, rise, rise's lean. Two rows a sighting (x, y)
+    columns = [
+        bump[:, None] * way,
+        bump[:, None] * side,
+        (bump * lean)[:, None] * side,
+        bump[:, None] * per_height,
+        (bump * lean)[:, None] * per_height,
+    ]
+    wanted = seen_over - start - share[:, None] * way - level[:, None] * per_height
+    bend = FIT_BEND[0] * length + FIT_BEND[1]
+    rise = FIT_RISE[0] * length + FIT_RISE[1]
+    # In the numbers of the unknowns: the bump is a quarter at its highest
+    usual = np.array([4 * FIT_AHEAD[0], 0.0, 0.0, 4 * rise, 0.0])
+    # A throw that bends one way and then the other, or rises late, is rare
+    varies = np.array([4 * FIT_AHEAD[1], 4 * bend, 2 * bend, 4 * rise, 2 * rise])
+    rows = np.vstack([np.concatenate([c[:, 0], c[:, 1]]) for c in columns]).T
+    rows = np.vstack([rows, np.diag(1.0 / varies)])
+    aim = np.concatenate([wanted[:, 0], wanted[:, 1], usual / varies])
+    found = np.linalg.lstsq(rows, aim, rcond=None)[0]
+    flight = FittedFlight(began, ended, start, end, start_height, end_height, side, found)
+    places, heights = flight.at(times)
+    on_line = cameras[:, :2] + (1.0 - heights / camera_height)[:, None] * (
+        seen_over - cameras[:, :2]
+    )
+    misfit = float(np.sqrt(np.mean(np.sum((places - on_line) ** 2, axis=1))))
+    if misfit > FIT_MISFIT or flight.at(np.linspace(began, ended, 21))[1].max() > FIT_MAX_HEIGHT:
+        return None
+    return flight
+
+
+class FittedFlight:
+    """The course of a throw as `fit_flight` found it."""
+
+    def __init__(self, began, ended, start, end, start_height, end_height, side, found):
+        self.began, self.ended = began, ended
+        self._start, self._end = start, end
+        self._heights = (start_height, end_height)
+        self._side = side
+        self._found = found
+
+    def at(self, times: Sequence[float]) -> Tuple[np.ndarray, np.ndarray]:
+        """Where the disc was over the field (N, 2) and how high (N), at some times."""
+        span = self.ended - self.began
+        share = np.clip((np.asarray(times, dtype=np.float64) - self.began) / span, 0.0, 1.0)
+        bump, lean = share * (1.0 - share), share - 0.5
+        ahead, bend, bend_lean, rise, rise_lean = self._found
+        places = (
+            self._start
+            + (share + bump * ahead)[:, None] * (self._end - self._start)
+            + (bump * (bend + bend_lean * lean))[:, None] * self._side
+        )
+        heights = (
+            self._heights[0]
+            + (self._heights[1] - self._heights[0]) * share
+            + bump * (rise + rise_lean * lean)
+        )
+        return places, np.maximum(heights, 0.0)
+
+
 class DiscPath:
     """Where the disc has been on the field over the last seconds.
 
@@ -80,9 +206,11 @@ class DiscPath:
     path is put right from the moment the answer holds from.
 
     A flight that has ended is known at both ends: it began where the thrower stood
-    and ended where the catcher stands, or where the disc lies. Its places in between,
-    taken at one fixed height, are shifted so that it begins and ends there, by as much
-    as each end was off and evenly in between.
+    and ended where the catcher stands, or where the disc lies. It is then fitted as a
+    whole between the two (`fit_flight`), which says how high it was in between and so
+    over which spots. A flight seen too little for that, or known at one end only, keeps
+    its places at one fixed height, shifted so that it begins and ends where it did, by
+    as much as each end was off and evenly in between.
     """
 
     def __init__(self, seconds: float = 8.0):
@@ -115,6 +243,7 @@ class DiscPath:
         raised: Optional[Sequence[float]] = None,
         holder: Optional[Sequence[float]] = None,
         since: Optional[float] = None,
+        camera: Optional[Sequence[float]] = None,
     ) -> None:
         """Take in a frame.
 
@@ -125,6 +254,8 @@ class DiscPath:
             raised: The spot it is over if it flies (place_under_disc), if it is seen
             holder: Where the player holding the disc stands, if one does
             since: The time from which `state` holds, which may be before this frame
+            camera: Where the camera is (x, y and its height in field units), for
+                fitting a throw once it has ended; without it throws are not fitted
         """
         if self._points and seconds < self._points[-1]["t"]:
             self.reset()
@@ -142,6 +273,7 @@ class DiscPath:
                 "ground": None if ground is None else np.asarray(ground, dtype=float),
                 "raised": None if raised is None else np.asarray(raised, dtype=float),
                 "holder": None if holder is None else np.asarray(holder, dtype=float),
+                "camera": None if camera is None else np.asarray(camera, dtype=float),
             }
         )
         start = len(self._points) - 1
@@ -179,6 +311,8 @@ class DiscPath:
         if not flight:
             return
         first, last = flight[0], flight[-1]
+        if thrown is not None and landed is not None and self._fitted(begin, end, thrown, landed):
+            return
         duration = last["t"] - first["t"]
         # How fast the disc was seen to move at each end, to carry the first and last
         # sighting on to the moment of the release and of the catch
@@ -199,6 +333,35 @@ class DiscPath:
         for point in flight:
             share = (point["t"] - first["t"]) / duration if duration > 0 else 1.0
             point["place"] = point["place"] + (1.0 - share) * at_release + share * at_catch
+
+    def _fitted(self, begin: int, end: int, thrown: dict, landed: dict) -> bool:
+        """Put the flight in points `begin` to `end` where a fit of the whole throw has
+        it; False if it cannot be fitted."""
+        seen = [
+            p
+            for p in self._points[begin:end]
+            if p["ground"] is not None and p["camera"] is not None and p["place"] is not None
+        ]
+        if (
+            len(seen) < FIT_SIGHTINGS
+            or seen[0]["t"] - thrown["t"] > ANCHOR_GAP_SECONDS
+            or landed["t"] - seen[-1]["t"] > ANCHOR_GAP_SECONDS
+        ):
+            return False
+        flight = fit_flight(
+            [p["t"] for p in seen],
+            [p["ground"] for p in seen],
+            [p["camera"] for p in seen],
+            (thrown["t"], thrown["place"], DISC_HEIGHT),
+            (landed["t"], landed["place"], DISC_HEIGHT if landed["state"] == "held" else 0.0),
+        )
+        if flight is None:
+            return False
+        # Also the frames in which the disc was not found: the course says where it was
+        places, heights = flight.at([p["t"] for p in self._points[begin:end]])
+        for point, place, height in zip(self._points[begin:end], places, heights):
+            point["place"], point["height"] = place, float(height)
+        return True
 
     def stretches(self) -> List[np.ndarray]:
         """The path as lines of places on the field (N, 2), oldest first: one line as

@@ -189,7 +189,14 @@ def matches(
         same_point_all, same_point_teammates, across_points_all, across_points_teammates
         (shares, the last two missing without a player numbered in two stretches), and
         for each the number of tracks matched (..._count) and how often picking at
-        random would be right (..._chance)
+        random would be right (..._chance).
+
+        Across points a match that is not right is of two kinds, and only one of them
+        is known to be wrong: the track taken has another number (..._wrong), or nobody
+        read a number on it (..._unknown), and then it may be the same player's other
+        track all the same. More than half the tracks have no number, so the share
+        right is a floor; ..._of_numbered is the share right of the matches that end at
+        a track with a number.
     """
     tracks = defaultdict(list)  # (video, stretch, player) -> indices of its crops, in time
     for index, row in sorted(enumerate(rows), key=lambda item: item[1]["frame"]):
@@ -209,8 +216,11 @@ def matches(
 
     hits = defaultdict(list)
     chance = defaultdict(list)
+    wrong = defaultdict(list)  # Matched with a track known to be somebody else
 
-    def match(name: str, query: np.ndarray, gallery: Dict[tuple, np.ndarray], right) -> None:
+    def match(
+        name: str, query: np.ndarray, gallery: Dict[tuple, np.ndarray], right, known=None
+    ) -> None:
         for teammates_only, kind in ((False, "all"), (True, "teammates")):
             chosen = {
                 key: vector
@@ -221,8 +231,11 @@ def matches(
                 continue
             keys = list(chosen)
             distance = np.linalg.norm(np.stack([chosen[key] for key in keys]) - query, axis=1)
-            hits[f"{name}_{kind}"].append(float(right[1](keys[int(np.argmin(distance))])))
+            taken = keys[int(np.argmin(distance))]
+            hits[f"{name}_{kind}"].append(float(right[1](taken)))
             chance[f"{name}_{kind}"].append(sum(right[1](key) for key in keys) / len(keys))
+            if known is not None:
+                wrong[f"{name}_{kind}"].append(float(not right[1](taken) and known(taken)))
 
     # Same point: the later half of each track against the earlier halves of all
     for keys in by_stretch.values():
@@ -248,6 +261,7 @@ def matches(
                 whole[key],
                 {other: whole[other] for other in keys},
                 (light[key], same_player),
+                known=lambda other: bool(number[other]),
             )
 
     results = {}
@@ -255,6 +269,11 @@ def matches(
         results[name] = float(np.mean(values))
         results[f"{name}_count"] = len(values)
         results[f"{name}_chance"] = float(np.mean(chance[name]))
+        if name in wrong:
+            results[f"{name}_wrong"] = float(np.mean(wrong[name]))
+            results[f"{name}_unknown"] = 1.0 - results[name] - results[f"{name}_wrong"]
+            numbered = results[name] + results[f"{name}_wrong"]
+            results[f"{name}_of_numbered"] = results[name] / numbered if numbered else 0.0
     return results
 
 
@@ -313,6 +332,9 @@ def main() -> None:
         ("same_point_teammates", "Same point, teammates only"),
         ("across_points_all", "Across points, all players"),
         ("across_points_teammates", "Across points, teammates only"),
+        ("across_points_teammates_wrong", "... taken: another number"),
+        ("across_points_teammates_unknown", "... taken: no number read"),
+        ("across_points_teammates_of_numbered", "... right, of those numbered"),
     )
     first = next(iter(ways.values()))
     print(f"{'':<32}" + "".join(f"{name:>30}" for name in ways) + f"{'at random':>12}{'tracks':>8}")
@@ -320,10 +342,16 @@ def main() -> None:
         if key not in first:
             print(f"{title:<32} no player numbered in two stretches")
             continue
+        # Chance and the number of tracks are of the matches, not of their kinds
+        of_matches = (
+            f"{first[key + '_chance']:>12.0%}{first[key + '_count']:>8}"
+            if key + "_count" in first
+            else ""
+        )
         print(
             f"{title:<32}"
             + "".join(f"{result[key]:>30.0%}" for result in ways.values())
-            + f"{first[key + '_chance']:>12.0%}{first[key + '_count']:>8}"
+            + of_matches
         )
 
 

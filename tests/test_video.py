@@ -55,6 +55,41 @@ class VideoPlayerTests(unittest.TestCase):
         self.assertFalse(player.seek_to_frame(20))
         self.assertEqual(player.current_frame_idx, 5)
 
+    def test_with_a_step_the_frames_between_are_passed_over(self):
+        module = load_module("utils.video")
+
+        class Film:
+            """Hands out its position as the frame."""
+
+            def __init__(self):
+                self.position = 0
+
+            def isOpened(self):
+                return True
+
+            def release(self):
+                pass
+
+            def grab(self):
+                self.position += 1
+                return True
+
+            def read(self):
+                self.position += 1
+                return True, np.full((1, 1), self.position - 1)
+
+        player = module.VideoPlayer()
+        player.cap = Film()
+        player.set_frame_step(2)
+        handed_out = []
+        for _ in range(3):
+            handed_out.append((player.current_frame_idx, int(player.get_next_frame()[0, 0])))
+        # Every frame again from here: what was decoded ahead is the frame at the position
+        player.set_frame_step(1)
+        for _ in range(3):
+            handed_out.append((player.current_frame_idx, int(player.get_next_frame()[0, 0])))
+        self.assertEqual(handed_out, [(0, 0), (2, 2), (4, 4), (6, 6), (7, 7), (8, 8)])
+
     def test_decode_ahead_returns_frames_in_order_and_is_dropped_on_seek(self):
         module = load_module("utils.video")
         player = module.VideoPlayer()

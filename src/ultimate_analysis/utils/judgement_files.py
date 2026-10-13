@@ -57,11 +57,18 @@ ASKED_COLUMNS = (
     "likeness",
     "time",
 )
-UNSURE_SHARE = 0.7  # Of the pairs asked about, where the network's vectors are there
-# How alike (cosine of their vectors) two tracks are that the network is unsure of. Of
-# the pairs answered by hand on 10 Oct it put the same players at 0.85 and others at
-# 0.1 to 0.3, in the middle case
-UNSURE_LIKENESS = (0.4, 0.8)
+UNSURE_SHARE = 0.8  # Of the pairs asked about, where the network's vectors are there
+# How alike (cosine of their vectors) two tracks are that the network is unsure of:
+# below, they are different players nearly every time, above, the same. Of the 117
+# pairs answered by 11 Oct whose likeness was written down: 1 of 24 below 0.4 was one
+# player, 5 of 60 from 0.4 to 0.6, 15 of 30 from 0.6 to 0.8
+UNSURE_LIKENESS = (0.6, 0.8)
+# The pairs asked about as "unsure" are drawn from these bands of likeness, a band at
+# random first: there are four times as many pairs from 0.4 to 0.6 as from 0.6 to 0.8,
+# so drawn from all of them together nine in ten were different players. The bands
+# above 0.8 are there for the pairs that look like one player and are two: the network
+# learns most from being told so
+ASKED_LIKENESS = ((0.5, 0.6), (0.6, 0.7), (0.7, 0.8), (0.8, 0.9), (0.9, 1.01))
 # A picture of a track that was shown: of the player the track is mostly of (1), or
 # of somebody else (0)
 PICTURE_COLUMNS = ("source", "video", "stretch", "player", "frame", "of_the_player", "time")
@@ -196,6 +203,15 @@ def judged_pairs(answers: Path) -> Set[frozenset]:
     }
 
 
+def seen_together(first: Track, second: Track) -> bool:
+    """Whether two tracks of one stretch are in the picture at one time."""
+    return (
+        first.key[:2] == second.key[:2]
+        and first.crops[0][0] <= second.crops[-1][0]
+        and second.crops[0][0] <= first.crops[-1][0]
+    )
+
+
 def choose_pair(
     tracks: Dict[TrackKey, Track],
     judged: Set[frozenset],
@@ -209,9 +225,12 @@ def choose_pair(
     Both are of the same game and the same kind of shirt. Two drawn at random are
     different players nearly every time, and a network that tells players apart knows
     that already. So where its vectors of the tracks are given, most pairs
-    (`UNSURE_SHARE`) are ones it is unsure of: neither alike enough to be one player
-    nor unlike enough to be two (`UNSURE_LIKENESS`). The rest are drawn at random: a
-    fair sample, which the others are not.
+    (`UNSURE_SHARE`) are ones that look alike to it, as many from each band of likeness
+    (`ASKED_LIKENESS`): about half of those are one player. The rest are drawn at
+    random: a fair sample, which the others are not.
+
+    Two tracks of one stretch that are in the picture at one time are never asked
+    about: they are two players, and nobody need say so.
     """
     by_game: Dict[Tuple[str, str], List[Track]] = defaultdict(list)
     for track in tracks.values():
@@ -223,15 +242,17 @@ def choose_pair(
         others = [
             other
             for other in by_game[first.key[0], first.light_shirt]
-            if other is not first and pair_of(first.key, other.key) not in judged
+            if other is not first
+            and pair_of(first.key, other.key) not in judged
+            and not seen_together(first, other)
         ]
         if unsure and first.key in vectors:
-            low, high = UNSURE_LIKENESS
+            low, high = rng.choice(ASKED_LIKENESS)
             others = [
                 other
                 for other in others
                 if other.key in vectors
-                and low <= float(vectors[first.key] @ vectors[other.key]) <= high
+                and low <= float(vectors[first.key] @ vectors[other.key]) < high
             ]
         elif unsure:
             continue

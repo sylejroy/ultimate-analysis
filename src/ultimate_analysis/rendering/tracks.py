@@ -270,8 +270,12 @@ def draw_tracks_with_player_ids(
         if track_histories and track_id in track_histories:
             history = track_histories[track_id]
             if len(history) > 1:
-                # A thin line: where they came from, without covering the grass
+                # A thin line: where they came from, without covering the grass. A
+                # trail is smooth, and a smooth line costs by its corners: some of its
+                # points draw the same line (counted from the newest, where they are)
                 points = np.asarray(history, dtype=np.int32)
+                every = -(-len(points) // TRAIL_POINTS)
+                points = np.ascontiguousarray(points[::-every][::-1])
                 cv2.polylines(vis_frame, [points], False, color, 1, cv2.LINE_AA)
 
     return vis_frame
@@ -463,15 +467,70 @@ def possession_colour(track: Any) -> Tuple[int, int, int]:
 
 
 # The colour the holder network's guess is drawn in (BGR): a light blue no team wears
+TRAIL_POINTS = 60  # A trail is drawn through at most this many of its points
+# Below this the network's guess is not drawn: it could not be seen anyway
+HOLDER_GUESS_SEEN = 0.04
 HOLDER_GUESS_COLOUR = (255, 200, 60)
 
 
+# A heat map is drawn where it is at least this sure, a glow this wide around each
+# spot (share of the picture's width), and fully bright from this sure on
+HEAT_SEEN = 0.02
+HEAT_GLOW = 0.008
+HEAT_BRIGHT = 0.4
+
+
+def draw_disc_heat(frame: np.ndarray, heat: Optional[np.ndarray]) -> None:
+    """Lay a heat map of where a disc is likely over the picture (in place): a glow
+    around every spot, dark red where the network is a little sure and yellow to white
+    where it is sure.
+
+    Args:
+        frame: The picture
+        heat: For every pixel of the picture at some smaller size, how sure (0 to 1)
+    """
+    if heat is None or float(heat.max()) < HEAT_SEEN:
+        return
+    height, width = frame.shape[:2]
+    rows, columns = heat.shape
+    wide = max(1.0, HEAT_GLOW * columns)
+    room = int(3 * wide) + 1
+    # Spot by spot, each with room for its glow: a spot here and one at the far end of
+    # the picture would otherwise have all between them worked through
+    # ... told apart on a grid of cells as large as that room: the cells with any heat
+    # in them and the cells around those
+    warm = (heat >= HEAT_SEEN).astype(np.uint8) * 255
+    cells = cv2.resize(warm, (-(-columns // room), -(-rows // room)), interpolation=cv2.INTER_AREA)
+    around = cv2.dilate((cells > 0).astype(np.uint8), np.ones((3, 3), dtype=np.uint8))
+    count, _, boxes, _ = cv2.connectedComponentsWithStats(around, connectivity=8)
+    for left, top, across, down, _ in boxes[1:count] * room:
+        across, down = min(across, columns - left), min(down, rows - top)
+        # A disc is a few pixels: its spot is widened so that it can be seen, and keeps
+        # how sure it is; without the little there is everywhere, which widened would
+        # tint the picture
+        spots = np.maximum(heat[top : top + down, left : left + across] - HEAT_SEEN, 0.0)
+        glow = cv2.GaussianBlur(spots, (0, 0), wide)
+        glow *= float(spots.max() + HEAT_SEEN) / max(float(glow.max()), 1e-6)
+        y1, y2 = top * height // rows, -(-(top + down) * height // rows)
+        x1, x2 = left * width // columns, -(-(left + across) * width // columns)
+        part = cv2.resize(glow, (x2 - x1, y2 - y1))
+        bright = np.clip((part - HEAT_SEEN) / (HEAT_BRIGHT - HEAT_SEEN), 0.0, 1.0)
+        # From the red of the colour scale on: its dark end would only dim the picture
+        colours = cv2.applyColorMap(
+            (255 * (0.4 + 0.6 * bright)).astype(np.uint8), cv2.COLORMAP_INFERNO
+        )
+        alpha = (0.85 * bright**0.7)[..., None]
+        ground = frame[y1:y2, x1:x2]
+        ground[:] = (ground * (1.0 - alpha) + colours * alpha).astype(np.uint8)
+
+
 def draw_holder_guess(frame: np.ndarray, tracks: List[Any], scores: Optional[dict]) -> None:
-    """Mark the player a holder network takes for the holder (in place): corner marks
-    around the one it is surest of, with how sure, and under every other player how sure
-    it is of them. Always, however unsure it is: this shows what the network says, not
-    what is made of it. Apart from the box of the
-    holder the possession tracking names, so the two can be seen to agree or not.
+    """Mark what a holder network says of every player (in place): corner marks around
+    each, as bright as the network is sure that they hold the disc. A player it is sure
+    of stands out, one it is half sure of is marked faintly, and of whom it is sure they
+    hold nothing, nothing is seen. The one it is surest of has the heavier marks. This
+    shows what the network says, not what is made of it; the holder the possession
+    tracking names has a box of their own, so the two can be seen to agree or not.
 
     Args:
         frame: The picture
@@ -481,27 +540,47 @@ def draw_holder_guess(frame: np.ndarray, tracks: List[Any], scores: Optional[dic
     if not scores:
         return
     best = max(scores, key=scores.get)
-    track = next((t for t in tracks if getattr(t, "track_id", None) == best), None)
-    if track is None:
-        return
-    x1, y1, x2, y2 = (int(value) for value in track.to_ltrb())
-    x1, y1, x2, y2 = x1 - 7, y1 - 7, x2 + 7, y2 + 7
-    arm = max(6, (x2 - x1) // 4)
-    for (x, y), (dx, dy) in (
-        ((x1, y1), (1, 1)),
-        ((x2, y1), (-1, 1)),
-        ((x1, y2), (1, -1)),
-        ((x2, y2), (-1, -1)),
-    ):
-        cv2.line(frame, (x, y), (x + dx * arm, y), HOLDER_GUESS_COLOUR, 2, cv2.LINE_AA)
-        cv2.line(frame, (x, y), (x, y + dy * arm), HOLDER_GUESS_COLOUR, 2, cv2.LINE_AA)
-    draw_label(frame, f"{scores[best]:.0%}", x1, y2 + 18, colour=HOLDER_GUESS_COLOUR)
-    # ... and what it says of everybody else, smaller, under each
-    for other in tracks:
-        player = getattr(other, "track_id", None)
-        if player in scores and player != best:
-            left, _, _, bottom = (int(value) for value in other.to_ltrb())
-            draw_label(frame, f"{scores[player]:.0%}", left, bottom + 14, 0.35, HOLDER_GUESS_COLOUR)
+    height, width = frame.shape[:2]
+    for track in tracks:
+        player = getattr(track, "track_id", None)
+        sure = float(scores.get(player, 0.0)) if player in scores else 0.0
+        if sure < HOLDER_GUESS_SEEN or not hasattr(track, "to_ltrb"):
+            continue
+        x1, y1, x2, y2 = (int(value) for value in track.to_ltrb())
+        x1, y1, x2, y2 = x1 - 7, y1 - 7, x2 + 7, y2 + 7
+        arm = max(6, (x2 - x1) // 4)
+        thick = 3 if player == best else 2
+        # Drawn on a copy of the picture around the player and laid over it by how sure
+        left, top = max(0, x1 - thick), max(0, y1 - thick)
+        right, bottom = min(width, x2 + thick + 1), min(height, y2 + thick + 1)
+        if right <= left or bottom <= top:
+            continue
+        ground = frame[top:bottom, left:right]
+        marked = ground.copy()
+        for (x, y), (dx, dy) in (
+            ((x1, y1), (1, 1)),
+            ((x2, y1), (-1, 1)),
+            ((x1, y2), (1, -1)),
+            ((x2, y2), (-1, -1)),
+        ):
+            corner = (x - left, y - top)
+            cv2.line(
+                marked,
+                corner,
+                (corner[0] + dx * arm, corner[1]),
+                HOLDER_GUESS_COLOUR,
+                thick,
+                cv2.LINE_AA,
+            )
+            cv2.line(
+                marked,
+                corner,
+                (corner[0], corner[1] + dy * arm),
+                HOLDER_GUESS_COLOUR,
+                thick,
+                cv2.LINE_AA,
+            )
+        ground[:] = cv2.addWeighted(marked, sure, ground, 1.0 - sure, 0)
 
 
 def draw_possession(

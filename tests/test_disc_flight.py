@@ -122,6 +122,54 @@ class DiscPathTest(unittest.TestCase):
             path.add(step / 10, "air", raised=(float(step), 0.0))
         self.assertEqual(len(path.stretches()), 1)
 
+    def high_throw(self, path, camera):
+        """A throw of 30 along the field that rises to 6 on the way; returns where it
+        was over the field in the frames it flew."""
+        path.add(0.0, "held", holder=(15.0, 30.0), since=0.0)
+        flown = []
+        for step in range(1, 40):
+            share = step / 40
+            place = np.array([15.0 + 4.0 * share, 30.0 + 30.0 * share])
+            ground = seen_over(place, 1.0 + 4 * share * (1 - share) * 5.0)
+            raised = load_module("processing.disc_flight").place_under_disc(ground, CAMERA)
+            path.add(share * 2.0, "air", ground=ground, raised=raised, camera=camera)
+            flown.append(place)
+        path.add(2.0, "held", holder=(19.0, 60.0), since=2.0)
+        return np.array(flown)
+
+    def test_a_throw_that_rises_is_put_over_the_ground_it_flew_over(self):
+        path = DiscPath()
+        flown = self.high_throw(path, CAMERA)
+        (line,) = path.stretches()
+        # Straight away from the camera, further on looks like higher: to a yard or so
+        self.assertLess(np.linalg.norm(line[1:-1] - flown, axis=1).max(), 1.5)
+        heights = [point["height"] for point in path._points[1:-1]]
+        self.assertAlmostEqual(max(heights), 6.0, delta=1.5)
+        # At one fixed height its middle lies yards further from the camera
+        plain = DiscPath()
+        self.high_throw(plain, None)
+        off = [
+            np.linalg.norm(point["place"] - place)
+            for point, place in zip(plain._points[1:-1], flown)
+            if point["place"] is not None
+        ]
+        self.assertGreater(max(off), 8.0)
+
+    def test_sightings_that_are_no_throw_between_the_two_are_not_fitted(self):
+        fit_flight = load_module("processing.disc_flight").fit_flight
+        times = np.linspace(0.1, 0.9, 9)
+        # Seen now on one side and now on the other, between players ten apart
+        seen = [(10.0 + 15.0 * (-1) ** n, 20.0 + 10.0 * t) for n, t in enumerate(times)]
+        cameras = [CAMERA] * len(times)
+        self.assertIsNone(
+            fit_flight(times, seen, cameras, (0.0, (10.0, 20.0), 1.0), (1.0, (10.0, 30.0), 1.0))
+        )
+        self.assertIsNone(
+            fit_flight(
+                times[:3], seen[:3], cameras[:3], (0.0, (10.0, 20.0), 1.0), (1.0, (10.0, 30.0), 1.0)
+            )
+        )
+
 
 class FlyingDiscTest(unittest.TestCase):
     """The disc is seen to fly on a clear, smooth course, found well, away from players."""

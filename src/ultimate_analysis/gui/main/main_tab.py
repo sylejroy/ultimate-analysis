@@ -7,7 +7,7 @@ The tab only handles the interface. Decoding and analysis run on a worker thread
 import re
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from PyQt5.QtCore import QEvent, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QKeySequence
@@ -117,6 +117,11 @@ GAME_STATE_COLOURS = {
 WORKER_SHUTDOWN_TIMEOUT_MS = 60000
 
 
+# With "Real time" on, at most every so many frames one is analysed: beyond that the
+# tracker has too little to go by
+MAX_FRAME_STEP = 4
+
+
 class MainTab(QWidget):
     """Main video analysis tab with video player and processing controls."""
 
@@ -148,6 +153,10 @@ class MainTab(QWidget):
         self._busy = False  # A frame request is with the worker
         self._redraw_pending = False  # The current frame must be drawn again when it returns
         self._last_request_time = 0.0
+        # With "Real time" on: every so many frames one is analysed, and how long an
+        # analysis has been taking of late (ms)
+        self._frame_step = 1
+        self._frame_ms: Optional[float] = None
         self._frame_interval_ms = 40.0
 
         self._start_worker()
@@ -383,15 +392,26 @@ class MainTab(QWidget):
         self.holder_guess_checkbox = ToggleSwitch("Show the holder network's guess")
         self.holder_guess_checkbox.setChecked(bool(get_setting("models.holder.show_guess", False)))
         self.holder_guess_checkbox.setToolTip(
-            "Light-blue corner marks around the player the holder network is surest of, with\n"
-            "how sure it is, however unsure: what the network says, with nothing held\n"
-            "back. It is not asked while the disc is seen to fly on a clear course, and\n"
-            "nothing is marked then. The thick box is the holder possession names: the\n"
-            "two can be seen to agree or not. The network then looks at every player in\n"
-            "every frame, which costs a few milliseconds a frame."
+            "Light-blue corner marks around every player, as bright as the holder network\n"
+            "is sure that they hold the disc: bright for sure, faint for half sure, nothing\n"
+            "where it is sure they do not. What the network says, with nothing held back.\n"
+            "It is not asked while the disc is seen to fly on a clear course, and nothing\n"
+            "is marked then. The thick box is the holder possession names: the two can be\n"
+            "seen to agree or not."
         )
         self.holder_guess_checkbox.stateChanged.connect(self._on_holder_guess_toggled)
         models_layout.addRow(self.holder_guess_checkbox)
+        self.disc_heat_checkbox = ToggleSwitch("Show the disc heat map")
+        self.disc_heat_checkbox.setChecked(bool(get_setting("models.disc_heatmap.show", False)))
+        self.disc_heat_checkbox.setToolTip(
+            "A glow where a second network takes a disc to be likely: dark red where it\n"
+            "is a little sure, yellow to white where it is sure. It looks at the frame and\n"
+            "the two before it, so it has nothing to show in the first frames after a\n"
+            "seek or a cut. Shown only: the disc is still found by the disc model above.\n"
+            "The network runs only while this is on, and playback is slower with it."
+        )
+        self.disc_heat_checkbox.stateChanged.connect(self._on_disc_heat_toggled)
+        models_layout.addRow(self.disc_heat_checkbox)
 
         # Disc detection model dropdown
         self.disc_model_combo = compact_combo(QComboBox())
@@ -559,6 +579,17 @@ class MainTab(QWidget):
         reset_button.setFixedHeight(40)
         controls_layout.addWidget(reset_button)
 
+        self.realtime_checkbox = ToggleSwitch("Real time")
+        self.realtime_checkbox.setChecked(bool(get_setting("video.realtime", False)))
+        self.realtime_checkbox.setToolTip(
+            "Play the video at its own speed by passing over frames: of a video with 60\n"
+            "frames a second every second one is analysed, which is what the analysis\n"
+            "keeps up with. Off: every frame is analysed, and a fast video plays slower\n"
+            "than it was filmed."
+        )
+        self.realtime_checkbox.stateChanged.connect(lambda _state: self._apply_frame_step())
+        controls_layout.addWidget(self.realtime_checkbox)
+
         layout.addLayout(controls_layout)
 
         panel.setLayout(layout)
@@ -698,6 +729,8 @@ class MainTab(QWidget):
             self._request_frame("current")
         elif self.is_playing:
             elapsed_ms = (time.perf_counter() - self._last_request_time) * 1000
+            if processed.mode == "next" and processed.result is not None:
+                self._keep_up(elapsed_ms)
             wait_ms = int(self._frame_interval_ms - elapsed_ms)
             if wait_ms <= 0:
                 self._request_frame("next")
@@ -882,7 +915,7 @@ class MainTab(QWidget):
             return
 
         self.video_info = info
-        self._frame_interval_ms = 1000.0 / info["fps"] if info["fps"] > 0 else 40.0
+        self._apply_frame_step()
         self.possession_bar.clear()
         self.possession_bar.set_frame_rate(info["fps"])
         if info["fps"] > 0:
@@ -906,6 +939,42 @@ class MainTab(QWidget):
             self.video_list.setCurrentRow((self.current_video_index + 1) % len(self.video_files))
 
     # ------------------------------------------------------------------ playback
+
+    def _apply_frame_step(self, step: int = 0) -> None:
+        """Analyse every frame, or as many as play the video at its own speed.
+
+        Args:
+            step: Every so many frames one is analysed; 0 for what the switch says to
+                begin with
+        """
+        rate = self.video_info.get("fps", 0) if self.video_info else 0
+        if not self.realtime_checkbox.isChecked() or rate <= 0:
+            step = 1
+        elif step <= 0:
+            self._frame_ms = None
+            step = max(1, round(rate / float(get_setting("video.realtime_rate", 30))))
+        self._frame_step = step
+        self._frame_interval_ms = 1000.0 * step / rate if rate > 0 else 40.0
+        self._run_on_worker(lambda worker: worker.set_frame_step(step))
+
+    def _keep_up(self, took_ms: float) -> None:
+        """With "Real time" on: pass over as many frames as the analysis takes the time
+        of, so that the video plays at its own speed on a slow day too."""
+        rate = self.video_info.get("fps", 0) if self.video_info else 0
+        if not self.realtime_checkbox.isChecked() or rate <= 0:
+            return
+        # Evened out over some frames: one slow frame is no reason to change the pace
+        self._frame_ms = took_ms if self._frame_ms is None else 0.9 * self._frame_ms + 0.1 * took_ms
+        frames = self._frame_ms * rate / 1000.0  # Frames of video one analysis takes
+        least = max(1, round(rate / float(get_setting("video.realtime_rate", 30))))
+        step = self._frame_step
+        if frames > step + 0.1:
+            step += 1
+        elif frames < step - 1.1:
+            step -= 1
+        step = min(MAX_FRAME_STEP, max(least, step))
+        if step != self._frame_step:
+            self._apply_frame_step(step)
 
     def toggle_playback(self) -> None:
         """Play or pause, asked for from another tab."""
@@ -1024,6 +1093,12 @@ class MainTab(QWidget):
         """Show or hide what the holder network makes of the players."""
         shown = self.holder_guess_checkbox.isChecked()
         self._run_on_worker(lambda worker: worker.show_holder_guess(shown))
+        self._request_display_update()
+
+    def _on_disc_heat_toggled(self, _state: int):
+        """Show or hide the heat map of where a disc is likely."""
+        shown = self.disc_heat_checkbox.isChecked()
+        self._run_on_worker(lambda worker: worker.show_disc_heat(shown))
         self._request_display_update()
 
     def _on_holder_model_changed(self, _index: int):

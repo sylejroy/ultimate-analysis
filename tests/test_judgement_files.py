@@ -75,10 +75,10 @@ class SamePlayerTests(unittest.TestCase):
 
     def test_most_pairs_are_ones_the_network_is_unsure_of(self):
         a, b, c = ("game", "0", "0-1"), ("game", "0", "0-2"), ("game", "1", "0-3")
-        # a and b are half alike, c is like neither
+        # a and b look alike, c is like neither
         vectors = {
             a: np.array([1.0, 0.0, 0.0]),
-            b: np.array([0.6, 0.8, 0.0]),
+            b: np.array([0.75, 0.6614, 0.0]),
             c: np.array([0.0, 0.0, 1.0]),
         }
         rng, asked = random.Random(3), []
@@ -96,6 +96,57 @@ class SamePlayerTests(unittest.TestCase):
                 judgement_files.choose_pair(self.tracks, judged, rng, vectors)[2],
                 judgement_files.RANDOM,
             )
+
+    def test_two_tracks_in_the_picture_at_one_time_are_not_asked_about(self):
+        # Track d of stretch 0 is there while track a is: they are two players
+        write(
+            self.data / "source" / "index.csv",
+            "video,stretch,frame,player,light_shirt,number,certainty,x1,y1,x2,y2",
+            [
+                f"game,0,{first + 10 * i},{player},1,,,0,0,1,1"
+                for player, first in (("0-1", 100), ("0-5", 120), ("0-2", 200))
+                for i in range(5)
+            ],
+        )
+        tracks = judgement_files.load_tracks(self.data / "source")
+        a, d, b = (tracks["game", "0", player] for player in ("0-1", "0-5", "0-2"))
+        self.assertTrue(judgement_files.seen_together(a, d))
+        self.assertFalse(judgement_files.seen_together(a, b))
+        rng, asked = random.Random(5), set()
+        for _ in range(60):
+            first, second, _ = judgement_files.choose_pair(tracks, set(), rng)
+            asked.add(judgement_files.pair_of(first.key, second.key))
+        self.assertNotIn(judgement_files.pair_of(a.key, d.key), asked)
+        self.assertIn(judgement_files.pair_of(a.key, b.key), asked)
+
+    def test_the_pairs_that_look_alike_come_from_every_band_of_likeness(self):
+        rows = [
+            f"game,{stretch},{100 + 10 * i},0-{stretch},1,,,0,0,1,1"
+            for stretch in range(40)
+            for i in range(5)
+        ]
+        write(
+            self.data / "source" / "index.csv",
+            "video,stretch,frame,player,light_shirt,number,certainty,x1,y1,x2,y2",
+            rows,
+        )
+        tracks = judgement_files.load_tracks(self.data / "source")
+        # One track, and thirty-nine others: most of them a little like it, few much
+        keys = sorted(tracks, key=lambda key: int(key[1]))
+        likeness = [1.0] + [0.55] * 30 + [0.65, 0.66, 0.75, 0.76, 0.85, 0.86, 0.95, 0.96, 0.1]
+        vectors = {
+            key: np.array([value, np.sqrt(1 - value**2)]) for key, value in zip(keys, likeness)
+        }
+        rng, bands = random.Random(7), []
+        for _ in range(4000):
+            first, second, why = judgement_files.choose_pair(tracks, set(), rng, vectors)
+            if why == judgement_files.UNSURE and first.key == keys[0]:
+                bands.append(float(vectors[first.key] @ vectors[second.key]))
+        alike = sum(value >= 0.6 for value in bands) / len(bands)
+        # Thirty of the thirty-eight that look at all like it are in the lowest band;
+        # of what is asked about that track, a fifth is
+        self.assertGreater(len(bands), 30)
+        self.assertGreater(alike, 0.6)
 
     def test_why_a_pair_was_asked_about_is_written_down(self):
         first, second = self.tracks["game", "0", "0-1"], self.tracks["game", "1", "0-3"]

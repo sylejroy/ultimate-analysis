@@ -237,6 +237,62 @@ def embed(
     return np.concatenate(vectors) if vectors else np.zeros((0, VECTOR_LENGTH), dtype=np.float32)
 
 
+def likeness_maps(
+    model: "PlayerEmbedder",
+    crops: Sequence[np.ndarray],
+    others: Sequence[np.ndarray],
+    grid: Sequence[int] = (12, 6),
+) -> List[np.ndarray]:
+    """What the likeness of each crop with a vector rests on.
+
+    Each part of a crop is covered in turn (smeared, so that no edge is drawn) and the
+    crop looked at again: where the likeness falls most, the network found what makes
+    the two alike.
+
+    Args:
+        model: The network
+        crops: The crops (BGR)
+        others: For each crop the vector it is compared with (of length 1)
+        grid: Rows and columns the crop is divided into; two by two are covered at once
+
+    Returns:
+        For each crop the falls as a map (rows, columns), 0 to 1 of its largest fall;
+        all 0 where covering nothing makes it less alike
+    """
+    rows, columns = grid
+    width, height = model.size
+    cell = (height // rows, width // columns)
+    covered: List[np.ndarray] = []
+    pictures = [fit(crop, model.size, model.keep_proportions) for crop in crops]
+    for picture in pictures:
+        smeared = cv2.blur(picture, (31, 31))
+        for row in range(rows - 1):
+            for column in range(columns - 1):
+                y, x = row * cell[0], column * cell[1]
+                copy = picture.copy()
+                copy[y : y + 2 * cell[0], x : x + 2 * cell[1]] = smeared[
+                    y : y + 2 * cell[0], x : x + 2 * cell[1]
+                ]
+                covered.append(copy)
+    if not pictures:
+        return []
+    per_crop = (rows - 1) * (columns - 1)
+    whole = embed(model, pictures)
+    parts = embed(model, covered).reshape(len(pictures), per_crop, -1)
+    maps = []
+    for index, other in enumerate(others):
+        falls = float(whole[index] @ other) - parts[index] @ np.asarray(other, dtype=np.float32)
+        heat = np.zeros((rows, columns), dtype=np.float32)
+        times = np.zeros((rows, columns), dtype=np.float32)
+        for position, fall in enumerate(falls):
+            row, column = divmod(position, columns - 1)
+            heat[row : row + 2, column : column + 2] += max(float(fall), 0.0)
+            times[row : row + 2, column : column + 2] += 1
+        heat /= np.maximum(times, 1)
+        maps.append(heat / heat.max() if heat.max() > 1e-6 else heat)
+    return maps
+
+
 def track_vector(vectors: np.ndarray) -> np.ndarray:
     """One vector for a track from those of its crops: their mean, brought to length 1."""
     mean = np.asarray(vectors, dtype=np.float64).mean(axis=0)

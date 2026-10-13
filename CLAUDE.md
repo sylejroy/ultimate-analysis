@@ -32,8 +32,9 @@ what the app does and how to use it, not how it works inside.
   write new datasets and runs to new folders.
 - Start model training through the app's Model Training tab so the progress is visible,
   not headless from a script. Dataset building, benchmarks, and TensorRT export are fine
-  from the terminal. The tab only trains YOLO models: the network that tells players
-  apart by their looks (`scripts/train_reid.py`) is trained from the terminal, with its
-  progress printed per epoch.
+  from the terminal. The tab only trains YOLO models: the networks that tell players
+  apart by their looks (`scripts/train_reid.py`), tell who holds the disc
+  (`scripts/train_holder.py`) and draw the disc heat map (`scripts/train_disc_heatmap.py`)
+  are trained from the terminal, with their progress printed per epoch.
 - Commit only when asked.
 - Source files use Windows line endings (CRLF); keep them.

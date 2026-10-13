@@ -139,6 +139,10 @@ class PipelineWorker(QObject):
         if self.video_player.seek_to_frame(frame_index):
             self.pipeline.reset()
 
+    def set_frame_step(self, step: int) -> None:
+        """Analyse every `step`-th frame of the video from now on."""
+        self.video_player.set_frame_step(step)
+
     def set_player_model(self, model_path: str) -> None:
         if set_player_model(model_path):
             self.pipeline.reset()
@@ -156,6 +160,10 @@ class PipelineWorker(QObject):
 
     def show_holder_guess(self, shown: bool) -> None:
         self.pipeline.show_holder_guess = shown
+        self.pipeline.invalidate()
+
+    def show_disc_heat(self, shown: bool) -> None:
+        self.pipeline.show_disc_heat = shown
         self.pipeline.invalidate()
 
     def set_looks_model(self, model_path: str) -> None:

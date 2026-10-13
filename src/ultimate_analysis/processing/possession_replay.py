@@ -16,6 +16,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from .disc_fusion import fuse_discs
+from .disc_fusion import is_enabled as fusion_enabled
 from .possession import PossessionTracker
 
 # What the tracker says after a frame: the frame, the holder, since when, the team
@@ -56,6 +58,7 @@ class RecordingPossessionTracker(PossessionTracker):
         tracks: List[Any],
         frame_index: Optional[int] = None,
         holder_scores: Optional[Dict[int, float]] = None,
+        sensors: Optional[Dict[str, Any]] = None,
     ) -> Optional[int]:
         discs = [
             {
@@ -78,6 +81,9 @@ class RecordingPossessionTracker(PossessionTracker):
         # What a network said of the players at the disc is written down only where
         # it said anything: recordings made without one stay as they were
         scores = (dict(holder_scores),) if holder_scores else ()
+        if sensors is not None:
+            # ... and what the discs were made of, so that they can be made again
+            scores = (dict(holder_scores or {}), sensors)
         self.calls.append(("update", discs, seen, frame_index, *scores))
         return super().update(detections, tracks, frame_index, holder_scores)
 
@@ -88,7 +94,8 @@ def _track(track_id: int, box: tuple, team: Optional[int], class_name: Optional[
 
 def replay(calls: List[tuple]) -> List[Said]:
     """Tell a new possession tracker what was recorded; what it says after every frame
-    that was marked as done."""
+    that was marked as done. Where the recording says what the discs were made of,
+    they are made again with the settings as they are now (models.disc_fusion)."""
     tracker = PossessionTracker()
     said: List[Said] = []
     for kind, *given in calls:
@@ -102,6 +109,10 @@ def replay(calls: List[tuple]) -> List[Said]:
             tracker.rename(*given)
         elif kind == "update":
             discs, seen, frame_index, *scores = given
+            if len(scores) > 1:
+                sensors = scores[1]
+                discs = fuse_discs(**sensors) if fusion_enabled() else sensors["discs"]
+                scores = [scores[0] or None]
             tracker.update(discs, [_track(*track) for track in seen], frame_index, *scores)
         elif kind == "frame":
             said.append((given[0], tracker.holder_id, tracker.since, tracker.team))

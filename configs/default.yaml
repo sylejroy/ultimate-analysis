@@ -12,6 +12,8 @@ app:
 # Video Processing Settings
 video:
   default_fps: 25                # Used when a video file reports no valid frame rate
+  realtime: true                 # Play at the video's own speed by passing over frames ("Real time" in the main tab); false: every frame is analysed, and a video of 60 frames a second plays at half its speed
+  realtime_rate: 30              # With that on, about this many frames are analysed per second of video
   default_video: "portland_vs_san_francisco_2024.mp4"  # Opened at startup if present
 
 # Model Configuration
@@ -105,6 +107,7 @@ models:
     hide_non_players: true       # Leave out observers: orange or red shirts that are not a team colour; backend "bytetrack" only
     hide_off_field: true         # Leave out those standing beside the field, going by where the field model sees the field (top-down from the field model only)
     hide_newcomers_off_field: false  # Also a new track that has only been seen beside the field so far, until it is judged
+    covered_feet: true           # A player whose legs another player stands in front of (the thrower behind the mark) is placed on the field as tall as they were before, not where their box ends
     weak_detections_from: 0.0    # Give the tracker players the detector is less sure of than its threshold, from this confidence: they can continue a track, not begin one. 0 = not
     track_history_length: 300    # Most points a trail is kept for
     trail_smoothing_seconds: 0.4 # A trail's points are averaged over this long, a stride, so it does not bob up and down with every step; 0 = as measured
@@ -151,13 +154,27 @@ models:
     stray_seconds: 5.0           # Something the disc model sees lying at the same place for this long is not listened to any more: a cap or a cone, or a disc nobody picks up, which then counts again once it is moved. 0: off
     box_margin: 0.15             # Player boxes are widened by this fraction; a held disc is often just outside
 
+  disc_heatmap:
+    # A network that says for every pixel how likely a disc's middle is there, from the
+    # frame and the two before it. Shown only: the disc is found by disc_detection
+    weights: "data/models/disc_heatmap/three_frames_pretrained/best.pt"
+    show: false                         # Draw the heat map on the video: a glow where a disc is likely. The network runs only while this is on
+
+  disc_fusion:
+    # The disc from the disc model and the heat map together: the two rarely take the
+    # same thing for a disc that is none
+    enabled: false                      # Off: the disc model's discs alone. On, the heat map's network runs in every frame in which the disc model has not exactly one disc it is sure of
+    weak_from: 0.1                      # Discs the disc model is this sure of are looked at, below its own confidence_threshold
+    agree_heat: 0.1                     # ... and count where the heat map is at least this sure of a disc at the same spot
+    heat_alone: 0.5                     # A spot the heat map is this sure of counts as a disc where the disc model has none. 0 = never
+
   holder:
     # A network that tells from a picture of a player whether they hold the disc
     # (scripts/train_holder.py). Used only where the disc is in the boxes of two
     # players or more: the mark in front of the thrower
     weights: "data/models/holder/20261010_holder_resnet18_s3_holder_by_hand_v4_everybody_everybody/best.pt"  # "" = not used: the player whose middle the disc is nearest to
     min_lead: 0.2                       # The network's choice counts if it is this much surer of one player than of the next (0 to 1)
-    show_guess: true                    # Draw the network's guess on the video: corner marks in light blue around the player it is surest of, with how sure, in every frame and however unsure: what the network says, nothing held back. It then looks at every player in every frame
+    show_guess: true                    # Draw the network's guess on the video: light-blue corner marks around every player, as bright as it is sure that they hold the disc. What the network says, not what is made of it
     not_while_flying: true              # The network is not asked while the disc is seen to fly (found surely, frame after frame, on a smooth course away from every player): it looks at one player at a time and names a holder in a fifth of such frames
     sure: 0.0                           # In a frame without a disc, a player the network is at least this sure of counts as the disc seen at them. 0 = never
     weight: 0.5                         # ... for this much of a frame in which the disc itself is seen
