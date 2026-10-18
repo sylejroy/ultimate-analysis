@@ -170,7 +170,7 @@ models:
     join_looking_back_seconds: 1.0      # Every so often, tracks that turn out to be one player looking back over the stretch (never in the picture at once, one team, within reach on the field, clearly most alike) are joined; 0 = never
     join_min_likeness: 0.5              # ... how alike (cosine) two groups of tracks must look to be joined
     join_min_lead: 0.1                  # ... and by how much more than like any rival
-    join_needs_place: true              # ... joined by looks only where both are known to lie within a player's reach on the field
+    join_needs_place: true              # ... joined by looks only where both are known to lie within a player's reach on the field (without: 7 wrong joins of 12)
     roster_folder: "data/cache/rosters" # The players of each video, kept between sessions; "" = not kept
 
   player_id:
