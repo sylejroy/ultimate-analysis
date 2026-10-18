@@ -359,7 +359,7 @@ class AnalysisPipeline:
         ):
             asked.update({t.track_id: t for t in players})
         try:
-            from .processing.holder import BOX_ALONE, crop_around
+            from ..processing.holder import BOX_ALONE, crop_around
 
             scores = None
             if asked:
@@ -389,7 +389,7 @@ class AnalysisPipeline:
 
     def _holding(self, crops: List[np.ndarray]) -> List[float]:
         """What the holder network says of some crops; also run beside the frames."""
-        from .processing.holder import holding, load_holder_net
+        from ..processing.holder import holding, load_holder_net
 
         with GPU_SETUP_LOCK.work():
             with self._holder_loading:
@@ -750,7 +750,7 @@ class AnalysisPipeline:
         try:
             self.disc_heat_shown = before
             if self._disc_heatmap is None:
-                from .processing.disc_heatmap import load_disc_heatmap
+                from ..processing.disc_heatmap import load_disc_heatmap
 
                 self._disc_heatmap = load_disc_heatmap(get_setting("models.disc_heatmap.weights"))
                 if self._disc_heatmap is None:

@@ -208,7 +208,7 @@ class DetectorProcess:
             except (OSError, ValueError):
                 pass
             self._connection.close()
-        if self._process is not None:
+        if self._process is not None and self._process.pid is not None:  # Started
             self._process.join(2.0)
             if self._process.is_alive():
                 self._process.terminate()
