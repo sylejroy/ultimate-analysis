@@ -30,8 +30,8 @@ os.chdir(REPO)
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
-from ultimate_analysis import pipeline as pipeline_module  # noqa: E402
 from ultimate_analysis.pipeline import AnalysisPipeline, PipelineOptions  # noqa: E402
+from ultimate_analysis.pipeline import analysis as pipeline_module  # noqa: E402
 from ultimate_analysis.processing.player_id import discard_pending_readings  # noqa: E402
 from ultimate_analysis.rendering.tracks import UNKNOWN_TEAM_COLOUR  # noqa: E402
 from ultimate_analysis.utils.video import seconds_of  # noqa: E402

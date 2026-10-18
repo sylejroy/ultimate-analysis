@@ -19,7 +19,7 @@ ALLOWED = {
     "processing": BASE | {"processing"},
     "training": BASE | {"training"},
     "rendering": BASE | {"processing", "rendering"},
-    "pipeline": BASE | {"processing", "rendering"},
+    "pipeline": BASE | {"processing", "rendering", "pipeline"},
     # The phone labelling page; like the GUI it sits on top, but must work without Qt
     "web": BASE | {"processing", "web"},
 }

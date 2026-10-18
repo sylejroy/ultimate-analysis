@@ -10,11 +10,14 @@ from support import load_module
 
 STAGES = (
     "detect_players_and_discs",
+    "reset_inference_state",
+    "reset_segmentation_cache",
+)
+# The field model and what is made of its masks (pipeline/field.py)
+FIELD_STAGES = (
     "run_field_segmentation",
     "create_unified_field_mask",
     "fit_lines_from_mask",
-    "reset_inference_state",
-    "reset_segmentation_cache",
 )
 # What the pipeline and the jersey numbers ask of the tracker (processing/tracking.py)
 TRACKER = (
@@ -50,12 +53,14 @@ DRAWING = (
 
 class PipelineTests(unittest.TestCase):
     def setUp(self):
-        self.module = load_module("pipeline")
+        self.module = load_module("pipeline.analysis")
         self.mocks = {}
         numbers = sys.modules[self.module.PlayerNumbers.__module__]
         tracker = self.module.PlayerTracker
+        self.field = sys.modules[self.module.FieldStage.__module__]
         for owner, names in (
             (self.module, STAGES + DRAWING),
+            (self.field, FIELD_STAGES),
             (numbers, NUMBER_STAGES),
             (tracker, TRACKER),
         ):
@@ -98,9 +103,9 @@ class PipelineTests(unittest.TestCase):
         # Each frame waits for the field unless a test says otherwise: what a test
         # sees must not depend on how fast another thread is
         self.beside_the_frames = False
-        setting = self.module.get_setting
+        setting = self.field.get_setting
         patcher = patch.object(
-            self.module,
+            self.field,
             "get_setting",
             lambda key, default=None: (
                 self.beside_the_frames
@@ -217,27 +222,27 @@ class PipelineTests(unittest.TestCase):
         self.beside_the_frames = True
         seen = [object()]
         with (
-            patch.object(self.module, "prepare_for_segmentation", return_value=self.frame),
-            patch.object(self.module, "segment_prepared", return_value=seen) as model,
+            patch.object(self.field, "prepare_for_segmentation", return_value=self.frame),
+            patch.object(self.field, "segment_prepared", return_value=seen) as model,
         ):
             first = self.pipeline.process(self.frame, 0, self.options)
-            self.pipeline._field_job["work"].result()
+            self.pipeline._field._job["work"].result()
             # Begun in the first frame, there in the second, and not begun again at once
             self.assertEqual(first.frame_index, 0)
-            self.assertEqual(self.pipeline.field_results, [])
+            self.assertEqual(self.pipeline._field.results, [])
             self.pipeline.process(self.frame, 1, self.options)
-            self.assertIs(self.pipeline.field_results, seen)
-            self.assertIsNotNone(self.pipeline._geometry.mask)
+            self.assertIs(self.pipeline._field.results, seen)
+            self.assertIsNotNone(self.pipeline._field.mask)
             for index in range(2, 5):
                 self.pipeline.process(self.frame, index, self.options)
             self.assertEqual(model.call_count, 1)
             self.pipeline.process(self.frame, 5, self.options)
-            self.pipeline._field_job["work"].result()
+            self.pipeline._field._job["work"].result()
             self.assertEqual(model.call_count, 2)
             # After a seek, what was found is of the view before
             self.pipeline.reset()
-            self.assertIsNone(self.pipeline._field_job)
-            self.assertEqual(self.pipeline._field_seen, [])
+            self.assertIsNone(self.pipeline._field._job)
+            self.assertEqual(self.pipeline._field._seen, [])
 
     def test_video_and_reader_resets_discard_player_crop_snapshots(self):
         for reset in (self.pipeline.reset, self.pipeline.reset_player_ids):
@@ -335,7 +340,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIsNone(result.top_down_view)
         self.assertEqual(result.top_down_message, "The field has not been found in this view yet")
 
-        self.pipeline._field_follower.image_to_field = np.eye(3)
+        self.pipeline._field.follower.image_to_field = np.eye(3)
         with patch.object(self.module, "draw_field_diagram", return_value="drawn") as diagram:
             result = self.pipeline.process(self.frame, 1, options)
         self.assertEqual((result.top_down_view, result.top_down_message), ("drawn", ""))

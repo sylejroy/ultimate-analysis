@@ -16,42 +16,35 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from .config.settings import get_setting
-from .constants import DEFAULT_PATHS
-from .processing import appearance, health
-from .processing.camera_motion import CameraMotionEstimator
-from .processing.camera_motion import is_enabled as camera_motion_enabled
-from .processing.detector_process import detect as detect_players_and_discs
-from .processing.disc_flight import DiscPath, FlyingDisc, place_under_disc
-from .processing.disc_fusion import fuse_discs, weak_discs_from
-from .processing.disc_fusion import is_enabled as fusion_enabled
-from .processing.disc_heatmap import peaks_of
-from .processing.field_analysis import create_unified_field_mask, fit_lines_from_mask
-from .processing.field_registration import FieldFollower, OffFieldWatcher, field_to_canvas
-from .processing.field_segmentation import (
-    prepare_for_segmentation,
-    reset_segmentation_cache,
-    run_field_segmentation,
-    segment_prepared,
-)
-from .processing.game_state import GameStateTracker, Player
-from .processing.inference import reset_inference_state
-from .processing.jersey_tracker import get_best_jersey_number
-from .processing.model_lock import GPU_SETUP_LOCK
-from .processing.player_looks import PlayerLooks
-from .processing.player_numbers import PlayerNumbers
-from .processing.possession import PossessionTracker, players_at_disc
-from .processing.shot_type import ShotWatcher, players_are_elsewhere
-from .processing.steady_places import SteadyPlaces
-from .processing.tracking import PlayerTracker
-from .rendering.field import (
+from ..config.settings import get_setting
+from ..processing import appearance, health
+from ..processing.camera_motion import CameraMotionEstimator
+from ..processing.camera_motion import is_enabled as camera_motion_enabled
+from ..processing.detector_process import detect as detect_players_and_discs
+from ..processing.disc_flight import DiscPath, FlyingDisc, place_under_disc
+from ..processing.disc_fusion import fuse_discs, weak_discs_from
+from ..processing.disc_fusion import is_enabled as fusion_enabled
+from ..processing.disc_heatmap import peaks_of
+from ..processing.field_registration import OffFieldWatcher, field_to_canvas
+from ..processing.field_segmentation import reset_segmentation_cache
+from ..processing.game_state import GameStateTracker, Player
+from ..processing.inference import reset_inference_state
+from ..processing.jersey_tracker import get_best_jersey_number
+from ..processing.model_lock import GPU_SETUP_LOCK
+from ..processing.player_looks import PlayerLooks
+from ..processing.player_numbers import PlayerNumbers
+from ..processing.possession import PossessionTracker, players_at_disc
+from ..processing.shot_type import ShotWatcher, players_are_elsewhere
+from ..processing.steady_places import SteadyPlaces
+from ..processing.tracking import PlayerTracker
+from ..rendering.field import (
     draw_field_segmentation,
     draw_unified_field_mask,
     get_primary_field_color,
 )
-from .rendering.overlays import draw_fps_overlay, draw_jersey_table, draw_notice
-from .rendering.top_down import draw_field_diagram
-from .rendering.tracks import (
+from ..rendering.overlays import draw_fps_overlay, draw_jersey_table, draw_notice
+from ..rendering.top_down import draw_field_diagram
+from ..rendering.tracks import (
     draw_detections,
     draw_disc_heat,
     draw_holder_guess,
@@ -60,10 +53,9 @@ from .rendering.tracks import (
     draw_tracks_with_player_ids,
     team_display_colour,
 )
-from .utils.field_camera import camera_of, raised_mapping
-from .utils.field_label_files import video_focal
-from .utils.field_template import DEFAULT_RULESET, TEMPLATES
-from .utils.logger import get_logger
+from ..utils.field_camera import camera_of, raised_mapping
+from ..utils.logger import get_logger
+from .field import FieldStage
 
 logger = get_logger("PIPELINE")
 
@@ -91,8 +83,6 @@ FIELD_UNSEEN_SECONDS = 20.0
 STATS_EVERY_FRAMES = 30
 # A heat map that is only shown is worked out about this often (a second of video)
 HEAT_SHOWN_A_SECOND = 30.0
-# The dataset of field labels that a video's focal length is taken from
-FIELD_LABELS = "hand_field"
 
 Line = Tuple[np.ndarray, np.ndarray]
 
@@ -167,18 +157,6 @@ class FrameResult:
     score: Tuple[Tuple[Tuple[int, int, int], int], ...] = ()
 
 
-@dataclass
-class _FieldGeometry:
-    """What follows from one segmentation result at one frame size.
-
-    Segmentation is reused for several frames, so this is worked out once per result.
-    """
-
-    source: Optional[List[Any]] = None  # The segmentation result it was made from
-    frame_shape: Optional[Tuple[int, int]] = None
-    mask: Optional[np.ndarray] = None
-
-
 class AnalysisPipeline:
     """Runs the enabled analysis stages on a frame and renders the results.
 
@@ -189,17 +167,16 @@ class AnalysisPipeline:
     FPS_WINDOW = 30  # Frames the displayed processing rate is averaged over
 
     def __init__(self):
+        # For what can be done beside the main work of a frame
+        self._threads = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pipeline")
+        self._timings: Dict[str, float] = {}
         # Where the field model sees the field: the top-down view and every place on it
-        self._field_follower = FieldFollower(
-            TEMPLATES.get(
-                get_setting("homography.ruleset", DEFAULT_RULESET), TEMPLATES[DEFAULT_RULESET]
-            )
-        )
-        self._off_field = OffFieldWatcher(self._field_follower.template)
+        self._field = FieldStage(self._threads, self._record)
+        self._off_field = OffFieldWatcher(self._field.template)
         self._steady = SteadyPlaces()
         self.places: Dict[int, Tuple[float, float]] = {}
         self.observers: Dict[int, Tuple[float, float]] = {}
-        template = self._field_follower.template
+        template = self._field.template
         self._game = GameStateTracker(template.length, template.end_zone)
         self._score: List[list] = []  # [a team's colour (BGR), its points]
         self._disc_path = DiscPath(float(get_setting("homography.disc_path_seconds", 8.0)))
@@ -208,16 +185,9 @@ class AnalysisPipeline:
         self.disc_seen_flying = False
         self._looks = PlayerLooks()
         self.numbers_by_looks: Dict[int, str] = {}
-        # For what can be done beside the main work of a frame
-        self._threads = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pipeline")
         self._ahead: Optional[Any] = None  # The detectors' work on the next frame
         # ... and with it how the camera moved to that frame, looked at but not taken in
         self._motion_ahead: Optional[tuple] = None
-        # The field model's work beside the frames: the job under way, the frame and
-        # frame size the last one was begun at, and the masks last taken in
-        self._field_job: Optional[dict] = None
-        self._field_begun: Optional[Tuple[int, Tuple[int, int]]] = None
-        self._field_seen: List[Any] = []
         # The shirts of the players of each team as their looks give it, the colours
         # made of them, and a count of frames
         self._shirts_by_looks: List[list] = [[], []]
@@ -246,7 +216,6 @@ class AnalysisPipeline:
         # Results for the current frame
         self.detections: List[Dict[str, Any]] = []
         self.tracks: List[Any] = []
-        self.field_results: List[Any] = []
 
         # The players and the disc followed from frame to frame
         self._tracker = PlayerTracker()
@@ -287,14 +256,8 @@ class AnalysisPipeline:
         # advance the tracker again, so its results are reused.
         self._analysed_key: Optional[tuple] = None
 
-        # Field geometry is derived only from a segmentation result and the frame size.
-        # Segmentation is reused for several frames, so its mask, contour, and line fit
-        # are computed once per result.
-        self._geometry = _FieldGeometry()
-
         self._frame_times_ms: List[float] = []
         self.fps = 0.0
-        self._timings: Dict[str, float] = {}
 
     # ------------------------------------------------------------------ state
 
@@ -314,19 +277,12 @@ class AnalysisPipeline:
         self._game.reset()
         self._score, self._events_counted = [], 0
         self.reset_fps()
-        focal = kept_in = None
-        if video_path:
-            dataset = Path(DEFAULT_PATHS["TRAINING_DATA"]) / FIELD_LABELS
-            focal = video_focal(dataset, video_path, self._field_follower.template)
-            # Without labels it is learned from the frames, and kept for the next time
-            folder = get_setting("homography.focal_folder", "data/cache/focal")
-            kept_in = Path(folder) / f"{Path(video_path).stem}.json" if folder else None
-        self._field_follower.new_video(focal, kept_in)
+        self._field.new_video(video_path)
         self._looks.new_video(video_path)
 
     def reset(self) -> None:
         """Forget everything derived from earlier frames."""
-        self._field_follower.reset()
+        self._field.reset()
         self._off_field.reset()
         self._steady.reset()
         self.places, self.observers = {}, {}
@@ -352,14 +308,12 @@ class AnalysisPipeline:
         self.invalidate()
         self.detections = []
         self.tracks = []
-        self.field_results = []
 
     def _forget_side_work(self) -> None:
         """What the other threads were working out is of the view before."""
         if self._ahead is not None:
             self._ahead.result()  # Waited for: its frame must not be drawn on meanwhile
             self._ahead = None
-        self._field_job, self._field_begun, self._field_seen = None, None, []
         # After a cut the tracker numbers its teams anew
         self._shirts_by_looks = [[], []]
         self._colours_by_looks = None
@@ -371,7 +325,7 @@ class AnalysisPipeline:
         if frames_per_second and frames_per_second > 0:
             self._possession.frame_rate = float(frames_per_second)
             self._looks.frame_rate = float(frames_per_second)
-            self._field_follower.max_frames_unseen = round(
+            self._field.follower.max_frames_unseen = round(
                 FIELD_UNSEEN_SECONDS * float(frames_per_second)
             )
 
@@ -478,7 +432,7 @@ class AnalysisPipeline:
     def invalidate(self) -> None:
         """Analyse the current frame again on the next call instead of reusing results."""
         self._analysed_key = None
-        self._geometry = _FieldGeometry()
+        self._field.invalidate()
 
     # ------------------------------------------------------------------ per frame
 
@@ -569,12 +523,12 @@ class AnalysisPipeline:
             points_begun=sum(1 for event in self._game.events if event.kind == "pull"),
             point_seconds=self._point_seconds(frame_index),
             score=tuple((tuple(colour), points) for colour, points in self._score),
-            image_to_field=self._field_follower.image_to_field if self._follow_field else None,
+            image_to_field=self._field.follower.image_to_field if self._follow_field else None,
             disc_place=self.disc_place,
             places=self.places,
             observers=self.observers,
-            seen_by_camera=self._seen_by_camera(self._field_follower.image_to_field)
-            if self._follow_field and self._field_follower.image_to_field is not None
+            seen_by_camera=self._seen_by_camera(self._field.follower.image_to_field)
+            if self._follow_field and self._field.follower.image_to_field is not None
             else None,
             timings=self._timings,
             wide_shot=self._shot.wide,
@@ -594,7 +548,7 @@ class AnalysisPipeline:
         would be on the ground.
         """
         self.disc_place = None
-        to_field = self._field_follower.image_to_field
+        to_field = self._field.follower.image_to_field
         if to_field is None:
             return
         state = self._possession.disc_state
@@ -618,7 +572,7 @@ class AnalysisPipeline:
                 _, _, camera = camera_of(
                     np.linalg.inv(to_field),
                     (frame_shape[1], frame_shape[0]),
-                    self._field_follower.focal,
+                    self._field.follower.focal,
                 )
                 raised = place_under_disc(ground, camera)
             except (np.linalg.LinAlgError, cv2.error):
@@ -650,7 +604,7 @@ class AnalysisPipeline:
 
     def _follow_game(self, frame_index: int) -> None:
         """Work out the phase of the game from where the players stand on the field."""
-        to_field = self._field_follower.image_to_field
+        to_field = self._field.follower.image_to_field
         players = []
         if to_field is not None:
             for track in self.tracks:
@@ -693,8 +647,8 @@ class AnalysisPipeline:
 
     def _draw_field_diagram(self, options: PipelineOptions) -> np.ndarray:
         """The top-down view as a drawing: the field, and the players where they stand."""
-        to_field = self._field_follower.image_to_field
-        template = self._field_follower.template
+        to_field = self._field.follower.image_to_field
+        template = self._field.follower.template
         # A drawing needs no more pixels than the panel it is shown in
         height = int(get_setting("homography.diagram_height", 900))
         size = (int(height * 1.25 * template.width / template.length), height)
@@ -767,7 +721,7 @@ class AnalysisPipeline:
             return None
         places = mapped[ahead, :2] / mapped[ahead, 2:3]
         # Near the horizon the ground runs off to infinity: kept within sight of the field
-        reach = 3.0 * self._field_follower.template.length
+        reach = 3.0 * self._field.follower.template.length
         return np.clip(places, -reach, reach)
 
     def _trails(self) -> Dict[int, np.ndarray]:
@@ -923,7 +877,7 @@ class AnalysisPipeline:
         self.detections = []
         self._weak_discs, self._disc_sensors = [], None
         self.tracks = []
-        self.field_results = []
+        self._field.results = []
         passed = frame_index - self._last_index if self._last_index is not None else 1
         # Anything else is a seek or the same frame again
         self._frames_passed = passed if 0 < passed <= self._possession.frame_rate else 1
@@ -967,17 +921,11 @@ class AnalysisPipeline:
                 # The next frame goes before the detectors only now: what they work out
                 # of the camera's motion starts from this frame's, and a cut forgets it
                 self._begin_ahead(next_frame, options)
-            if self._field_job is not None:
-                # What is being worked out of the field is of the frame it was begun in
-                before = self._field_job["since"]
-                self._field_job["since"] = (
-                    None if motion is None or before is None else motion @ before
-                )
+            self._field.camera_moved(motion)
             if motion is not None:
                 self._tracker.apply_camera_motion(motion)
                 self._possession.move(motion)
                 self._flying.move(motion)
-                self._field_follower.move(motion)
             self._record("Camera Motion", start)
             self._look_for_disc_heat(frame, motion)
         else:
@@ -987,7 +935,7 @@ class AnalysisPipeline:
         if options.tracking:
             start = time.perf_counter()
             self._tracker.set_field(
-                self._field_follower.image_to_field if self._follow_field else None
+                self._field.follower.image_to_field if self._follow_field else None
             )
             self.tracks = self._tracker.run_tracking(frame, self.detections, frame_index)
             self._teams_by_looks(frame)
@@ -996,8 +944,8 @@ class AnalysisPipeline:
                 # ... judged only by a field seen lately: followed blind through a swing
                 # of the camera, it puts players on the field beside it
                 off_field = self._off_field.update(
-                    self._field_follower.image_to_field
-                    if self._field_follower.seen_lately
+                    self._field.follower.image_to_field
+                    if self._field.follower.seen_lately
                     else None,
                     self.tracks,
                     bool(get_setting("models.tracking.hide_newcomers_off_field", False)),
@@ -1011,7 +959,7 @@ class AnalysisPipeline:
                 if track.class_name == "player"
             }
             feet.update({who: ((box[0] + box[2]) / 2.0, box[3]) for who, box in watching.items()})
-            to_field = self._field_follower.image_to_field if self._follow_field else None
+            to_field = self._field.follower.image_to_field if self._follow_field else None
             boxes = camera = None
             if to_field is not None and get_setting("models.tracking.covered_feet", True):
                 boxes = {t.track_id: t.bbox for t in self.tracks if t.class_name == "player"}
@@ -1020,7 +968,7 @@ class AnalysisPipeline:
                     camera = raised_mapping(
                         np.linalg.inv(to_field),
                         (frame.shape[1], frame.shape[0]),
-                        self._field_follower.focal,
+                        self._field.follower.focal,
                     )
                 except (np.linalg.LinAlgError, cv2.error):
                     pass  # By the players' own boxes alone
@@ -1046,15 +994,7 @@ class AnalysisPipeline:
             self._possession.reset()
 
         if options.field_segmentation:
-            start = time.perf_counter()
-            in_background = bool(get_setting("models.segmentation.in_background", True))
-            if in_background:
-                self._field_beside_the_frames(frame, frame_index)
-            else:
-                self.field_results = run_field_segmentation(frame, frame_index)
-            self._record("Field Segmentation", start)
-            if self.field_results and not in_background:
-                self._update_field_geometry(frame.shape[:2])
+            self._field.update(frame, frame_index, self.detections, self._follow_field)
 
         if options.player_id and self.tracks:
             timing, renamed = self._numbers.update(frame, self.tracks, frame_index)
@@ -1196,7 +1136,7 @@ class AnalysisPipeline:
 
     def _places_on_field(self) -> Dict[int, np.ndarray]:
         """Track -> where the player stands on the field, if the field's place is known."""
-        to_field = self._field_follower.image_to_field if self._follow_field else None
+        to_field = self._field.follower.image_to_field if self._follow_field else None
         players = [track for track in self.tracks if track.class_name == "player"]
         if to_field is None or not players:
             return {}
@@ -1243,70 +1183,6 @@ class AnalysisPipeline:
                 shown[track_id] = (f"~{number}", None)
         return shown
 
-    def _field_beside_the_frames(self, frame: np.ndarray, frame_index: int) -> None:
-        """The field model and what follows from it, on another thread: begun every
-        few frames, and taken in when it is done, a frame or two later. Finding the
-        field takes several frames' worth of time, and the field does not move."""
-        job = self._field_job
-        if job is not None and job["work"].done():
-            self._field_job = None
-            self._take_field(job)
-        interval = max(1, int(get_setting("models.segmentation.frame_interval", 5)))
-        shape = frame.shape[:2]
-        due = (
-            self._field_begun is None
-            or not 0 <= frame_index - self._field_begun[0] < interval
-            or self._field_begun[1] != shape
-        )
-        if due and self._field_job is None:
-            prepared = prepare_for_segmentation(frame)
-            if prepared is not None:
-                self._field_begun = (frame_index, shape)
-                feet = np.array(
-                    [
-                        [(d["bbox"][0] + d["bbox"][2]) / 2.0, d["bbox"][3]]
-                        for d in self.detections
-                        if d["class_name"] == "player"
-                    ]
-                ).reshape(-1, 2)
-                self._field_job = {
-                    "work": self._threads.submit(
-                        self._look_at_field, prepared, shape, self._follow_field
-                    ),
-                    "shape": shape,
-                    "feet": feet,
-                    "follow": self._follow_field,
-                    "since": np.eye(3),
-                }
-        self.field_results = self._field_seen
-
-    def _look_at_field(self, prepared: np.ndarray, shape: Tuple[int, int], follow: bool) -> dict:
-        """On another thread: the field model's masks for a frame, the lines of their
-        outline, and where the field lies by them."""
-        results = segment_prepared(prepared)
-        mask = create_unified_field_mask(results, shape) if results else None
-        lines = fit_lines_from_mask(mask)[0] if mask is not None else []
-        estimate = self._field_follower.estimate(results, shape, lines) if follow else None
-        return {"results": results, "mask": mask, "estimate": estimate}
-
-    def _take_field(self, job: dict) -> None:
-        """Take in what was worked out of the field beside the frames."""
-        try:
-            seen = job["work"].result()
-        except Exception as error:
-            logger.exception(f"Error finding the field: {error}")
-            health.report("Field", f"failed ({type(error).__name__}); see the log")
-            return
-        self._field_seen = seen["results"]
-        self._geometry = _FieldGeometry(seen["results"], job["shape"], seen["mask"])
-        since = job["since"]
-        if since is None:
-            return  # The camera's motion was lost meanwhile: where that frame lay is not known
-        if job["follow"]:
-            self._field_follower.take(
-                seen["estimate"], job["shape"], seen["mask"], job["feet"], since
-            )
-
     def _watch_shot(self) -> bool:
         """Whether this frame is drone footage; what was followed is dropped when it stops.
 
@@ -1326,40 +1202,6 @@ class AnalysisPipeline:
             self._shot.pause()
         return wide
 
-    def _update_field_geometry(self, frame_shape: Tuple[int, int]) -> None:
-        """Work out the field's mask and lines for the current segmentation result, and
-        where the field lies by them.
-
-        Only when the segmentation result or the frame size has changed, so the frames
-        between two segmentation runs reuse one mask and one line fit.
-        """
-        if (
-            self.field_results is not self._geometry.source
-            or frame_shape != self._geometry.frame_shape
-        ):
-            start = time.perf_counter()
-            mask = create_unified_field_mask(self.field_results, frame_shape)
-            self._record("Mask Unification", start)
-
-            lines: List[Line] = []
-            if mask is not None:
-                start = time.perf_counter()
-                lines = fit_lines_from_mask(mask)[0]
-                self._record("Line Extraction", start)
-
-            self._geometry = _FieldGeometry(self.field_results, frame_shape, mask)
-            if self._follow_field:
-                start = time.perf_counter()
-                feet = np.array(
-                    [
-                        [(d["bbox"][0] + d["bbox"][2]) / 2.0, d["bbox"][3]]
-                        for d in self.detections
-                        if d["class_name"] == "player"
-                    ]
-                ).reshape(-1, 2)
-                self._field_follower.update(self.field_results, frame_shape, lines, mask, feet)
-                self._record("Field Estimate", start)
-
     # ------------------------------------------------------------------ rendering
 
     def _draw_main_view(self, frame: np.ndarray, options: PipelineOptions) -> np.ndarray:
@@ -1375,11 +1217,11 @@ class AnalysisPipeline:
         start = time.perf_counter()
 
         # Field first, as background for the players
-        if self.field_results and options.field_segmentation:
+        if self._field.results and options.field_segmentation:
             if get_setting("models.segmentation.show_raw_masks", False):
-                frame = draw_field_segmentation(frame, self.field_results)
-            if self._geometry.mask is not None:
-                frame = self._draw_field_overlay(frame, self._geometry.mask)
+                frame = draw_field_segmentation(frame, self._field.results)
+            if self._field.mask is not None:
+                frame = self._draw_field_overlay(frame, self._field.mask)
 
         # Plain detections only without tracking; tracks carry the same boxes
         if self.detections and not options.tracking:
@@ -1439,7 +1281,7 @@ class AnalysisPipeline:
             return None, "Close-up: no top-down view"
         if not options.field_segmentation:
             return None, "The top-down view needs field segmentation"
-        if self._field_follower.image_to_field is None:
+        if self._field.follower.image_to_field is None:
             return None, "The field has not been found in this view yet"
         start = time.perf_counter()
         try:
