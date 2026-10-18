@@ -9,7 +9,7 @@ import numpy as np
 from support import load_module
 
 STAGES = (
-    "run_inference",
+    "detect_players_and_discs",
     "run_tracking",
     "run_field_segmentation",
     "create_unified_field_mask",
@@ -75,7 +75,7 @@ class PipelineTests(unittest.TestCase):
         self.track = SimpleNamespace(track_id=7, class_name="player", bbox=[1, 1, 5, 5])
         # Drone footage: a team's worth of players in view
         self.players = [{"class_name": "player", "bbox": [1, 1, 5, 5]}] * 7
-        self.mocks["run_inference"].return_value = self.players
+        self.mocks["detect_players_and_discs"].return_value = self.players
         self.mocks["run_tracking"].return_value = [self.track]
         self.mocks["run_field_segmentation"].return_value = [object()]
         self.mocks["run_player_id_on_tracks"].return_value = (
@@ -113,7 +113,7 @@ class PipelineTests(unittest.TestCase):
     def test_redrawing_a_frame_reuses_its_analysis_and_new_frames_advance_it(self):
         first = self.pipeline.process(self.frame, 0, self.options)
         self.pipeline.process(self.frame, 0, self.options)
-        self.assertEqual(self.mocks["run_inference"].call_count, 1)
+        self.assertEqual(self.mocks["detect_players_and_discs"].call_count, 1)
         self.assertEqual(self.mocks["run_tracking"].call_count, 1)
 
         # Identical pixels at a new position are a new frame for the tracker
@@ -144,7 +144,7 @@ class PipelineTests(unittest.TestCase):
 
         without_tracking = self.module.PipelineOptions(tracking=False, top_down_view=False)
         result = self.pipeline.process(self.frame, 3, without_tracking)
-        self.assertEqual(self.mocks["run_inference"].call_count, 2)
+        self.assertEqual(self.mocks["detect_players_and_discs"].call_count, 2)
         self.assertEqual(result.tracks, [])
 
         self.pipeline.process(self.frame, 3, self.options)
@@ -153,7 +153,7 @@ class PipelineTests(unittest.TestCase):
         self.mocks["reset_segmentation_cache"].assert_called_once()
         self.assertEqual(self.pipeline.player_ids, {})
         self.pipeline.process(self.frame, 3, self.options)
-        self.assertEqual(self.mocks["run_inference"].call_count, 4)
+        self.assertEqual(self.mocks["detect_players_and_discs"].call_count, 4)
 
     def test_nothing_is_followed_during_a_close_up_and_tracking_starts_afresh_after_it(self):
         self.pipeline.process(self.frame, 0, self.options)
@@ -161,7 +161,7 @@ class PipelineTests(unittest.TestCase):
         resets = self.mocks["reset_tracker"].call_count
 
         # The footage cuts to a close-up: the detector finds nobody
-        self.mocks["run_inference"].return_value = []
+        self.mocks["detect_players_and_discs"].return_value = []
         results = [self.pipeline.process(self.frame, index, self.options) for index in range(1, 40)]
         self.assertFalse(results[-1].wide_shot)
         self.assertEqual(results[-1].tracks, [])
@@ -171,7 +171,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.mocks["reset_tracker"].call_count, resets + 1)
 
         # Back on the drone
-        self.mocks["run_inference"].return_value = self.players
+        self.mocks["detect_players_and_discs"].return_value = self.players
         results = [
             self.pipeline.process(self.frame, index, self.options) for index in range(40, 80)
         ]
@@ -186,7 +186,7 @@ class PipelineTests(unittest.TestCase):
             health.report("Detection", "failed (RuntimeError); see the log")
             return []
 
-        self.mocks["run_inference"].side_effect = failing
+        self.mocks["detect_players_and_discs"].side_effect = failing
         results = [self.pipeline.process(self.frame, index, self.options) for index in range(1, 40)]
         self.assertTrue(results[-1].wide_shot)
         self.assertEqual(
@@ -194,7 +194,7 @@ class PipelineTests(unittest.TestCase):
         )
 
         # Working again: nothing is shown any more
-        self.mocks["run_inference"].side_effect = None
+        self.mocks["detect_players_and_discs"].side_effect = None
         self.assertEqual(list(self.pipeline.process(self.frame, 40, self.options).problems), [])
 
     def test_field_geometry_is_computed_once_per_segmentation_result(self):

@@ -21,6 +21,7 @@ from .constants import DEFAULT_PATHS
 from .processing import appearance, health
 from .processing.camera_motion import CameraMotionEstimator
 from .processing.camera_motion import is_enabled as camera_motion_enabled
+from .processing.detector_process import detect as detect_players_and_discs
 from .processing.disc_flight import DiscPath, FlyingDisc, place_under_disc
 from .processing.disc_fusion import fuse_discs, weak_discs_from
 from .processing.disc_fusion import is_enabled as fusion_enabled
@@ -36,7 +37,7 @@ from .processing.field_segmentation import (
 )
 from .processing.game_state import GameStateTracker, Player
 from .processing.homography import output_canvas_size
-from .processing.inference import reset_inference_state, run_inference
+from .processing.inference import reset_inference_state
 from .processing.jersey_tracker import get_best_jersey_number
 from .processing.model_lock import GPU_SETUP_LOCK
 from .processing.player_looks import PlayerLooks
@@ -856,7 +857,7 @@ class AnalysisPipeline:
             if looked_at is frame:
                 self._motion_ahead = motion
                 return found
-        return run_inference(
+        return detect_players_and_discs(
             frame, weak_players_from=self._weak_from(), weak_discs_from=weak_discs_from()
         )
 
@@ -872,7 +873,7 @@ class AnalysisPipeline:
         frame = next_frame()
         if frame is None:
             return None, [], None
-        found = run_inference(
+        found = detect_players_and_discs(
             frame, weak_players_from=self._weak_from(), weak_discs_from=weak_discs_from()
         )
         motion = None

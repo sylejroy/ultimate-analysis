@@ -51,6 +51,7 @@ _disc_position: Optional[Tuple[float, float]] = None
 _disc_velocity = (0.0, 0.0)  # Pixels per frame
 _disc_frames_missing = 0
 _frames_since_full_search = 0
+_resets = 0  # How often all of that was forgotten
 
 
 # The detectors take one frame at a time: the pipeline has the next frame searched
@@ -58,11 +59,24 @@ _frames_since_full_search = 0
 _detector_lock = threading.RLock()
 
 
+def current_model_paths() -> Tuple[Optional[str], Optional[str]]:
+    """The player and the disc model as they were chosen (None: not chosen yet, the
+    default when first needed)."""
+    return _player_model_path, _disc_model_path
+
+
+def reset_count() -> int:
+    """How often the detectors were told to forget (`reset_inference_state`): detectors
+    in another process forget when this has changed (processing/detector_process.py)."""
+    return _resets
+
+
 def reset_inference_state() -> None:
     """Resume disc detection when the video or playback position changes."""
     global _frames_since_last_disc, _disc_position, _disc_velocity
-    global _disc_frames_missing, _frames_since_full_search
+    global _disc_frames_missing, _frames_since_full_search, _resets
     with _detector_lock:
+        _resets += 1
         _frames_since_last_disc = 0
         _disc_position = None
         _disc_velocity = (0.0, 0.0)

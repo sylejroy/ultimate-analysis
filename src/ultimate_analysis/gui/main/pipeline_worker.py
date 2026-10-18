@@ -15,6 +15,7 @@ from PyQt5.QtCore import QObject, pyqtSignal, pyqtSlot
 
 from ...config.settings import get_setting
 from ...pipeline import AnalysisPipeline, FrameResult, PipelineOptions
+from ...processing import detector_process
 from ...processing.field_segmentation import set_field_model, warmup_field_model
 from ...processing.inference import (
     reset_inference_state,
@@ -68,15 +69,22 @@ class PipelineWorker(QObject):
                 if self.video_player.load_video(video_path):
                     info = self.video_player.get_video_info()
                     self.pipeline.set_frame_rate(info.get("fps", 0))
-                    # Loading models here keeps the first frame from stalling playback
-                    if options.detection and get_setting("models.inference.warmup_on_load", True):
-                        warmup_models()
-                    # The engines of all three models are loaded here, one after the
-                    # other, whatever is switched on: an engine first loaded after frames
-                    # have been analysed crashes the process (an access violation inside
-                    # TensorRT, seen only in the app)
                     shape = (info.get("height") or 1080, info.get("width") or 1920, 3)
-                    run_inference(np.zeros(shape, dtype=np.uint8))
+                    if detector_process.in_own_process():
+                        # They load their models over there, and are waited for here
+                        detector_process.detect(np.zeros(shape, dtype=np.uint8))
+                    else:
+                        # Loading models here keeps the first frame from stalling playback
+                        if options.detection and get_setting(
+                            "models.inference.warmup_on_load", True
+                        ):
+                            warmup_models()
+                        # The engines of all three models are loaded here, one after the
+                        # other, whatever is switched on: an engine first loaded after
+                        # frames have been analysed crashes the process (an access
+                        # violation inside TensorRT, seen only in the app)
+                        run_inference(np.zeros(shape, dtype=np.uint8))
+                        detector_process.ready_here()
                     reset_inference_state()
                     warmup_field_model(shape)
                     if options.player_id:
