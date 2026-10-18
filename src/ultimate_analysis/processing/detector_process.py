@@ -46,7 +46,7 @@ DETECT = "ultimate_analysis.processing.detector_process:_detect"
 
 def is_enabled() -> bool:
     """Whether the detectors are to run in a process of their own."""
-    return bool(get_setting("models.inference.own_process", False))
+    return bool(get_setting("models.inference.own_process", True))
 
 
 def in_own_process() -> bool:

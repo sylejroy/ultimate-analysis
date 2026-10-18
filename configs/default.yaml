@@ -26,7 +26,7 @@ models:
     tensorrt: true         # Use a TensorRT engine when one was built for the model (scripts/export_tensorrt.py)
     side_by_side: true     # Run the disc model on a second thread while the player model runs: the same detections, sooner
     detect_ahead: true     # During playback, look for players and disc in the next frame while this one is followed and drawn
-    own_process: false     # The player and disc models in a process of their own, where they do not take turns with the rest of the app's Python. Not timed yet
+    own_process: true      # The player and disc models in a process of their own, where they do not take turns with the rest of the app's Python: 37 to 39 frames a second against 33 to 34, the same tracks
   
   # Separate player and disc detection models
   player_detection:
