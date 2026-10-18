@@ -1,6 +1,7 @@
 """Tracks joined into players after the fact."""
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 from support import load_module
@@ -83,6 +84,12 @@ class TrackletLinkingTest(unittest.TestCase):
             for _ in range(self.module.MIN_LOOKS):
                 self.book.learn(track_id, looks(1, 0, 0))
         self.assertEqual(self.book.players(60.0), {1: 1, 2: 2})
+        # ... unless asked to (models.reid.join_needs_place)
+        settings = {"models.reid.join_needs_place": False}
+        with patch.object(
+            self.module, "get_setting", side_effect=lambda key, d=None: settings.get(key, d)
+        ):
+            self.assertEqual(self.book.players(60.0), {1: 1, 2: 1})
 
     def test_a_track_hardly_looked_at_is_left_alone(self):
         self.track(1, 0, 100, looks(1, 0, 0))
