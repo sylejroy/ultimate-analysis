@@ -69,7 +69,7 @@ class PlayerNumbers:
             frame_index=frame_index,
             finalized_tracks=self._finalized,
             crop_selector=self.crops,
-            background=bool(get_setting("models.player_id.background_reading", False)),
+            background=bool(get_setting("models.player_id.background_reading", True)),
         )
         self.numbers.update(read)
 

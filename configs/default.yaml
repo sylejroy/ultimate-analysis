@@ -153,6 +153,7 @@ models:
     min_lead: 0.2                       # The network's choice counts if it is this much surer of one player than of the next (0 to 1)
     show_guess: true                    # Draw the network's guess on the video: light-blue corner marks around every player, as bright as it is sure that they hold the disc. What the network says, not what is made of it
     not_while_flying: true              # The network is not asked while the disc is seen to fly (found surely, frame after frame, on a smooth course away from every player): it looks at one player at a time and names a holder in a fifth of such frames
+    ask_everybody: false                # Ask the network about every player in every frame, for a recording to be played back with other settings (scripts/benchmark_possession.py)
     sure: 0.0                           # In a frame without a disc, a player the network is at least this sure of counts as the disc seen at them. 0 = never
     weight: 0.5                         # ... for this much of a frame in which the disc itself is seen
 

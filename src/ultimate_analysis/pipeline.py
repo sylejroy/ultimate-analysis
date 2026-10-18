@@ -267,12 +267,12 @@ class AnalysisPipeline:
         self._possession = PossessionTracker()
         # A network that tells from a picture of a player whether they hold the disc:
         # its weights (None: not used), and the network once it is loaded
-        weights = str(get_setting("models.holder.weights", "") or "")
+        weights = str(get_setting("models.holder.weights") or "")
         self._holder_weights: Optional[str] = weights or None
         self._holder_net: Any = None
         # Whether the network's guess is drawn on the camera view (it then looks at
         # every player in every frame), and what it said of the players of this frame
-        self.show_holder_guess = bool(get_setting("models.holder.show_guess", False))
+        self.show_holder_guess = bool(get_setting("models.holder.show_guess", True))
         self.holder_scores: Optional[Dict[int, float]] = None
         # What the network says of every player, for showing: worked out beside the
         # frames (track IDs asked about, the work), and so of the frame before
@@ -868,9 +868,7 @@ class AnalysisPipeline:
             if self._disc_heatmap is None:
                 from .processing.disc_heatmap import load_disc_heatmap
 
-                self._disc_heatmap = load_disc_heatmap(
-                    get_setting("models.disc_heatmap.weights", "")
-                )
+                self._disc_heatmap = load_disc_heatmap(get_setting("models.disc_heatmap.weights"))
                 if self._disc_heatmap is None:
                     self._disc_heatmap = False
                     health.report("Disc heat map", "no network to show; see the log")
@@ -1183,7 +1181,7 @@ class AnalysisPipeline:
         Every so often (models.reid.join_looking_back_seconds, 0: never), and only into
         a player the tracker still remembers and does not see.
         """
-        every = float(get_setting("models.reid.join_looking_back_seconds", 0.0))
+        every = float(get_setting("models.reid.join_looking_back_seconds", 1.0))
         rate = self._possession.frame_rate
         if every <= 0 or frame_index - self._joined_at < every * rate:
             return
@@ -1383,7 +1381,7 @@ class AnalysisPipeline:
 
         # Field first, as background for the players
         if self.field_results and options.field_segmentation:
-            if get_setting("models.segmentation.show_raw_masks", True):
+            if get_setting("models.segmentation.show_raw_masks", False):
                 frame = draw_field_segmentation(frame, self.field_results)
             if self._geometry.mask is not None:
                 frame = self._draw_field_overlay(frame, self._geometry.mask)

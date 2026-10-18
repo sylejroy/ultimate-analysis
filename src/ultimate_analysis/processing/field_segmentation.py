@@ -131,7 +131,7 @@ def segment_prepared(preprocessed_frame: np.ndarray) -> List[Any]:
     """Run the field model on a picture from `prepare_for_segmentation`."""
     try:
         # Get segmentation parameters from config
-        confidence_threshold = get_setting("models.segmentation.confidence_threshold", 0.25)
+        confidence_threshold = get_setting("models.segmentation.confidence_threshold", 0.4)
         iou_threshold = get_setting("models.segmentation.iou_threshold", 0.7)
 
         # Determine image size to use - prefer model's training size

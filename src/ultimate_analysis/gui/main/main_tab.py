@@ -344,7 +344,10 @@ class MainTab(QWidget):
 
         # The network that knows players by their looks
         self.looks_model_combo = compact_combo(QComboBox())
-        populate_reid_model_combo(self.looks_model_combo, get_setting("models.reid.weights", ""))
+        populate_reid_model_combo(
+            self.looks_model_combo,
+            get_setting("models.reid.weights"),
+        )
         self.looks_model_combo.setToolTip(
             "The network that tells players apart by their looks (scripts/train_reid.py).\n"
             "Another one learns the players of the video anew and keeps its own roster."
@@ -355,7 +358,8 @@ class MainTab(QWidget):
         # The network that tells a holder from a picture of a player
         self.holder_model_combo = compact_combo(QComboBox())
         populate_holder_model_combo(
-            self.holder_model_combo, get_setting("models.holder.weights", "") or None
+            self.holder_model_combo,
+            get_setting("models.holder.weights") or None,
         )
         self.holder_model_combo.setToolTip(
             "A network that tells from a picture of a player whether they hold the disc\n"
@@ -366,7 +370,7 @@ class MainTab(QWidget):
         self.holder_model_combo.currentIndexChanged.connect(self._on_holder_model_changed)
         models_layout.addRow(faint("Holder"), self.holder_model_combo)
         self.holder_guess_checkbox = ToggleSwitch("Show the holder network's guess")
-        self.holder_guess_checkbox.setChecked(bool(get_setting("models.holder.show_guess", False)))
+        self.holder_guess_checkbox.setChecked(bool(get_setting("models.holder.show_guess", True)))
         self.holder_guess_checkbox.setToolTip(
             "Light-blue corner marks around every player, as bright as the holder network\n"
             "is sure that they hold the disc: bright for sure, faint for half sure, nothing\n"
@@ -556,7 +560,7 @@ class MainTab(QWidget):
         controls_layout.addWidget(reset_button)
 
         self.realtime_checkbox = ToggleSwitch("Real time")
-        self.realtime_checkbox.setChecked(bool(get_setting("video.realtime", False)))
+        self.realtime_checkbox.setChecked(bool(get_setting("video.realtime", True)))
         self.realtime_checkbox.setToolTip(
             "Play the video at its own speed by passing over frames: of a video with 60\n"
             "frames a second every second one is analysed, which is what the analysis\n"
@@ -856,7 +860,7 @@ class MainTab(QWidget):
         """Open the configured default video, or the first one."""
         if not self.video_files:
             return
-        default_name = get_setting("video.default_video", "")
+        default_name = get_setting("video.default_video")
         names = [Path(path).name for path in self.video_files]
         self.video_list.setCurrentRow(names.index(default_name) if default_name in names else 0)
 

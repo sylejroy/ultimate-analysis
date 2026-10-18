@@ -60,7 +60,7 @@ _easyocr_config_cache: Dict[str, Any] = {}
 
 def get_player_id_method() -> str:
     """Name of the jersey reader in use: parseq, or easyocr."""
-    method = _method_override or get_setting("models.player_id.method", "easyocr")
+    method = _method_override or get_setting("models.player_id.method", "parseq")
     return method if method in READER_LABELS else "easyocr"
 
 
@@ -140,12 +140,12 @@ def run_player_id_on_tracks(
         finalized_tracks = set()
 
     # Optimization settings
-    ocr_frame_interval = max(1, get_setting("models.player_id.ocr_frame_interval", 1))
+    ocr_frame_interval = max(1, get_setting("models.player_id.ocr_frame_interval", 5))
     stagger_enabled = get_setting("models.player_id.ocr_frame_interval_stagger", True)
-    finalized_threshold = get_setting("models.player_id.finalized_certainty_threshold", 0.999)
+    finalized_threshold = get_setting("models.player_id.finalized_certainty_threshold", 0.9)
     verbose_debug = get_setting("models.player_id.verbose_debug", False)
     selection_enabled = crop_selector is not None and get_setting(
-        "models.player_id.crop_selection.enabled", False
+        "models.player_id.crop_selection.enabled", True
     )
     selection_start = time.perf_counter()
     crop_config = _load_easyocr_config().get("preprocessing", {}) if selection_enabled else {}

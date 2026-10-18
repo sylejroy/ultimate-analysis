@@ -165,7 +165,7 @@ def calculate_field_contour(
 
     # Use config values if parameters not provided
     if simplify_epsilon is None:
-        simplify_epsilon = get_setting("models.segmentation.contour.simplify_epsilon", 0.01)
+        simplify_epsilon = get_setting("models.segmentation.contour.simplify_epsilon", 0.0001)
     if min_contour_area is None:
         min_contour_area = get_setting("models.segmentation.contour.min_area", 5000)
 
@@ -228,10 +228,10 @@ def apply_morphological_smoothing(
         )
     if closing_kernel_size is None:
         closing_kernel_size = get_setting(
-            "models.segmentation.morphological.closing_kernel_size", 15
+            "models.segmentation.morphological.closing_kernel_size", 5
         )
     if fill_holes is None:
-        fill_holes = get_setting("models.segmentation.morphological.fill_holes", True)
+        fill_holes = get_setting("models.segmentation.morphological.fill_holes", False)
 
     try:
         # Ensure mask is binary
@@ -452,19 +452,19 @@ def fit_field_lines_ransac(
         points = contour.reshape(-1, 2).astype(np.float32)
         edge_points = no_points
 
-        if get_setting("models.segmentation.contour.interpolation.enabled", False):
+        if get_setting("models.segmentation.contour.interpolation.enabled", True):
             points = interpolate_contour_points(
                 points.reshape(-1, 1, 2),
-                get_setting("models.segmentation.contour.interpolation.max_point_distance", 10),
+                get_setting("models.segmentation.contour.interpolation.max_point_distance", 20),
                 get_setting("models.segmentation.contour.interpolation.min_point_distance", 3),
             )
             points = points.reshape(-1, 2).astype(np.float32)
 
-        if get_setting("models.segmentation.contour.ransac.edge_filtering.enabled", False):
+        if get_setting("models.segmentation.contour.ransac.edge_filtering.enabled", True):
             kept, at_edge = filter_edge_points(
                 points.reshape(-1, 1, 2),
                 frame_shape,
-                get_setting("models.segmentation.contour.ransac.edge_filtering.margin", 20),
+                get_setting("models.segmentation.contour.ransac.edge_filtering.margin", 45),
             )
             if len(kept) > 0:
                 points = kept.reshape(-1, 2).astype(np.float32)
@@ -634,10 +634,10 @@ def fit_lines_from_mask(
             unified_mask.shape,
             num_lines=num_lines,
             distance_threshold=get_setting(
-                "models.segmentation.contour.ransac.distance_threshold", 10.0
+                "models.segmentation.contour.ransac.distance_threshold", 5.0
             ),
             min_samples=get_setting("models.segmentation.contour.ransac.min_samples", 2),
-            max_trials=get_setting("models.segmentation.contour.ransac.max_trials", 1000),
+            max_trials=get_setting("models.segmentation.contour.ransac.max_trials", 100),
         )
         lines, _, inliers, _ = fit
         # Confidence of a line: its share of the points a line would have if the

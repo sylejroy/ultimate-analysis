@@ -186,7 +186,7 @@ class PlayerLooks:
         tracks are looked at anew, and the video's roster is that of this network.
         Returns whether anything changed."""
         chosen = None if weights is None else Path(weights)
-        if chosen is not None and chosen == Path(str(get_setting("models.reid.weights", ""))):
+        if chosen is not None and chosen == Path(str(get_setting("models.reid.weights"))):
             chosen = None
         if chosen == self._weights:
             return False
@@ -261,7 +261,7 @@ class PlayerLooks:
     def _network(self) -> Any:
         if not self._tried_to_load:
             self._tried_to_load = True
-            weights = self._weights or Path(str(get_setting("models.reid.weights", "")))
+            weights = self._weights or Path(str(get_setting("models.reid.weights")))
             try:
                 from .reid import load_embedder
 

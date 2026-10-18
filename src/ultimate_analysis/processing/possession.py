@@ -552,7 +552,7 @@ class PossessionTracker:
             return needed
         if self.team is not None and getattr(track, "team", None) == self.team:
             # A pass to a teammate: the likeliest thing by far (0: as long as any other)
-            sooner = float(get_setting("models.possession.teammate_seconds", 0.0))
+            sooner = float(get_setting("models.possession.teammate_seconds", 0.15))
             if sooner > 0:
                 needed = min(needed, max(1, round(sooner * self.frame_rate)))
         if self._holder_box is not None and _overlap(self._holder_box, track.to_ltrb()):

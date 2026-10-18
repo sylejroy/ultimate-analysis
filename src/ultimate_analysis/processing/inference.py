@@ -275,7 +275,7 @@ def _predict_detections(
         imgsz = model_imgsz if model_imgsz else 640
 
         # FP16 for ~2x speedup on compatible GPUs
-        precision = FP16_KWARGS if get_setting("models.inference.half_precision", False) else {}
+        precision = FP16_KWARGS if get_setting("models.inference.half_precision", True) else {}
 
         # A TensorRT engine built for this model and frame size replaces the PyTorch model
         runtime_model, runtime_kwargs = model, {"imgsz": imgsz, **precision}

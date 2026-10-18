@@ -166,7 +166,7 @@ class TrackVectors(QThread):
             self.worked_out.emit({})
 
     def _vectors(self) -> dict:
-        weights = Path(get_setting("models.reid.weights", ""))
+        weights = Path(get_setting("models.reid.weights"))
         if not weights.is_file():
             return {}
         kept = Path("data/cache/track_vectors") / f"{self.source.name}__{weights.parent.name}.npz"
@@ -211,7 +211,7 @@ class PairLook(QThread):
             logger.warning(f"The network's view of the pair failed: {error}")
 
     def _look(self) -> Optional[dict]:
-        weights = Path(get_setting("models.reid.weights", ""))
+        weights = Path(get_setting("models.reid.weights"))
         if not weights.is_file():
             return None
         from ...processing.reid import embed, likeness_maps, load_embedder, track_vector
