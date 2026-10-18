@@ -6,7 +6,8 @@ takes a few minutes to build. The app picks it up on the next start and keeps us
 PyTorch for any model without one.
 
 Without arguments, engines are built for the default player, disc, and field
-segmentation models from configs/default.yaml, for 1920x1080 video.
+segmentation models from configs/default.yaml, for 1920x1080 video. With --heatmap,
+also for the disc heat-map network (processing/network_engines.py).
 """
 
 import argparse
@@ -48,7 +49,15 @@ def main() -> None:
     parser.add_argument("--frame-width", type=int, default=1920)
     parser.add_argument("--frame-height", type=int, default=1080)
     parser.add_argument("--force", action="store_true", help="Rebuild engines that exist")
+    parser.add_argument("--heatmap", action="store_true", help="Also the disc heat-map network")
+    parser.add_argument(
+        "--only-heatmap", action="store_true", help="Only the disc heat-map network"
+    )
     args = parser.parse_args()
+    if args.heatmap or args.only_heatmap:
+        export_heatmap(args.force)
+    if args.only_heatmap:
+        return
 
     half = bool(get_setting("models.inference.half_precision", False))
     frame_shape = (args.frame_height, args.frame_width)
@@ -71,10 +80,12 @@ def main() -> None:
         if weights == disc_weights and window:
             jobs.append((weights, (window, window), half))
     if not args.weights:
-        # Field segmentation always receives a square, letterboxed frame in full precision
+        # Field segmentation receives the frame stretched to a square; in half precision
+        # where models.segmentation.half_precision asks for it
         weights = Path(default_model_path("segmentation"))
         imgsz = get_training_image_size(weights)
-        jobs.append((weights, (imgsz, imgsz), False))
+        field_half = bool(get_setting("models.segmentation.half_precision", False))
+        jobs.append((weights, (imgsz, imgsz), field_half))
 
     for weights, input_shape, half_precision in dict.fromkeys(jobs):
         weights = weights if weights.is_absolute() else REPO / weights
@@ -89,6 +100,26 @@ def main() -> None:
             print(f"Skipped: {e}")
             continue
         print(f"Wrote {target}")
+
+
+def export_heatmap(force: bool) -> None:
+    """The engine of the disc heat-map network in the settings."""
+    from ultimate_analysis.processing import network_engines
+    from ultimate_analysis.processing.disc_heatmap import load_disc_heatmap
+
+    weights = Path(get_setting("models.disc_heatmap.weights"))
+    weights = weights if weights.is_absolute() else REPO / weights
+    heatmap = load_disc_heatmap(weights)
+    if heatmap is None:
+        print(f"No heat-map network at {weights}")
+        return
+    target = network_engines.engine_path(weights, heatmap.input_shape)
+    if target.exists() and not force:
+        print(f"Exists, skipping: {target}")
+        return
+    print(f"Building {target.name} ...")
+    network_engines.export_engine(heatmap._model.float(), heatmap.input_shape, target)
+    print(f"Wrote {target}")
 
 
 if __name__ == "__main__":

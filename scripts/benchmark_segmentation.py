@@ -29,6 +29,7 @@ the app sees a video frame. --as-stored scores the square images the model was t
 """
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -40,6 +41,7 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import yaml  # noqa: E402
 
+from ultimate_analysis.config.settings import get_config  # noqa: E402
 from ultimate_analysis.processing.field_analysis import create_unified_field_mask  # noqa: E402
 from ultimate_analysis.processing.field_segmentation import (  # noqa: E402
     reset_segmentation_cache,
@@ -165,7 +167,16 @@ def main() -> None:
     parser.add_argument("--splits", nargs="+", default=["valid", "test"])
     parser.add_argument("--as-stored", action="store_true", help="do not stretch images to 16:9")
     parser.add_argument("--negatives", type=Path, help="folder of pictures without a field")
+    parser.add_argument("--set", action="append", default=[], help="setting=value, as JSON")
     args = parser.parse_args()
+    config = get_config()
+    for item in args.set:
+        key, value = item.split("=", 1)
+        node = config
+        *path, last = key.split(".")
+        for part in path:
+            node = node[part]
+        node[last] = json.loads(value)
 
     dataset = args.dataset or Path(get_training_args(args.weights)["data"]).parent
     if not dataset.exists():

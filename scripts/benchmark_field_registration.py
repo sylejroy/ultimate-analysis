@@ -23,6 +23,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -38,6 +39,7 @@ os.chdir(REPO)
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
+from ultimate_analysis.config.settings import get_config  # noqa: E402
 from ultimate_analysis.constants import DEFAULT_PATHS  # noqa: E402
 from ultimate_analysis.processing.field_analysis import create_unified_field_mask  # noqa: E402
 from ultimate_analysis.processing.field_registration import (  # noqa: E402
@@ -100,7 +102,16 @@ def main() -> None:
         "--games", nargs="+", help="Only games called like this, e.g. those a model has not seen"
     )
     parser.add_argument("--model", type=Path, help="Field model to use instead of the default")
+    parser.add_argument("--set", action="append", default=[], help="setting=value, as JSON")
     args = parser.parse_args()
+    config = get_config()
+    for item in args.set:
+        key, value = item.split("=", 1)
+        node = config
+        *path, last = key.split(".")
+        for part in path:
+            node = node[part]
+        node[last] = json.loads(value)
 
     dataset = REPO / DEFAULT_PATHS["TRAINING_DATA"] / args.dataset
     template = field_template.TEMPLATES[field_label_files.dataset_ruleset(dataset)]

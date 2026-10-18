@@ -133,12 +133,23 @@ class DiscHeatmap:
         self.threshold = float(saved.get("threshold", 0.5))
         self.frame_size: Tuple[int, int] = tuple(saved.get("frame", FRAME_SIZE))
         self._rows = -(-self.frame_size[1] // 16) * 16
+        # A TensorRT engine built for the network (scripts/export_tensorrt.py --heatmap)
+        self._engine = None
+        if self.device == "cuda":
+            from .network_engines import load_engine
+
+            self._engine = load_engine(weights, self.input_shape)
         # The frames at the network's size, newest last, and how the camera moved to each
         # from the one before (at that size)
         self._frames: Deque["torch.Tensor"] = deque()
         self._moves: Deque[np.ndarray] = deque()
         self._pixels: Any = None  # The pixels of a frame, for laying frames onto each other
         logger.info(f"Disc heat map: {weights} at {self.frame_size[0]} x {self.frame_size[1]}")
+
+    @property
+    def input_shape(self) -> Tuple[int, int, int, int]:
+        """What the network takes: three frames of three colours, at its size."""
+        return (1, 9, self._rows, self.frame_size[0])
 
     def reset(self) -> None:
         """Forget the frames before (new video, seek, cut)."""
@@ -211,6 +222,9 @@ class DiscHeatmap:
                 ]
             batch = torch.cat(three, dim=1) / 255.0
             batch = nn.functional.pad(batch, (0, 0, 0, self._rows - self.frame_size[1]))
+            if self._engine is not None:
+                heat = torch.sigmoid(self._engine(batch)[0].float())
+                return heat[: self.frame_size[1]].cpu().numpy()
             if self._half:
                 # Only the network: half precision is too coarse for where a pixel was
                 batch = batch.half().contiguous(memory_format=torch.channels_last)

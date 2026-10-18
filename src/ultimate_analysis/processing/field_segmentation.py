@@ -139,7 +139,8 @@ def segment_prepared(preprocessed_frame: np.ndarray) -> List[Any]:
 
         # A TensorRT engine built for this model replaces the PyTorch model
         runtime_model, runtime_imgsz = _field_model, imgsz
-        engine = get_engine(_field_model, preprocessed_frame.shape, imgsz, half=False)
+        half = bool(get_setting("models.segmentation.half_precision", False))
+        engine = get_engine(_field_model, preprocessed_frame.shape, imgsz, half=half)
         if engine is not None:
             runtime_model, runtime_imgsz = engine
 

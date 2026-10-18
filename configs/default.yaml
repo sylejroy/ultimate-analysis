@@ -51,6 +51,7 @@ models:
     confidence_threshold: 0.4   # 0.6 cut the far end zone away in about one frame in five
     show_raw_masks: false      # Whether to show raw segmentation model output masks
     frame_interval: 5           # Process segmentation every N frames (1=every frame, 5=every 5th)
+    half_precision: false       # The field model's engine in half precision: 3.5 ms less a run, the same masks, the field estimate a little worse (19 against 17 of 69 more than 2 yd off)
     in_background: true         # Find the field beside the frames and take it in a frame or two later; false = the frame waits for it
     iou_threshold: 0.7          # IoU threshold for segmentation
     
