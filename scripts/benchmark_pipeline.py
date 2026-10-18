@@ -13,6 +13,13 @@ No training or export runs are started and existing model engines are reused.
 --compare reports on how many frames the track IDs, jersey numbers, or disc holder differ
 from a saved run, and the largest box difference. Timings are only meaningful with
 nothing else on the GPU; profiling adds overhead, so take throughput from unprofiled runs.
+
+Before timing, the load of the graphics card and the processor is looked at for a few
+seconds; if something else is using them the run stops (--busy-ok times it anyway and
+marks it). The summary holds the git commit, the settings changed with --set, and that
+load. What a part costs is found by switching it off:
+
+    python scripts/benchmark_pipeline.py --ahead --set models.reid.enabled=false
 """
 
 import argparse
@@ -20,6 +27,7 @@ import collections
 import cProfile
 import json
 import pstats
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -39,12 +47,56 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
-from ultimate_analysis.config.settings import get_setting  # noqa: E402
+from ultimate_analysis.config.settings import get_config, get_setting  # noqa: E402
 from ultimate_analysis.pipeline import AnalysisPipeline, PipelineOptions  # noqa: E402
 from ultimate_analysis.processing.homography import load_default_matrix  # noqa: E402
 from ultimate_analysis.processing.inference import set_disc_model, set_player_model  # noqa: E402
 from ultimate_analysis.processing.player_id import initialize_player_id_system  # noqa: E402
 from ultimate_analysis.utils.model_files import default_model_path  # noqa: E402
+
+# Above this the machine is taken to be busy with something else (percent, averaged)
+BUSY_GPU = 10.0
+BUSY_CPU = 25.0
+
+
+def machine_load(seconds: float = 3.0) -> dict:
+    """How busy the graphics card and the processor are while nothing of ours runs."""
+    import psutil
+
+    load = {"cpu_percent": psutil.cpu_percent(interval=seconds)}
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        samples = []
+        for _ in range(5):
+            samples.append(pynvml.nvmlDeviceGetUtilizationRates(handle).gpu)
+            time.sleep(0.2)
+        load["gpu_percent"] = float(np.mean(samples))
+        load["gpu_processes"] = len(pynvml.nvmlDeviceGetComputeRunningProcesses(handle))
+        pynvml.nvmlShutdown()
+    except Exception as error:  # No NVIDIA card or driver library: nothing to say
+        load["gpu_error"] = str(error)
+    load["busy"] = load["cpu_percent"] > BUSY_CPU or load.get("gpu_percent", 0.0) > BUSY_GPU
+    return load
+
+
+def git_commit() -> str:
+    """The commit the code is at, with "+changes" if the working tree differs from it."""
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"], cwd=REPO, capture_output=True, text=True
+        ).stdout.strip()
+        changed = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        return commit + ("+changes" if changed else "")
+    except OSError:
+        return "unknown"
 
 
 def main():
@@ -63,11 +115,30 @@ def main():
     parser.add_argument(
         "--compare", type=Path, help="Compare track snapshots with a saved reference"
     )
+    parser.add_argument("--set", action="append", default=[], help="setting=value, as JSON")
+    parser.add_argument(
+        "--busy-ok", action="store_true", help="Time even if the machine is busy (marked)"
+    )
     args = parser.parse_args()
     if args.frames <= args.warmup or args.warmup < 0:
         parser.error("--frames must exceed --warmup, which must be nonnegative")
     if args.threads is not None:
         cv2.setNumThreads(args.threads)
+    config = get_config()
+    for item in args.set:
+        key, value = item.split("=", 1)
+        node = config
+        *path, last = key.split(".")
+        for part in path:
+            node = node[part]
+        node[last] = json.loads(value)
+    load = machine_load()
+    print(f"Before the run: {json.dumps(load)}")
+    if load["busy"] and not args.busy_ok:
+        sys.exit(
+            "Something else is using the graphics card or the processor: the times would "
+            "say nothing. Free the machine, or pass --busy-ok to time it anyway (marked)."
+        )
     video = args.video or BENCHMARK_CLIP
     if not video.exists():
         video = REPO / "data" / "raw" / "videos" / get_setting("video.default_video")
@@ -130,6 +201,9 @@ def main():
                 }
             )
     summary = {
+        "commit": git_commit(),
+        "settings_changed": args.set,
+        "machine_before": load,
         "video": video.name,
         "frames": len(totals),
         "warmup_frames": args.warmup,
