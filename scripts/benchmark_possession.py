@@ -86,6 +86,7 @@ from build_holder_ground_truth import (  # noqa: E402
     holder_by_label,
     labelled_discs,
 )
+from check_splits import frame_of, seen_frames  # noqa: E402
 
 from ultimate_analysis.config.settings import get_config, get_setting  # noqa: E402
 from ultimate_analysis.constants import DEFAULT_PATHS  # noqa: E402
@@ -225,8 +226,11 @@ def a_few(rows: list) -> list:
     return [row for turn in turns for row in turn][:EXAMPLES]
 
 
-def watch(anchor_of: tuple, options: PipelineOptions, record: bool) -> Union[dict, str]:
-    """Analyse the video around a labelled frame. Gives what was seen, for `judged`, or
+def watch(
+    anchor_of: tuple, options: PipelineOptions, record: bool, step: int = STEP
+) -> Union[dict, str]:
+    """Analyse the video around a labelled frame, every `step` frames as the app does in
+    "Real time" (the labelled frame among them). Gives what was seen, for `judged`, or
     why the frame is left out."""
     video, anchor, disc_share = anchor_of
     path = REPO / "data" / "raw" / "videos" / f"{video}.mp4"
@@ -234,8 +238,8 @@ def watch(anchor_of: tuple, options: PipelineOptions, record: bool) -> Union[dic
         return "video not found"
     capture = cv2.VideoCapture(str(path))
     rate = capture.get(cv2.CAP_PROP_FPS)
-    before = int(BEFORE_SECONDS * rate) // STEP * STEP
-    start = max(anchor % STEP, anchor - before)
+    before = int(BEFORE_SECONDS * rate) // step * step
+    start = max(anchor % step, anchor - before)
     capture.set(cv2.CAP_PROP_POS_FRAMES, start)
     pipeline = AnalysisPipeline()
     if record:
@@ -253,7 +257,7 @@ def watch(anchor_of: tuple, options: PipelineOptions, record: bool) -> Union[dic
         ok, frame = capture.read()
         if not ok:
             break
-        if (number - start) % STEP:
+        if (number - start) % step:
             continue
         result = pipeline.process(frame, number, options)
         if record:
@@ -413,6 +417,23 @@ def judged(case: dict, said: list) -> dict:
     }
 
 
+def share_spread(rows: list, rounds: int = 2000) -> tuple:
+    """Where the share of frames right lies with the games drawn again (5th and 95th
+    percentile): frames of one game are not independent of each other."""
+    by_game = defaultdict(list)
+    for row in rows:
+        by_game[row["video"]].append(row["cause"] in (RIGHT, CAUSES[3]))
+    games = list(by_game.values())
+    if not games:
+        return 0.0, 0.0
+    rng = np.random.default_rng(0)
+    shares = []
+    for _ in range(rounds):
+        drawn = [games[i] for i in rng.integers(len(games), size=len(games))]
+        shares.append(sum(map(sum, drawn)) / max(1, sum(map(len, drawn))))
+    return float(np.percentile(shares, 5)), float(np.percentile(shares, 95))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -427,6 +448,19 @@ def main() -> None:
         "--perfect-disc",
         type=float,
         help="With --replay: the disc as labelled, on the holder for so many seconds before",
+    )
+    parser.add_argument(
+        "--step",
+        type=int,
+        default=STEP,
+        help=f"Analyse every so many frames, as the app's Real time (default {STEP})",
+    )
+    parser.add_argument(
+        "--train",
+        nargs="+",
+        default=[],
+        help="Datasets the disc networks learned from: the frames no frame of theirs is "
+        "near (scripts/check_splits.py) are counted apart, as the honest number",
     )
     args = parser.parse_args()
     if bool(args.labels) == bool(args.replay):
@@ -482,7 +516,7 @@ def main() -> None:
         out.mkdir(parents=True)
         options = PipelineOptions(player_id=False, top_down_view=False, draw=False)
         for count, anchor_of in enumerate(anchors):
-            case = watch(anchor_of, options, args.record)
+            case = watch(anchor_of, options, args.record, args.step)
             if count % 20 == 19:
                 done = dict(Counter(r["cause"].split()[0] for r in rows))
                 print(f"{count + 1} of {len(anchors)} labelled frames: {done}", flush=True)
@@ -502,6 +536,8 @@ def main() -> None:
         index.writerows(rows)
 
     lines = [f"Settings changed: {', '.join(args.set)}"] if args.set else []
+    if not args.replay:
+        lines.append(f"Every {args.step} frames analysed")
     if args.perfect_disc is not None:
         lines.append(
             f"The disc as labelled in place of the disc model's: at the labelled frame, and "
@@ -518,6 +554,19 @@ def main() -> None:
         same = sum(row["cause"] in (RIGHT, CAUSES[3]) for row in chosen)
         lines.append(
             f"  {label:<7}{len(chosen):>5} frames, {same} the same ({same / len(chosen):.0%})"
+        )
+    low, high = share_spread(rows)
+    lines.append(f"  all: 90% between {low:.0%} and {high:.0%}, the games drawn again")
+    if args.train:
+        place = {id(row): frame_of(f"{row['video']}_frame_{row['frame']}") for row in rows}
+        seen = seen_frames(place.values(), args.train)
+        unseen = [row for row in rows if place[id(row)] not in seen]
+        same = sum(row["cause"] in (RIGHT, CAUSES[3]) for row in unseen)
+        low, high = share_spread(unseen)
+        lines.append(
+            f"  unseen (no frame of {', '.join(args.train)} within 10 s): {len(unseen)} "
+            f"frames, {same} the same ({same / max(1, len(unseen)):.0%}; "
+            f"90% between {low:.0%} and {high:.0%})"
         )
     lines += [f"  left out: {times} {what}" for what, times in sorted(left_out.items())]
     lines += ["", "Causes: " + "; ".join(CAUSES), ""]

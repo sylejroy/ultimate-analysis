@@ -20,6 +20,7 @@ that run; the association numbers are what one tracker is compared with another 
 
     python scripts/benchmark_tracking.py hand_tracks
     python scripts/benchmark_tracking.py hand_tracks --set models.tracking.weak_detections_from=0.25
+    python scripts/benchmark_tracking.py hand_tracks --step 2      # as "Real time" at 60 fps
 """
 
 import argparse
@@ -75,9 +76,10 @@ def truth_of(folder: Path) -> dict:
     }
 
 
-def run_tracker(video: str, start: int, count: int) -> Tuple[dict, dict]:
+def run_tracker(video: str, start: int, count: int, step: int = 1) -> Tuple[dict, dict]:
     """Frame -> [(tracker ID, box)] of the pipeline as it is now, and track -> player
-    as the tracks are joined looking back over the stretch."""
+    as the tracks are joined looking back over the stretch. With `step`, only every
+    so many frames is analysed, as the app does in "Real time"."""
     path = REPO / "data" / "raw" / "videos" / f"{video}.mp4"
     capture = cv2.VideoCapture(str(path))
     rate = capture.get(cv2.CAP_PROP_FPS)
@@ -87,12 +89,16 @@ def run_tracker(video: str, start: int, count: int) -> Tuple[dict, dict]:
     pipeline.set_frame_rate(rate)
     options = PipelineOptions()
     found = {}
-    for step in range(count):
+    for offset in range(count):
+        if offset % step:
+            if not capture.grab():
+                break
+            continue
         ok, frame = capture.read()
         if not ok:
             break
-        result = pipeline.process(frame, start + step, options)
-        found[step] = [
+        result = pipeline.process(frame, start + offset, options)
+        found[offset] = [
             (int(t.track_id), [float(v) for v in t.to_ltrb()])
             for t in result.tracks
             if t.class_name == "player"
@@ -187,6 +193,9 @@ def main() -> None:
     parser.add_argument("dataset", help="Folder in data/raw/training_data with labelled stretches")
     parser.add_argument("--set", action="append", default=[], help="setting=value, as JSON")
     parser.add_argument("--only", help="Only stretches whose name contains this")
+    parser.add_argument(
+        "--step", type=int, default=1, help="Analyse every so many frames (the app's Real time)"
+    )
     args = parser.parse_args()
     config = get_config()
     config["models"]["reid"]["roster_folder"] = ""
@@ -208,7 +217,13 @@ def main() -> None:
     totals = {"as tracked": defaultdict(list), "joined after": defaultdict(list)}
     for folder in folders:
         labelled = truth_of(folder)
-        found, naming = run_tracker(labelled["video"], labelled["start"], labelled["frames"])
+        found, naming = run_tracker(
+            labelled["video"], labelled["start"], labelled["frames"], args.step
+        )
+        # Only the frames analysed are scored
+        labelled["truth"] = {
+            frame: boxes for frame, boxes in labelled["truth"].items() if frame in found
+        }
         joined = {
             frame: [(naming.get(track_id, track_id), box) for track_id, box in boxes]
             for frame, boxes in found.items()
@@ -227,6 +242,17 @@ def main() -> None:
             mean["players"] = sum(sums["players"])
             mean["ID switches"] = sum(sums["ID switches"])
             print(line(kind, mean))
+            low, high = spread(sums["AssA"])
+            print(f"  {'':13} AssA, stretches drawn again: 90% between {low:.3f} and {high:.3f}")
+
+
+def spread(values: list, rounds: int = 2000) -> Tuple[float, float]:
+    """Where the mean of per-stretch values lies with the stretches drawn again (5th and
+    95th percentile): with four stretches, a rough idea of what is noise."""
+    rng = np.random.default_rng(0)
+    values = np.asarray(values, dtype=float)
+    means = rng.choice(values, size=(rounds, len(values))).mean(axis=1)
+    return float(np.percentile(means, 5)), float(np.percentile(means, 95))
 
 
 def line(kind: str, result: dict) -> str:
