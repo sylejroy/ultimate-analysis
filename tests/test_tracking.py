@@ -1,4 +1,4 @@
-"""Tracking state and class handling, with the DeepSORT backend."""
+"""Tracking state and class handling, with stand-ins for the ByteTrack trackers."""
 
 import unittest
 from types import SimpleNamespace
@@ -8,82 +8,79 @@ import numpy as np
 from support import load_module
 
 
+def bytetrack(rows=(), tracks=()):
+    """A stand-in for a ByteTrack tracker: `rows` are what each update gives back
+    (x1, y1, x2, y2, track ID, confidence, class, detection), `tracks` its tracks."""
+    tracker = Mock()
+    tracker.update.return_value = np.array(rows, dtype=float).reshape(-1, 8)
+    tracker.outsiders.return_value = ()
+    tracker.teams_of_tracks.return_value = {}
+    tracker.leanings_of_tracks.return_value = {}
+    tracker.shirt_colours.return_value = {}
+    tracker.tracked_stracks, tracker.lost_stracks = list(tracks), []
+    tracker.args = SimpleNamespace()
+    tracker.keep_frames = 180  # Video frames a lost track is kept
+    return tracker
+
+
 class TrackingTests(unittest.TestCase):
     def setUp(self):
         self.module = load_module("processing.tracking")
         self.module._track_histories.clear()
-        backend = patch.object(self.module, "_uses_bytetrack", return_value=False)
-        backend.start()
-        self.addCleanup(backend.stop)
 
-    def test_reset_preserves_loaded_embedder_and_discards_identity_state(self):
-        tracker = Mock()
-        tracker.tracker.metric.samples = {1: ["old embedding"]}
-        with patch.object(self.module, "_deepsort_tracker", tracker):
+    def test_reset_keeps_the_trackers_and_forgets_their_tracks(self):
+        player, disc = bytetrack(), bytetrack()
+        with patch.multiple(self.module, _player_tracker=player, _disc_tracker=disc):
             self.module.reset_tracker()
-            self.assertIs(self.module._deepsort_tracker, tracker)
-        tracker.delete_all_tracks.assert_called_once()
-        self.assertEqual(tracker.tracker.metric.samples, {})
+            self.assertIs(self.module._player_tracker, player)
+        player.reset.assert_called_once()
+        disc.reset.assert_called_once()
 
     def test_empty_frame_ages_tracker_and_prunes_retired_histories(self):
-        tracker = Mock()
-        tracker.update_tracks.return_value = []
+        player, disc = bytetrack(), bytetrack()
         self.module._track_histories[7] = np.array([(1, 2)], dtype=np.float32)
         frame = np.zeros((8, 8, 3))
-        with patch.multiple(self.module, _deepsort_tracker=tracker, DEEPSORT_AVAILABLE=True):
+        with patch.multiple(self.module, _player_tracker=player, _disc_tracker=disc):
             self.assertEqual(self.module.run_tracking(frame, []), [])
-        tracker.update_tracks.assert_called_once_with([], embeds=None, frame=frame)
+        player.update.assert_called_once()
         self.assertEqual(self.module.get_track_histories(), {})
 
     def test_separate_model_class_zero_does_not_turn_players_into_discs(self):
-        tracker = Mock()
-        tracker.update_tracks.return_value = []
-        detections = [
-            {"bbox": [0, 0, 4, 4], "confidence": 0.9, "class_id": 0, "class_name": name}
-            for name in ("player", "disc")
-        ]
-        with patch.multiple(self.module, _deepsort_tracker=tracker, DEEPSORT_AVAILABLE=True):
-            self.module.run_tracking(np.zeros((8, 8, 3)), detections)
-        raw = tracker.update_tracks.call_args.args[0]
-        self.assertEqual([detection[2] for detection in raw], [1, 0])
-
-    def test_real_deepsort_ages_tracks_without_loading_an_embedder(self):
-        from deep_sort_realtime.deepsort_tracker import DeepSort
-
-        tracker = DeepSort(embedder=None, n_init=2, max_age=1)
-        tracker.embedder = Mock()
-        tracker.generate_embeds = Mock(return_value=[np.ones(128, dtype=np.float32)])
-        frame = np.zeros((8, 8, 3), dtype=np.uint8)
+        # A player model whose only class is 0, beside a disc model: by class name
+        player = bytetrack(rows=[(0, 0, 4, 4, 3, 0.9, 0, 0)])
+        disc = bytetrack()
         detections = [
             {"bbox": [0, 0, 4, 4], "confidence": 0.9, "class_id": 0, "class_name": "player"}
         ]
-        with patch.multiple(self.module, _deepsort_tracker=tracker, DEEPSORT_AVAILABLE=True):
-            self.module.run_tracking(frame, detections)
-            tracks = self.module.run_tracking(frame, detections)
-            self.assertEqual([track.class_name for track in tracks], ["player"])
-            self.assertEqual(self.module.run_tracking(frame, []), [])
-            self.assertEqual(self.module.run_tracking(frame, []), [])
-            self.assertEqual(tracker.tracker.tracks, [])
-            self.module.reset_tracker()
-            self.assertIs(self.module._deepsort_tracker, tracker)
-            self.assertEqual(tracker.tracker.metric.samples, {})
+        settings = {"models.tracking.identity.enabled": False}
+        with (
+            patch.multiple(self.module, _player_tracker=player, _disc_tracker=disc),
+            patch.object(
+                self.module, "get_setting", side_effect=lambda key, d=None: settings.get(key, d)
+            ),
+        ):
+            tracks = self.module.run_tracking(np.zeros((8, 8, 3)), detections)
+        self.assertEqual([track.class_name for track in tracks], ["player"])
+        self.assertEqual(len(disc.update.call_args.args[0].conf), 0)
+        self.module.reset_tracker()
 
     def test_lost_tracks_are_kept_for_seconds_whatever_the_frame_rate(self):
-        tracker = Mock()
+        player, disc = bytetrack(), bytetrack()
         settings = {"models.tracking.max_age_seconds": 3.0}
         with (
-            patch.object(self.module, "_deepsort_tracker", tracker),
+            patch.multiple(self.module, _player_tracker=player, _disc_tracker=disc),
             patch.object(
                 self.module, "get_setting", side_effect=lambda key, d=None: settings.get(key, d)
             ),
         ):
             self.module.set_frame_rate(60)
-            self.assertEqual(tracker.tracker.max_age, 180)
+            self.assertEqual(player.max_frames_lost, 180)
             self.module.set_frame_rate(29.97)
-            self.assertEqual(tracker.tracker.max_age, 90)
+            self.assertEqual(player.max_frames_lost, 90)
             # A video without a usable frame rate keeps the last one
             self.module.set_frame_rate(0)
-            self.assertEqual(tracker.tracker.max_age, 90)
+            self.assertEqual(player.max_frames_lost, 90)
+        self.module.set_frame_rate(30)
 
     def test_a_bigger_step_keeps_lost_tracks_as_long_and_moves_them_as_far(self):
         # ByteTrack counts its calls: x, y, aspect, height and their speeds per call
@@ -111,10 +108,8 @@ class TrackingTests(unittest.TestCase):
         self.assertEqual((track.covariance[4, 4], track.covariance[0, 0]), (4.0, 1.0))
 
     def test_the_clock_counts_video_frames_not_calls(self):
-        tracker = Mock()
-        tracker.update_tracks.return_value = []
         self.module.reset_tracker()
-        with patch.multiple(self.module, _deepsort_tracker=tracker, DEEPSORT_AVAILABLE=True):
+        with patch.multiple(self.module, _player_tracker=bytetrack(), _disc_tracker=bytetrack()):
             for index in (100, 102, 104):
                 self.module.run_tracking(np.zeros((8, 8, 3)), [], index)
         self.assertEqual((self.module._frame_count, self.module._calls), (5, 3))
@@ -156,7 +151,7 @@ class TrackingTests(unittest.TestCase):
         self.module._track_histories[1] = np.array(
             [(100, 900), (100, 1100), (100, 600), (110, 500)], dtype=np.float32
         )
-        with patch.object(self.module, "_deepsort_tracker", None):
+        with patch.multiple(self.module, _player_tracker=None, _disc_tracker=None):
             # The drone flies forward: what is low in the picture leaves it at the bottom,
             # and what was below y = 1000 is behind the camera
             forward = np.array([[1.0, 0, 0], [0, 1.0, 0], [0, -0.001, 1.0]])
@@ -167,15 +162,13 @@ class TrackingTests(unittest.TestCase):
         self.module._track_histories.clear()
 
     def test_camera_motion_moves_trails_and_where_tracks_expect_their_players(self):
-        from types import SimpleNamespace
-
         # x, y, aspect, height and their speeds
         track = SimpleNamespace(mean=np.array([400.0, 300.0, 0.4, 100.0, 5.0, 0.0, 0.0, 1.0]))
-        tracker = Mock()
-        tracker.tracker.tracks = [track]
         self.module._track_histories[1] = np.array([(400, 350), (410, 350)], dtype=np.float32)
 
-        with patch.object(self.module, "_deepsort_tracker", tracker):
+        with patch.multiple(
+            self.module, _player_tracker=bytetrack(tracks=[track]), _disc_tracker=None
+        ):
             # The camera pans: the picture moves 20 px left and 4 px up
             pan = np.array([[1.0, 0, -20], [0, 1, -4], [0, 0, 1]])
             self.module.apply_camera_motion(pan)

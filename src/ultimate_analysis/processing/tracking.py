@@ -1,19 +1,13 @@
 """Tracking of players and discs across video frames.
 
-Two trackers can do the work (models.tracking.backend):
-
-- "bytetrack": follows boxes by their motion and keeps each player track within its
-  team (team_tracker.py). The default.
-- "deepsort": matches boxes by what they look like. Between two players who cover each
-  other it decides by appearance alone, and often wrongly.
-
-On top of either, the identity layer keeps a player's ID when the tracker loses them
-and picks them up again as a new track.
+ByteTrack follows boxes by their motion and keeps each player track within its team
+(team_tracker.py); with models.tracking.backend "ground" a lost player is also found
+again by their place on the field (ground_tracker.py). On top of it, the identity layer
+keeps a player's ID when the tracker loses them and picks them up again as a new track.
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 
-import cv2
 import numpy as np
 
 from ..config.settings import get_setting
@@ -26,27 +20,10 @@ from .team_tracker import BYTETracker, DetectionBoxes, TeamTracker, tracker_sett
 
 logger = get_logger("TRACKING")
 
-# Try to import DeepSORT
-try:
-    import torch
-    from deep_sort_realtime.deepsort_tracker import DeepSort
-    from deep_sort_realtime.embedder.embedder_pytorch import INPUT_WIDTH, MobileNetv2_Embedder
-
-    DEEPSORT_AVAILABLE = True
-except ImportError:
-    logger.warning("DeepSORT not available, install with: pip install deep-sort-realtime")
-    DEEPSORT_AVAILABLE = False
-    DeepSort = None
-
-
 # Global tracking state
-_deepsort_tracker = None
 _image_to_field: Optional[np.ndarray] = None  # Of the frame about to be tracked
 _player_tracker: Optional[TeamTracker] = None  # The "bytetrack" backend: players,
 _disc_tracker: Optional[BYTETracker] = None  # and discs, which have no team
-# (embedder, network) - the embedder's network compiled for inference, or the network
-# itself when compiling is not possible
-_compiled_embedder: Tuple[Any, Any] = (None, None)
 # Track ID -> the trail of its feet, an array (N, 2) of picture positions. Kept as
 # fractions of a pixel: the camera motion moves every stored point every frame, and
 # rounding each time would let a trail drift.
@@ -109,47 +86,6 @@ class Track:
         return self.bbox
 
 
-def _initialize_deepsort_tracker():
-    """Initialize DeepSORT tracker with optimal settings."""
-    global _deepsort_tracker
-
-    if not DEEPSORT_AVAILABLE:
-        logger.warning("Cannot initialize DeepSORT - not available")
-        return False
-
-    if _deepsort_tracker is not None:
-        return True
-
-    try:
-        # DeepSORT configuration optimized for Ultimate Frisbee
-        _deepsort_tracker = DeepSort(
-            max_age=_max_age_frames(),
-            n_init=get_setting("models.tracking.n_init", 3),  # Frames needed to confirm track
-            nms_max_overlap=get_setting("models.tracking.nms_overlap", 0.7),  # Non-max suppression
-            max_cosine_distance=get_setting(
-                "models.tracking.max_cosine_distance", 0.5
-            ),  # Tighter for faster matching (was 0.7)
-            nn_budget=get_setting("models.tracking.nn_budget", 50),  # Reduced from 100 for speed
-            override_track_class=None,  # Don't override class predictions
-            embedder="mobilenet",  # Feature extractor model
-            half=True,  # Use half precision for speed
-            bgr=True,  # Input is BGR format
-            embedder_gpu=True,  # Use GPU for feature extraction if available
-            embedder_model_name=None,
-            embedder_wts=None,
-            polygon=False,  # Don't use polygon tracking
-            today=None,
-        )
-
-        logger.info("DeepSORT tracker initialized successfully")
-        return True
-
-    except Exception as e:
-        logger.error(f"Failed to initialize DeepSORT: {e}")
-        _deepsort_tracker = None
-        return False
-
-
 def _max_age_frames() -> int:
     """Video frames a track is kept without being detected.
 
@@ -193,78 +129,9 @@ def set_frame_rate(frames_per_second: float) -> None:
     global _frame_rate
     if frames_per_second and frames_per_second > 0:
         _frame_rate = float(frames_per_second)
-    if _deepsort_tracker is not None:
-        _deepsort_tracker.tracker.max_age = _max_age_frames()
     for tracker in (_player_tracker, _disc_tracker):
         if tracker is not None:
             _keep_lost(tracker, _max_age_frames())
-
-
-def _get_embedder_network(embedder: Any) -> Any:
-    """The embedder's network, traced once so it runs without Python overhead.
-
-    Tracing keeps the arithmetic identical. Freezing the trace would be faster still, but
-    it folds batch normalization into half-precision weights and shifts the embeddings.
-
-    The compiled network is only used when it reproduces the original's embeddings; any
-    failure or mismatch keeps the original network.
-    """
-    global _compiled_embedder
-    if _compiled_embedder[0] is embedder:
-        return _compiled_embedder[1]
-
-    network = embedder.model
-    try:
-        dtype = torch.half if embedder.half else torch.float
-        shape = (embedder.max_batch_size, 3, INPUT_WIDTH, INPUT_WIDTH)
-        example = torch.rand(shape, device="cuda", dtype=dtype)
-        with torch.inference_mode():
-            compiled = torch.jit.trace(network, example, check_trace=False)
-            # A different batch size than the traced one, as during tracking
-            check = torch.rand((3, *shape[1:]), device="cuda", dtype=dtype)
-            expected = network(check).float()
-            actual = compiled(check).float()
-            similarity = torch.nn.functional.cosine_similarity(expected, actual).min().item()
-        if actual.shape == expected.shape and similarity > 0.99999:
-            network = compiled
-        else:
-            logger.warning("Compiled embedder differs; using the original")
-    except Exception as e:
-        logger.warning(f"Could not compile embedder, using the original: {e}")
-
-    _compiled_embedder = (embedder, network)
-    return network
-
-
-def _embed_detections(frame: np.ndarray, deepsort_detections: List[tuple]) -> Optional[list]:
-    """Appearance embeddings for the detections, as DeepSORT's embedder computes them.
-
-    The library converts and normalizes every crop separately on the CPU and runs the
-    network with gradient tracking. This does the same arithmetic for the whole batch on
-    the GPU without gradients. Returns None to let the library compute them instead.
-    """
-    embedder = _deepsort_tracker.embedder
-    if not isinstance(embedder, MobileNetv2_Embedder) or not embedder.gpu or not embedder.bgr:
-        return None
-
-    crops, _ = _deepsort_tracker.crop_bb(frame, deepsort_detections)
-    if any(crop.size == 0 for crop in crops):
-        return None
-
-    resized = np.stack([cv2.resize(crop[..., ::-1], (INPUT_WIDTH, INPUT_WIDTH)) for crop in crops])
-
-    network = _get_embedder_network(embedder)
-    embeds = []
-    with torch.inference_mode():
-        mean = torch.tensor([0.485, 0.456, 0.406], device="cuda").view(1, 3, 1, 1)
-        std = torch.tensor([0.229, 0.224, 0.225], device="cuda").view(1, 3, 1, 1)
-        for start in range(0, len(resized), embedder.max_batch_size):
-            batch = torch.from_numpy(resized[start : start + embedder.max_batch_size]).cuda()
-            batch = (batch.permute(0, 3, 1, 2).float().div_(255.0) - mean) / std
-            if embedder.half:
-                batch = batch.half()
-            embeds.extend(network(batch).cpu().numpy())
-    return embeds
 
 
 def run_tracking(
@@ -299,22 +166,12 @@ def run_tracking(
     if _frames_per_step != before:
         _step_changed(before)
 
-    if _uses_bytetrack():
-        try:
-            return _run_bytetrack_tracking(frame, detections)
-        except Exception as e:
-            logger.exception(f"Error in ByteTrack tracking: {e}")
-            health.report("Tracking", f"failed ({type(e).__name__}); players are not followed")
-            return _run_simple_tracking(detections)
-
-    if not detections and _deepsort_tracker is None:
-        return []
-
-    return _run_deepsort_tracking(frame, detections)
-
-
-def _uses_bytetrack() -> bool:
-    return get_setting("models.tracking.backend", "bytetrack") in ("bytetrack", "ground")
+    try:
+        return _run_bytetrack_tracking(frame, detections)
+    except Exception as e:
+        logger.exception(f"Error in ByteTrack tracking: {e}")
+        health.report("Tracking", f"failed ({type(e).__name__}); players are not followed")
+        return _run_simple_tracking(detections)
 
 
 def _uses_the_ground() -> bool:
@@ -468,137 +325,10 @@ def _finish_tracks(frame: np.ndarray, tracks: List[Track]) -> None:
 def _followed_tracks() -> Tuple[List[Any], float]:
     """Player tracks the tracker still follows, found in this frame or not, and how long
     a track exists before the tracker reports it (seconds)."""
-    if _uses_bytetrack() and _player_tracker is not None:
-        followed = _player_tracker.tracked_stracks + _player_tracker.lost_stracks
-        return followed, 1.0 / _frame_rate  # Reported from its second frame on
-    if _deepsort_tracker is not None:
-        # Reported once it has been detected in n_init frames in a row
-        age = float(get_setting("models.tracking.n_init", 3)) / _frame_rate
-        return list(_deepsort_tracker.tracker.tracks), age
-    return [], 0.0
-
-
-def _run_deepsort_tracking(frame: np.ndarray, detections: List[Dict[str, Any]]) -> List[Track]:
-    """Run DeepSORT tracking on detections.
-
-    Args:
-        frame: Input video frame
-        detections: List of detection dictionaries
-
-    Returns:
-        List of Track objects with consistent IDs
-    """
-
-    if not _initialize_deepsort_tracker():
-        logger.warning("DeepSORT not available, falling back to simple tracking")
-        return _run_simple_tracking(detections)
-
-    try:
-        # Convert detections to DeepSORT format: [([x1, y1, x2, y2], confidence, class_id), ...]
-        deepsort_detections = []
-
-        logger.debug(f"Processing {len(detections)} detections for DeepSORT")
-
-        for i, det in enumerate(detections):
-            logger.debug(f"Detection {i}: {det}")
-
-            bbox = det.get("bbox")
-            confidence = det.get("confidence")
-            class_id = det.get("class_id")
-
-            logger.debug(f"bbox: {bbox} (type: {type(bbox)})")
-            logger.debug(f"confidence: {confidence} (type: {type(confidence)})")
-            logger.debug(f"class_id: {class_id} (type: {type(class_id)})")
-
-            # Ensure bbox exists and has 4 values
-            if bbox is None:
-                logger.warning("bbox is None, skipping detection")
-                continue
-
-            if not hasattr(bbox, "__len__") or len(bbox) != 4:
-                logger.warning(f"Invalid bbox format or length {bbox}, skipping detection")
-                continue
-
-            try:
-                # Convert bbox from [x1, y1, x2, y2] to [x, y, width, height] for DeepSORT
-                x1, y1, x2, y2 = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
-
-                # DeepSORT expects TLWH format: [x, y, width, height]
-                x = x1
-                y = y1
-                width = x2 - x1
-                height = y2 - y1
-
-                conf = float(confidence)
-                # IDs are local to each YOLO model: both may use class zero.
-                class_name = det.get("class_name")
-                cls = {"disc": 0, "player": 1}.get(class_name)
-                if cls is None:
-                    cls = int(class_id)
-
-                if width <= 0 or height <= 0:
-                    continue
-
-                # DeepSORT expects ([x, y, width, height], confidence, class_id) format
-                deepsort_det = ([x, y, width, height], conf, cls)
-                deepsort_detections.append(deepsort_det)
-
-                logger.debug(
-                    f"Formatted detection: LTRB {[x1, y1, x2, y2]} -> TLWH {[x, y, width, height]}"
-                )
-
-            except (ValueError, TypeError) as e:
-                logger.warning(f"Invalid detection values, skipping: {e}")
-                continue
-
-        logger.debug(f"Formatted {len(deepsort_detections)} detections for DeepSORT")
-
-        # Update tracker with current frame and detections
-        embeds = _embed_detections(frame, deepsort_detections) if deepsort_detections else None
-        with torch.inference_mode():
-            tracks_deepsort = _deepsort_tracker.update_tracks(
-                deepsort_detections, embeds=embeds, frame=frame
-            )
-
-        # Convert DeepSORT tracks to our Track format
-        tracks = []
-        for track in tracks_deepsort:
-            if not track.is_confirmed() or track.time_since_update > 0:
-                continue  # Skip unconfirmed tracks
-
-            # Get track bounding box
-            ltrb = track.to_ltrb()
-
-            # Get class info (use the most recent detection class)
-            class_id = int(track.get_det_class()) if track.get_det_class() is not None else 0
-            confidence = float(track.get_det_conf()) if track.get_det_conf() is not None else 0.5
-
-            # Map class_id to class_name
-            class_name = _get_class_name_from_id(class_id)
-
-            # Determine model type from class name (this works since each model specializes in its class)
-            model_type = "player_model" if class_name == "player" else "disc_model"
-
-            # Create our Track object
-            our_track = Track(
-                track_id=int(track.track_id),
-                bbox=[float(ltrb[0]), float(ltrb[1]), float(ltrb[2]), float(ltrb[3])],
-                class_id=class_id,
-                confidence=confidence,
-                class_name=class_name,
-                model_type=model_type,
-            )
-
-            tracks.append(our_track)
-
-        _finish_tracks(frame, tracks)
-
-        logger.debug(f"DeepSORT returned {len(tracks)} confirmed tracks")
-        return tracks
-
-    except Exception as e:
-        logger.exception(f"Error in DeepSORT tracking: {e}")
-        return _run_simple_tracking(detections)
+    if _player_tracker is None:
+        return [], 0.0
+    followed = _player_tracker.tracked_stracks + _player_tracker.lost_stracks
+    return followed, 1.0 / _frame_rate  # Reported from its second frame on
 
 
 def _assign_player_identities(frame: np.ndarray, tracks: List[Track]) -> None:
@@ -697,37 +427,15 @@ def _run_simple_tracking(detections: List[Dict[str, Any]]) -> List[Track]:
     return tracks
 
 
-def _get_class_name_from_id(class_id: int) -> str:
-    """Convert class ID to class name.
-
-    Args:
-        class_id: Numeric class identifier
-
-    Returns:
-        String class name
-    """
-    # Map based on our model's class structure
-    class_mapping = {0: "disc", 1: "player"}
-
-    return class_mapping.get(class_id, "unknown")
-
-
 def reset_tracker() -> None:
     """Reset the tracker state and clear all tracks.
 
     This should be called when switching videos or when tracking quality degrades.
     """
-    global _deepsort_tracker, _track_histories, _frame_count, _calls, _video_frame
-    global _frames_per_step
+    global _track_histories, _frame_count, _calls, _video_frame, _frames_per_step
 
     logger.info("Resetting tracker state")
     _observers.clear()
-
-    # Reset DeepSORT tracker
-    if _deepsort_tracker is not None:
-        # Keep the loaded appearance model, but discard identities and old embeddings.
-        _deepsort_tracker.delete_all_tracks()
-        _deepsort_tracker.tracker.metric.samples.clear()
     for tracker in (_player_tracker, _disc_tracker):
         if tracker is not None:
             tracker.reset()
@@ -835,16 +543,13 @@ def _move_track_states(camera_motion: np.ndarray) -> None:
     (x, y, a, h, vx, vy, va, vh). The centre moves with the picture; near a point the
     motion is a small linear map, which turns the speed and scales the height.
     """
-    if _uses_bytetrack():
-        states = [
-            track
-            for tracker in (_player_tracker, _disc_tracker)
-            if tracker is not None
-            for track in tracker.tracked_stracks + tracker.lost_stracks
-            if track.mean is not None
-        ]
-    else:
-        states = [] if _deepsort_tracker is None else list(_deepsort_tracker.tracker.tracks)
+    states = [
+        track
+        for tracker in (_player_tracker, _disc_tracker)
+        if tracker is not None
+        for track in tracker.tracked_stracks + tracker.lost_stracks
+        if track.mean is not None
+    ]
     if not states:
         return
     # All tracks at once: each centre, and a step to its right and one below it, which

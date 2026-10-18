@@ -1,7 +1,7 @@
 # Ultimate Analysis
 
 PyQt5 desktop app that analyses Ultimate Frisbee video: player and disc detection (YOLO),
-tracking (DeepSORT), possession, jersey numbers, field segmentation, and a top-down view.
+tracking (ByteTrack), possession, jersey numbers, field segmentation, and a top-down view.
 
 The README says what the app does and how to run it. Keep checked-in documents short:
 what the app does and how to use it, not how it works inside.
@@ -20,9 +20,8 @@ what the app does and how to use it, not how it works inside.
   Tests are `unittest` (pytest is not installed) and need no videos, weights, or GPU.
 - `requirements-lock.txt` is the environment as it is known to work (`pip freeze`);
   update it when a package changes.
-- PyTorch must stay at `2.7.1+cu128` and setuptools below 81. Newer setuptools removes
-  `pkg_resources`, and DeepSORT then fails to load without an error: tracking silently
-  falls back to a much worse tracker.
+- PyTorch must stay at `2.7.1+cu128`. setuptools stays below 81 until it is checked that
+  no package still imports `pkg_resources` (DeepSORT, which did, is gone).
 - Never let Ultralytics install packages on its own (`YOLO_AUTOINSTALL=false`); it has
   replaced the CUDA build of PyTorch before. Install with `--no-deps` when in doubt.
 

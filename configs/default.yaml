@@ -85,10 +85,10 @@ models:
           margin: 45           # Outline this near the frame's edge is where the frame cuts the field off, not a field line; masks stop up to some 40 px short of the edge
   
   tracking:
-    backend: bytetrack           # "bytetrack": by motion, each track within its team; "ground": the same, with lost players found again by their place on the field; "deepsort": by appearance
+    backend: bytetrack           # "bytetrack": by motion, each track within its team; "ground": the same, with lost players found again by their place on the field
     ground_keep_seconds: 6.0     # Backend "ground": how long a lost player is remembered where the field's place is known
-    hide_non_players: true       # Leave out observers: orange or red shirts that are not a team colour; backend "bytetrack" only
-    hide_off_field: true         # Leave out those standing beside the field, going by where the field model sees the field (top-down from the field model only)
+    hide_non_players: true       # Leave out observers: orange or red shirts that are not a team colour
+    hide_off_field: true         # Leave out those standing beside the field, going by where the field model sees the field (needs field segmentation)
     hide_newcomers_off_field: false  # Also a new track that has only been seen beside the field so far, until it is judged
     covered_feet: true           # A player whose legs another player stands in front of (the thrower behind the mark) is placed on the field as tall as they were before, not where their box ends
     weak_detections_from: 0.0    # Give the tracker players the detector is less sure of than its threshold, from this confidence: they can continue a track, not begin one. 0 = not
@@ -111,11 +111,6 @@ models:
       max_kit_distance: 60.0              # Kit colours further apart than this (Lab units) are different teams
       appearance_interval: 10             # Frames analysed between looks at a player's kit colour
       number_certainty: 0.6               # Certainty of a jersey number from which it identifies a missing player
-    # Only for backend "deepsort"
-    n_init: 3                    # Frames needed to confirm a track
-    nms_overlap: 0.7             # Non-maximum suppression overlap threshold
-    max_cosine_distance: 0.5     # Feature similarity threshold (tighter for faster matching)
-    nn_budget: 50                # Feature budget per class (reduced from 100 for speed)
     
   # Edited games cut away from the drone to close-ups and title cards; nothing is analysed there
   shot_type:

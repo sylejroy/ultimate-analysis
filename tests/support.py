@@ -19,8 +19,6 @@ def load_module(name):
             sys.modules[package_name] = package
     yolo = types.ModuleType("ultralytics")
     yolo.YOLO = Mock()
-    deepsort = types.ModuleType("deep_sort_realtime.deepsort_tracker")
-    deepsort.DeepSort = Mock()
     # The tracking module subclasses these; a class of its own each, nothing of ByteTrack
     trackers = types.ModuleType("ultralytics.trackers")
     byte_tracker = types.ModuleType("ultralytics.trackers.byte_tracker")
@@ -30,7 +28,6 @@ def load_module(name):
         "ultralytics": yolo,
         "ultralytics.trackers": trackers,
         "ultralytics.trackers.byte_tracker": byte_tracker,
-        "deep_sort_realtime.deepsort_tracker": deepsort,
     }
     previous = {key: sys.modules.get(key) for key in replacements}
     sys.modules.update(replacements)

@@ -20,9 +20,8 @@ nltk
 transformers>=5.0
 
 # Object tracking
-deep-sort-realtime>=1.2.0
 scipy  # matching returning players to missing ones
-setuptools<81  # deep-sort-realtime imports pkg_resources, removed in newer setuptools
+setuptools<81  # As it is known to work; DeepSORT, which needed pkg_resources, is gone, other packages not checked yet
 
 # System monitoring
 psutil>=5.9.0
