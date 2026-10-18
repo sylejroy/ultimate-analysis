@@ -41,8 +41,8 @@ models:
     confidence_threshold: 0.3
     nms_threshold: 0.45          # Only for models that need it; YOLO26 removes double boxes itself
     adaptive_skip: true          # Skip disc model when no disc detected recently
-    skip_threshold: 30           # Frames without disc before skipping disc model
-    retry_interval: 5            # While absent, search every fifth frame (was every thirtieth)
+    skip_threshold: 30           # Video frames without disc before skipping disc model
+    retry_interval: 5            # While absent, search every fifth video frame (was every thirtieth)
     follow_window: 0             # Side of the area searched around a followed disc, in frame pixels (0 = always the whole frame). Off: with a TensorRT engine for the window the app crashed during playback, without one the window is slower than the whole frame
     follow_max_missing: 5        # Frames the followed disc may be missing before the whole frame is searched again
     full_search_interval: 15     # Search the whole frame at least this often, so a wrong lock does not last
@@ -127,7 +127,7 @@ models:
       carry_on_seconds: 1.0               # For this long a missing player is expected to carry on as they were going
       min_margin: 0.25                    # How much nearer than any other candidate a match must be (share of the reachable distance)
       max_kit_distance: 60.0              # Kit colours further apart than this (Lab units) are different teams
-      appearance_interval: 10             # Frames between looks at a player's kit colour
+      appearance_interval: 10             # Frames analysed between looks at a player's kit colour
       number_certainty: 0.6               # Certainty of a jersey number from which it identifies a missing player
     # Only for backend "deepsort"
     n_init: 3                    # Frames needed to confirm a track
@@ -139,7 +139,7 @@ models:
   shot_type:
     enabled: true
     min_players: 6               # Drone footage shows at least this many players; a close-up shows the detector none or one or two
-    confirm_frames: 15           # Frames in a row that must look like the other kind before the analysis stops or starts again
+    confirm_frames: 15           # Video frames in a row that must look like the other kind before the analysis stops or starts again
 
   # Possession: the disc belongs to the player whose box it is in
   possession:

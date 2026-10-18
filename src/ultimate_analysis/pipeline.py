@@ -279,6 +279,10 @@ class AnalysisPipeline:
         self._players_before = np.zeros((0, 4))
         self._follow_field = False
         self._joined_at = 0  # The frame the tracks were last looked back over
+        # The frame analysed before, and how many video frames lie between it and this
+        # one: playback passes over frames to keep up
+        self._last_index: Optional[int] = None
+        self._frames_passed = 1
 
         # Results for the current frame
         self.detections: List[Dict[str, Any]] = []
@@ -400,6 +404,7 @@ class AnalysisPipeline:
         self.disc_heat = self.disc_heat_shown = None
         self._camera_motion.reset()
         self._motion_known = False
+        self._last_index = None  # After a seek no frames were passed over
         self._line_filter.reset()
         self._camera_since_calibration = np.eye(3)
         self.invalidate()
@@ -864,7 +869,10 @@ class AnalysisPipeline:
                 self._motion_ahead = motion
                 return found
         return detect_players_and_discs(
-            frame, weak_players_from=self._weak_from(), weak_discs_from=weak_discs_from()
+            frame,
+            weak_players_from=self._weak_from(),
+            weak_discs_from=weak_discs_from(),
+            frames_passed=self._frames_passed,
         )
 
     @staticmethod
@@ -879,8 +887,12 @@ class AnalysisPipeline:
         frame = next_frame()
         if frame is None:
             return None, [], None
+        # The next frame lies as far on as this one did from the one before
         found = detect_players_and_discs(
-            frame, weak_players_from=self._weak_from(), weak_discs_from=weak_discs_from()
+            frame,
+            weak_players_from=self._weak_from(),
+            weak_discs_from=weak_discs_from(),
+            frames_passed=self._frames_passed,
         )
         motion = None
         if with_motion:
@@ -990,6 +1002,10 @@ class AnalysisPipeline:
         self._weak_discs, self._disc_sensors = [], None
         self.tracks = []
         self.field_results = []
+        passed = frame_index - self._last_index if self._last_index is not None else 1
+        # Anything else is a seek or the same frame again
+        self._frames_passed = passed if 0 < passed <= self._possession.frame_rate else 1
+        self._last_index = frame_index
 
         if options.detection:
             start = time.perf_counter()
@@ -1413,7 +1429,7 @@ class AnalysisPipeline:
         was_wide = self._shot.wide
         players = sum(1 for detection in self.detections if detection["class_name"] == "player")
         # Of the frame before: this frame's camera motion is not worked out yet
-        wide = self._shot.update(players, continuous=self._motion_known)
+        wide = self._shot.update(players, continuous=self._motion_known, frames=self._frames_passed)
         if was_wide and not wide:
             detections = self.detections
             self.reset()

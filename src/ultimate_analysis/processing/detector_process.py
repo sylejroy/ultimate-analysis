@@ -73,6 +73,7 @@ def _detect(frame: np.ndarray, sent: Dict[str, Any], state: Dict[str, Any]) -> L
         frame,
         weak_players_from=sent["weak_players_from"],
         weak_discs_from=sent["weak_discs_from"],
+        frames_passed=sent.get("frames_passed", 1),
     )
 
 
@@ -154,7 +155,7 @@ class DetectorProcess:
             self._give_up(f"could not be started: {error}")
 
     def _give_up(self, why: str) -> None:
-        logger.error(f"The detectors' own process {why}; they run in this one from now on")
+        logger.error(f"The detectors' own process {why}; open the video again to detect here")
         self.failed = True
         self._end()
 
@@ -252,7 +253,10 @@ def start() -> None:
 
 
 def detect(
-    frame: np.ndarray, weak_players_from: float = 0.0, weak_discs_from: float = 0.0
+    frame: np.ndarray,
+    weak_players_from: float = 0.0,
+    weak_discs_from: float = 0.0,
+    frames_passed: int = 1,
 ) -> List[Dict[str, Any]]:
     """The players and discs of a frame, as `inference.run_inference` gives them: from
     the detectors' own process if that is switched on and works, from this one otherwise."""
@@ -268,6 +272,7 @@ def detect(
                 "resets": inference.reset_count(),
                 "weak_players_from": float(weak_players_from),
                 "weak_discs_from": float(weak_discs_from),
+                "frames_passed": int(frames_passed),
             },
         )
         if found is not None:
@@ -278,5 +283,8 @@ def detect(
         )
         return []
     return inference.run_inference(
-        frame, weak_players_from=weak_players_from, weak_discs_from=weak_discs_from
+        frame,
+        weak_players_from=weak_players_from,
+        weak_discs_from=weak_discs_from,
+        frames_passed=frames_passed,
     )

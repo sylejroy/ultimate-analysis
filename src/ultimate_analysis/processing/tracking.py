@@ -72,7 +72,10 @@ _video_frame: Optional[int] = None
 _frames_per_step = 1
 # Discs are not players; their track IDs are moved out of the way of the player IDs
 DISC_ID_OFFSET = 100000
+# The tracker's clock: video frames since the reset, however many were analysed. And the
+# calls since the reset (frames analysed)
 _frame_count = 0
+_calls = 0
 
 
 class Track:
@@ -148,13 +151,41 @@ def _initialize_deepsort_tracker():
 
 
 def _max_age_frames() -> int:
-    """Frames a track is kept without being detected.
+    """Video frames a track is kept without being detected.
 
     Half a second, the tracker's own default at 60 frames per second, loses a player who
     runs behind another one; the track then returns as somebody new.
     """
     seconds = float(get_setting("models.tracking.max_age_seconds", 3.0))
     return max(1, round(seconds * _frame_rate))
+
+
+def _keep_lost(tracker: Any, frames: int) -> None:
+    """Have a ByteTrack tracker keep a lost track for so many video frames. It counts its
+    calls, not frames, so this is turned into calls at the present step."""
+    tracker.keep_frames = frames
+    tracker.max_frames_lost = tracker.args.track_buffer = max(1, round(frames / _frames_per_step))
+
+
+def _step_changed(before: int) -> None:
+    """Every `_frames_per_step` video frames are analysed now, every `before` until now.
+
+    ByteTrack counts calls: the time a lost track is kept is put right, and so is the
+    speed each track is expected to move by from one call to the next (its Kalman state
+    is per call), with its doubt.
+    """
+    ratio = _frames_per_step / before
+    for tracker in (_player_tracker, _disc_tracker):
+        if tracker is None:
+            continue
+        _keep_lost(tracker, getattr(tracker, "keep_frames", _max_age_frames()))
+        for track in tracker.tracked_stracks + tracker.lost_stracks:
+            if track.mean is None:
+                continue
+            track.mean[4:] *= ratio
+            if track.covariance is not None:
+                track.covariance[4:, :] *= ratio
+                track.covariance[:, 4:] *= ratio
 
 
 def set_frame_rate(frames_per_second: float) -> None:
@@ -166,7 +197,7 @@ def set_frame_rate(frames_per_second: float) -> None:
         _deepsort_tracker.tracker.max_age = _max_age_frames()
     for tracker in (_player_tracker, _disc_tracker):
         if tracker is not None:
-            tracker.max_frames_lost = tracker.args.track_buffer = _max_age_frames()
+            _keep_lost(tracker, _max_age_frames())
 
 
 def _get_embedder_network(embedder: Any) -> Any:
@@ -256,13 +287,17 @@ def run_tracking(
             track_id = track.track_id
             x1, y1, x2, y2 = track.to_ltrb()
     """
-    global _frame_count, _video_frame, _frames_per_step
-    _frame_count += 1
+    global _frame_count, _calls, _video_frame, _frames_per_step
+    _calls += 1
+    before = _frames_per_step
     if frame_index is not None:
         skipped = frame_index - _video_frame if _video_frame is not None else 1
         # Anything else is a seek, after which the caller resets the tracker anyway
         _frames_per_step = skipped if 0 < skipped <= _frame_rate else 1
         _video_frame = frame_index
+    _frame_count += _frames_per_step
+    if _frames_per_step != before:
+        _step_changed(before)
 
     if _uses_bytetrack():
         try:
@@ -306,16 +341,19 @@ def _run_bytetrack_tracking(frame: np.ndarray, detections: List[Dict[str, Any]])
         weak_from = float(get_setting("models.tracking.weak_detections_from", 0.0))
         sure_from = float(get_setting("models.player_detection.confidence_threshold", 0.5))
         sure_from = sure_from if weak_from > 0 else 0.25
+        keep = _max_age_frames()
         if on_the_ground:
             # Kept longer: where the field is known, a lost player is found by their place
             seconds = float(get_setting("models.tracking.ground_keep_seconds", 6.0))
-            keep = max(_max_age_frames(), round(seconds * _frame_rate))
+            keep = max(keep, round(seconds * _frame_rate))
             _player_tracker = GroundTeamTracker(
                 tracker_settings(keep, sure_from), _max_age_frames() / _frame_rate
             )
         else:
-            _player_tracker = TeamTracker(tracker_settings(_max_age_frames(), sure_from))
+            _player_tracker = TeamTracker(tracker_settings(keep, sure_from))
         _disc_tracker = BYTETracker(tracker_settings(_max_age_frames()))
+        _keep_lost(_player_tracker, keep)
+        _keep_lost(_disc_tracker, _max_age_frames())
     if on_the_ground:
         _player_tracker.look(_image_to_field, _frames_per_step / _frame_rate)
 
@@ -582,8 +620,7 @@ def _assign_player_identities(frame: np.ndarray, tracks: List[Track]) -> None:
     due = [
         index
         for index, track in enumerate(players)
-        if not _identities.knows_track(track.track_id)
-        or (_frame_count + track.track_id) % interval == 0
+        if not _identities.knows_track(track.track_id) or (_calls + track.track_id) % interval == 0
     ]
     features: List[Optional[np.ndarray]] = [None] * len(players)
     for index, vector in zip(due, appearance.encode(frame, [players[i].bbox for i in due])):
@@ -680,7 +717,8 @@ def reset_tracker() -> None:
 
     This should be called when switching videos or when tracking quality degrades.
     """
-    global _deepsort_tracker, _track_histories, _frame_count, _video_frame, _frames_per_step
+    global _deepsort_tracker, _track_histories, _frame_count, _calls, _video_frame
+    global _frames_per_step
 
     logger.info("Resetting tracker state")
     _observers.clear()
@@ -699,7 +737,7 @@ def reset_tracker() -> None:
     _history_last_frame.clear()
     _player_teams.clear()
     _identities.reset()
-    _frame_count = 0
+    _frame_count = _calls = 0
     _video_frame, _frames_per_step = None, 1
 
     # Reset jersey tracking as well

@@ -51,6 +51,8 @@ _disc_position: Optional[Tuple[float, float]] = None
 _disc_velocity = (0.0, 0.0)  # Pixels per frame
 _disc_frames_missing = 0
 _frames_since_full_search = 0
+# Video frames since the disc model last ran, for probing while no disc is seen
+_frames_since_probe = 0
 _resets = 0  # How often all of that was forgotten
 
 
@@ -74,10 +76,10 @@ def reset_count() -> int:
 def reset_inference_state() -> None:
     """Resume disc detection when the video or playback position changes."""
     global _frames_since_last_disc, _disc_position, _disc_velocity
-    global _disc_frames_missing, _frames_since_full_search, _resets
+    global _disc_frames_missing, _frames_since_full_search, _resets, _frames_since_probe
     with _detector_lock:
         _resets += 1
-        _frames_since_last_disc = 0
+        _frames_since_last_disc = _frames_since_probe = 0
         _disc_position = None
         _disc_velocity = (0.0, 0.0)
         _disc_frames_missing = 0
@@ -533,6 +535,7 @@ def run_inference(
     return_timing: bool = False,
     weak_players_from: float = 0.0,
     weak_discs_from: float = 0.0,
+    frames_passed: int = 1,
 ) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], Dict[str, float]]]:
     """Find the players and the disc in a frame (see `_run_inference`), one frame at a
     time whichever thread asks.
@@ -542,10 +545,18 @@ def run_inference(
     only: nothing else should take them for players. `weak_discs_from` does the same
     for discs: they count only where something else sees a disc there too
     (processing/disc_fusion.py).
+
+    `frames_passed`: video frames since the frame asked about before (more than one where
+    playback passes over frames): how long the disc has not been seen is counted in
+    frames of the video.
     """
     with _detector_lock:
         return _run_inference(
-            frame, return_timing, float(weak_players_from), float(weak_discs_from)
+            frame,
+            return_timing,
+            float(weak_players_from),
+            float(weak_discs_from),
+            max(1, int(frames_passed)),
         )
 
 
@@ -554,6 +565,7 @@ def _run_inference(
     return_timing: bool = False,
     weak_players_from: float = 0.0,
     weak_discs_from: float = 0.0,
+    frames_passed: int = 1,
 ) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], Dict[str, float]]]:
     """Run YOLO inference on a video frame using the player and disc models.
 
@@ -618,15 +630,16 @@ def _run_inference(
     # One model in both roles: a single pass finds players and discs
     shared_model = _player_model is not None and _player_model is _disc_model
 
-    # Skip disc model if no disc detected in recent frames (optimization)
-    global _frames_since_last_disc
+    # Skip disc model if no disc detected in recent frames (optimization). Counted in
+    # video frames, however many playback passes over.
+    global _frames_since_last_disc, _frames_since_probe
+    absent = _frames_since_last_disc + frames_passed
     skip_disc = (
         get_setting("models.disc_detection.adaptive_skip", True)
         and _frames_since_last_disc > get_setting("models.disc_detection.skip_threshold", 30)
         # Periodically probe so a disc entering the frame can be detected again.
-        and _frames_since_last_disc
-        % max(1, int(get_setting("models.disc_detection.retry_interval", 5)))
-        != 0
+        and _frames_since_probe + frames_passed
+        < max(1, int(get_setting("models.disc_detection.retry_interval", 5)))
     )
     # The two models look at the same frame and know nothing of each other: the disc
     # model is started on a second thread and its answer taken after the players'. Both
@@ -678,13 +691,12 @@ def _run_inference(
         all_detections.extend(disc_detections)
 
         # Update disc detection history
-        if disc_count > 0:
-            _frames_since_last_disc = 0
-        else:
-            _frames_since_last_disc += 1
+        _frames_since_last_disc = 0 if disc_count > 0 else absent
+        _frames_since_probe = 0
     elif skip_disc:
-        logger.debug(f"Skipping disc model (no disc for {_frames_since_last_disc} frames)")
-        _frames_since_last_disc += 1
+        logger.debug(f"Skipping disc model (no disc for {absent} frames)")
+        _frames_since_last_disc = absent
+        _frames_since_probe += frames_passed
         disc_timing = {"preprocessing": 0.0, "inference": 0.0, "postprocessing": 0.0, "total": 0.0}
     else:
         logger.warning("Disc model not loaded")

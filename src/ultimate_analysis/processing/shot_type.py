@@ -31,7 +31,7 @@ class ShotWatcher:
 
     def __init__(self) -> None:
         self.wide = True
-        self._disagreeing = 0  # Frames in a row that looked like the other kind
+        self._disagreeing = 0  # Video frames in a row that looked like the other kind
         self._broken = True  # Whether the picture broke since it last showed enough players
 
     def reset(self) -> None:
@@ -53,7 +53,7 @@ class ShotWatcher:
     def _confirm_frames() -> int:
         return max(1, int(get_setting("models.shot_type.confirm_frames", 15)))
 
-    def update(self, player_count: int, continuous: bool = False) -> bool:
+    def update(self, player_count: int, continuous: bool = False, frames: int = 1) -> bool:
         """Take in how many players the detector found in a frame; True for drone footage.
 
         The kind only changes once that many frames in a row say so: players are missed
@@ -64,6 +64,8 @@ class ShotWatcher:
             continuous: Whether the picture goes on from the frame before (the camera's
                 motion between the two could be told). Drone footage that goes on
                 unbroken stays drone footage with few players in it, for a while.
+            frames: Video frames since the frame before (more than one where playback
+                passes over frames); the frames in a row are counted in the video's
         """
         looks_wide = player_count >= int(get_setting("models.shot_type.min_players", 6))
         if looks_wide:
@@ -73,7 +75,7 @@ class ShotWatcher:
         if looks_wide == self.wide:
             self._disagreeing = 0
             return self.wide
-        self._disagreeing += 1
+        self._disagreeing += max(1, int(frames))
         needed = self._confirm_frames()
         if self.wide and not self._broken:
             needed *= UNBROKEN_PATIENCE  # A swing of the camera, as far as can be told

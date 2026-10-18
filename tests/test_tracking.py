@@ -1,6 +1,7 @@
 """Tracking state and class handling, with the DeepSORT backend."""
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -83,6 +84,41 @@ class TrackingTests(unittest.TestCase):
             # A video without a usable frame rate keeps the last one
             self.module.set_frame_rate(0)
             self.assertEqual(tracker.tracker.max_age, 90)
+
+    def test_a_bigger_step_keeps_lost_tracks_as_long_and_moves_them_as_far(self):
+        # ByteTrack counts its calls: x, y, aspect, height and their speeds per call
+        track = SimpleNamespace(
+            mean=np.array([10.0, 20.0, 0.5, 90.0, 2.0, -1.0, 0.0, 0.5]), covariance=np.eye(8)
+        )
+        player, disc = (
+            SimpleNamespace(args=SimpleNamespace(), tracked_stracks=tracks, lost_stracks=[])
+            for tracks in ([track], [])
+        )
+        settings = {"models.tracking.max_age_seconds": 3.0}
+        with (
+            patch.multiple(self.module, _player_tracker=player, _disc_tracker=disc),
+            patch.object(
+                self.module, "get_setting", side_effect=lambda key, d=None: settings.get(key, d)
+            ),
+        ):
+            self.module.set_frame_rate(60)
+            self.assertEqual(player.max_frames_lost, 180)
+            self.module._frames_per_step = 2  # "Real time": every second frame
+            self.module._step_changed(1)
+        self.module._frames_per_step = 1
+        self.assertEqual((player.max_frames_lost, disc.max_frames_lost), (90, 90))
+        np.testing.assert_allclose(track.mean, [10, 20, 0.5, 90, 4, -2, 0, 1])
+        self.assertEqual((track.covariance[4, 4], track.covariance[0, 0]), (4.0, 1.0))
+
+    def test_the_clock_counts_video_frames_not_calls(self):
+        tracker = Mock()
+        tracker.update_tracks.return_value = []
+        self.module.reset_tracker()
+        with patch.multiple(self.module, _deepsort_tracker=tracker, DEEPSORT_AVAILABLE=True):
+            for index in (100, 102, 104):
+                self.module.run_tracking(np.zeros((8, 8, 3)), [], index)
+        self.assertEqual((self.module._frame_count, self.module._calls), (5, 3))
+        self.module.reset_tracker()
 
     def test_a_trail_reaches_back_a_time_however_many_frames_are_skipped(self):
         settings = {
