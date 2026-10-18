@@ -121,9 +121,7 @@ class UltimateAnalysisApp(QMainWindow):
 
         # Tab references for lazy loading
         self.main_tab: Optional["MainTab"] = None
-        self.easyocr_tab: Optional[LazyLoadingTab] = None
         self.model_training_tab: Optional[LazyLoadingTab] = None
-        self.homography_tab: Optional[LazyLoadingTab] = None
         self.labelling_tab: Optional[LazyLoadingTab] = None
 
         # Initialize UI
@@ -132,23 +130,11 @@ class UltimateAnalysisApp(QMainWindow):
 
         logger.info("Ultimate Analysis application initialized")
 
-    def _create_easyocr_tab(self) -> QWidget:
-        """Factory method to create EasyOCR tuning tab."""
-        from .easyocr.easyocr_tab import EasyOCRTuningTab
-
-        return EasyOCRTuningTab()
-
     def _create_model_training_tab(self) -> QWidget:
         """Factory method to create model training tab."""
         from .training.training_tab import ModelTrainingTab
 
         return ModelTrainingTab()
-
-    def _create_homography_tab(self) -> QWidget:
-        """Factory method to create homography tab."""
-        from .homography.homography_tab import HomographyTab
-
-        return HomographyTab()
 
     def _create_labelling_tab(self) -> QWidget:
         """Factory method to create labelling tab."""
@@ -202,16 +188,6 @@ class UltimateAnalysisApp(QMainWindow):
         self.model_training_tab = LazyLoadingTab(self._create_model_training_tab, "Model Training")
         self.tab_widget.addTab(self.model_training_tab, "Model Training")
 
-        # The two tuning tabs are on their way out: the top-down view comes from the field
-        # model and the numbers from a reader that needs no tuning. Shown only on request
-        # until they are removed.
-        if get_setting("app.legacy_tabs", False):
-            self.homography_tab = LazyLoadingTab(self._create_homography_tab, "Field Calibration")
-            self.tab_widget.addTab(self.homography_tab, "Field Calibration")
-
-            self.easyocr_tab = LazyLoadingTab(self._create_easyocr_tab, "Jersey Number Tuning")
-            self.tab_widget.addTab(self.easyocr_tab, "Jersey Number Tuning")
-
         # Status bar
         self.status_bar = self.statusBar()
         self.status_bar.showMessage("Ready")
@@ -258,7 +234,7 @@ class UltimateAnalysisApp(QMainWindow):
             self.main_tab.close()
 
         # Cleanup lazy loading tabs if they were loaded
-        for tab_attr in ["easyocr_tab", "model_training_tab", "homography_tab", "labelling_tab"]:
+        for tab_attr in ["model_training_tab", "labelling_tab"]:
             if hasattr(self, tab_attr):
                 tab = getattr(self, tab_attr)
                 if isinstance(tab, LazyLoadingTab) and tab.is_loaded():

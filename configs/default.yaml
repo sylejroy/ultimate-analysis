@@ -7,7 +7,6 @@ app:
   version: "0.1.0"
   log_level: "INFO"
   draw_views_side_by_side: true   # Draw the camera view and the top-down view at the same time
-  legacy_tabs: false             # Show the Field Calibration and Jersey Number Tuning tabs: no longer needed for the analysis, kept until they are removed
 
 # Video Processing Settings
 video:
@@ -242,49 +241,3 @@ homography:
   buffer_factor: 1.8                         # Output canvas size multiplier (1.8 = 80% larger)
   output_aspect_ratio: 3.0                   # Height:width ratio for homography output canvas (3.0 = 3:1)
   display_scale: 0.5                         # Main-tab top-down view render scale (1.0 = full canvas, sharper when zoomed but ~4x slower warp)
-
-# Genetic Algorithm Optimization Settings
-optimization:
-  # Population Parameters
-  ga_population_size: 20
-  ga_coverage_scale: 0.5          # Half-resolution grayscale coverage; line geometry stays full size
-  ga_elite_size: 2              # Number of best individuals to preserve
-  ga_mutation_rate: 0.2         # Probability of parameter mutation
-  ga_crossover_rate: 0.7        # Probability of crossover between parents
-  
-  # Fitness Function Weights (must sum to 1.0)
-  ga_fitness_weights:
-    alignment: 0.35             # Line alignment (vertical/horizontal)
-    coverage: 0.2               # Field coverage preservation  
-    visibility: 0.15            # Line visibility in warped view
-    proportion: 0.1             # Field proportion accuracy
-    distortion: 0.05            # Perspective distortion penalty
-    orientation: 0.15           # Vertical/horizontal line balance reward
-  
-  # Continuous Evolution Settings
-  continuous_evolution_interval_ms: 1000  # Milliseconds between generations in continuous mode
-  convergence_threshold: 0.95             # Fitness threshold to stop continuous evolution
-  max_generations: 200                    # Maximum generations for continuous evolution
-  
-  # Line Alignment Evaluation
-  ga_line_alignment:
-    vertical_tolerance: 5.0     # Degrees tolerance for vertical lines
-    horizontal_tolerance: 5.0   # Degrees tolerance for horizontal lines
-    min_line_length: 10         # Minimum line length to consider (pixels)
-  
-  # Field Coverage Evaluation  
-  ga_field_coverage:
-    black_pixel_threshold: 10   # Pixels below this value considered "black"
-    optimal_coverage_ratio: 0.75 # Optimal ratio of non-black pixels (avoids over-zooming)
-  
-  # Field Proportion Evaluation
-  ga_field_proportion:
-    expected_ratio: 2.7         # Ultimate field width:length ratio
-    ratio_tolerance: 0.5        # Acceptable deviation from expected ratio
-
-  # Line Orientation Balance Evaluation
-  ga_line_orientation:
-    vertical_tolerance: 15.0    # Degrees tolerance for vertical line classification
-    horizontal_tolerance: 15.0  # Degrees tolerance for horizontal line classification  
-    min_line_length: 20         # Minimum line length to consider (pixels)
-    missing_orientation_penalty: 0.5  # Penalty for missing vertical OR horizontal lines

@@ -17,7 +17,6 @@ ALLOWED = {
     "constants": BASE,
     "utils": BASE,
     "processing": BASE | {"processing"},
-    "optimization": BASE | {"processing", "optimization"},
     "training": BASE | {"training"},
     "rendering": BASE | {"processing", "rendering"},
     "pipeline": BASE | {"processing", "rendering"},
