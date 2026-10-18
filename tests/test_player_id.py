@@ -162,8 +162,7 @@ class PlayerIdConfigTests(unittest.TestCase):
 
         readers = load_module("processing.jersey_readers")
         readers._readers.clear()
-        with patch.object(readers, "find_digit_model", return_value=None):
-            self.assertIsNone(readers.get_reader("yolo_digits", lambda: None))
+        self.assertIsNone(readers.get_reader("florence", lambda: None))
         self.assertIsNone(readers.get_reader("parseq", lambda: None))
 
 

@@ -7,7 +7,7 @@ tracks where no number can be seen. Every reader runs through the app's own play
 code, so the numbers reflect what the app does.
 
     python scripts/benchmark_jersey_readers.py                # all readers
-    python scripts/benchmark_jersey_readers.py parseq yolo_digits
+    python scripts/benchmark_jersey_readers.py parseq
 """
 
 import collections

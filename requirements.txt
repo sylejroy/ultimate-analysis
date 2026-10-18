@@ -16,7 +16,7 @@ easyocr>=1.7.0
 timm
 pytorch-lightning
 nltk
-# Florence-2 reader
+# Enlarging crops (utils/enlarging.py, Swin2SR)
 transformers>=5.0
 
 # Object tracking

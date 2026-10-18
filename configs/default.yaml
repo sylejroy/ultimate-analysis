@@ -171,15 +171,10 @@ models:
     roster_folder: "data/cache/rosters" # The players of each video, kept between sessions; "" = not kept
 
   player_id:
-    # Jersey number reader: easyocr, parseq, florence, or yolo_digits (also selectable in the GUI).
-    # parseq read 18 of 23 test players with none wrong, at EasyOCR's speed; see README.
+    # Jersey number reader: parseq or easyocr (also selectable in the GUI). parseq identified
+    # 17 of 23 test players with none wrong, at EasyOCR's speed; EasyOCR is its fallback.
     method: "parseq"
     show_reading_table: false      # Draw the table of jersey readings on the video: for tuning the reader
-    florence:
-      min_confidence: 0.7          # Below this the model is guessing; lower finds more numbers but more wrong ones
-    yolo_digits:
-      model: ""                    # Digit detector weights; empty = newest detection run trained on a digits dataset
-      min_confidence: 0.5
 
     # Performance optimization: only run OCR on a subset of frames per track
     ocr_frame_interval: 5          # Run OCR for a given track every N frames (>=1)

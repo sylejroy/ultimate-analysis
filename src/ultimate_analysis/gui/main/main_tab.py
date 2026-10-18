@@ -337,9 +337,7 @@ class MainTab(QWidget):
         self.player_id_method_combo.setToolTip(
             "How jersey numbers are read.\n"
             "PARSeq + text detector: most accurate in testing, same speed as EasyOCR\n"
-            "Florence-2: similar accuracy, about 4x slower\n"
-            "YOLO digit detector: needs a model trained on a digits dataset\n"
-            "A reader that cannot be loaded falls back to EasyOCR."
+            "If PARSeq cannot be loaded, EasyOCR reads the numbers."
         )
         self.player_id_method_combo.currentIndexChanged.connect(self._on_player_id_method_changed)
         models_layout.addRow(faint("Numbers"), self.player_id_method_combo)

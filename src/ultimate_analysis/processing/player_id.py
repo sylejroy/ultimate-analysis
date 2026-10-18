@@ -59,7 +59,7 @@ _easyocr_config_cache: Dict[str, Any] = {}
 
 
 def get_player_id_method() -> str:
-    """Name of the jersey reader in use: easyocr, parseq, florence, or yolo_digits."""
+    """Name of the jersey reader in use: parseq, or easyocr."""
     method = _method_override or get_setting("models.player_id.method", "easyocr")
     return method if method in READER_LABELS else "easyocr"
 
