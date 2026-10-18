@@ -362,6 +362,18 @@ class PipelineTests(unittest.TestCase):
         self.pipeline.reset()
         np.testing.assert_allclose(self.pipeline._top_down_matrix(), calibration)
 
+    def test_a_crossing_exchanges_what_belongs_to_the_boxes(self):
+        one = SimpleNamespace(track_id=7, class_name="player", team=0, team_colour=(1, 1, 1))
+        other = SimpleNamespace(track_id=8, class_name="player", team=1, team_colour=(2, 2, 2))
+        self.pipeline.tracks = [one, other]
+        self.pipeline._looks.swapped.return_value = [(7, 8)]
+        # Where each box stands on the field, followed over the frames
+        self.pipeline._steady._players = {7: ["left"], 8: ["right"]}
+        with patch.object(self.module, "swap_players", return_value=True):
+            self.pipeline._settle_crossings(0)
+        self.assertEqual((one.track_id, other.track_id), (8, 7))
+        self.assertEqual(self.pipeline._steady._players, {8: ["left"], 7: ["right"]})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -105,17 +105,17 @@ def _exchange_names(rename: Callable[[int, int], None], first: int, second: int)
 SHIRT_EVERY_FRAMES = 6
 MIN_SHIRTS_PER_TEAM = 20
 SHIRTS_PER_TEAM = 300
-# The table of the players' statistics is handed out with every so many frames
 # The field's place is followed by the camera's motion alone for this long at most,
 # however little the camera moves
 FIELD_UNSEEN_SECONDS = 20.0
+# The table of the players' statistics is handed out with every so many frames
 STATS_EVERY_FRAMES = 30
-
-Line = Tuple[np.ndarray, np.ndarray]
 # A heat map that is only shown is worked out about this often (a second of video)
 HEAT_SHOWN_A_SECOND = 30.0
 # The dataset of field labels that a video's focal length is taken from
 FIELD_LABELS = "hand_field"
+
+Line = Tuple[np.ndarray, np.ndarray]
 
 
 @dataclass(frozen=True)
@@ -136,9 +136,17 @@ class PipelineOptions:
     draw: bool = True
 
     @property
-    def analysis_key(self) -> Tuple[bool, bool, bool, bool]:
-        """The options that change the analysis results (the top-down view only draws)."""
-        return (self.detection, self.tracking, self.player_id, self.field_segmentation)
+    def analysis_key(self) -> Tuple[bool, bool, bool, bool, str]:
+        """The options that change the analysis results. The top-down view only draws,
+        but where it is made from decides whether the field is followed, which the
+        tracker and the hiding of players beside the field go by."""
+        return (
+            self.detection,
+            self.tracking,
+            self.player_id,
+            self.field_segmentation,
+            self.top_down_source,
+        )
 
 
 @dataclass
@@ -745,9 +753,7 @@ class AnalysisPipeline:
             return None
         return max(0.0, frame_index / self._possession.frame_rate - pulls[-1].seconds)
 
-    def _draw_field_diagram(
-        self, on_canvas: np.ndarray, size: Tuple[int, int], options: PipelineOptions
-    ) -> np.ndarray:
+    def _draw_field_diagram(self, options: PipelineOptions) -> np.ndarray:
         """The top-down view as a drawing: the field, and the players where they stand."""
         to_field = self._field_follower.image_to_field
         template = self._field_follower.template
@@ -1128,10 +1134,7 @@ class AnalysisPipeline:
             if timing.get("filtering_ms", 0) > 0:
                 self._timings["Player ID - Jersey Number Filtering"] = timing["filtering_ms"]
             for was, now in renamed:
-                self._possession.rename(was, now)
-                self._off_field.rename(was, now)
-                self._steady.rename(was, now)
-                self._looks.rename(was, now)
+                self._rename(was, now)
         elif not options.player_id:
             self._numbers.numbers.clear()
 
@@ -1164,11 +1167,25 @@ class AnalysisPipeline:
             one.team, other.team = other.team, one.team
             one.team_colour, other.team_colour = other.team_colour, one.team_colour
             # What belongs to the box goes with the box: who has the disc, where they
-            # stood by the field, how sharp and how far they ran
-            for watcher in (self._possession, self._off_field):
+            # stand on the field and beside it, how sharp and how far they ran
+            for watcher in self._with_the_box():
                 _exchange_names(watcher.rename, first, second)
             self._looks.swap(first, second)
             logger.info(f"Players {first} and {second} had changed tracks in a crossing")
+
+    def _with_the_box(self) -> Tuple[Any, ...]:
+        """What is kept per track and belongs to the box, not to the player's name: who
+        has the disc, who stands beside the field, where each stands on it. Each has a
+        rename(was, now)."""
+        return (self._possession, self._off_field, self._steady)
+
+    def _rename(self, was: int, now: int) -> None:
+        """A track is known under another ID from now on: everything kept of it goes along."""
+        for watcher in self._with_the_box():
+            watcher.rename(was, now)
+        self._looks.rename(was, now)
+        if was in self.numbers_by_looks:
+            self.numbers_by_looks[now] = self.numbers_by_looks.pop(was)
 
     def _teams_by_looks(self, frame: np.ndarray) -> None:
         """Put the players in the team their looks say, where those say another than
@@ -1228,12 +1245,7 @@ class AnalysisPipeline:
         returned = self._looks.returned(list(players), missing_players(set(players)), frame_index)
         for was, now in returned:
             self._numbers.join(players[was], now)
-            self._possession.rename(was, now)
-            self._off_field.rename(was, now)
-            self._steady.rename(was, now)
-            self._looks.rename(was, now)
-            if was in self.numbers_by_looks:
-                self.numbers_by_looks[now] = self.numbers_by_looks.pop(was)
+            self._rename(was, now)
             logger.info(f"Player {was} is player {now} again (by their looks)")
 
     def _join_looking_back(self, frame_index: int) -> None:
@@ -1258,12 +1270,7 @@ class AnalysisPipeline:
             if now == was or now in players or now not in missing:
                 continue
             self._numbers.join(track, now)
-            self._possession.rename(was, now)
-            self._off_field.rename(was, now)
-            self._steady.rename(was, now)
-            self._looks.rename(was, now)
-            if was in self.numbers_by_looks:
-                self.numbers_by_looks[now] = self.numbers_by_looks.pop(was)
+            self._rename(was, now)
             players[now] = track
             missing.discard(now)
             logger.info(f"Player {was} is player {now} again (looking back over the tracks)")
@@ -1568,7 +1575,7 @@ class AnalysisPipeline:
 
         if from_field and get_setting("homography.field_diagram", True):
             start = time.perf_counter()
-            view = self._draw_field_diagram(on_canvas, (output_width, output_height), options)
+            view = self._draw_field_diagram(options)
             self._record("Top-down view", start)
             return view, ""
 
@@ -1610,7 +1617,8 @@ class AnalysisPipeline:
                     if with_field is not None:
                         view = with_field
                 except Exception as e:
-                    logger.error(f"Error applying segmentation to top-down view: {e}")
+                    logger.exception(f"Error applying segmentation to top-down view: {e}")
+                    health.report("Top-down view", "the field could not be drawn; see the log")
 
             if options.tracking and self.tracks:
                 disc_in_view = None
@@ -1645,5 +1653,6 @@ class AnalysisPipeline:
             return np.ascontiguousarray(view), ""
 
         except Exception as e:
-            logger.error(f"Error rendering top-down view: {e}")
+            logger.exception(f"Error rendering top-down view: {e}")
+            health.report("Top-down view", f"failed ({type(e).__name__}); see the log")
             return None, f"Error: {e}"
