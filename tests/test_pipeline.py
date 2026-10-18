@@ -55,7 +55,8 @@ class PipelineTests(unittest.TestCase):
     def setUp(self):
         self.module = load_module("pipeline.analysis")
         self.mocks = {}
-        numbers = sys.modules[self.module.PlayerNumbers.__module__]
+        self.identity = sys.modules[self.module.IdentityStage.__module__]
+        numbers = sys.modules[self.identity.PlayerNumbers.__module__]
         tracker = self.module.PlayerTracker
         self.field = sys.modules[self.module.FieldStage.__module__]
         self.views = sys.modules[self.module.Scene.__module__]
@@ -72,7 +73,7 @@ class PipelineTests(unittest.TestCase):
                 self.addCleanup(patcher.stop)
 
         # No network in the tests: nobody is known by their looks
-        looks = patch.object(self.module, "PlayerLooks")
+        looks = patch.object(self.identity, "PlayerLooks")
         stage = looks.start().return_value
         stage.update.return_value = {}
         stage.teams.return_value, stage.swapped.return_value = {}, []
@@ -249,9 +250,9 @@ class PipelineTests(unittest.TestCase):
     def test_video_and_reader_resets_discard_player_crop_snapshots(self):
         for reset in (self.pipeline.reset, self.pipeline.reset_player_ids):
             with self.subTest(reset=reset.__name__):
-                self.pipeline._numbers.crops.observe(7, self.frame, 3, 5, 100)
+                self.pipeline._identity.numbers.crops.observe(7, self.frame, 3, 5, 100)
                 reset()
-                self.assertIsNone(self.pipeline._numbers.crops.take(7, 3))
+                self.assertIsNone(self.pipeline._identity.numbers.crops.take(7, 3))
 
     def test_jersey_numbers_persist_fall_back_to_the_tracker_and_follow_the_tracks(self):
         self.pipeline.process(self.frame, 0, self.options)
@@ -331,7 +332,7 @@ class PipelineTests(unittest.TestCase):
 
         # Nor one who was seen somewhere the missing player cannot have been
         self.mocks["get_jersey_read_count"].return_value = 5
-        self.pipeline._numbers.could_be = lambda player, earlier: False
+        self.pipeline._identity.numbers.could_be = lambda player, earlier: False
         result = self.pipeline.process(self.frame, 5, self.options)
         self.assertEqual([track.track_id for track in result.tracks], [7])
         self.mocks["merge_players"].assert_called_once()
@@ -357,11 +358,11 @@ class PipelineTests(unittest.TestCase):
         one = SimpleNamespace(track_id=7, class_name="player", team=0, team_colour=(1, 1, 1))
         other = SimpleNamespace(track_id=8, class_name="player", team=1, team_colour=(2, 2, 2))
         self.pipeline.tracks = [one, other]
-        self.pipeline._looks.swapped.return_value = [(7, 8)]
+        self.pipeline._identity.looks.swapped.return_value = [(7, 8)]
         # Where each box stands on the field, followed over the frames
         self.pipeline._steady._players = {7: ["left"], 8: ["right"]}
         with patch.object(self.module.PlayerTracker, "swap_players", return_value=True):
-            self.pipeline._settle_crossings(0)
+            self.pipeline._identity._settle_crossings(self.pipeline.tracks, 0)
         self.assertEqual((one.track_id, other.track_id), (8, 7))
         self.assertEqual(self.pipeline._steady._players, {8: ["left"], 7: ["right"]})
 

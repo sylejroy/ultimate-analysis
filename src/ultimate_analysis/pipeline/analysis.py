@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 
 from ..config.settings import get_setting
-from ..processing import appearance, health
+from ..processing import health
 from ..processing.camera_motion import CameraMotionEstimator
 from ..processing.camera_motion import is_enabled as camera_motion_enabled
 from ..processing.detector_process import detect as detect_players_and_discs
@@ -29,10 +29,7 @@ from ..processing.field_registration import OffFieldWatcher
 from ..processing.field_segmentation import reset_segmentation_cache
 from ..processing.game_state import GameStateTracker, Player
 from ..processing.inference import reset_inference_state
-from ..processing.jersey_tracker import get_best_jersey_number
 from ..processing.model_lock import GPU_SETUP_LOCK
-from ..processing.player_looks import PlayerLooks
-from ..processing.player_numbers import PlayerNumbers
 from ..processing.possession import PossessionTracker, players_at_disc
 from ..processing.shot_type import ShotWatcher, players_are_elsewhere
 from ..processing.steady_places import SteadyPlaces
@@ -42,6 +39,7 @@ from ..rendering.tracks import team_display_colour
 from ..utils.field_camera import camera_of, raised_mapping
 from ..utils.logger import get_logger
 from .field import FieldStage
+from .identity import IdentityStage
 from .views import Scene, draw_camera_view, draw_top_down_view, seen_by_camera
 
 logger = get_logger("PIPELINE")
@@ -57,12 +55,6 @@ def _exchange_names(rename: Callable[[int, int], None], first: int, second: int)
         rename(was, now)
 
 
-# The colour a team is shown in, by the teams the players' looks give: a shirt is taken
-# every so many frames, a colour is given from so many shirts, and no more are taken
-# after so many, so that a team does not change colour on the screen
-SHIRT_EVERY_FRAMES = 6
-MIN_SHIRTS_PER_TEAM = 20
-SHIRTS_PER_TEAM = 300
 # The field's place is followed by the camera's motion alone for this long at most,
 # however little the camera moves
 FIELD_UNSEEN_SECONDS = 20.0
@@ -170,16 +162,9 @@ class AnalysisPipeline:
         # Whether the disc is seen to fly: the holder network is not asked meanwhile
         self._flying = FlyingDisc()
         self.disc_seen_flying = False
-        self._looks = PlayerLooks()
-        self.numbers_by_looks: Dict[int, str] = {}
         self._ahead: Optional[Any] = None  # The detectors' work on the next frame
         # ... and with it how the camera moved to that frame, looked at but not taken in
         self._motion_ahead: Optional[tuple] = None
-        # The shirts of the players of each team as their looks give it, the colours
-        # made of them, and a count of frames
-        self._shirts_by_looks: List[list] = [[], []]
-        self._colours_by_looks: Optional[dict] = None
-        self._shirt_turn = 0
         # Discs the detector is not sure of, and what the discs of this frame were made
         # of (processing/disc_fusion.py; None where they are the detector's alone)
         self._weak_discs: List[Dict[str, Any]] = []
@@ -194,7 +179,6 @@ class AnalysisPipeline:
         self._motion_known = False
         self._players_before = np.zeros((0, 4))
         self._follow_field = False
-        self._joined_at = 0  # The frame the tracks were last looked back over
         # The frame analysed before, and how many video frames lie between it and this
         # one: playback passes over frames to keep up
         self._last_index: Optional[int] = None
@@ -204,13 +188,11 @@ class AnalysisPipeline:
         self.detections: List[Dict[str, Any]] = []
         self.tracks: List[Any] = []
 
-        # The players and the disc followed from frame to frame
-        self._tracker = PlayerTracker()
-        # Jersey numbers persist across frames: only some players are read per frame
-        self._numbers = PlayerNumbers(self._tracker)
-        self._numbers.could_be = self._looks.could_be
-
         self._possession = PossessionTracker()
+        # The players and the disc followed from frame to frame, and who the players are
+        self._tracker = PlayerTracker()
+        self._identity = IdentityStage(self._tracker, self._rename_boxes, self._exchange_boxes)
+
         # A network that tells from a picture of a player whether they hold the disc:
         # its weights (None: not used), and the network once it is loaded
         weights = str(get_setting("models.holder.weights") or "")
@@ -251,7 +233,7 @@ class AnalysisPipeline:
     @property
     def player_ids(self) -> Dict[int, Tuple[str, Any]]:
         """Player ID -> (jersey number or "Unknown", details of the reading)."""
-        return self._numbers.numbers
+        return self._identity.player_ids
 
     def new_video(self, video_path: Optional[str] = None) -> None:
         """Start on another video: nothing of the last one holds, its camera included.
@@ -265,7 +247,7 @@ class AnalysisPipeline:
         self._score, self._events_counted = [], 0
         self.reset_fps()
         self._field.new_video(video_path)
-        self._looks.new_video(video_path)
+        self._identity.new_video(video_path)
 
     def reset(self) -> None:
         """Forget everything derived from earlier frames."""
@@ -275,12 +257,11 @@ class AnalysisPipeline:
         self.places, self.observers = {}, {}
         self.holder_guess, self._guess_job = None, None  # Of tracks that are no more
         self._game.cut()
-        self._looks.cut()
         self._forget_side_work()
         self.disc_place = None
         self._disc_path.reset()
         self._flying.reset()
-        self._numbers.reset()
+        self._identity.reset()
         self._shot.reset()
         self._tracker.reset()
         reset_inference_state()
@@ -301,17 +282,14 @@ class AnalysisPipeline:
         if self._ahead is not None:
             self._ahead.result()  # Waited for: its frame must not be drawn on meanwhile
             self._ahead = None
-        # After a cut the tracker numbers its teams anew
-        self._shirts_by_looks = [[], []]
-        self._colours_by_looks = None
-        self._shirt_turn = 0
 
     def set_frame_rate(self, frames_per_second: float) -> None:
         """Tell the pipeline the frame rate of the video; durations are set in seconds."""
         self._tracker.set_frame_rate(frames_per_second)
         if frames_per_second and frames_per_second > 0:
             self._possession.frame_rate = float(frames_per_second)
-            self._looks.frame_rate = float(frames_per_second)
+            self._identity.looks.frame_rate = float(frames_per_second)
+            self._identity.frame_rate = float(frames_per_second)
             self._field.follower.max_frames_unseen = round(
                 FIELD_UNSEEN_SECONDS * float(frames_per_second)
             )
@@ -401,14 +379,12 @@ class AnalysisPipeline:
     def set_looks_model(self, weights: Optional[str]) -> None:
         """Know the players by their looks with another network (None: the one in the
         settings). The tracks go on; what they look like is learned anew."""
-        if self._looks.set_weights(weights):
-            self.numbers_by_looks = {}
-            self._shirts_by_looks, self._colours_by_looks = [[], []], None
+        if self._identity.set_looks_model(weights):
             self._analysed_key = None
 
     def reset_player_ids(self) -> None:
         """Forget the jersey numbers read so far (e.g. after switching the reader)."""
-        self._numbers.reset(readings_too=True)
+        self._identity.numbers.reset(readings_too=True)
         self._analysed_key = None
 
     def reset_fps(self) -> None:
@@ -495,7 +471,7 @@ class AnalysisPipeline:
             detections=self.detections,
             tracks=self.tracks,
             player_ids=dict(self.player_ids),
-            numbers_by_looks=dict(self.numbers_by_looks),
+            numbers_by_looks=dict(self._identity.numbers_by_looks),
             # A table of every player is not made for every frame
             player_stats=self.player_stats() if frame_index % STATS_EVERY_FRAMES == 0 else None,
             holder_id=self._possession.holder_id,
@@ -534,7 +510,7 @@ class AnalysisPipeline:
             detections=list(self.detections),
             tracks=list(self.tracks),
             trails=self._trails() if tracking else {},
-            numbers=self._shown_numbers(),
+            numbers=self._identity.shown_numbers(),
             read_numbers=bool(self.player_ids),
             holder_id=self._possession.holder_id,
             holder_box=self._possession.holder_box,
@@ -643,7 +619,7 @@ class AnalysisPipeline:
         # A score is counted for the colour of the team that made it: the tracker numbers
         # its teams anew after every cut, the colours stay
         for event in self._game.events[self._events_counted :]:
-            shirt = self._team_colours().get(event.team) if event.kind == "score" else None
+            shirt = self._identity.team_colours().get(event.team) if event.kind == "score" else None
             if shirt is not None:
                 colour = team_display_colour(shirt)
                 for entry in self._score:
@@ -669,7 +645,7 @@ class AnalysisPipeline:
 
     def _possession_colour(self) -> Optional[Tuple[int, int, int]]:
         """The colour that stands for the team in possession, None while it is not known."""
-        shirt = self._team_colours().get(self._possession.team)
+        shirt = self._identity.team_colours().get(self._possession.team)
         return None if shirt is None else team_display_colour(shirt)
 
     def _update_fps(self, frame_time_ms: float) -> None:
@@ -875,7 +851,7 @@ class AnalysisPipeline:
                 self._field.follower.image_to_field if self._follow_field else None
             )
             self.tracks = self._tracker.run_tracking(frame, self.detections, frame_index)
-            self._teams_by_looks(frame)
+            self._identity.teams_by_looks(frame, self.tracks)
             if self._follow_field and get_setting("models.tracking.hide_off_field", True):
                 # Those standing along the sidelines are followed but not shown or counted
                 # ... judged only by a field seen lately: followed blind through a swing
@@ -934,50 +910,27 @@ class AnalysisPipeline:
             self._field.update(frame, frame_index, self.detections, self._follow_field)
 
         if options.player_id and self.tracks:
-            timing, renamed = self._numbers.update(frame, self.tracks, frame_index)
+            timing = self._identity.read_numbers(frame, self.tracks, frame_index)
             if timing["preprocessing_ms"] > 0 or timing["ocr_ms"] > 0:
                 self._timings["Player ID - Preprocessing"] = timing["preprocessing_ms"]
                 self._timings["Player ID - Reading"] = timing["ocr_ms"]
             if timing.get("filtering_ms", 0) > 0:
                 self._timings["Player ID - Jersey Number Filtering"] = timing["filtering_ms"]
-            for was, now in renamed:
-                self._rename(was, now)
         elif not options.player_id:
-            self._numbers.numbers.clear()
+            self._identity.player_ids.clear()
 
-        self.numbers_by_looks = {}
+        self._identity.numbers_by_looks = {}
         if options.tracking and self.tracks and get_setting("models.reid.enabled", True):
             start = time.perf_counter()
-            self.numbers_by_looks = self._looks.update(
+            self._identity.look(
                 frame,
                 self.tracks,
                 frame_index,
-                self._certain_numbers(),
                 self._possession.holder_id,
                 self._places_on_field(),
                 self.places,
             )
-            self._join_looking_back(frame_index)
-            self._settle_crossings(frame_index)
             self._record("Player ID - Looks", start)
-
-    def _settle_crossings(self, frame_index: int) -> None:
-        """Exchange the players of two tracks that changed them while their boxes
-        overlapped, as their looks before and after say."""
-        players = {t.track_id: t for t in self.tracks if t.class_name == "player"}
-        for first, second in self._looks.swapped(list(players), frame_index):
-            if not self._tracker.swap_players(first, second):
-                continue
-            one, other = players[first], players[second]
-            one.track_id, other.track_id = other.track_id, one.track_id
-            one.team, other.team = other.team, one.team
-            one.team_colour, other.team_colour = other.team_colour, one.team_colour
-            # What belongs to the box goes with the box: who has the disc, where they
-            # stand on the field and beside it, how sharp and how far they ran
-            for watcher in self._with_the_box():
-                _exchange_names(watcher.rename, first, second)
-            self._looks.swap(first, second)
-            logger.info(f"Players {first} and {second} had changed tracks in a crossing")
 
     def _with_the_box(self) -> Tuple[Any, ...]:
         """What is kept per track and belongs to the box, not to the player's name: who
@@ -985,91 +938,15 @@ class AnalysisPipeline:
         rename(was, now)."""
         return (self._possession, self._off_field, self._steady)
 
-    def _rename(self, was: int, now: int) -> None:
-        """A track is known under another ID from now on: everything kept of it goes along."""
+    def _rename_boxes(self, was: int, now: int) -> None:
+        """A track is known under another ID from now on."""
         for watcher in self._with_the_box():
             watcher.rename(was, now)
-        self._looks.rename(was, now)
-        if was in self.numbers_by_looks:
-            self.numbers_by_looks[now] = self.numbers_by_looks.pop(was)
 
-    def _teams_by_looks(self, frame: np.ndarray) -> None:
-        """Put the players in the team their looks say, where those say another than
-        the colour of the shirt area does: a kit is not always one colour. And take
-        the colour a team is shown in from the shirts of those the looks put in it."""
-        if not get_setting("models.reid.teams_by_looks", True):
-            return
-        players = [track for track in self.tracks if track.class_name == "player"]
-        by_looks = self._looks.teams(
-            {track.track_id: getattr(track, "team", None) for track in players}
-        )
-        if not by_looks:
-            return
-        for track in players:
-            team = by_looks.get(track.track_id)
-            if team is not None and team != getattr(track, "team", None):
-                track.team = team
-                self._tracker.set_team_of_player(track.track_id, team)
-        # A shirt every few frames, of players who stand clear of the others, until
-        # there are enough: after that a team's colour stays as it is
-        self._shirt_turn += 1
-        if self._shirt_turn % SHIRT_EVERY_FRAMES == 0:
-            boxes = [track.to_ltrb() for track in players]
-            touched = appearance.box_overlaps(boxes).max(axis=1) > 0 if boxes else []
-            for track, box, is_touched in zip(players, boxes, touched):
-                team = by_looks.get(track.track_id)
-                if team is None or len(self._shirts_by_looks[team]) >= SHIRTS_PER_TEAM:
-                    continue
-                if is_touched:
-                    continue
-                shirt = appearance.shirt_colour(frame, box)
-                if shirt is not None:
-                    self._shirts_by_looks[team].append(shirt)
-                    self._colours_by_looks = None
-        colours = self._team_colours()
-        for track in players:
-            if getattr(track, "team", None) is not None:
-                track.team_colour = colours.get(track.team)
-
-    def _team_colours(self) -> Dict[int, Tuple[int, int, int]]:
-        """{team: the colour of its shirts (BGR)}: of the shirts of those the looks put
-        in the team once there are a few, and as the tracker has it until then."""
-        if self._colours_by_looks is None:
-            colours = dict(self._tracker.team_shirt_colours())
-            for team, shirts in enumerate(self._shirts_by_looks):
-                if len(shirts) >= MIN_SHIRTS_PER_TEAM:
-                    colours[team] = tuple(int(round(v)) for v in np.median(shirts, axis=0))
-            if all(len(shirts) < MIN_SHIRTS_PER_TEAM for shirts in self._shirts_by_looks):
-                return colours  # The tracker's, which it may still be changing
-            self._colours_by_looks = appearance.told_apart(colours)
-        return self._colours_by_looks
-
-    def _join_looking_back(self, frame_index: int) -> None:
-        """Give a player the tracker lost and began again their ID back, where the
-        tracks since the last cut, looked back over, turn out to be one player
-        (tracklet_linking.py: never in the picture at once, of one team, within a
-        player's reach of each other on the field, and clearly most alike).
-
-        Every so often (models.reid.join_looking_back_seconds, 0: never), and only into
-        a player the tracker still remembers and does not see.
-        """
-        every = float(get_setting("models.reid.join_looking_back_seconds", 1.0))
-        rate = self._possession.frame_rate
-        if every <= 0 or frame_index - self._joined_at < every * rate:
-            return
-        self._joined_at = frame_index
-        players = {t.track_id: t for t in self.tracks if t.class_name == "player"}
-        naming = self._looks.players_of_tracks()
-        missing = set(self._tracker.missing_players(set(players)))
-        for was, track in list(players.items()):
-            now = naming.get(was, was)
-            if now == was or now in players or now not in missing:
-                continue
-            self._numbers.join(track, now)
-            self._rename(was, now)
-            players[now] = track
-            missing.discard(now)
-            logger.info(f"Player {was} is player {now} again (looking back over the tracks)")
+    def _exchange_boxes(self, first: int, second: int) -> None:
+        """Two tracks exchanged their IDs in a crossing."""
+        for watcher in self._with_the_box():
+            _exchange_names(watcher.rename, first, second)
 
     def _places_on_field(self) -> Dict[int, np.ndarray]:
         """Track -> where the player stands on the field, if the field's place is known."""
@@ -1088,37 +965,11 @@ class AnalysisPipeline:
 
     def players_of_tracks(self) -> Dict[int, int]:
         """Track -> player, looking back over the tracks since the last cut."""
-        return self._looks.players_of_tracks()
+        return self._identity.players_of_tracks()
 
     def player_stats(self) -> List[dict]:
-        """What is known of each player of the video and what they did: a row each
-        (PlayerRoster.table), with the colour their team is drawn in."""
-        rows = self._looks.roster.table()
-        for row in rows:
-            shirt = row.pop("team_colour")
-            row["colour"] = None if shirt is None else team_display_colour(shirt)
-        return rows
-
-    def _certain_numbers(self) -> Dict[int, str]:
-        """Track -> jersey number, for the players whose number is read often enough to
-        name them by."""
-        needed = float(get_setting("models.tracking.identity.number_certainty", 0.6))
-        certain = {}
-        for track in self.tracks:
-            if track.class_name == "player" and track.track_id in self.player_ids:
-                number, certainty = get_best_jersey_number(track.track_id)
-                if number and certainty >= needed:
-                    certain[track.track_id] = str(number)
-        return certain
-
-    def _shown_numbers(self) -> Dict[int, Tuple[str, Any]]:
-        """The numbers to draw: those read, and for the others the number of the player
-        they look like, marked with a tilde."""
-        shown = dict(self.player_ids)
-        for track_id, number in self.numbers_by_looks.items():
-            if not str(shown.get(track_id, ("", None))[0]).isdigit():
-                shown[track_id] = (f"~{number}", None)
-        return shown
+        """What is known of each player of the video and what they did: a row each."""
+        return self._identity.player_stats()
 
     def _watch_shot(self) -> bool:
         """Whether this frame is drone footage; what was followed is dropped when it stops.
