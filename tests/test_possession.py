@@ -88,6 +88,7 @@ class PossessionTests(unittest.TestCase):
             "models.possession.other_team_seconds": OTHER_TEAM_FRAMES / FRAME_RATE,
             "models.possession.reach": 1.0,
             "models.possession.thrown_speed": 0.0,
+            "models.possession.release_from_box": False,
             "models.possession.stray_seconds": STRAY_FRAMES / FRAME_RATE,
             "models.possession.covered_seconds": MEMORY_FRAMES / FRAME_RATE,
             "models.possession.teammate_seconds": 0.0,
@@ -207,6 +208,20 @@ class PossessionTests(unittest.TestCase):
         self.assertIsNone(self.see(flight[-1]))
         # Nobody's from the first sighting outside the box, not from when it was sure
         self.assertEqual(self.tracker.since, CONFIRM_FRAMES)
+
+    def test_a_throw_leaves_the_holder_where_the_disc_left_their_box_where_asked(self):
+        for from_box, left in ((False, CONFIRM_FRAMES + 2), (True, CONFIRM_FRAMES)):
+            with self.subTest(release_from_box=from_box):
+                self.tracker = self.module.PossessionTracker()  # Frames counted from 0
+                self.tracker.frame_rate = FRAME_RATE
+                self.settings["models.possession.release_from_box"] = from_box
+                self.see(disc(130, 150), frames=CONFIRM_FRAMES)
+                # Two frames just outside the box, within reach: held out, as it seems
+                self.assertEqual(self.see(disc(190, 150)), 1)
+                self.assertEqual(self.see(disc(200, 150)), 1)
+                # Then out of reach until nobody is sure to have it
+                self.assertIsNone(self.see(disc(400, 150), frames=CONFIRM_FRAMES))
+                self.assertEqual(self.tracker.since, left)
 
     def test_a_disc_held_out_and_moved_about_is_not_thrown(self):
         self.settings["models.possession.thrown_speed"] = 1.5

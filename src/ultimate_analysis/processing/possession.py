@@ -257,6 +257,9 @@ class PossessionTracker:
         # the last sighting, and at the sighting it began to move away from them
         self._last_away: Optional[Tuple[int, float]] = None
         self._away_since: Optional[Tuple[int, float]] = None
+        # The frame since which the disc is outside the holder's box but within their
+        # reach, taken for held out: if it turns out to have been thrown, from there
+        self._out_of_box_since: Optional[int] = None
         self._lying: List[_Lying] = []  # What is seen lying at no player
         # Player track -> (box, team, frame) as last seen: where the lost ones stood
         self._last_seen: Dict[int, Tuple[Box, Optional[int], int]] = {}
@@ -629,6 +632,7 @@ class PossessionTracker:
             x1, y1, x2, y2 = self._holder_box
             if _contains(_widened(self._holder_box, margin), *centre):
                 at_disc = self.holder_id  # Still in the holder's box, or where they were
+                self._out_of_box_since = None
             elif at_disc is None and thrown:
                 # On its way: nobody's from the sighting it set off at
                 self._first_seen[None] = min(
@@ -636,6 +640,10 @@ class PossessionTracker:
                 )
             elif at_disc is None and _contains((x1 - arm, y1 - arm, x2 + arm, y2 + arm), *centre):
                 at_disc = self.holder_id  # Held out at arm's length
+                if self._out_of_box_since is None:
+                    self._out_of_box_since = self._frame
+        elif at_disc == self.holder_id:
+            self._out_of_box_since = None
 
         self._follow_disc(
             centre, at_disc is not None, float(np.median(heights)) if heights else 90.0
@@ -687,9 +695,17 @@ class PossessionTracker:
         self._first_seen.setdefault(at_disc, self._frame)
 
         if self._seen_at[at_disc] >= self._frames_needed(at_disc, tracks):
+            self.since = self._first_seen[at_disc]
+            if (
+                at_disc is None
+                and self._out_of_box_since is not None
+                and get_setting("models.possession.release_from_box", True)
+            ):
+                # Thrown: from when it left the holder's box, not from when it was out of
+                # their reach
+                self.since = min(self.since, self._out_of_box_since)
             self.holder_id = at_disc
             self._holder_teams = [0, 0]
-            self.since = self._first_seen[at_disc]
             self._seen_at.clear()
             self._first_seen.clear()
             # A holder who is covered is remembered where they stood, like one who was
@@ -699,6 +715,7 @@ class PossessionTracker:
             self._holder_box = stood[0] if covered else None
             self._holder_unseen = self._frame - stood[2] if covered else 0
             self._last_away = self._away_since = None
+            self._out_of_box_since = None
             if at_disc is not None:
                 self._turned_over = False
             self._follow_holder(tracks)
