@@ -25,7 +25,7 @@ from ..processing.disc_flight import DiscPath, FlyingDisc, place_under_disc
 from ..processing.disc_fusion import fuse_discs, weak_discs_from
 from ..processing.disc_fusion import is_enabled as fusion_enabled
 from ..processing.disc_heatmap import peaks_of
-from ..processing.field_registration import OffFieldWatcher, field_to_canvas
+from ..processing.field_registration import OffFieldWatcher
 from ..processing.field_segmentation import reset_segmentation_cache
 from ..processing.game_state import GameStateTracker, Player
 from ..processing.inference import reset_inference_state
@@ -37,25 +37,12 @@ from ..processing.possession import PossessionTracker, players_at_disc
 from ..processing.shot_type import ShotWatcher, players_are_elsewhere
 from ..processing.steady_places import SteadyPlaces
 from ..processing.tracking import PlayerTracker
-from ..rendering.field import (
-    draw_field_segmentation,
-    draw_unified_field_mask,
-    get_primary_field_color,
-)
-from ..rendering.overlays import draw_fps_overlay, draw_jersey_table, draw_notice
-from ..rendering.top_down import draw_field_diagram
-from ..rendering.tracks import (
-    draw_detections,
-    draw_disc_heat,
-    draw_holder_guess,
-    draw_possession,
-    draw_tracks,
-    draw_tracks_with_player_ids,
-    team_display_colour,
-)
+from ..rendering.overlays import draw_notice
+from ..rendering.tracks import team_display_colour
 from ..utils.field_camera import camera_of, raised_mapping
 from ..utils.logger import get_logger
 from .field import FieldStage
+from .views import Scene, draw_camera_view, draw_top_down_view, seen_by_camera
 
 logger = get_logger("PIPELINE")
 
@@ -473,14 +460,12 @@ class AnalysisPipeline:
             self._analyse(frame, frame_index, options, next_frame)
             self._analysed_key = analysis_key
 
-        # The two views are drawn side by side: neither changes what the other reads.
-        # The trails both draw are worked out before they part.
+        # The two views are drawn side by side, from what this frame's analysis left
+        scene = self._scene(options) if options.draw else None
         side_by_side = bool(get_setting("app.draw_views_side_by_side", True))
         top_down = None
         if options.top_down_view and side_by_side and options.draw:
-            if options.tracking and self.tracks:
-                self._trails()
-            top_down = self._threads.submit(self._draw_top_down_view, options)
+            top_down = self._threads.submit(draw_top_down_view, scene, options, self._record)
 
         # The copy of the frame that is drawn on belongs to the drawing. None is needed
         # of a frame that is ours.
@@ -489,7 +474,7 @@ class AnalysisPipeline:
             copy_start = time.perf_counter()
             drawn_on = frame if frame_is_ours else frame.copy()
             self._record("Visualization", copy_start)
-            main_view = self._draw_main_view(drawn_on, options)
+            main_view = draw_camera_view(drawn_on, scene, options, self._record)
         problems = health.problems()
         for line, problem in enumerate(problems if options.draw else ()):
             draw_notice(main_view, problem, line=line + 1, alarm=True)
@@ -498,7 +483,7 @@ class AnalysisPipeline:
         if top_down is not None:
             top_down_view, top_down_message = top_down.result()
         elif options.top_down_view and options.draw:
-            top_down_view, top_down_message = self._draw_top_down_view(options)
+            top_down_view, top_down_message = draw_top_down_view(scene, options, self._record)
 
         total_ms = (time.perf_counter() - start) * 1000
         self._update_fps(total_ms)
@@ -527,12 +512,43 @@ class AnalysisPipeline:
             disc_place=self.disc_place,
             places=self.places,
             observers=self.observers,
-            seen_by_camera=self._seen_by_camera(self._field.follower.image_to_field)
+            seen_by_camera=seen_by_camera(
+                self._field.follower.image_to_field, self._frame_size, self._field.template
+            )
             if self._follow_field and self._field.follower.image_to_field is not None
             else None,
             timings=self._timings,
             wide_shot=self._shot.wide,
             problems=problems,
+        )
+
+    def _scene(self, options: PipelineOptions) -> Scene:
+        """What the views of this frame are drawn from, taken here on the frame's own
+        thread: the top-down view is drawn beside it on another."""
+        tracking = options.tracking and bool(self.tracks)
+        return Scene(
+            template=self._field.template,
+            frame_size=self._frame_size,
+            wide=self._shot.wide,
+            fps=self.fps,
+            detections=list(self.detections),
+            tracks=list(self.tracks),
+            trails=self._trails() if tracking else {},
+            numbers=self._shown_numbers(),
+            read_numbers=bool(self.player_ids),
+            holder_id=self._possession.holder_id,
+            holder_box=self._possession.holder_box,
+            possession_colour=self._possession_colour(),
+            holder_guess=dict(self.holder_guess) if self.holder_guess else self.holder_guess,
+            disc_heat=self.disc_heat_shown,
+            field_results=self._field.results,
+            field_mask=self._field.mask,
+            image_to_field=self._field.follower.image_to_field,
+            places=dict(self.places),
+            disc_place=self.disc_place,
+            disc_path=list(self._disc_path.stretches()) if options.tracking else [],
+            show_holder_guess=self.show_holder_guess,
+            show_disc_heat=self.show_disc_heat,
         )
 
     def _record(self, stage: str, start: float) -> float:
@@ -644,85 +660,6 @@ class AnalysisPipeline:
         if not pulls or self._game.state not in ("pull", "live"):
             return None
         return max(0.0, frame_index / self._possession.frame_rate - pulls[-1].seconds)
-
-    def _draw_field_diagram(self, options: PipelineOptions) -> np.ndarray:
-        """The top-down view as a drawing: the field, and the players where they stand."""
-        to_field = self._field.follower.image_to_field
-        template = self._field.follower.template
-        # A drawing needs no more pixels than the panel it is shown in
-        height = int(get_setting("homography.diagram_height", 900))
-        size = (int(height * 1.25 * template.width / template.length), height)
-        to_view = field_to_canvas(template, size)
-
-        def on_field(pixels: np.ndarray) -> np.ndarray:
-            mapped = pixels @ to_field[:, :2].T + to_field[:, 2]
-            ahead = mapped[:, 2] * mapped[-1, 2] > 0  # Above the horizon is no ground
-            return mapped[ahead, :2] / mapped[ahead, 2:3]
-
-        players, disc = [], None
-        histories = self._trails() if options.tracking else {}
-        shown_numbers = self._shown_numbers()
-        for track in self.tracks if options.tracking else ():
-            x1, y1, x2, y2 = track.to_ltrb()
-            if track.class_name != "player":
-                if self._possession.holder_id is None:
-                    disc = self.disc_place or tuple(
-                        on_field(np.array([[(x1 + x2) / 2, (y1 + y2) / 2]]))[0]
-                    )
-                continue
-            shirt = getattr(track, "team_colour", None)
-            number = shown_numbers.get(track.track_id, ("", None))[0]
-            trail = histories.get(track.track_id)
-            players.append(
-                {
-                    "place": self.places.get(track.track_id)
-                    or tuple(on_field(np.array([[(x1 + x2) / 2, y2]]))[0]),
-                    "colour": None if shirt is None else team_display_colour(shirt),
-                    # A number with a tilde is known by the player's looks, not read
-                    "label": f"#{number}"
-                    if str(number).isdigit()
-                    else (str(number) if str(number).startswith("~") else ""),
-                    "holder": track.track_id == self._possession.holder_id,
-                    "trail": on_field(np.asarray(trail, dtype=float)) if trail is not None else (),
-                }
-            )
-        return draw_field_diagram(
-            size,
-            template.width,
-            template.length,
-            template.end_zone,
-            to_view,
-            players,
-            disc,
-            self._seen_by_camera(to_field),
-            self._disc_path.stretches() if options.tracking else (),
-        )
-
-    def _seen_by_camera(self, to_field: np.ndarray) -> Optional[np.ndarray]:
-        """The outline on the field of what the frame shows: its border, as far as that
-        lies on the ground (the part above the horizon does not)."""
-        if self._frame_size is None:
-            return None
-        width, height = self._frame_size
-        along = np.linspace(0.0, 1.0, 24, endpoint=False)
-        border = np.concatenate(
-            [
-                np.column_stack([along * width, np.zeros_like(along)]),
-                np.column_stack([np.full_like(along, width), along * height]),
-                np.column_stack([(1 - along) * width, np.full_like(along, height)]),
-                np.column_stack([np.zeros_like(along), (1 - along) * height]),
-            ]
-        )
-        mapped = np.column_stack([border, np.ones(len(border))]) @ to_field.T
-        # The middle of the frame's lower edge is ground in front of the camera
-        ground = to_field @ [width / 2.0, height - 1.0, 1.0]
-        ahead = mapped[:, 2] * ground[2] > 1e-9 * abs(ground[2])
-        if ahead.sum() < 3:
-            return None
-        places = mapped[ahead, :2] / mapped[ahead, 2:3]
-        # Near the horizon the ground runs off to infinity: kept within sight of the field
-        reach = 3.0 * self._field.follower.template.length
-        return np.clip(places, -reach, reach)
 
     def _trails(self) -> Dict[int, np.ndarray]:
         """The trails of the tracks in this frame: both views draw them."""
@@ -1201,94 +1138,3 @@ class AnalysisPipeline:
             self.detections = detections
             self._shot.pause()
         return wide
-
-    # ------------------------------------------------------------------ rendering
-
-    def _draw_main_view(self, frame: np.ndarray, options: PipelineOptions) -> np.ndarray:
-        """Draw the overlays for the current results on a frame the caller owns."""
-        if not self._shot.wide:
-            draw_notice(frame, "Close-up: analysis paused")
-            draw_fps_overlay(frame, self.fps)
-            return frame
-        if not (options.field_segmentation or self.detections or self.tracks):
-            draw_fps_overlay(frame, self.fps)
-            return frame
-
-        start = time.perf_counter()
-
-        # Field first, as background for the players
-        if self._field.results and options.field_segmentation:
-            if get_setting("models.segmentation.show_raw_masks", False):
-                frame = draw_field_segmentation(frame, self._field.results)
-            if self._field.mask is not None:
-                frame = self._draw_field_overlay(frame, self._field.mask)
-
-        # Plain detections only without tracking; tracks carry the same boxes
-        if self.detections and not options.tracking:
-            frame = draw_detections(frame, self.detections, in_place=True)
-        elif self.tracks and options.tracking:
-            track_histories = self._trails()
-            if options.player_id:
-                frame = draw_tracks_with_player_ids(
-                    frame, self.tracks, track_histories, self._shown_numbers(), in_place=True
-                )
-            else:
-                frame = draw_tracks(frame, self.tracks, track_histories, in_place=True)
-            draw_possession(
-                frame,
-                self.tracks,
-                self._possession.holder_id,
-                self._possession.holder_box,
-                self._possession_colour(),
-            )
-            # As the network says it, in every frame: nothing is held back, so that what
-            # it gets wrong can be seen
-            if self.show_holder_guess:
-                draw_holder_guess(frame, self.tracks, self.holder_guess)
-        if self.show_disc_heat:
-            draw_disc_heat(frame, self.disc_heat_shown)
-
-        draw_fps_overlay(frame, self.fps)
-        if (
-            options.player_id
-            and self.player_ids
-            and get_setting("models.player_id.show_reading_table", False)
-        ):
-            draw_jersey_table(frame)
-
-        self._record("Visualization", start)
-        return frame
-
-    def _draw_field_overlay(self, frame: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        """The outline of the field the model sees, drawn before the players."""
-        return draw_unified_field_mask(
-            frame,
-            mask,
-            get_primary_field_color(),
-            alpha=0.3,
-            draw_contour=False,
-            fill_mask=False,
-            in_place=True,
-        )
-
-    def _draw_top_down_view(self, options: PipelineOptions) -> Tuple[Optional[np.ndarray], str]:
-        """Draw the field from above, with the players where they stand on it.
-
-        Returns:
-            (view, "") or (None, reason there is no view)
-        """
-        if not self._shot.wide:
-            return None, "Close-up: no top-down view"
-        if not options.field_segmentation:
-            return None, "The top-down view needs field segmentation"
-        if self._field.follower.image_to_field is None:
-            return None, "The field has not been found in this view yet"
-        start = time.perf_counter()
-        try:
-            view = self._draw_field_diagram(options)
-        except Exception as e:
-            logger.exception(f"Error drawing the top-down view: {e}")
-            health.report("Top-down view", f"failed ({type(e).__name__}); see the log")
-            return None, f"Error: {e}"
-        self._record("Top-down view", start)
-        return view, ""

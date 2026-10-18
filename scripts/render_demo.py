@@ -31,7 +31,7 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
 from ultimate_analysis.pipeline import AnalysisPipeline, PipelineOptions  # noqa: E402
-from ultimate_analysis.pipeline import analysis as pipeline_module  # noqa: E402
+from ultimate_analysis.pipeline import views as pipeline_views  # noqa: E402
 from ultimate_analysis.processing.player_id import discard_pending_readings  # noqa: E402
 from ultimate_analysis.rendering.tracks import UNKNOWN_TEAM_COLOUR  # noqa: E402
 from ultimate_analysis.utils.video import seconds_of  # noqa: E402
@@ -211,7 +211,7 @@ def main() -> None:
 
     every = args.every or max(1, round(frames_per_second / 30.0))
     # The processing rate shown in the app says nothing here: every frame is waited for
-    pipeline_module.draw_fps_overlay = lambda *_, **__: None
+    pipeline_views.draw_fps_overlay = lambda *_, **__: None
     pipeline = AnalysisPipeline()
     pipeline.new_video(str(args.video))
     pipeline.set_frame_rate(frames_per_second)

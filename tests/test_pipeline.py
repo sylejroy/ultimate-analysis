@@ -58,8 +58,10 @@ class PipelineTests(unittest.TestCase):
         numbers = sys.modules[self.module.PlayerNumbers.__module__]
         tracker = self.module.PlayerTracker
         self.field = sys.modules[self.module.FieldStage.__module__]
+        self.views = sys.modules[self.module.Scene.__module__]
         for owner, names in (
-            (self.module, STAGES + DRAWING),
+            (self.module, STAGES + ("draw_notice",)),
+            (self.views, DRAWING),
             (self.field, FIELD_STAGES),
             (numbers, NUMBER_STAGES),
             (tracker, TRACKER),
@@ -341,7 +343,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result.top_down_message, "The field has not been found in this view yet")
 
         self.pipeline._field.follower.image_to_field = np.eye(3)
-        with patch.object(self.module, "draw_field_diagram", return_value="drawn") as diagram:
+        with patch.object(self.views, "draw_field_diagram", return_value="drawn") as diagram:
             result = self.pipeline.process(self.frame, 1, options)
         self.assertEqual((result.top_down_view, result.top_down_message), ("drawn", ""))
         diagram.assert_called_once()
