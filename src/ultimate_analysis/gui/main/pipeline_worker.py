@@ -55,16 +55,13 @@ class PipelineWorker(QObject):
 
     # ------------------------------------------------------------------ requests
 
-    @pyqtSlot(str, object, object)
-    def load_video(
-        self, video_path: str, options: PipelineOptions, homography_matrix: Optional[np.ndarray]
-    ) -> None:
+    @pyqtSlot(str, object)
+    def load_video(self, video_path: str, options: PipelineOptions) -> None:
         """Open a video, forget the previous one, and prepare the models for it."""
         info: Dict[str, Any] = {"loaded": False, "path": video_path}
         try:
             with MODEL_LOCK:
                 self.pipeline.new_video(video_path)
-                self.pipeline.homography_matrix = homography_matrix
 
                 if self.video_player.load_video(video_path):
                     info = self.video_player.get_video_info()

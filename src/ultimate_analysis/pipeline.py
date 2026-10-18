@@ -27,7 +27,6 @@ from .processing.disc_fusion import fuse_discs, weak_discs_from
 from .processing.disc_fusion import is_enabled as fusion_enabled
 from .processing.disc_heatmap import peaks_of
 from .processing.field_analysis import create_unified_field_mask, fit_lines_from_mask
-from .processing.field_line_filter import FieldLineFilter
 from .processing.field_registration import FieldFollower, OffFieldWatcher, field_to_canvas
 from .processing.field_segmentation import (
     prepare_for_segmentation,
@@ -36,7 +35,6 @@ from .processing.field_segmentation import (
     segment_prepared,
 )
 from .processing.game_state import GameStateTracker, Player
-from .processing.homography import output_canvas_size
 from .processing.inference import reset_inference_state
 from .processing.jersey_tracker import get_best_jersey_number
 from .processing.model_lock import GPU_SETUP_LOCK
@@ -63,15 +61,8 @@ from .rendering.field import (
     draw_unified_field_mask,
     get_primary_field_color,
 )
-from .rendering.field_lines import draw_ransac_field_lines
 from .rendering.overlays import draw_fps_overlay, draw_jersey_table, draw_notice
-from .rendering.top_down import (
-    apply_segmentation_to_warped_frame,
-    draw_field_diagram,
-    draw_field_template,
-    draw_tracks_top_down,
-    hide_behind_camera,
-)
+from .rendering.top_down import draw_field_diagram
 from .rendering.tracks import (
     draw_detections,
     draw_disc_heat,
@@ -127,26 +118,14 @@ class PipelineOptions:
     player_id: bool = True
     field_segmentation: bool = True
     top_down_view: bool = True
-    # What the top-down view is made from: "calibration" (the mapping set by hand in the
-    # Homography tab, moved with the camera) or "field" (where the field model sees the
-    # field in each frame)
-    top_down_source: str = "field"
     # Whether the views are drawn. Without, the camera view of a result is the frame as
     # it came and there is no top-down view: for a run that only reads the results
     draw: bool = True
 
     @property
-    def analysis_key(self) -> Tuple[bool, bool, bool, bool, str]:
-        """The options that change the analysis results. The top-down view only draws,
-        but where it is made from decides whether the field is followed, which the
-        tracker and the hiding of players beside the field go by."""
-        return (
-            self.detection,
-            self.tracking,
-            self.player_id,
-            self.field_segmentation,
-            self.top_down_source,
-        )
+    def analysis_key(self) -> Tuple[bool, bool, bool, bool]:
+        """The options that change the analysis results (the top-down view only draws)."""
+        return (self.detection, self.tracking, self.player_id, self.field_segmentation)
 
 
 @dataclass
@@ -210,8 +189,6 @@ class _FieldGeometry:
     source: Optional[List[Any]] = None  # The segmentation result it was made from
     frame_shape: Optional[Tuple[int, int]] = None
     mask: Optional[np.ndarray] = None
-    contour: Optional[np.ndarray] = None
-    ransac_fit: Optional[tuple] = None
 
 
 class AnalysisPipeline:
@@ -224,12 +201,7 @@ class AnalysisPipeline:
     FPS_WINDOW = 30  # Frames the displayed processing rate is averaged over
 
     def __init__(self):
-        # Camera-to-top-down homography as calibrated; without one there is no top-down
-        # view. The camera has moved since the frame it was calibrated on (taken to be the
-        # first frame after a reset), which is undone before it is applied.
-        self._homography_matrix: Optional[np.ndarray] = None
-        self._camera_since_calibration = np.eye(3)
-        # Where the field model sees the field, for a top-down view without calibration
+        # Where the field model sees the field: the top-down view and every place on it
         self._field_follower = FieldFollower(
             TEMPLATES.get(
                 get_setting("homography.ruleset", DEFAULT_RULESET), TEMPLATES[DEFAULT_RULESET]
@@ -288,8 +260,6 @@ class AnalysisPipeline:
         self.detections: List[Dict[str, Any]] = []
         self.tracks: List[Any] = []
         self.field_results: List[Any] = []
-        self.ransac_lines: List[Line] = []
-        self.ransac_confidences: List[float] = []
 
         # Jersey numbers persist across frames: only some players are read per frame
         self._numbers = PlayerNumbers()
@@ -323,8 +293,6 @@ class AnalysisPipeline:
         self._camera_motion = CameraMotionEstimator()
         # Close-ups and title cards of an edited game are not analysed
         self._shot = ShotWatcher()
-        # The field lines shown: moved with the camera between fits, smoothed over fits
-        self._line_filter = FieldLineFilter()
 
         # Redrawing the frame that was just analysed (pause, toggling an overlay) must not
         # advance the tracker again, so its results are reused.
@@ -345,22 +313,6 @@ class AnalysisPipeline:
     def player_ids(self) -> Dict[int, Tuple[str, Any]]:
         """Player ID -> (jersey number or "Unknown", details of the reading)."""
         return self._numbers.numbers
-
-    @property
-    def homography_matrix(self) -> Optional[np.ndarray]:
-        """Calibrated camera-to-top-down homography."""
-        return self._homography_matrix
-
-    @homography_matrix.setter
-    def homography_matrix(self, matrix: Optional[np.ndarray]) -> None:
-        self._homography_matrix = matrix
-        self._camera_since_calibration = np.eye(3)
-
-    def _top_down_matrix(self) -> Optional[np.ndarray]:
-        """Homography from the current frame to the top-down view."""
-        if self._homography_matrix is None:
-            return None
-        return self._homography_matrix @ np.linalg.inv(self._camera_since_calibration)
 
     def new_video(self, video_path: Optional[str] = None) -> None:
         """Start on another video: nothing of the last one holds, its camera included.
@@ -405,8 +357,6 @@ class AnalysisPipeline:
         self._camera_motion.reset()
         self._motion_known = False
         self._last_index = None  # After a seek no frames were passed over
-        self._line_filter.reset()
-        self._camera_since_calibration = np.eye(3)
         self.invalidate()
         self.detections = []
         self.tracks = []
@@ -537,7 +487,6 @@ class AnalysisPipeline:
         """Analyse the current frame again on the next call instead of reusing results."""
         self._analysed_key = None
         self._geometry = _FieldGeometry()
-        self._line_filter.reset()
 
     # ------------------------------------------------------------------ per frame
 
@@ -567,9 +516,9 @@ class AnalysisPipeline:
         start = time.perf_counter()
         self._timings = {}
         self._trails_now = None
-        # Also without the top-down view shown: who stands beside the field, and whether
-        # the fitted lines are drawn, should not depend on a view being switched on
-        self._follow_field = options.field_segmentation and options.top_down_source == "field"
+        # Also without the top-down view shown: who stands beside the field should not
+        # depend on a view being switched on
+        self._follow_field = options.field_segmentation
         self._frame_size = (frame.shape[1], frame.shape[0])
 
         analysis_key = (frame_index, *options.analysis_key)
@@ -585,15 +534,14 @@ class AnalysisPipeline:
         if options.top_down_view and side_by_side and options.draw:
             if options.tracking and self.tracks:
                 self._trails()
-            top_down = self._threads.submit(self._draw_top_down_view, frame, options)
+            top_down = self._threads.submit(self._draw_top_down_view, options)
 
         # The copy of the frame that is drawn on belongs to the drawing. None is needed
-        # of a frame that is ours, unless the top-down view is made of the frame itself.
+        # of a frame that is ours.
         main_view = frame
         if options.draw:
             copy_start = time.perf_counter()
-            warped = options.top_down_view and not self._top_down_is_drawn(options)
-            drawn_on = frame if frame_is_ours and not warped else frame.copy()
+            drawn_on = frame if frame_is_ours else frame.copy()
             self._record("Visualization", copy_start)
             main_view = self._draw_main_view(drawn_on, options)
         problems = health.problems()
@@ -604,7 +552,7 @@ class AnalysisPipeline:
         if top_down is not None:
             top_down_view, top_down_message = top_down.result()
         elif options.top_down_view and options.draw:
-            top_down_view, top_down_message = self._draw_top_down_view(frame, options)
+            top_down_view, top_down_message = self._draw_top_down_view(options)
 
         total_ms = (time.perf_counter() - start) * 1000
         self._update_fps(total_ms)
@@ -639,13 +587,6 @@ class AnalysisPipeline:
             timings=self._timings,
             wide_shot=self._shot.wide,
             problems=problems,
-        )
-
-    @staticmethod
-    def _top_down_is_drawn(options: PipelineOptions) -> bool:
-        """Whether the top-down view is a drawing of the field, not the frame warped."""
-        return options.top_down_source == "field" and bool(
-            get_setting("homography.field_diagram", True)
         )
 
     def _record(self, stage: str, start: float) -> float:
@@ -1057,8 +998,6 @@ class AnalysisPipeline:
                 apply_camera_motion(motion)
                 self._possession.move(motion)
                 self._flying.move(motion)
-                self._line_filter.move(motion)
-                self._camera_since_calibration = motion @ self._camera_since_calibration
                 self._field_follower.move(motion)
             self._record("Camera Motion", start)
             self._look_for_disc_heat(frame, motion)
@@ -1125,7 +1064,6 @@ class AnalysisPipeline:
         else:
             self._possession.reset()
 
-        self.ransac_lines, self.ransac_confidences = [], []
         if options.field_segmentation:
             start = time.perf_counter()
             in_background = bool(get_setting("models.segmentation.in_background", True))
@@ -1134,13 +1072,8 @@ class AnalysisPipeline:
             else:
                 self.field_results = run_field_segmentation(frame, frame_index)
             self._record("Field Segmentation", start)
-            if self.field_results:
-                if not in_background:
-                    self._update_field_geometry(frame.shape[:2])
-                # The lines fitted to the outline are shown where they are what the view
-                # is made from; with the field model's own estimate they are only clutter
-                if self._geometry.mask is not None and not self._follow_field:
-                    self.ransac_lines, self.ransac_confidences = self._line_filter.current()
+            if self.field_results and not in_background:
+                self._update_field_geometry(frame.shape[:2])
 
         if options.player_id and self.tracks:
             timing, renamed = self._numbers.update(frame, self.tracks, frame_index)
@@ -1382,19 +1315,9 @@ class AnalysisPipeline:
         outline, and where the field lies by them."""
         results = segment_prepared(prepared)
         mask = create_unified_field_mask(results, shape) if results else None
-        lines, confidences, contour, ransac_fit = [], [], None, None
-        if mask is not None:
-            lines, confidences, contour, ransac_fit = fit_lines_from_mask(mask)
+        lines = fit_lines_from_mask(mask)[0] if mask is not None else []
         estimate = self._field_follower.estimate(results, shape, lines) if follow else None
-        return {
-            "results": results,
-            "mask": mask,
-            "lines": lines,
-            "confidences": confidences,
-            "contour": contour,
-            "ransac_fit": ransac_fit,
-            "estimate": estimate,
-        }
+        return {"results": results, "mask": mask, "estimate": estimate}
 
     def _take_field(self, job: dict) -> None:
         """Take in what was worked out of the field beside the frames."""
@@ -1405,14 +1328,10 @@ class AnalysisPipeline:
             health.report("Field", f"failed ({type(error).__name__}); see the log")
             return
         self._field_seen = seen["results"]
-        self._geometry = _FieldGeometry(
-            seen["results"], job["shape"], seen["mask"], seen["contour"], seen["ransac_fit"]
-        )
-        self._line_filter.update(seen["lines"], seen["confidences"])
+        self._geometry = _FieldGeometry(seen["results"], job["shape"], seen["mask"])
         since = job["since"]
         if since is None:
             return  # The camera's motion was lost meanwhile: where that frame lay is not known
-        self._line_filter.move(since)
         if job["follow"]:
             self._field_follower.take(
                 seen["estimate"], job["shape"], seen["mask"], job["feet"], since
@@ -1438,10 +1357,11 @@ class AnalysisPipeline:
         return wide
 
     def _update_field_geometry(self, frame_shape: Tuple[int, int]) -> None:
-        """Work out the field's mask, outline, and lines for the current segmentation result.
+        """Work out the field's mask and lines for the current segmentation result, and
+        where the field lies by them.
 
         Only when the segmentation result or the frame size has changed, so the frames
-        between two segmentation runs reuse one mask and one randomized line fit.
+        between two segmentation runs reuse one mask and one line fit.
         """
         if (
             self.field_results is not self._geometry.source
@@ -1452,18 +1372,12 @@ class AnalysisPipeline:
             self._record("Mask Unification", start)
 
             lines: List[Line] = []
-            confidences: List[float] = []
-            contour: Optional[np.ndarray] = None
-            ransac_fit: Optional[tuple] = None
             if mask is not None:
                 start = time.perf_counter()
-                lines, confidences, contour, ransac_fit = fit_lines_from_mask(mask)
+                lines = fit_lines_from_mask(mask)[0]
                 self._record("Line Extraction", start)
 
-            self._geometry = _FieldGeometry(
-                self.field_results, frame_shape, mask, contour, ransac_fit
-            )
-            self._line_filter.update(lines, confidences)
+            self._geometry = _FieldGeometry(self.field_results, frame_shape, mask)
             if self._follow_field:
                 start = time.perf_counter()
                 feet = np.array(
@@ -1534,141 +1448,35 @@ class AnalysisPipeline:
         return frame
 
     def _draw_field_overlay(self, frame: np.ndarray, mask: np.ndarray) -> np.ndarray:
-        """The field outline and lines, drawn before the players."""
-        frame = draw_unified_field_mask(
+        """The outline of the field the model sees, drawn before the players."""
+        return draw_unified_field_mask(
             frame,
             mask,
             get_primary_field_color(),
             alpha=0.3,
-            draw_contour=not self._follow_field,
+            draw_contour=False,
             fill_mask=False,
-            # The fitted lines as shown: filtered
-            ransac_fit=(
-                (self.ransac_lines, *self._geometry.ransac_fit[1:])
-                if self._geometry.ransac_fit is not None
-                else None
-            ),
-            field_contour=self._geometry.contour,
             in_place=True,
         )
-        if self.ransac_lines:
-            frame = draw_ransac_field_lines(
-                frame,
-                self.ransac_lines,
-                self.ransac_confidences,
-                transformation_matrix=None,
-                scale_factor=1.0,
-                in_place=True,
-            )
-        return frame
 
-    def _draw_top_down_view(
-        self, frame: np.ndarray, options: PipelineOptions
-    ) -> Tuple[Optional[np.ndarray], str]:
-        """Warp the frame to the top-down view and draw field, players, and lines on it.
+    def _draw_top_down_view(self, options: PipelineOptions) -> Tuple[Optional[np.ndarray], str]:
+        """Draw the field from above, with the players where they stand on it.
 
         Returns:
             (view, "") or (None, reason there is no view)
         """
         if not self._shot.wide:
             return None, "Close-up: no top-down view"
-        height, width = frame.shape[:2]
-        output_width, output_height = output_canvas_size(width, height)
-        from_field = options.top_down_source == "field"
-        if from_field:
-            if not options.field_segmentation:
-                return None, "The top-down view from the field needs field segmentation"
-            if self._field_follower.image_to_field is None:
-                return None, "The field has not been found in this view yet"
-            on_canvas = field_to_canvas(
-                self._field_follower.template, (output_width, output_height)
-            )
-            top_down_matrix = on_canvas @ self._field_follower.image_to_field
-        else:
-            top_down_matrix = self._top_down_matrix()
-            if top_down_matrix is None:
-                return None, "Homography matrix not available"
-
-        if from_field and get_setting("homography.field_diagram", True):
-            start = time.perf_counter()
-            view = self._draw_field_diagram(options)
-            self._record("Top-down view", start)
-            return view, ""
-
+        if not options.field_segmentation:
+            return None, "The top-down view needs field segmentation"
+        if self._field_follower.image_to_field is None:
+            return None, "The field has not been found in this view yet"
+        start = time.perf_counter()
         try:
-            start = time.perf_counter()
-
-            # The panel is far smaller than the full canvas, so render it at a reduced
-            # scale; warp cost is proportional to the output pixel count.
-            scale = float(get_setting("homography.display_scale", 0.5))
-            scale = min(1.0, max(0.1, scale))
-            matrix = top_down_matrix
-            if scale != 1.0:
-                output_width = max(1, int(output_width * scale))
-                output_height = max(1, int(output_height * scale))
-                matrix = np.diag([scale, scale, 1.0]) @ top_down_matrix
-
-            view = cv2.warpPerspective(frame, matrix, (output_width, output_height))
-            if from_field:
-                hide_behind_camera(view, matrix)
-                draw_field_template(
-                    view,
-                    list(self._field_follower.template.lines.values()),
-                    np.diag([scale, scale, 1.0]) @ on_canvas,
-                )
-            warp_ms = self._record("Homography Calculation", start)
-
-            if self.field_results and options.field_segmentation:
-                try:
-                    with_field = apply_segmentation_to_warped_frame(
-                        view,
-                        self.field_results,
-                        matrix,
-                        frame.shape[:2],
-                        "PIPELINE",
-                        field_contour=self._geometry.contour,
-                        draw_scale=scale,
-                        in_place=True,
-                    )
-                    if with_field is not None:
-                        view = with_field
-                except Exception as e:
-                    logger.exception(f"Error applying segmentation to top-down view: {e}")
-                    health.report("Top-down view", "the field could not be drawn; see the log")
-
-            if options.tracking and self.tracks:
-                disc_in_view = None
-                if from_field and self.disc_place is not None:
-                    placed = np.diag([scale, scale, 1.0]) @ on_canvas @ [*self.disc_place, 1.0]
-                    disc_in_view = (placed[0] / placed[2], placed[1] / placed[2])
-                view = draw_tracks_top_down(
-                    view,
-                    matrix,
-                    self.tracks,
-                    self.player_ids,
-                    self._trails(),
-                    scale,
-                    holder_id=self._possession.holder_id,
-                    disc_position=disc_in_view,
-                )
-
-            if self.ransac_lines:
-                view = draw_ransac_field_lines(
-                    view,
-                    self.ransac_lines,
-                    self.ransac_confidences,
-                    matrix,
-                    scale_factor=2.0 * scale,
-                    show_confidence=True,
-                    in_place=True,
-                )
-
-            overlays_ms = (time.perf_counter() - start) * 1000 - warp_ms
-            if overlays_ms > 1.0:
-                self._timings["Homography Other"] = overlays_ms
-            return np.ascontiguousarray(view), ""
-
+            view = self._draw_field_diagram(options)
         except Exception as e:
-            logger.exception(f"Error rendering top-down view: {e}")
+            logger.exception(f"Error drawing the top-down view: {e}")
             health.report("Top-down view", f"failed ({type(e).__name__}); see the log")
             return None, f"Error: {e}"
+        self._record("Top-down view", start)
+        return view, ""

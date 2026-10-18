@@ -31,7 +31,6 @@ from PyQt5.QtWidgets import (
 from ...config.settings import get_setting
 from ...constants import SHORTCUTS
 from ...pipeline import PipelineOptions
-from ...processing.homography import load_default_matrix
 from ...processing.jersey_readers import READER_LABELS
 from ...processing.player_id import get_player_id_method
 from ...utils.logger import get_logger
@@ -129,7 +128,7 @@ class MainTab(QWidget):
     frame_shown = pyqtSignal(object)  # The FrameResult just shown, for the 3D View tab
 
     # Requests to the worker thread; they are queued and run in the order sent
-    _load_video_requested = pyqtSignal(str, object, object)  # path, options, homography matrix
+    _load_video_requested = pyqtSignal(str, object)  # path, options
     _frame_requested = pyqtSignal(str, object, int)  # mode, options, generation
     _command_requested = pyqtSignal(object)  # callable taking the worker
 
@@ -299,36 +298,15 @@ class MainTab(QWidget):
         self.homography_checkbox = ToggleSwitch("Top-down view")
         self.homography_checkbox.setChecked(True)  # Enable by default
         self.homography_checkbox.setToolTip(
-            "Enable/disable homography transformation for top-down view"
+            "The field from above, with the players where they stand; needs field segmentation"
         )
         self.homography_checkbox.stateChanged.connect(self._on_homography_toggled)
-
-        self.top_down_source_combo = compact_combo(QComboBox())
-        self.top_down_source_combo.addItem("Top-down from the calibration", "calibration")
-        self.top_down_source_combo.addItem("Top-down from the field model", "field")
-        self.top_down_source_combo.setToolTip(
-            "Calibration: the mapping set by hand in the Homography tab, moved with the camera.\n"
-            "Field model: where the field model sees the field in each frame; needs field "
-            "segmentation."
-        )
-        self.top_down_source_combo.setCurrentIndex(
-            max(
-                0,
-                self.top_down_source_combo.findData(get_setting("homography.source", "field")),
-            )
-        )
-        self.top_down_source_combo.currentIndexChanged.connect(
-            lambda _: self._request_display_update(immediate=True)
-        )
 
         processing_layout.addWidget(self.inference_checkbox)
         processing_layout.addWidget(self.tracking_checkbox)
         processing_layout.addWidget(self.player_id_checkbox)
         processing_layout.addWidget(self.field_segmentation_checkbox)
         processing_layout.addWidget(self.homography_checkbox)
-        processing_layout.addWidget(self.top_down_source_combo)
-        # The other source is a calibration set by hand in a tab that is on its way out
-        self.top_down_source_combo.setVisible(bool(get_setting("app.legacy_tabs", False)))
 
         processing_group.setLayout(processing_layout)
         layout.addWidget(processing_group)
@@ -688,7 +666,6 @@ class MainTab(QWidget):
             player_id=self.player_id_checkbox.isChecked(),
             field_segmentation=self.field_segmentation_checkbox.isChecked(),
             top_down_view=self.homography_enabled,
-            top_down_source=self.top_down_source_combo.currentData(),
         )
 
     def _request_frame(self, mode: str) -> None:
@@ -902,7 +879,7 @@ class MainTab(QWidget):
         self._generation += 1
         self.video_info = {}
         self.video_label.setText(f"Loading {Path(video_path).name}...")
-        self._load_video_requested.emit(video_path, self._options(), load_default_matrix())
+        self._load_video_requested.emit(video_path, self._options())
 
     def _on_video_loaded(self, info: Dict[str, Any]) -> None:
         """Show the first frame of a video the worker has opened."""

@@ -60,15 +60,10 @@ models:
       closing_kernel_size: 5    # Size for hole filling (0 to disable)
       fill_holes: false           # Apply flood fill for remaining holes
     
-    # Contour calculation and drawings
+    # The field's outline and the lines fitted to it
     contour:
       simplify_epsilon: 0.0001     # Contour simplification factor (fraction of perimeter)
       min_area: 5000             # Minimum contour area to consider
-      line_color: [255, 255, 0]  # BGR color for contour lines (yellow)
-      point_color: [0, 255, 255] # BGR color for contour points (cyan)
-      line_thickness: 2          # Thickness of contour lines
-      point_radius: 5            # Radius of contour points
-      draw_points: false         # Dots on the corners of the simplified outline (for checking the outline)
       
       # Contour interpolation parameters
       interpolation:
@@ -78,28 +73,16 @@ models:
       
       # RANSAC line fitting parameters
       ransac:
-        enabled: true            # Whether to use RANSAC line fitting instead of contour
         num_lines: 4            # Number of line segments to fit (3-4 for field boundaries)
         distance_threshold: 5.0 # Maximum distance from point to line for inliers
         min_samples: 2          # Minimum number of points needed to fit a line
         max_trials: 100         # Point pairs tried per line (all at once, so they are cheap)
-        smooth_lines: true      # Move the lines with the camera between fits and blend each new fit in, instead of jumping
         min_line_length: 60     # Pixels; anything shorter is a corner or dent, not a field line
-        line_color: [0, 255, 0] # BGR color for RANSAC lines (green)
-        outlier_color: [0, 165, 255] # BGR color for RANSAC outlier points (orange)
-        outlier_radius: 6       # Radius for outlier point visualization (increased for visibility)
-        show_outliers: false    # Dots on outline points that are on no line (for checking the fit)
-        inlier_color: [0, 255, 0] # BGR color for RANSAC inlier points (green)
-        inlier_radius: 5        # Radius for inlier point visualization (increased for visibility)
-        show_inliers: false     # Dots on the outline points each line was fitted to (for checking the fit)
         
         # Edge filtering parameters
         edge_filtering:
           enabled: true         # Whether to filter points near image edges
           margin: 45           # Outline this near the frame's edge is where the frame cuts the field off, not a field line; masks stop up to some 40 px short of the edge
-          edge_point_color: [0, 0, 255] # BGR color for filtered edge points (red)
-          edge_point_radius: 6  # Radius for edge point visualization (increased for visibility)
-          show_edge_points: false # Dots on outline points left out at the frame border
   
   tracking:
     backend: bytetrack           # "bytetrack": by motion, each track within its team; "ground": the same, with lost players found again by their place on the field; "deepsort": by appearance
@@ -227,17 +210,8 @@ models:
 logging:
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
-# Homography Estimation Settings
+# The top-down view: the field drawn from above
 homography:
-  source: "field"                      # Top-down view from: "calibration" (set by hand in the Homography tab) or "field" (where the field model sees the field)
-  field_diagram: true                        # With the field model as source: draw the field and the players as dots, where the video frame is otherwise warped onto the ground
   disc_path_seconds: 8.0                     # How far back the path of the disc is drawn on it
   diagram_height: 900                        # Height of that drawing in pixels
   ruleset: "usau"                            # The field the field model's view is laid on: "usau" or "wfdf"
-  save_directory: "configs"
-  default_params_file: "configs/homography_params.yaml"
-  slider_range_main: [-100.0, 100.0]          # Range for H00, H01, H10, H11 (scale/skew/extreme) - expanded from [-50.0, 50.0]
-  slider_range_perspective: [-0.2, 0.2]      # Range for H20, H21 (perspective/extreme)
-  buffer_factor: 1.8                         # Output canvas size multiplier (1.8 = 80% larger)
-  output_aspect_ratio: 3.0                   # Height:width ratio for homography output canvas (3.0 = 3:1)
-  display_scale: 0.5                         # Main-tab top-down view render scale (1.0 = full canvas, sharper when zoomed but ~4x slower warp)

@@ -3,7 +3,7 @@
 import sys
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import numpy as np
 from support import load_module
@@ -35,7 +35,6 @@ NUMBER_STAGES = (
 DRAWING = (
     "draw_field_segmentation",
     "draw_unified_field_mask",
-    "draw_ransac_field_lines",
     "draw_detections",
     "draw_tracks",
     "draw_tracks_with_player_ids",
@@ -43,8 +42,6 @@ DRAWING = (
     "draw_fps_overlay",
     "draw_notice",
     "draw_jersey_table",
-    "apply_segmentation_to_warped_frame",
-    "draw_tracks_top_down",
 )
 
 
@@ -323,44 +320,22 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual([track.track_id for track in result.tracks], [7])
         self.mocks["merge_players"].assert_called_once()
 
-    def test_top_down_view_needs_a_homography(self):
-        options = self.module.PipelineOptions(top_down_source="calibration")
+    def test_the_top_down_view_is_drawn_once_the_field_is_found(self):
+        options = self.module.PipelineOptions(tracking=False)
         result = self.pipeline.process(self.frame, 0, options)
         self.assertIsNone(result.top_down_view)
-        self.assertEqual(result.top_down_message, "Homography matrix not available")
+        self.assertEqual(result.top_down_message, "The field has not been found in this view yet")
 
-        self.pipeline.homography_matrix = np.eye(3, dtype=np.float32)
-        with patch.object(
-            self.module, "get_setting", side_effect=lambda key, default=None: default
-        ):
-            result = self.pipeline.process(self.frame, 0, options)
-        self.assertIsNotNone(result.top_down_view)
-        self.assertIn("Homography Calculation", result.timings)
+        self.pipeline._field_follower.image_to_field = np.eye(3)
+        with patch.object(self.module, "draw_field_diagram", return_value="drawn") as diagram:
+            result = self.pipeline.process(self.frame, 1, options)
+        self.assertEqual((result.top_down_view, result.top_down_message), ("drawn", ""))
+        diagram.assert_called_once()
+        self.assertIn("Top-down view", result.timings)
 
-    def test_top_down_calibration_follows_the_camera_and_starts_again_on_reset(self):
-        calibration = np.diag([2.0, 2.0, 1.0])
-        self.pipeline.homography_matrix = calibration
-        # The picture moves 6 px to the left per frame (the camera pans right)
-        pan = np.array([[1.0, 0, -6], [0, 1, 0], [0, 0, 1]])
-        self.pipeline._camera_motion = Mock(update=Mock(return_value=pan))
-
-        for index in range(3):
-            self.pipeline.process(self.frame, index, self.options)
-        # Redrawing a frame does not move the camera again
-        self.pipeline.process(self.frame, 2, self.options)
-
-        # A spot calibrated at x=100 is now at x=82 in the picture, same place on the field
-        spot_now = self.pipeline._top_down_matrix() @ [82, 50, 1]
-        np.testing.assert_allclose(spot_now, calibration @ [100, 50, 1])
-        self.mocks["apply_camera_motion"].assert_called_with(pan)
-
-        # Unknown motion (a cut) leaves the calibration where it was
-        self.pipeline._camera_motion.update.return_value = None
-        self.pipeline.process(self.frame, 3, self.options)
-        np.testing.assert_allclose(self.pipeline._top_down_matrix() @ [82, 50, 1], spot_now)
-
-        self.pipeline.reset()
-        np.testing.assert_allclose(self.pipeline._top_down_matrix(), calibration)
+        without = self.module.PipelineOptions(tracking=False, field_segmentation=False)
+        result = self.pipeline.process(self.frame, 2, without)
+        self.assertEqual(result.top_down_message, "The top-down view needs field segmentation")
 
     def test_a_crossing_exchanges_what_belongs_to_the_boxes(self):
         one = SimpleNamespace(track_id=7, class_name="player", team=0, team_colour=(1, 1, 1))

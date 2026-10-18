@@ -32,7 +32,6 @@ import numpy as np  # noqa: E402
 
 from ultimate_analysis import pipeline as pipeline_module  # noqa: E402
 from ultimate_analysis.pipeline import AnalysisPipeline, PipelineOptions  # noqa: E402
-from ultimate_analysis.processing.homography import load_default_matrix  # noqa: E402
 from ultimate_analysis.processing.player_id import discard_pending_readings  # noqa: E402
 from ultimate_analysis.rendering.tracks import UNKNOWN_TEAM_COLOUR  # noqa: E402
 from ultimate_analysis.utils.video import seconds_of  # noqa: E402
@@ -194,12 +193,6 @@ def main() -> None:
         "followed and numbers read when the video begins",
     )
     parser.add_argument(
-        "--top-down",
-        choices=("field", "calibration"),
-        default="field",
-        help="What the top-down view is made from",
-    )
-    parser.add_argument(
         "--every",
         type=int,
         help="Write every n-th frame; by default as many as give about 30 frames per second",
@@ -222,9 +215,7 @@ def main() -> None:
     pipeline = AnalysisPipeline()
     pipeline.new_video(str(args.video))
     pipeline.set_frame_rate(frames_per_second)
-    if args.top_down == "calibration":
-        pipeline.homography_matrix = load_default_matrix()
-    options = PipelineOptions(top_down_source=args.top_down)
+    options = PipelineOptions()
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     out_rate = frames_per_second / every

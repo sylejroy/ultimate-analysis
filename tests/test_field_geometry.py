@@ -64,23 +64,19 @@ class FieldGeometryTests(unittest.TestCase):
         np.testing.assert_allclose([start[0], end[0]], [100.0, 100.0], atol=1e-3)
         np.testing.assert_allclose(sorted([start[1], end[1]]), [0.0, 490.0], atol=1e-3)
 
-    def test_drawing_with_a_cached_fit_does_not_refit_or_copy(self):
+    def test_the_field_is_drawn_as_its_outline_in_place(self):
         module = load_module("rendering.field")
-
         frame = np.zeros((40, 40, 3), dtype=np.uint8)
-        mask = np.zeros((40, 40), dtype=np.uint8)
+        empty = np.zeros((40, 40), dtype=np.uint8)
+        self.assertIs(module.draw_unified_field_mask(frame, empty, in_place=True), frame)
+        self.assertFalse(frame.any())
+
+        mask = empty.copy()
         mask[10:30, 10:30] = 1
-        lines = [np.array([[10.0, 10.0], [29.0, 10.0]])]
-        fit = (lines, [np.empty((0, 2))], [lines[0]], np.empty((0, 2)))
-        settings = {"models.segmentation.contour.ransac.enabled": True}
-        with (
-            patch.object(module, "get_setting", side_effect=lambda k, d=None: settings.get(k, d)),
-            patch.object(module, "fit_field_lines_ransac") as refit,
-        ):
-            result = module.draw_unified_field_mask(frame, mask, ransac_fit=fit, in_place=True)
-        refit.assert_not_called()
+        result = module.draw_unified_field_mask(frame, mask, in_place=True)
         self.assertIs(result, frame)
-        self.assertTrue(frame.any())
+        self.assertTrue(frame[10, 10:30].any())  # On the outline
+        self.assertFalse(frame[20, 20].any())  # Not inside, without a fill
 
 
 if __name__ == "__main__":

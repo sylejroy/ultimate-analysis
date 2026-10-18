@@ -49,7 +49,6 @@ import torch  # noqa: E402
 
 from ultimate_analysis.config.settings import get_config, get_setting  # noqa: E402
 from ultimate_analysis.pipeline import AnalysisPipeline, PipelineOptions  # noqa: E402
-from ultimate_analysis.processing.homography import load_default_matrix  # noqa: E402
 from ultimate_analysis.processing.inference import set_disc_model, set_player_model  # noqa: E402
 from ultimate_analysis.processing.player_id import initialize_player_id_system  # noqa: E402
 from ultimate_analysis.utils.model_files import default_model_path  # noqa: E402
@@ -163,7 +162,6 @@ def main():
     pipeline = AnalysisPipeline()
     pipeline.reset()
     pipeline.set_frame_rate(fps)
-    pipeline.homography_matrix = load_default_matrix()
     options = PipelineOptions()
     profiler = cProfile.Profile()
     use_cuda = torch.cuda.is_available()
