@@ -20,8 +20,7 @@ what the app does and how to use it, not how it works inside.
   Tests are `unittest` (pytest is not installed) and need no videos, weights, or GPU.
 - `requirements-lock.txt` is the environment as it is known to work (`pip freeze`);
   update it when a package changes.
-- PyTorch must stay at `2.7.1+cu128`. setuptools stays below 81 until it is checked that
-  no package still imports `pkg_resources` (DeepSORT, which did, is gone).
+- PyTorch must stay at `2.7.1+cu128`.
 - Never let Ultralytics install packages on its own (`YOLO_AUTOINSTALL=false`); it has
   replaced the CUDA build of PyTorch before. Install with `--no-deps` when in doubt.
 
