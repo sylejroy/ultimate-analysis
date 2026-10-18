@@ -43,19 +43,7 @@ from .processing.player_numbers import PlayerNumbers
 from .processing.possession import PossessionTracker, players_at_disc
 from .processing.shot_type import ShotWatcher, players_are_elsewhere
 from .processing.steady_places import SteadyPlaces
-from .processing.tracking import (
-    apply_camera_motion,
-    get_track_histories,
-    missing_players,
-    observers_in_view,
-    reset_tracker,
-    run_tracking,
-    set_field,
-    set_frame_rate,
-    set_team_of_player,
-    swap_players,
-    team_shirt_colours,
-)
+from .processing.tracking import PlayerTracker
 from .rendering.field import (
     draw_field_segmentation,
     draw_unified_field_mask,
@@ -260,8 +248,10 @@ class AnalysisPipeline:
         self.tracks: List[Any] = []
         self.field_results: List[Any] = []
 
+        # The players and the disc followed from frame to frame
+        self._tracker = PlayerTracker()
         # Jersey numbers persist across frames: only some players are read per frame
-        self._numbers = PlayerNumbers()
+        self._numbers = PlayerNumbers(self._tracker)
         self._numbers.could_be = self._looks.could_be
 
         self._possession = PossessionTracker()
@@ -349,7 +339,7 @@ class AnalysisPipeline:
         self._flying.reset()
         self._numbers.reset()
         self._shot.reset()
-        reset_tracker()
+        self._tracker.reset()
         reset_inference_state()
         reset_segmentation_cache()
         self._possession.reset()
@@ -377,7 +367,7 @@ class AnalysisPipeline:
 
     def set_frame_rate(self, frames_per_second: float) -> None:
         """Tell the pipeline the frame rate of the video; durations are set in seconds."""
-        set_frame_rate(frames_per_second)
+        self._tracker.set_frame_rate(frames_per_second)
         if frames_per_second and frames_per_second > 0:
             self._possession.frame_rate = float(frames_per_second)
             self._looks.frame_rate = float(frames_per_second)
@@ -783,7 +773,7 @@ class AnalysisPipeline:
     def _trails(self) -> Dict[int, np.ndarray]:
         """The trails of the tracks in this frame: both views draw them."""
         if self._trails_now is None:
-            self._trails_now = get_track_histories()
+            self._trails_now = self._tracker.get_track_histories()
         return self._trails_now
 
     def _possession_colour(self) -> Optional[Tuple[int, int, int]]:
@@ -984,7 +974,7 @@ class AnalysisPipeline:
                     None if motion is None or before is None else motion @ before
                 )
             if motion is not None:
-                apply_camera_motion(motion)
+                self._tracker.apply_camera_motion(motion)
                 self._possession.move(motion)
                 self._flying.move(motion)
                 self._field_follower.move(motion)
@@ -996,8 +986,10 @@ class AnalysisPipeline:
 
         if options.tracking:
             start = time.perf_counter()
-            set_field(self._field_follower.image_to_field if self._follow_field else None)
-            self.tracks = run_tracking(frame, self.detections, frame_index)
+            self._tracker.set_field(
+                self._field_follower.image_to_field if self._follow_field else None
+            )
+            self.tracks = self._tracker.run_tracking(frame, self.detections, frame_index)
             self._teams_by_looks(frame)
             if self._follow_field and get_setting("models.tracking.hide_off_field", True):
                 # Those standing along the sidelines are followed but not shown or counted
@@ -1012,7 +1004,7 @@ class AnalysisPipeline:
                 )
                 self.tracks = [track for track in self.tracks if track.track_id not in off_field]
             # Players and observers alike: their numbers are the one tracker's
-            watching = observers_in_view()
+            watching = self._tracker.observers_in_view()
             feet = {
                 track.track_id: ((track.bbox[0] + track.bbox[2]) / 2.0, track.bbox[3])
                 for track in self.tracks
@@ -1097,7 +1089,7 @@ class AnalysisPipeline:
         overlapped, as their looks before and after say."""
         players = {t.track_id: t for t in self.tracks if t.class_name == "player"}
         for first, second in self._looks.swapped(list(players), frame_index):
-            if not swap_players(first, second):
+            if not self._tracker.swap_players(first, second):
                 continue
             one, other = players[first], players[second]
             one.track_id, other.track_id = other.track_id, one.track_id
@@ -1140,7 +1132,7 @@ class AnalysisPipeline:
             team = by_looks.get(track.track_id)
             if team is not None and team != getattr(track, "team", None):
                 track.team = team
-                set_team_of_player(track.track_id, team)
+                self._tracker.set_team_of_player(track.track_id, team)
         # A shirt every few frames, of players who stand clear of the others, until
         # there are enough: after that a team's colour stays as it is
         self._shirt_turn += 1
@@ -1166,7 +1158,7 @@ class AnalysisPipeline:
         """{team: the colour of its shirts (BGR)}: of the shirts of those the looks put
         in the team once there are a few, and as the tracker has it until then."""
         if self._colours_by_looks is None:
-            colours = dict(team_shirt_colours())
+            colours = dict(self._tracker.team_shirt_colours())
             for team, shirts in enumerate(self._shirts_by_looks):
                 if len(shirts) >= MIN_SHIRTS_PER_TEAM:
                     colours[team] = tuple(int(round(v)) for v in np.median(shirts, axis=0))
@@ -1191,7 +1183,7 @@ class AnalysisPipeline:
         self._joined_at = frame_index
         players = {t.track_id: t for t in self.tracks if t.class_name == "player"}
         naming = self._looks.players_of_tracks()
-        missing = set(missing_players(set(players)))
+        missing = set(self._tracker.missing_players(set(players)))
         for was, track in list(players.items()):
             now = naming.get(was, was)
             if now == was or now in players or now not in missing:

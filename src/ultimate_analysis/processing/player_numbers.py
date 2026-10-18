@@ -20,7 +20,7 @@ from .jersey_tracker import (
     reset_jersey_tracker,
 )
 from .player_id import discard_pending_readings, run_player_id_on_tracks
-from .tracking import kit_distance, merge_players, missing_players, team_of_player
+from .tracking import PlayerTracker
 
 logger = get_logger("PLAYER_NUMBERS")
 
@@ -34,7 +34,9 @@ NO_NUMBER = ("Unknown", None, "")
 class PlayerNumbers:
     """Jersey numbers by player ID, for the players on screen."""
 
-    def __init__(self) -> None:
+    def __init__(self, tracker: PlayerTracker) -> None:
+        # The tracker whose players these are: joined by their numbers there
+        self._tracker = tracker
         # Player ID -> (number or "Unknown", details of the reading)
         self.numbers: Dict[int, Tuple[str, Any]] = {}
         self.crops = JerseyCropSelector()
@@ -99,7 +101,7 @@ class PlayerNumbers:
         """A track is a player known before and missing since: it goes on as that player,
         with what was read on both."""
         player_id = track.track_id
-        merge_players(player_id, earlier)
+        self._tracker.merge_players(player_id, earlier)
         merge_jersey_readings(player_id, earlier)
         track.track_id = earlier
         if player_id in self.numbers:
@@ -121,7 +123,7 @@ class PlayerNumbers:
         max_distance = float(get_setting("models.tracking.identity.max_kit_distance", 60.0))
         present = {track.track_id for track in tracks if track.class_name == "player"}
         missing = {}
-        for player_id in missing_players(present):
+        for player_id in self._tracker.missing_players(present):
             number, certainty = get_best_jersey_number(player_id)
             if number and certainty >= certainty_needed and _read_often(player_id, number):
                 missing.setdefault(number, player_id)
@@ -137,10 +139,10 @@ class PlayerNumbers:
                 continue
             if self.could_be is not None and not self.could_be(player_id, earlier):
                 continue  # Seen elsewhere at the time, or looking like somebody else
-            teams = team_of_player(player_id), team_of_player(earlier)
+            teams = self._tracker.team_of_player(player_id), self._tracker.team_of_player(earlier)
             if None in teams or teams[0] != teams[1]:
                 continue
-            distance = kit_distance(player_id, earlier)
+            distance = self._tracker.kit_distance(player_id, earlier)
             if distance is None or distance > max_distance:
                 continue
 

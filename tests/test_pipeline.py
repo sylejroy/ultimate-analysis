@@ -10,23 +10,26 @@ from support import load_module
 
 STAGES = (
     "detect_players_and_discs",
-    "run_tracking",
     "run_field_segmentation",
     "create_unified_field_mask",
     "fit_lines_from_mask",
+    "reset_inference_state",
+    "reset_segmentation_cache",
+)
+# What the pipeline and the jersey numbers ask of the tracker (processing/tracking.py)
+TRACKER = (
+    "run_tracking",
     "get_track_histories",
     "apply_camera_motion",
     "set_frame_rate",
-    "reset_tracker",
-    "reset_inference_state",
-    "reset_segmentation_cache",
+    "reset",
+    "missing_players",
+    "kit_distance",
+    "merge_players",
 )
 # The stages the jersey numbers use (processing/player_numbers.py)
 NUMBER_STAGES = (
     "run_player_id_on_tracks",
-    "missing_players",
-    "kit_distance",
-    "merge_players",
     "merge_jersey_readings",
     "get_best_jersey_number",
     "get_jersey_read_count",
@@ -50,7 +53,12 @@ class PipelineTests(unittest.TestCase):
         self.module = load_module("pipeline")
         self.mocks = {}
         numbers = sys.modules[self.module.PlayerNumbers.__module__]
-        for owner, names in ((self.module, STAGES + DRAWING), (numbers, NUMBER_STAGES)):
+        tracker = self.module.PlayerTracker
+        for owner, names in (
+            (self.module, STAGES + DRAWING),
+            (numbers, NUMBER_STAGES),
+            (tracker, TRACKER),
+        ):
             for name in names:
                 patcher = patch.object(owner, name)
                 self.mocks[name] = patcher.start()
@@ -146,7 +154,7 @@ class PipelineTests(unittest.TestCase):
 
         self.pipeline.process(self.frame, 3, self.options)
         self.pipeline.reset()
-        self.mocks["reset_tracker"].assert_called_once()
+        self.mocks["reset"].assert_called_once()
         self.mocks["reset_segmentation_cache"].assert_called_once()
         self.assertEqual(self.pipeline.player_ids, {})
         self.pipeline.process(self.frame, 3, self.options)
@@ -155,7 +163,7 @@ class PipelineTests(unittest.TestCase):
     def test_nothing_is_followed_during_a_close_up_and_tracking_starts_afresh_after_it(self):
         self.pipeline.process(self.frame, 0, self.options)
         tracked = self.mocks["run_tracking"].call_count
-        resets = self.mocks["reset_tracker"].call_count
+        resets = self.mocks["reset"].call_count
 
         # The footage cuts to a close-up: the detector finds nobody
         self.mocks["detect_players_and_discs"].return_value = []
@@ -165,7 +173,7 @@ class PipelineTests(unittest.TestCase):
         self.assertIsNone(results[-1].top_down_view)
         # A few frames pass before the cut is believed; from then on nothing is tracked
         self.assertLess(self.mocks["run_tracking"].call_count - tracked, 20)
-        self.assertEqual(self.mocks["reset_tracker"].call_count, resets + 1)
+        self.assertEqual(self.mocks["reset"].call_count, resets + 1)
 
         # Back on the drone
         self.mocks["detect_players_and_discs"].return_value = self.players
@@ -270,8 +278,9 @@ class PipelineTests(unittest.TestCase):
             player, (None, 0.0)
         )
 
-        numbers_module = sys.modules[self.module.PlayerNumbers.__module__]
-        teams = patch.object(numbers_module, "team_of_player", side_effect={7: 0, 3: 0, 5: 1}.get)
+        teams = patch.object(
+            self.module.PlayerTracker, "team_of_player", side_effect={7: 0, 3: 0, 5: 1}.get
+        )
         teams.start()
         self.addCleanup(teams.stop)
 
@@ -344,7 +353,7 @@ class PipelineTests(unittest.TestCase):
         self.pipeline._looks.swapped.return_value = [(7, 8)]
         # Where each box stands on the field, followed over the frames
         self.pipeline._steady._players = {7: ["left"], 8: ["right"]}
-        with patch.object(self.module, "swap_players", return_value=True):
+        with patch.object(self.module.PlayerTracker, "swap_players", return_value=True):
             self.pipeline._settle_crossings(0)
         self.assertEqual((one.track_id, other.track_id), (8, 7))
         self.assertEqual(self.pipeline._steady._players, {8: ["left"], 7: ["right"]})
