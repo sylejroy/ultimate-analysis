@@ -11,12 +11,15 @@ pipeline (digit filtering, validation, probabilistic tracking) is the same for a
   tried as well and are gone.
 """
 
+import time
+import traceback
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 
 from ..utils.logger import get_logger
+from . import health
 
 logger = get_logger("PLAYER_ID")
 
@@ -109,8 +112,24 @@ class ParseqReader:
         return readings
 
 
-# Loaded readers by name; None marks a reader that could not be loaded
+# Loaded readers by name; None marks a reader that could not be loaded, and when that was
 _readers: Dict[str, Optional[Any]] = {}
+_failed_at: Dict[str, float] = {}
+# A reader that did not load is tried again after this long (seconds): what failed may
+# have been passing (an import that another thread was in the middle of)
+RETRY_SECONDS = 60.0
+
+
+def _hidden_cause(error: Exception) -> str:
+    """What lies behind an error that hides its cause. Transformers' lazy imports say only
+    "Could not import module 'AutoModel'": importing that module directly says why."""
+    if "Could not import module" not in str(error):
+        return ""
+    try:
+        import transformers.models.auto.modeling_auto  # noqa: F401
+    except Exception:
+        return traceback.format_exc()
+    return "(importing transformers' AutoModel directly works now: it was passing)"
 
 
 def get_reader(name: str, text_detector_factory: Callable[[], Any]) -> Optional[Any]:
@@ -121,6 +140,9 @@ def get_reader(name: str, text_detector_factory: Callable[[], Any]) -> Optional[
         text_detector_factory: Returns the initialized EasyOCR reader (PARSeq uses its
             text detector)
     """
+    failed = name in _readers and _readers[name] is None
+    if failed and time.monotonic() - _failed_at.get(name, 0.0) >= RETRY_SECONDS:
+        del _readers[name]
     if name not in _readers:
         try:
             if name == "parseq":
@@ -131,7 +153,17 @@ def get_reader(name: str, text_detector_factory: Callable[[], Any]) -> Optional[
             else:
                 raise ValueError(f"unknown jersey reader '{name}'")
             logger.info(f"Jersey reader loaded: {READER_LABELS.get(name, name)}")
+            health.clear("Jersey numbers")
         except Exception as e:
-            logger.warning(f"Jersey reader '{name}' is not available, using EasyOCR instead: {e}")
+            logger.exception(f"Jersey reader '{name}' is not available, using EasyOCR instead: {e}")
+            cause = _hidden_cause(e)
+            if cause:
+                logger.error(f"What lies behind it:\n{cause}")
+            health.report(
+                "Jersey numbers",
+                f"{READER_LABELS.get(name, name)} did not load, read with EasyOCR (see the log)",
+                standing=True,
+            )
             _readers[name] = None
+            _failed_at[name] = time.monotonic()
     return _readers[name]

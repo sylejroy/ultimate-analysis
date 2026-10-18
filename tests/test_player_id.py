@@ -165,6 +165,22 @@ class PlayerIdConfigTests(unittest.TestCase):
         self.assertIsNone(readers.get_reader("florence", lambda: None))
         self.assertIsNone(readers.get_reader("parseq", lambda: None))
 
+    def test_a_reader_that_did_not_load_is_shown_and_tried_again(self):
+        readers = load_module("processing.jersey_readers")
+        health = load_module("processing.health")
+        readers._readers.clear()
+        health.clear("Jersey numbers")
+        self.addCleanup(readers._readers.clear)
+        self.addCleanup(health.clear, "Jersey numbers")
+        self.assertIsNone(readers.get_reader("parseq", lambda: None))
+        self.assertTrue(any("Jersey numbers" in p for p in health.problems()))
+        # Not tried again at once; after a while it is, and loads this time
+        with patch.object(readers, "ParseqReader", return_value="reader"):
+            self.assertIsNone(readers.get_reader("parseq", lambda: "detector"))
+            readers._failed_at["parseq"] -= readers.RETRY_SECONDS
+            self.assertEqual(readers.get_reader("parseq", lambda: "detector"), "reader")
+        self.assertFalse(any("Jersey numbers" in p for p in health.problems()))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,12 @@ def report(stage: str, problem: str, standing: bool = False) -> None:
     (_standing if standing else _problems)[stage] = problem
 
 
+def clear(stage: str) -> None:
+    """A stage that failed for good works again (a model that loaded on a later try)."""
+    _standing.pop(stage, None)
+    _problems.pop(stage, None)
+
+
 def start_frame() -> None:
     """Forget the problems of the frame before."""
     _problems.clear()
