@@ -19,7 +19,7 @@ Since the truth boxes come from a run of the same detector, detection is flatter
 that run; the association numbers are what one tracker is compared with another by.
 
     python scripts/benchmark_tracking.py hand_tracks
-    python scripts/benchmark_tracking.py hand_tracks --set models.tracking.weak_detections_from=0.25
+    python scripts/benchmark_tracking.py hand_tracks --set models.tracking.max_age_seconds=5
     python scripts/benchmark_tracking.py hand_tracks --step 2      # as "Real time" at 60 fps
 """
 

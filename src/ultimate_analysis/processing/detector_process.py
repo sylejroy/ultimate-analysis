@@ -71,7 +71,6 @@ def _detect(frame: np.ndarray, sent: Dict[str, Any], state: Dict[str, Any]) -> L
         state["resets"] = sent["resets"]
     return inference.run_inference(
         frame,
-        weak_players_from=sent["weak_players_from"],
         weak_discs_from=sent["weak_discs_from"],
         frames_passed=sent.get("frames_passed", 1),
     )
@@ -253,10 +252,7 @@ def start() -> None:
 
 
 def detect(
-    frame: np.ndarray,
-    weak_players_from: float = 0.0,
-    weak_discs_from: float = 0.0,
-    frames_passed: int = 1,
+    frame: np.ndarray, weak_discs_from: float = 0.0, frames_passed: int = 1
 ) -> List[Dict[str, Any]]:
     """The players and discs of a frame, as `inference.run_inference` gives them: from
     the detectors' own process if that is switched on and works, from this one otherwise."""
@@ -270,7 +266,6 @@ def detect(
                 "settings": {name: models.get(name, {}) for name in SENT_SETTINGS},
                 "models": inference.current_model_paths(),
                 "resets": inference.reset_count(),
-                "weak_players_from": float(weak_players_from),
                 "weak_discs_from": float(weak_discs_from),
                 "frames_passed": int(frames_passed),
             },
@@ -284,7 +279,6 @@ def detect(
         return []
     return inference.run_inference(
         frame,
-        weak_players_from=weak_players_from,
         weak_discs_from=weak_discs_from,
         frames_passed=frames_passed,
     )

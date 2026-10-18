@@ -196,7 +196,6 @@ def _run_single_model_inference(
     model_imgsz: Optional[int],
     config_prefix: str,
     target_class: str,
-    weak_players_from: float = 0.0,
     weak_discs_from: float = 0.0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
     """Run inference on a single model and return normalized detections with detailed timing.
@@ -217,7 +216,6 @@ def _run_single_model_inference(
         model,
         model_imgsz,
         {target_class: (config_prefix, model_type)},
-        weak_players_from,
         weak_discs_from,
     )
 
@@ -227,7 +225,6 @@ def _predict_detections(
     model: Any,
     model_imgsz: Optional[int],
     roles: Dict[str, Tuple[str, str]],
-    weak_players_from: float = 0.0,
     weak_discs_from: float = 0.0,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
     """Run one model and return the detections of the requested classes.
@@ -237,9 +234,8 @@ def _predict_detections(
         model: Loaded YOLO model
         model_imgsz: Model's training image size
         roles: Class name -> (settings prefix for its thresholds, model type label)
-        weak_players_from: Also give players the model is at least this sure of but
-            less than its threshold, marked "weak": True (0: do not)
-        weak_discs_from: The same for discs
+        weak_discs_from: Also give discs the model is at least this sure of but less
+            than its threshold, marked "weak": True (0: do not)
 
     Returns:
         Tuple of (List of detection dictionaries, timing_breakdown dict)
@@ -259,11 +255,9 @@ def _predict_detections(
             name: get_setting(f"{prefix}.confidence_threshold", 0.5)
             for name, (prefix, _) in roles.items()
         }
-        # Players the model is less sure of are given too, marked as weak, if asked for:
-        # the tracker can go on with one where a player is half covered
+        # Discs the model is less sure of are given too, marked as weak, if asked for:
+        # they count where something else sees a disc there too (disc_fusion.py)
         sure = dict(thresholds)
-        if weak_players_from and "player" in thresholds:
-            thresholds["player"] = min(thresholds["player"], weak_players_from)
         if weak_discs_from and "disc" in thresholds:
             thresholds["disc"] = min(thresholds["disc"], weak_discs_from)
         first_prefix = next(iter(roles.values()))[0]
@@ -533,18 +527,15 @@ def _second_thread() -> ThreadPoolExecutor:
 def run_inference(
     frame: np.ndarray,
     return_timing: bool = False,
-    weak_players_from: float = 0.0,
     weak_discs_from: float = 0.0,
     frames_passed: int = 1,
 ) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], Dict[str, float]]]:
     """Find the players and the disc in a frame (see `_run_inference`), one frame at a
     time whichever thread asks.
 
-    With `weak_players_from`, players the model gives at least that confidence but less
-    than its threshold are returned as well, with "weak": True. They are for the tracker
-    only: nothing else should take them for players. `weak_discs_from` does the same
-    for discs: they count only where something else sees a disc there too
-    (processing/disc_fusion.py).
+    With `weak_discs_from`, discs the model gives at least that confidence but less than
+    its threshold are returned as well, with "weak": True. They count only where
+    something else sees a disc there too (processing/disc_fusion.py).
 
     `frames_passed`: video frames since the frame asked about before (more than one where
     playback passes over frames): how long the disc has not been seen is counted in
@@ -554,7 +545,6 @@ def run_inference(
         return _run_inference(
             frame,
             return_timing,
-            float(weak_players_from),
             float(weak_discs_from),
             max(1, int(frames_passed)),
         )
@@ -563,7 +553,6 @@ def run_inference(
 def _run_inference(
     frame: np.ndarray,
     return_timing: bool = False,
-    weak_players_from: float = 0.0,
     weak_discs_from: float = 0.0,
     frames_passed: int = 1,
 ) -> Union[List[Dict[str, Any]], Tuple[List[Dict[str, Any]], Dict[str, float]]]:
@@ -660,7 +649,6 @@ def _run_inference(
             _player_model,
             _player_model_imgsz,
             dict(_MODEL_ROLES),
-            weak_players_from,
             weak_discs_from,
         )
         disc_count = sum(1 for det in all_detections if det["class_name"] == "disc")
@@ -673,7 +661,6 @@ def _run_inference(
             _player_model_imgsz,
             "models.player_detection",
             "player",
-            weak_players_from,
         )
         player_count = len(player_detections)
         all_detections.extend(player_detections)

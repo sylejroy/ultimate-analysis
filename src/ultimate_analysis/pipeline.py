@@ -235,7 +235,6 @@ class AnalysisPipeline:
         self._shirts_by_looks: List[list] = [[], []]
         self._colours_by_looks: Optional[dict] = None
         self._shirt_turn = 0
-        self._weak_players: List[Dict[str, Any]] = []
         # Discs the detector is not sure of, and what the discs of this frame were made
         # of (processing/disc_fusion.py; None where they are the detector's alone)
         self._weak_discs: List[Dict[str, Any]] = []
@@ -811,16 +810,9 @@ class AnalysisPipeline:
                 return found
         return detect_players_and_discs(
             frame,
-            weak_players_from=self._weak_from(),
             weak_discs_from=weak_discs_from(),
             frames_passed=self._frames_passed,
         )
-
-    @staticmethod
-    def _weak_from() -> float:
-        """The confidence from which the tracker is given players the detector is not
-        sure of (0: not at all)."""
-        return float(get_setting("models.tracking.weak_detections_from", 0.0))
 
     def _detect_ahead(
         self, next_frame: Callable[[], Optional[np.ndarray]], with_motion: bool
@@ -831,7 +823,6 @@ class AnalysisPipeline:
         # The next frame lies as far on as this one did from the one before
         found = detect_players_and_discs(
             frame,
-            weak_players_from=self._weak_from(),
             weak_discs_from=weak_discs_from(),
             frames_passed=self._frames_passed,
         )
@@ -939,7 +930,6 @@ class AnalysisPipeline:
     ) -> None:
         """Run the enabled stages and store their results."""
         self.detections = []
-        self._weak_players = []
         self._weak_discs, self._disc_sensors = [], None
         self.tracks = []
         self.field_results = []
@@ -951,11 +941,9 @@ class AnalysisPipeline:
         if options.detection:
             start = time.perf_counter()
             found = self._detect(frame)
-            # Players the detector is not sure of are for the tracker alone
+            # Discs the detector is not sure of are for putting the discs together alone
             self.detections = [detection for detection in found if not detection.get("weak")]
-            weak = [detection for detection in found if detection.get("weak")]
-            self._weak_players = [d for d in weak if d["class_name"] == "player"]
-            self._weak_discs = [d for d in weak if d["class_name"] == "disc"]
+            self._weak_discs = [d for d in found if d.get("weak") and d["class_name"] == "disc"]
             self._record("Inference", start)
             if get_setting("models.shot_type.enabled", True) and not self._watch_shot():
                 self._begin_ahead(next_frame, options)
@@ -1008,7 +996,7 @@ class AnalysisPipeline:
         if options.tracking:
             start = time.perf_counter()
             set_field(self._field_follower.image_to_field if self._follow_field else None)
-            self.tracks = run_tracking(frame, self.detections + self._weak_players, frame_index)
+            self.tracks = run_tracking(frame, self.detections, frame_index)
             self._teams_by_looks(frame)
             if self._follow_field and get_setting("models.tracking.hide_off_field", True):
                 # Those standing along the sidelines are followed but not shown or counted
@@ -1099,7 +1087,6 @@ class AnalysisPipeline:
                 self._places_on_field(),
                 self.places,
             )
-            self._rejoin_by_looks(frame_index)
             self._join_looking_back(frame_index)
             self._settle_crossings(frame_index)
             self._record("Player ID - Looks", start)
@@ -1186,16 +1173,6 @@ class AnalysisPipeline:
                 return colours  # The tracker's, which it may still be changing
             self._colours_by_looks = appearance.told_apart(colours)
         return self._colours_by_looks
-
-    def _rejoin_by_looks(self, frame_index: int) -> None:
-        """Give a player the tracker lost a while ago their ID back, where a new track
-        looks like them."""
-        players = {t.track_id: t for t in self.tracks if t.class_name == "player"}
-        returned = self._looks.returned(list(players), missing_players(set(players)), frame_index)
-        for was, now in returned:
-            self._numbers.join(players[was], now)
-            self._rename(was, now)
-            logger.info(f"Player {was} is player {now} again (by their looks)")
 
     def _join_looking_back(self, frame_index: int) -> None:
         """Give a player the tracker lost and began again their ID back, where the

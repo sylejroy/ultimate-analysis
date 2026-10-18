@@ -50,13 +50,8 @@ MAX_RUN_SPEED = 12.0
 # A disc that changes hands within this time and distance, in one team, was passed
 MAX_PASS_SECONDS = 10.0
 MAX_PASS_DISTANCE = 100.0
-# A new track is a player the tracker lost if it has been looked at this often, is this
-# much like them (cosine), and that much more than like any other lost teammate. Of
-# tracks cut in two, the second part found its first among eight teammates in 67 to 74%
-# of cases with these, and 98.7% of those rightly (docs/MEASUREMENTS.md).
-REJOIN_LOOKS = 5
-REJOIN_LIKENESS = 0.7
-REJOIN_LEAD = 0.1
+# A track's looks are trusted to say whose it is once it has been looked at this often
+TRUSTED_LOOKS = 5
 # The teams are told from the players' looks once this many tracks have been looked at
 # this often each, if they fall into two groups of at least so many whose members are
 # this much more alike among themselves than across (cosine). The colour of the shirt
@@ -462,9 +457,7 @@ class PlayerLooks:
                 self._profiles[track_id].ended = True
                 self._sharpness.pop(track_id, None)
                 self._ran_from.pop(track_id, None)
-        remembered = self.frame_rate * max(
-            PROFILE_SECONDS, float(get_setting("models.reid.rejoin_seconds", 0.0))
-        )
+        remembered = self.frame_rate * PROFILE_SECONDS
         for track_id in [t for t, p in self._profiles.items() if frame_index - p.last > remembered]:
             del self._profiles[track_id]
 
@@ -503,7 +496,7 @@ class PlayerLooks:
             given_up = (
                 gone_for > CROSSING_SECONDS
                 or (any(t not in present for t in pair) and gone_for > TRACK_ENDED_SECONDS)
-                or any(p is None or p.looks < REJOIN_LOOKS for p in before)
+                or any(p is None or p.looks < TRUSTED_LOOKS for p in before)
             )
             settled = (
                 frame_index > until
@@ -589,61 +582,6 @@ class PlayerLooks:
         self._last_held = (holder_id, team, place, frame_index)
 
     # ------------------------------------------------------------------ for the tracker
-
-    def returned(
-        self, present: Sequence[int], missing: Sequence[int], frame_index: int
-    ) -> List[Tuple[int, int]]:
-        """Which of the tracks in the frame are players the tracker lost a while ago.
-
-        The tracker gives a player back their track if it finds them within a moment
-        where they can have got to. After that it starts a new track, and only the
-        player's looks say who it is: among the lost players of the same team who were
-        gone before the track began, the one it is clearly most like.
-
-        Args:
-            present: The tracks in the frame
-            missing: The players the tracker still remembers and does not see
-            frame_index: Position of the frame in the video
-
-        Returns:
-            (track, lost player it is) for each track that is one; the caller joins the
-            two, and tells this stage with `rename`
-        """
-        longest = float(get_setting("models.reid.rejoin_seconds", 0.0)) * self.frame_rate
-        if longest <= 0:
-            return []
-        lost = [
-            (track_id, self._profiles[track_id])
-            for track_id in missing
-            if track_id in self._profiles
-            and self._profiles[track_id].looks >= REJOIN_LOOKS
-            and frame_index - self._profiles[track_id].last <= longest
-        ]
-        offers = []
-        for track_id in present:
-            profile = self._profiles.get(track_id)
-            if profile is None or profile.looks < REJOIN_LOOKS or profile.team is None:
-                continue
-            likeness = sorted(
-                (
-                    (float(profile.mean @ other.mean), other_id)
-                    for other_id, other in lost
-                    # Gone before this track began: otherwise they are two players
-                    if other.last < profile.first and other.team == profile.team
-                ),
-                reverse=True,
-            )
-            if not likeness or likeness[0][0] < REJOIN_LIKENESS:
-                continue
-            if len(likeness) > 1 and likeness[0][0] - likeness[1][0] < REJOIN_LEAD:
-                continue
-            offers.append((likeness[0][0], track_id, likeness[0][1]))
-        joined, taken = [], set()
-        for _, track_id, earlier in sorted(offers, reverse=True):
-            if earlier not in taken:
-                taken.add(earlier)
-                joined.append((track_id, earlier))
-        return joined
 
     def teams(self, tracker_teams: Dict[int, Optional[int]]) -> Dict[int, int]:
         """The team of each track by its looks: the tracks looked at often enough, split

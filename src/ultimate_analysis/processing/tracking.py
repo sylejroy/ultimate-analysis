@@ -194,20 +194,16 @@ def _run_bytetrack_tracking(frame: np.ndarray, detections: List[Dict[str, Any]])
         or _disc_tracker is None
         or isinstance(_player_tracker, GroundTeamTracker) != on_the_ground
     ):
-        # With weak detections coming in, only those the detector is sure of begin a track
-        weak_from = float(get_setting("models.tracking.weak_detections_from", 0.0))
-        sure_from = float(get_setting("models.player_detection.confidence_threshold", 0.5))
-        sure_from = sure_from if weak_from > 0 else 0.25
         keep = _max_age_frames()
         if on_the_ground:
             # Kept longer: where the field is known, a lost player is found by their place
             seconds = float(get_setting("models.tracking.ground_keep_seconds", 6.0))
             keep = max(keep, round(seconds * _frame_rate))
             _player_tracker = GroundTeamTracker(
-                tracker_settings(keep, sure_from), _max_age_frames() / _frame_rate
+                tracker_settings(keep), _max_age_frames() / _frame_rate
             )
         else:
-            _player_tracker = TeamTracker(tracker_settings(keep, sure_from))
+            _player_tracker = TeamTracker(tracker_settings(keep))
         _disc_tracker = BYTETracker(tracker_settings(_max_age_frames()))
         _keep_lost(_player_tracker, keep)
         _keep_lost(_disc_tracker, _max_age_frames())

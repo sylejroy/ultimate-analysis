@@ -91,7 +91,6 @@ models:
     hide_off_field: true         # Leave out those standing beside the field, going by where the field model sees the field (needs field segmentation)
     hide_newcomers_off_field: false  # Also a new track that has only been seen beside the field so far, until it is judged
     covered_feet: true           # A player whose legs another player stands in front of (the thrower behind the mark) is placed on the field as tall as they were before, not where their box ends
-    weak_detections_from: 0.0    # Give the tracker players the detector is less sure of than its threshold, from this confidence: they can continue a track, not begin one. 0 = not
     track_history_length: 300    # Most points a trail is kept for
     trail_smoothing_seconds: 0.4 # A trail's points are averaged over this long, a stride, so it does not bob up and down with every step; 0 = as measured
     trail_seconds: 4.0           # How far back a trail reaches, however many frames playback skips to keep up
@@ -167,7 +166,6 @@ models:
     check_crossings: true               # After two players' boxes overlapped, check by their looks whether the tracks changed players, and put them right
     teams_by_looks: true                # A player's team is what they look like, once they have been looked at enough; until then, and without the network, the colour of the shirt
     join_looking_back_seconds: 1.0      # Every so often, tracks that turn out to be one player looking back over the stretch (never in the picture at once, one team, within reach on the field, clearly most alike) are joined; 0 = never
-    rejoin_seconds: 0.0                 # A new track that looks like a teammate lost up to this long ago is that player again; 0 = never. Off: it joined few and some of them wrongly
     roster_folder: "data/cache/rosters" # The players of each video, kept between sessions; "" = not kept
 
   player_id:

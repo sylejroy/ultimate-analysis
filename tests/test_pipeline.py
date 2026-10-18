@@ -59,7 +59,7 @@ class PipelineTests(unittest.TestCase):
         # No network in the tests: nobody is known by their looks
         looks = patch.object(self.module, "PlayerLooks")
         stage = looks.start().return_value
-        stage.update.return_value, stage.returned.return_value = {}, []
+        stage.update.return_value = {}
         stage.teams.return_value, stage.swapped.return_value = {}, []
         stage.swap.return_value = None
         self.addCleanup(looks.stop)

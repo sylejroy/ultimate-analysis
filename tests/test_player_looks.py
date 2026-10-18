@@ -37,7 +37,6 @@ class PlayerLooksTest(unittest.TestCase):
             "models.reid.roster_folder": self.folder.name,
             "models.reid.look_every_frames": 1,
             "models.reid.in_background": False,
-            "models.reid.rejoin_seconds": 10.0,
         }
         for owner, name, replacement in (
             (reid, "embed", by_colour),
@@ -157,32 +156,6 @@ class PlayerLooksTest(unittest.TestCase):
         found = self.watch(tracks, {}, self.roster_module.MIN_LOOKS + 2)
         self.assertEqual(found, {8: "17"})
 
-    def test_a_new_track_that_looks_like_a_lost_teammate_is_that_player(self):
-        anna, ben = player(1, self.boxes["anna"]), player(2, self.boxes["ben"])
-        anna.team = ben.team = 0
-        self.watch([anna, ben], {}, 10)
-        # Both are lost; a second later two new tracks appear, the other way round
-        again = [player(7, self.boxes["ben"]), player(8, self.boxes["anna"])]
-        again[0].team = again[1].team = 0
-        self.watch(again, {}, 10, start=70)
-        self.assertEqual(sorted(self.looks.returned([7, 8], [1, 2], 80)), [(7, 2), (8, 1)])
-        # Not of the other team, not a player who is still there, not after too long
-        again[1].team = 1
-        self.looks._profiles[8].team = 1
-        self.assertEqual(self.looks.returned([7, 8], [1, 2], 80), [(7, 2)])
-        self.assertEqual(self.looks.returned([7], [1], 80), [])
-        self.assertEqual(self.looks.returned([7], [2], 80 + 100000), [])
-
-    def test_two_lost_teammates_who_look_alike_are_not_told_apart(self):
-        twin = self.boxes["anna"]
-        first, second = player(1, twin), player(2, twin)
-        first.team = second.team = 0
-        self.watch([first, second], {}, 10)
-        new = player(7, twin)
-        new.team = 0
-        self.watch([new], {}, 10, start=70)
-        self.assertEqual(self.looks.returned([7], [1, 2], 80), [])
-
     def test_the_teams_are_told_from_what_the_players_look_like(self):
         # Three players a side: one kit reddish, one greenish, each player a shade of it
         reds = [(200 - 10 * n, 30, 40 + 10 * n) for n in range(3)]
@@ -242,7 +215,7 @@ class PlayerLooksTest(unittest.TestCase):
         module = self.module
         for track_id, vector in ((1, [1.0, 0.0]), (2, [0.0, 1.0])):
             profile = module._Profile(first=0, last=10)
-            for _ in range(module.REJOIN_LOOKS):
+            for _ in range(module.TRUSTED_LOOKS):
                 profile.learn(np.array(vector))
             # Since the crossing each looks like the other did before
             profile.held = [(np.array(vector[::-1]), None)] * module.CROSSING_LOOKS
