@@ -116,11 +116,6 @@ GAME_STATE_COLOURS = {
 WORKER_SHUTDOWN_TIMEOUT_MS = 60000
 
 
-# With "Real time" on, at most every so many frames one is analysed: beyond that the
-# tracker has too little to go by
-MAX_FRAME_STEP = 4
-
-
 class MainTab(QWidget):
     """Main video analysis tab with video player and processing controls."""
 
@@ -951,7 +946,10 @@ class MainTab(QWidget):
             step += 1
         elif frames < step - 1.1:
             step -= 1
-        step = min(MAX_FRAME_STEP, max(least, step))
+        # Beyond every second frame the tracks suffer: on the hand-labelled stretches AssA
+        # 0.852 every frame, 0.836 every second, 0.776 every third (docs/MEASUREMENTS.md)
+        most = max(least, int(get_setting("video.realtime_max_step", 2)))
+        step = min(most, max(least, step))
         if step != self._frame_step:
             self._apply_frame_step(step)
 

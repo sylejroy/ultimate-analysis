@@ -13,6 +13,7 @@ video:
   default_fps: 25                # Used when a video file reports no valid frame rate
   realtime: true                 # Play at the video's own speed by passing over frames ("Real time" in the main tab); false: every frame is analysed, and a video of 60 frames a second plays at half its speed
   realtime_rate: 30              # With that on, about this many frames are analysed per second of video
+  realtime_max_step: 2           # ... and at most every so many frames passed over: where the analysis cannot keep up, the video plays slower instead (tracks: AssA 0.852 every frame, 0.836 every second, 0.776 every third)
   default_video: "portland_vs_san_francisco_2024.mp4"  # Opened at startup if present
 
 # Model Configuration
