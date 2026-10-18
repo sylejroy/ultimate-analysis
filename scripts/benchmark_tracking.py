@@ -199,6 +199,7 @@ def main() -> None:
     args = parser.parse_args()
     config = get_config()
     config["models"]["reid"]["roster_folder"] = ""
+    config["homography"]["focal_folder"] = ""  # Nothing of an earlier session
     config["models"]["player_id"]["background_reading"] = False
     for item in args.set:
         key, value = item.split("=", 1)

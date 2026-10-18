@@ -1,14 +1,18 @@
 """Tests for the camera fitted to the field and the estimate made from the field model's masks."""
 
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 import cv2
 import numpy as np
 
 from ultimate_analysis.processing.field_registration import (
+    MIN_FOCAL_SAMPLES,
     FieldEstimate,
     FieldFollower,
+    FocalLength,
     estimate_field,
     field_to_canvas,
     implausible,
@@ -297,6 +301,34 @@ class FieldEstimateTest(unittest.TestCase):
         self.assertLess(near_left[0], far_right[0])
         for corner in (near_left, far_right):
             self.assertTrue(0 <= corner[0] <= 400 and 0 <= corner[1] <= 1200)
+
+
+class FocalLengthTest(unittest.TestCase):
+    def test_what_is_learned_of_a_video_is_kept_for_the_next_time(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = Path(folder.name) / "focal" / "game.json"
+        learning = FocalLength(path)
+        for value in [1700.0] * (MIN_FOCAL_SAMPLES - 1):
+            learning.add(value)
+        self.assertFalse(path.exists())  # Not known yet, nothing kept
+        learning.add(1720.0)
+        self.assertTrue(path.exists())
+        self.assertEqual(FocalLength(path).value, learning.value)
+
+        follower = FieldFollower(TEMPLATES["usau"])
+        follower.new_video(None, path)
+        self.assertEqual(follower.focal, 1700.0)
+        # The focal length of the video's labels comes first
+        follower.new_video(1650.0, path)
+        self.assertEqual(follower.focal, 1650.0)
+
+    def test_a_kept_file_that_cannot_be_read_is_left_aside(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = Path(folder.name) / "game.json"
+        path.write_text("not json")
+        self.assertIsNone(FocalLength(path).value)
 
 
 if __name__ == "__main__":

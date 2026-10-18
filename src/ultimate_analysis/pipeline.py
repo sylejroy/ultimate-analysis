@@ -324,11 +324,14 @@ class AnalysisPipeline:
         self._game.reset()
         self._score, self._events_counted = [], 0
         self.reset_fps()
-        focal = None
+        focal = kept_in = None
         if video_path:
             dataset = Path(DEFAULT_PATHS["TRAINING_DATA"]) / FIELD_LABELS
             focal = video_focal(dataset, video_path, self._field_follower.template)
-        self._field_follower.new_video(focal)
+            # Without labels it is learned from the frames, and kept for the next time
+            folder = get_setting("homography.focal_folder", "data/cache/focal")
+            kept_in = Path(folder) / f"{Path(video_path).stem}.json" if folder else None
+        self._field_follower.new_video(focal, kept_in)
         self._looks.new_video(video_path)
 
     def reset(self) -> None:

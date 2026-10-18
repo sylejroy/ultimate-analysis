@@ -9,8 +9,10 @@ and less certain towards the camera when no near goal line is in view. Knowing t
 length of the video's camera makes up for much of that.
 """
 
+import json
 from dataclasses import dataclass
 from itertools import product
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
@@ -46,6 +48,9 @@ MAX_MISFIT_PIXELS = 8.0
 MIN_FOCAL_SAMPLES = 15
 FOCAL_SAMPLE_EVERY = 6
 MAX_FOCAL_SAMPLES = 300
+# What was learned of a video is written to its file once known, and then every so many
+# samples more: the next session begins with it
+FOCAL_SAVE_EVERY = 15
 # How much of a new estimate goes into the field as followed; the rest is where the field
 # was, moved with the camera. Evens out the estimates' jitter. Less makes the field in the
 # top-down view steadier and slower to follow an estimate that has moved for good; the
@@ -107,15 +112,35 @@ class FocalLength:
     """The focal length of a video's camera, learned from the frames seen so far.
 
     A camera that does not zoom keeps its focal length, and each frame's lines give it
-    only roughly; the middle of many frames' values is steady.
+    only roughly; the middle of many frames' values is steady. With a file, what was
+    learned is kept there and taken up again the next time the video is opened.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, path: Optional[Path] = None) -> None:
         self._samples: List[float] = []
         self._asked = 0
+        self._path = path
+        if path is not None and path.is_file():
+            try:
+                kept = json.loads(path.read_text(encoding="utf-8"))["samples"]
+                self._samples = [float(v) for v in kept][:MAX_FOCAL_SAMPLES]
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                logger.warning(f"The focal length kept in {path} is not usable: {error}")
 
     def add(self, focal: float) -> None:
         self._samples.append(float(focal))
+        learned = len(self._samples) - MIN_FOCAL_SAMPLES
+        if self._path is not None and learned >= 0 and learned % FOCAL_SAVE_EVERY == 0:
+            self._save()
+
+    def _save(self) -> None:
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            written = self._path.with_suffix(".tmp")
+            written.write_text(json.dumps({"samples": self._samples}), encoding="utf-8")
+            written.replace(self._path)
+        except OSError as error:
+            logger.warning(f"The focal length could not be kept in {self._path}: {error}")
 
     def wants_one(self) -> bool:
         """Whether the current frame should give a focal length."""
@@ -210,9 +235,15 @@ class FieldFollower:
         """The focal length of the video's camera in pixels, as far as it is known."""
         return self._known_focal if self._known_focal is not None else self._focal.value
 
-    def new_video(self, focal: Optional[float] = None) -> None:
-        """Another camera: forget its focal length too, or take the one that is known."""
-        self._focal = FocalLength()
+    def new_video(self, focal: Optional[float] = None, kept_in: Optional[Path] = None) -> None:
+        """Another camera: forget its focal length too, or take the one that is known.
+
+        Args:
+            focal: The focal length, if known (from the video's field labels)
+            kept_in: A file where what is learned of the focal length is kept between
+                sessions, and taken up again from
+        """
+        self._focal = FocalLength(kept_in if focal is None else None)
         self._known_focal = focal
         self.reset()
 

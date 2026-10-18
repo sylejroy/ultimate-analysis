@@ -50,6 +50,7 @@ def main() -> None:
     config = get_config()
     config["models"]["player_id"]["background_reading"] = False  # Numbers in the frame read
     config["models"]["reid"]["roster_folder"] = ""
+    config["homography"]["focal_folder"] = ""  # Nothing of an earlier session
     initialize_player_id_system()
     options = PipelineOptions(top_down_view=False)
     for stretch in args.stretches:

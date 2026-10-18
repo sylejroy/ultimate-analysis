@@ -204,3 +204,4 @@ homography:
   disc_path_seconds: 8.0                     # How far back the path of the disc is drawn on it
   diagram_height: 900                        # Height of that drawing in pixels
   ruleset: "usau"                            # The field the field model's view is laid on: "usau" or "wfdf"
+  focal_folder: "data/cache/focal"           # The focal length learned of each video without field labels, kept between sessions; "" = not kept
