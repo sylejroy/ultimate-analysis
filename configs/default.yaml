@@ -167,6 +167,9 @@ models:
     check_crossings: true               # After two players' boxes overlapped, check by their looks whether the tracks changed players, and put them right
     teams_by_looks: true                # A player's team is what they look like, once they have been looked at enough; until then, and without the network, the colour of the shirt
     join_looking_back_seconds: 1.0      # Every so often, tracks that turn out to be one player looking back over the stretch (never in the picture at once, one team, within reach on the field, clearly most alike) are joined; 0 = never
+    join_min_likeness: 0.5              # ... how alike (cosine) two groups of tracks must look to be joined
+    join_min_lead: 0.1                  # ... and by how much more than like any rival
+    join_needs_place: true              # ... joined by looks only where both are known to lie within a player's reach on the field
     roster_folder: "data/cache/rosters" # The players of each video, kept between sessions; "" = not kept
 
   player_id:

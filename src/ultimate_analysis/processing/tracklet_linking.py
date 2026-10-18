@@ -18,6 +18,8 @@ from typing import Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
 
+from ..config.settings import get_setting
+
 # Looks from which a track's looks are trusted to tell whose it is
 MIN_LOOKS = 3
 # How alike (cosine) two tracks must look to be joined, and by how much more than any
@@ -111,6 +113,7 @@ def connect(
     frame_rate: float,
     min_likeness: float = MIN_LIKENESS,
     min_lead: float = MIN_LEAD,
+    needs_place: bool = True,
 ) -> List[List[Tracklet]]:
     """Group tracks into players.
 
@@ -119,6 +122,8 @@ def connect(
         frame_rate: Frames per second of the video
         min_likeness: How alike two groups must look to be joined
         min_lead: By how much more alike than any rival
+        needs_place: Join by looks only tracks known to lie within a player's reach of
+            each other on the field (False: also where the field's place is not known)
 
     Returns:
         The groups, each the tracks of one player
@@ -161,7 +166,7 @@ def connect(
                         continue
                     # Looks alone do not tell teammates apart well enough: only tracks
                     # known to lie within a player's reach of each other are joined by them
-                    if placed(groups[i], groups[j]):
+                    if not needs_place or placed(groups[i], groups[j]):
                         likeness[i, j] = likeness[j, i] = float(means[i] @ means[j])
             best = 0.0
             for i in range(count):
@@ -255,7 +260,14 @@ class TrackletBook:
         """Track -> player, the player named by the first of their tracks. Tracks the
         tracker renamed are in it under their old names, too."""
         naming = {}
-        for group in connect(self._tracklets.values(), frame_rate):
+        groups = connect(
+            self._tracklets.values(),
+            frame_rate,
+            float(get_setting("models.reid.join_min_likeness", MIN_LIKENESS)),
+            float(get_setting("models.reid.join_min_lead", MIN_LEAD)),
+            bool(get_setting("models.reid.join_needs_place", True)),
+        )
+        for group in groups:
             player = min(group, key=lambda t: (t.first, t.track_id)).track_id
             for tracklet in group:
                 naming[tracklet.track_id] = player
