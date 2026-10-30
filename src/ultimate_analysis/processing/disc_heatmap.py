@@ -16,6 +16,7 @@ from typing import Any, Deque, Optional, Tuple
 import numpy as np
 
 from ..utils.logger import get_logger
+from .model_lock import GPU_SETUP_LOCK
 from .reid import TORCH_AVAILABLE
 
 if TORCH_AVAILABLE:
@@ -138,7 +139,9 @@ class DiscHeatmap:
         if self.device == "cuda":
             from .network_engines import load_engine
 
-            self._engine = load_engine(weights, self.input_shape)
+            # Set up while nobody else is on the GPU, as every engine is (model_lock.py)
+            with GPU_SETUP_LOCK:
+                self._engine = load_engine(weights, self.input_shape)
         # The frames at the network's size, newest last, and how the camera moved to each
         # from the one before (at that size)
         self._frames: Deque["torch.Tensor"] = deque()
@@ -222,14 +225,15 @@ class DiscHeatmap:
                 ]
             batch = torch.cat(three, dim=1) / 255.0
             batch = nn.functional.pad(batch, (0, 0, 0, self._rows - self.frame_size[1]))
-            if self._engine is not None:
-                heat = torch.sigmoid(self._engine(batch)[0].float())
+            with GPU_SETUP_LOCK.work():  # Not while an engine is set up on another thread
+                if self._engine is not None:
+                    heat = torch.sigmoid(self._engine(batch)[0].float())
+                    return heat[: self.frame_size[1]].cpu().numpy()
+                if self._half:
+                    # Only the network: half precision is too coarse for where a pixel was
+                    batch = batch.half().contiguous(memory_format=torch.channels_last)
+                heat = torch.sigmoid(self._model(batch)[0].float())
                 return heat[: self.frame_size[1]].cpu().numpy()
-            if self._half:
-                # Only the network: half precision is too coarse for where a pixel was
-                batch = batch.half().contiguous(memory_format=torch.channels_last)
-            heat = torch.sigmoid(self._model(batch)[0].float())
-            return heat[: self.frame_size[1]].cpu().numpy()
 
     def _laid_onto(self, picture: "torch.Tensor", move: np.ndarray) -> "torch.Tensor":
         """An earlier frame (1 x 3 x rows x columns) as it lies in the frame the camera

@@ -419,13 +419,17 @@ def warmup_models() -> None:
 
     try:
         logger.info("Warming up inference models...")
-        for name, model, size in (
-            ("Player", _player_model, _player_model_imgsz or 640),
-            ("Disc", _disc_model, _disc_model_imgsz or 640),
-        ):
-            if model is not None:
-                model.predict(np.zeros((size, size, 3), dtype=np.uint8), verbose=False, imgsz=size)
-                logger.info(f"{name} model warmed up")
+        # A network run like any other: not while an engine is set up on another thread
+        with GPU_SETUP_LOCK.work():
+            for name, model, size in (
+                ("Player", _player_model, _player_model_imgsz or 640),
+                ("Disc", _disc_model, _disc_model_imgsz or 640),
+            ):
+                if model is not None:
+                    model.predict(
+                        np.zeros((size, size, 3), dtype=np.uint8), verbose=False, imgsz=size
+                    )
+                    logger.info(f"{name} model warmed up")
         logger.info("Model warmup complete")
     except Exception as e:
         logger.warning(f"Model warmup failed (non-critical): {e}")
