@@ -34,6 +34,11 @@ class NetworkEnginesTest(unittest.TestCase):
 
         with patch.object(self.module, "NetworkEngine", side_effect=broken):
             self.assertIsNone(self.module.load_engine(self.weights, (1, 9, 544, 960)))
+        # ... and it is said, for good, until the app is restarted
+        health = load_module("processing.health")
+        (said,) = [problem for problem in health.problems() if problem.startswith("Engine ")]
+        self.addCleanup(health.clear, said.split(":")[0])
+        self.assertIn("does not load", said)
 
 
 if __name__ == "__main__":

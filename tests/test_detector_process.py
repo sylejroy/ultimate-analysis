@@ -27,17 +27,43 @@ class DetectorProcessTest(unittest.TestCase):
         detectors = self.module.DetectorProcess(ECHO, serve)
         self.addCleanup(detectors.close)
         frame = np.arange(4 * 6 * 3, dtype=np.uint8).reshape(4, 6, 3)
-        (first,) = detectors.detect(frame, self.asked(0.1))
+        (first,), reported = detectors.detect(frame, self.asked(0.1))
         self.assertEqual(first["shape"], (4, 6, 3))
         self.assertEqual(first["sum"], int(frame.sum()))
         self.assertEqual(first["sent"], 0.1)
+        self.assertEqual(reported, {})
         # A larger frame than the memory shared so far, and what the other side keeps
         larger = np.full((8, 8, 3), 2, dtype=np.uint8)
-        (second,) = detectors.detect(larger, self.asked(0.0))
+        (second,), _ = detectors.detect(larger, self.asked(0.0))
         self.assertEqual((second["shape"], second["sum"], second["frames"]), ((8, 8, 3), 384, 2))
         # Not all of a frame: rows left out lie apart in memory
-        (third,) = detectors.detect(larger[::2], self.asked(0.0))
+        (third,), _ = detectors.detect(larger[::2], self.asked(0.0))
         self.assertEqual((third["shape"], third["sum"]), ((4, 8, 3), 192))
+
+    def test_what_the_detectors_report_over_there_is_reported_here(self):
+        """A failure the detectors catch themselves is reported in their own process,
+        where nobody sees it; it comes back with the detections and is said here."""
+        module, health = self.module, load_module("processing.health")
+        detectors = module.DetectorProcess(ECHO, serve)
+        self.addCleanup(detectors.close)
+        for name, value in (
+            ("is_enabled", Mock(return_value=True)),
+            ("_the_process", Mock(return_value=detectors)),
+            ("_detectors", detectors),
+            ("_loaded_here", False),
+        ):
+            patcher = patch.object(module, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        load_module("processing.inference")  # Asked which models and resets were sent
+        health.start_frame()
+        self.addCleanup(health.start_frame)
+        frame = np.zeros((2, 2, 3), dtype=np.uint8)
+        self.assertEqual(len(module.detect(frame, weak_discs_from=-1.0)), 1)
+        self.assertIn("Detection: told to fail", health.problems())
+        health.start_frame()
+        module.detect(frame, weak_discs_from=0.0)
+        self.assertFalse(health.failed("Detection"))
 
     def test_a_process_that_cannot_work_is_given_up(self):
         detectors = self.module.DetectorProcess("no_such_module:thing", serve)

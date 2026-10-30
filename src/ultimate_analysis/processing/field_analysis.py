@@ -19,6 +19,7 @@ import numpy as np
 
 from ..config.settings import get_setting
 from ..utils.logger import get_logger
+from . import health
 
 logger = get_logger("FIELD_ANALYSIS")
 
@@ -139,6 +140,7 @@ def create_unified_field_mask(
 
         except Exception as e:
             logger.error(f"Error creating unified mask: {e}")
+            health.report("Field", f"failed ({type(e).__name__}); see the log")
 
     # Apply morphological operations to smooth the mask
     if cv2.countNonZero(unified_mask):
@@ -198,6 +200,7 @@ def calculate_field_contour(
 
     except Exception as e:
         logger.error(f"Error calculating field contour: {e}")
+        health.report("Field", f"failed ({type(e).__name__}); see the log")
         return None
 
 
@@ -257,6 +260,7 @@ def apply_morphological_smoothing(
 
     except Exception as e:
         logger.error(f"Error in morphological smoothing: {e}")
+        health.report("Field", f"failed ({type(e).__name__}); see the log")
         return mask
 
 
@@ -497,6 +501,7 @@ def fit_field_lines_ransac(
 
     except Exception as e:
         logger.error(f"Error in RANSAC line fitting: {e}")
+        health.report("Field", f"failed ({type(e).__name__}); see the log")
         return [], [], [], no_points
 
 
@@ -587,6 +592,7 @@ def _fit_line_ransac_numpy(
 
     except Exception as e:
         logger.error(f"Error in numpy RANSAC fitting: {e}")
+        health.report("Field", f"failed ({type(e).__name__}); see the log")
         return None
 
 
@@ -651,4 +657,5 @@ def fit_lines_from_mask(
 
     except Exception as e:
         logger.error(f"Error extracting lines from mask: {e}")
+        health.report("Field", f"failed ({type(e).__name__}); see the log")
         return [], [], None, None

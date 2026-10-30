@@ -9,7 +9,8 @@ The other process loads the models itself and keeps what the detectors remember 
 frame to frame (where the disc was). The frame is handed over in memory both processes
 see, so it is not copied through a pipe; the detections come back as they are. The
 models chosen, the thresholds and a reset are sent along with every frame, so the two
-processes cannot come apart.
+processes cannot come apart. What the detectors report over there (processing/health.py)
+comes back with the detections and is reported again here, where it is shown.
 
 If the other process cannot be started or dies, that is shown on the frame. The
 detectors then run in this process, but only once this process has loaded their
@@ -54,8 +55,11 @@ def in_own_process() -> bool:
     return is_enabled() and not (_detectors is not None and _detectors.failed)
 
 
-def _detect(frame: np.ndarray, sent: Dict[str, Any], state: Dict[str, Any]) -> List[dict]:
-    """In the other process: bring models, settings and memory in step, then detect."""
+def _detect(
+    frame: np.ndarray, sent: Dict[str, Any], state: Dict[str, Any]
+) -> Tuple[List[dict], health.Caught]:
+    """In the other process: bring models, settings and memory in step, then detect.
+    Returns the detections and what the detectors reported, for the asking process."""
     from . import inference
 
     models = get_config().setdefault("models", {})
@@ -69,17 +73,25 @@ def _detect(frame: np.ndarray, sent: Dict[str, Any], state: Dict[str, Any]) -> L
     if sent["resets"] != state.get("resets"):
         inference.reset_inference_state()
         state["resets"] = sent["resets"]
-    return inference.run_inference(
-        frame,
-        weak_discs_from=sent["weak_discs_from"],
-        frames_passed=sent.get("frames_passed", 1),
-    )
+    with health.captured() as reported:
+        found = inference.run_inference(
+            frame,
+            weak_discs_from=sent["weak_discs_from"],
+            frames_passed=sent.get("frames_passed", 1),
+        )
+    return found, reported
 
 
-def _echo(frame: np.ndarray, sent: Dict[str, Any], state: Dict[str, Any]) -> List[dict]:
-    """For the tests: says what arrived, without any model."""
+def _echo(
+    frame: np.ndarray, sent: Dict[str, Any], state: Dict[str, Any]
+) -> Tuple[List[dict], health.Caught]:
+    """For the tests: says what arrived, without any model, and complains of a
+    threshold below zero as a failing detector would."""
     state["frames"] = state.get("frames", 0) + 1
-    return [
+    with health.captured() as reported:
+        if sent["weak_discs_from"] < 0:
+            health.report("Detection", "told to fail")
+    found = [
         {
             "shape": tuple(frame.shape),
             "sum": int(frame.sum()),
@@ -87,6 +99,7 @@ def _echo(frame: np.ndarray, sent: Dict[str, Any], state: Dict[str, Any]) -> Lis
             "frames": state["frames"],
         }
     ]
+    return found, reported
 
 
 def _serve(connection: Any, detect: str) -> None:
@@ -260,7 +273,7 @@ def detect(
 
     if is_enabled() and not _loaded_here:
         models = get_config().get("models", {})
-        found = _the_process().detect(
+        answer = _the_process().detect(
             frame,
             {
                 "settings": {name: models.get(name, {}) for name in SENT_SETTINGS},
@@ -270,7 +283,9 @@ def detect(
                 "frames_passed": int(frames_passed),
             },
         )
-        if found is not None:
+        if answer is not None:
+            found, reported = answer
+            health.repeat(reported)  # What the detectors said over there, shown here
             return found
         health.report(
             "Detection",

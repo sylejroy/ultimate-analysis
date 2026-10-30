@@ -28,7 +28,7 @@ from ..processing.disc_heatmap import peaks_of
 from ..processing.field_registration import OffFieldWatcher
 from ..processing.field_segmentation import reset_segmentation_cache
 from ..processing.game_state import GameStateTracker, Player
-from ..processing.inference import reset_inference_state
+from ..processing.inference import DETECTOR_STAGES, reset_inference_state
 from ..processing.model_lock import GPU_SETUP_LOCK
 from ..processing.possession import PossessionTracker, players_at_disc
 from ..processing.shot_type import ShotWatcher, players_are_elsewhere
@@ -664,9 +664,12 @@ class AnalysisPipeline:
         self._motion_ahead = None
         if ahead is not None:
             # Waited for also when it is of another frame (after a seek, say)
-            looked_at, found, motion = ahead.result()
+            looked_at, found, motion, reported = ahead.result()
             if looked_at is frame:
                 self._motion_ahead = motion
+                # What the detectors said of this frame was said during the frame
+                # before and forgotten with it: said again on this frame's turn
+                health.repeat(reported)
                 return found
         return detect_players_and_discs(
             frame,
@@ -679,13 +682,14 @@ class AnalysisPipeline:
     ) -> tuple:
         frame = next_frame()
         if frame is None:
-            return None, [], None
+            return None, [], None, {}
         # The next frame lies as far on as this one did from the one before
-        found = detect_players_and_discs(
-            frame,
-            weak_discs_from=weak_discs_from(),
-            frames_passed=self._frames_passed,
-        )
+        with health.captured(DETECTOR_STAGES) as reported:
+            found = detect_players_and_discs(
+                frame,
+                weak_discs_from=weak_discs_from(),
+                frames_passed=self._frames_passed,
+            )
         motion = None
         if with_motion:
             # How the camera moved to that frame needs the frame and its boxes and
@@ -695,7 +699,7 @@ class AnalysisPipeline:
                 motion = self._camera_motion.look(frame, boxes)
             except cv2.error:
                 motion = None  # Worked out again, and failing again, on the frame's turn
-        return frame, found, motion
+        return frame, found, motion, reported
 
     def _begin_ahead(
         self, next_frame: Optional[Callable[[], Optional[np.ndarray]]], options: PipelineOptions

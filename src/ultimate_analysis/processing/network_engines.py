@@ -12,6 +12,7 @@ from typing import Any, Optional, Sequence, Tuple
 
 from ..config.settings import get_setting
 from ..utils.logger import get_logger
+from . import health
 
 logger = get_logger("NETWORK_ENGINES")
 
@@ -130,6 +131,9 @@ def load_engine(weights: Path, input_shape: Sequence[int]) -> Optional[NetworkEn
         engine = NetworkEngine(path)
     except Exception as error:
         logger.warning(f"{path.name} does not load, the network runs in PyTorch: {error}")
+        health.report(
+            f"Engine {path.name[:40]}", "does not load, the network runs slower", standing=True
+        )
         return None
     logger.info(f"Loaded {path.name}")
     return engine

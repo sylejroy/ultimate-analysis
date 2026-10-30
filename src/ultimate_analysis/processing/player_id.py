@@ -17,7 +17,7 @@ import yaml
 from ..config.settings import get_setting
 from ..constants import JERSEY_NUMBER_MAX, JERSEY_NUMBER_MIN
 from ..utils.logger import get_logger
-from . import facing
+from . import facing, health
 from .jersey_crops import (
     JerseyCropSelector,
     best_number,
@@ -520,6 +520,8 @@ def _read_crops(
         _initialize_easyocr()
     if not EASYOCR_AVAILABLE or _easyocr_reader is None:
         logger.debug("EasyOCR not available for batch processing")
+        # Said until a reader loads: "Unknown" for everybody looks like numbers not seen
+        health.report("Jersey numbers", "no reader loaded; see the log", standing=True)
         return unread, timing
 
     try:
@@ -578,6 +580,7 @@ def _read_crops(
                 readings = reader.read(valid_crops)
             except Exception as e:
                 logger.error(f"Error reading jersey numbers with {get_player_id_method()}: {e}")
+                health.report("Jersey numbers", f"failed ({type(e).__name__}); see the log")
                 readings = [[] for _ in valid_crops]
         elif valid_crops:
             readtext_params = easyocr_readtext_parameters(user_config.get("easyocr", {}))
@@ -586,6 +589,7 @@ def _read_crops(
                     readings.append(_easyocr_reader.readtext(crop, **readtext_params))
                 except Exception as e:
                     logger.error(f"Error processing crop {crop_index}: {e}")
+                    health.report("Jersey numbers", f"failed ({type(e).__name__}); see the log")
                     readings.append([])
         timing["ocr_ms"] = (time.perf_counter() - start) * 1000
 
@@ -620,6 +624,7 @@ def _read_crops(
 
     except Exception as e:
         logger.exception(f"Error in batch OCR processing: {e}")
+        health.report("Jersey numbers", f"failed ({type(e).__name__}); see the log")
         return unread, timing
 
 
@@ -662,8 +667,8 @@ def _load_easyocr_config() -> Dict[str, Any]:
         try:
             mtime_ns = config_path.stat().st_mtime_ns
         except FileNotFoundError:
-            if get_setting("models.player_id.verbose_debug", False):
-                logger.warning(f"Config file not found: {config_path}")
+            logger.warning(f"Config file not found: {config_path}")
+            _settings_unusable(f"{config_path.name} not found")
             return {}
 
         if mtime_ns != _easyocr_config_mtime_ns:
@@ -671,13 +676,20 @@ def _load_easyocr_config() -> Dict[str, Any]:
                 config = yaml.safe_load(f) or {}
             _easyocr_config_cache = config.get("player_id", {})
             _easyocr_config_mtime_ns = mtime_ns
+            health.clear("EasyOCR settings")
 
         return _easyocr_config_cache
 
     except Exception as e:
-        if get_setting("models.player_id.verbose_debug", False):
-            logger.error(f"Error loading config: {e}")
+        logger.error(f"Error loading config: {e}")
+        _settings_unusable(f"do not load ({type(e).__name__})")
         return {}
+
+
+def _settings_unusable(why: str) -> None:
+    """The reader runs with built-in values instead of the file's, which differ in
+    every threshold: said on the frame, not only in the log."""
+    health.report("EasyOCR settings", f"{why}; reading with built-in values", standing=True)
 
 
 def _initialize_easyocr() -> None:
@@ -710,6 +722,7 @@ def _set_up_easyocr() -> None:
             gpu = easyocr_config.get("gpu", True)
 
             _easyocr_reader = easyocr.Reader(languages, gpu=gpu)
+            health.clear("Jersey numbers")
             if get_setting("models.player_id.verbose_debug", False):
                 logger.debug("EasyOCR reader initialized successfully")
         else:

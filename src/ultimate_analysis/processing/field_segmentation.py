@@ -121,6 +121,8 @@ def prepare_for_segmentation(frame: np.ndarray) -> Optional[np.ndarray]:
 
     if _field_model is None:
         logger.warning("No field segmentation model available")
+        # Said until a model loads: without this, no masks reads as "no field in view"
+        health.report("Field", "no field model loaded; see the log", standing=True)
         return None
     imgsz = _model_imgsz if _model_imgsz else 640
     prepared = _preprocess_frame_for_segmentation(frame, imgsz)
@@ -205,6 +207,7 @@ def set_field_model(model_path: str) -> bool:
         logger.info(f"Field segmentation model loaded: {model_path} (image size {_model_imgsz})")
 
         reset_segmentation_cache()
+        health.clear("Field")
         return True
 
     except Exception as e:

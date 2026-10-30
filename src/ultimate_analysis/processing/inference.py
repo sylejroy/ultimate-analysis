@@ -21,6 +21,9 @@ from .tensorrt_engines import get_engine
 
 logger = get_logger("INFERENCE")
 
+# The stages the detectors report their failures as (processing/health.py)
+DETECTOR_STAGES = ("Detection", "Disc detection")
+
 try:
     from ultralytics import YOLO
     from ultralytics.cfg import DEFAULT_CFG_DICT
@@ -666,6 +669,7 @@ def _run_inference(
         all_detections.extend(player_detections)
     else:
         logger.warning("Player model not loaded")
+        health.report("Detection", "no player model loaded; see the log")
 
     if shared_model:
         disc_timing = {"preprocessing": 0.0, "inference": 0.0, "postprocessing": 0.0, "total": 0.0}
@@ -687,6 +691,7 @@ def _run_inference(
         disc_timing = {"preprocessing": 0.0, "inference": 0.0, "postprocessing": 0.0, "total": 0.0}
     else:
         logger.warning("Disc model not loaded")
+        health.report("Disc detection", "no disc model loaded; see the log")
 
     total_inference_time = time.perf_counter() - total_inference_start
 

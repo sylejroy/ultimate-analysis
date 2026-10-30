@@ -210,6 +210,30 @@ class PipelineTests(unittest.TestCase):
         self.mocks["detect_players_and_discs"].side_effect = None
         self.assertEqual(list(self.pipeline.process(self.frame, 40, self.options).problems), [])
 
+    def test_a_failure_of_the_detectors_looking_ahead_is_shown_on_their_frame(self):
+        """The next frame's detectors run during this frame and report then; what
+        they say must reach the frame it is about, not be forgotten with this one."""
+        health = sys.modules[self.module.health.__name__]
+
+        def failing(frame, **_):
+            health.report("Detection", "failed (RuntimeError); see the log")
+            return []
+
+        self.mocks["detect_players_and_discs"].side_effect = failing
+        frame = self.frame
+        results = [self.pipeline.process(frame, 0, self.options, next_frame=lambda: frame)]
+        for index in range(1, 40):
+            # The detectors are done with the frame before its turn, as in the app
+            self.pipeline._ahead.result()
+            results.append(
+                self.pipeline.process(frame, index, self.options, next_frame=lambda: frame)
+            )
+        self.assertTrue(results[-1].wide_shot)
+        self.assertEqual(
+            {tuple(result.problems) for result in results},
+            {("Detection: failed (RuntimeError); see the log",)},
+        )
+
     def test_field_geometry_is_computed_once_per_segmentation_result(self):
         # Segmentation returns the same result object for the frames in its interval
         for index in range(5):
