@@ -38,6 +38,8 @@ logger = get_logger("TRAINING")
 
 # The settings hold long model and dataset paths
 SETTINGS_WIDTH = PANEL_WIDTH + 100
+# How long a stop waits for the training thread before the thread is killed
+STOP_WAIT_MS = 5000
 
 
 class ModelTrainingTab(QWidget):
@@ -999,15 +1001,27 @@ class ModelTrainingTab(QWidget):
 
     def _stop_training(self):
         """Stop current training."""
-        if self.training_thread and self.training_thread.isRunning():
-            self.training_thread.stop_training()
-            self.training_thread.wait()
+        self._end_training_thread()
 
         # Stop results monitoring
         self.results_widget.stop_monitoring()
 
         self._reset_training_ui()
         self.progress_info_label.setText("Training stopped by user")
+
+    def _end_training_thread(self) -> None:
+        """Stop the training thread and wait a few seconds for it.
+
+        A thread that does not finish in that time is killed: the window must not hang
+        on it.
+        """
+        if not (self.training_thread and self.training_thread.isRunning()):
+            return
+        self.training_thread.stop_training()
+        if not self.training_thread.wait(STOP_WAIT_MS):
+            logger.warning("The training thread did not stop in time and is killed")
+            self.training_thread.terminate()
+            self.training_thread.wait()
 
     def _on_training_progress(self, progress_value: int, status: str):
         """Handle training progress update."""
@@ -1179,8 +1193,6 @@ class ModelTrainingTab(QWidget):
 
     def closeEvent(self, event):
         """Stop a running training with the application, so it does not continue unseen."""
-        if self.training_thread and self.training_thread.isRunning():
-            self.training_thread.stop_training()
-            self.training_thread.wait()
+        self._end_training_thread()
         self.results_widget.stop_monitoring()
         super().closeEvent(event)

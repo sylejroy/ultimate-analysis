@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -85,6 +86,10 @@ class ModelTrainingThread(QThread):
         self._training_started = False
         self._last_prep_update = 0.0
         self._fallback_sent = False
+        # The training subprocess while it runs; `stop_training` ends it from
+        # the caller's thread
+        self._process = None
+        self._process_lock = threading.Lock()
 
     def run(self):
         """Run the training process."""
@@ -132,16 +137,21 @@ class ModelTrainingThread(QThread):
             try:
                 # Ultralytics prints UTF-8 progress bars; the Windows default pipe
                 # encoding (cp1252) cannot decode them and would abort the run.
-                process = subprocess.Popen(
-                    [sys.executable, str(script_path), "--config", config_path],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    cwd=os.getcwd(),
-                    env={**os.environ, "PYTHONIOENCODING": "utf-8", "YOLO_AUTOINSTALL": "false"},
-                )
+                with self._process_lock:
+                    process = self._process = subprocess.Popen(
+                        [sys.executable, str(script_path), "--config", config_path],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        cwd=os.getcwd(),
+                        env={
+                            **os.environ,
+                            "PYTHONIOENCODING": "utf-8",
+                            "YOLO_AUTOINSTALL": "false",
+                        },
+                    )
 
                 epoch_count = 0
                 total_epochs = self.epochs
@@ -149,7 +159,7 @@ class ModelTrainingThread(QThread):
 
                 while True:
                     if self.should_stop:
-                        process.terminate()
+                        self._end_process()
                         process.wait()
                         break
 
@@ -191,6 +201,8 @@ class ModelTrainingThread(QThread):
                     self.error_occurred.emit(f"Training failed with return code: {return_code}")
 
             finally:
+                with self._process_lock:
+                    self._process = None
                 # Cleanup temporary files
                 if os.path.exists(config_path):
                     os.remove(config_path)
@@ -202,8 +214,20 @@ class ModelTrainingThread(QThread):
             self.error_occurred.emit(str(e))
 
     def stop_training(self):
-        """Request to stop training."""
+        """Request to stop training.
+
+        The subprocess is ended here, from the caller's thread: `run` waits in a line
+        read that only returns when training prints or ends, so a training that prints
+        nothing would otherwise never see the request.
+        """
         self.should_stop = True
+        self._end_process()
+
+    def _end_process(self):
+        """End the training subprocess if it is still running."""
+        with self._process_lock:
+            if self._process is not None and self._process.poll() is None:
+                self._process.terminate()
 
     def _process_training_line(
         self, line: str, current_time: float, start_time: float, epoch_count: int, total_epochs: int

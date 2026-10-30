@@ -90,6 +90,7 @@ class FieldLabellingWidget(QWidget):
         self._model_lines: Optional[tuple] = None
         # (video, frame) shown without the field model's view because the model was busy
         self._awaiting_model: Optional[Tuple[str, int]] = None
+        self._model_failed = False  # The field model failed on the frame shown
         self._player_model = None  # An own copy, loaded when first needed
         self._saved = False  # The shown frame is in the dataset
         self._edited = False
@@ -446,6 +447,7 @@ class FieldLabellingWidget(QWidget):
         None if the model is busy (the Main Analysis tab holds the models while it loads
         them at startup; waiting here would freeze the window) or fails.
         """
+        self._model_failed = False
         if not MODEL_LOCK.acquire(blocking=False):
             self._awaiting_model = (self._video_path, self._frame_index)
             QTimer.singleShot(MODEL_RETRY_MS, self._model_when_free)
@@ -456,7 +458,9 @@ class FieldLabellingWidget(QWidget):
             reset_segmentation_cache()
             return found_lines(results, self._frame.shape[:2])
         except Exception as e:
+            # Said in the status line too: None alone reads as "busy"
             logger.exception(f"Could not run the field model: {e}")
+            self._model_failed = True
             return None
         finally:
             MODEL_LOCK.release()
@@ -468,6 +472,8 @@ class FieldLabellingWidget(QWidget):
         self._awaiting_model = None
         self._model_lines = self._lines_of_the_model()
         if self._model_lines is None:
+            if self._model_failed:
+                self._update_status()
             return  # Still busy (asked again by itself), or failed
         self._show_model_lines()
         # The frame had to start without the estimate; it gets it if nothing was done yet
@@ -528,7 +534,11 @@ class FieldLabellingWidget(QWidget):
         """Put the drawing where the field model sees the field."""
         mapping = self._estimated_field()
         if mapping is None:
-            self.status_label.setText("The field model does not show enough of the field here")
+            self.status_label.setText(
+                "The field model failed, see the log"
+                if self._model_failed
+                else "The field model does not show enough of the field here"
+            )
             return
         self.canvas.set_frame(self._frame, mapping, unconfirmed=not self._saved)
         self._on_label_changed()
@@ -567,6 +577,12 @@ class FieldLabellingWidget(QWidget):
         if self._saved and self._edited:
             self._save()
 
+    def closeEvent(self, event) -> None:
+        self._keep_edits()
+        if self._capture is not None:
+            self._capture.release()
+        super().closeEvent(event)
+
     def _save_and_go_on(self) -> None:
         self._save()
         if self.random_check.isChecked():
@@ -587,6 +603,8 @@ class FieldLabellingWidget(QWidget):
             if self._saved
             else "Not saved yet: pull the drawing onto the field, then save"
         )
+        if self._model_failed:
+            state += "; the field model failed, see the log"
         self.status_label.setText(state)
         self.remove_button.setEnabled(self._saved)
         self.save_button.setEnabled(self.canvas.mapping is not None)

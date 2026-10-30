@@ -2,7 +2,7 @@
 whether two tracks are one player, and who holds the disc: by a yes or no for one
 player, or by a click on the holder after the second before the frame was played."""
 
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 from PyQt5.QtWidgets import QTabWidget, QVBoxLayout, QWidget
 
@@ -44,6 +44,7 @@ class LabellingModes(QWidget):
         super().__init__()
         self.boxes = LabellingTab()
         self.field: Optional[QWidget] = None
+        self._pages: List[QWidget] = [self.boxes]  # The pages built so far
 
         self.modes = QTabWidget()
         self.modes.setDocumentMode(True)
@@ -70,6 +71,15 @@ class LabellingModes(QWidget):
         if build is None:
             return
         page = build()
+        self._pages.append(page)
         if build is _field:
             self.field = page
         self.modes.widget(index).layout().addWidget(page)
+
+    def closeEvent(self, event) -> None:
+        """Close the pages that were built: closed, a page keeps its edits and lets go
+        of its videos and threads, and a close of this widget does not reach it on
+        its own."""
+        for page in self._pages:
+            page.close()
+        super().closeEvent(event)

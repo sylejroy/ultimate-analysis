@@ -302,6 +302,13 @@ class HolderClickWidget(_Judging):
             )
         return self._videos[video]
 
+    def closeEvent(self, event) -> None:
+        self._timer.stop()
+        for capture in self._videos.values():
+            capture.release()
+        self._videos.clear()
+        super().closeEvent(event)
+
     def _players_in(self, frame: np.ndarray) -> List[Box]:
         """The players the player model finds in a frame; none without the model."""
         if not self._tried_detector:

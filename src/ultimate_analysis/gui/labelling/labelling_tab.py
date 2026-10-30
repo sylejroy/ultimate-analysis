@@ -98,6 +98,7 @@ class LabellingTab(QWidget):
         # (model, image size) for players and discs; loaded when first needed
         # (video, frame) shown without its suggestion because the models were busy
         self._awaiting_suggestion: Optional[Tuple[str, int]] = None
+        self._suggestion_failed = False  # The models failed on the frame shown
         self._detectors: Optional[Tuple[Any, Any]] = None
 
         self._init_ui()
@@ -384,6 +385,7 @@ class LabellingTab(QWidget):
         self._saved = boxes is not None
         self._edited = False
         self._awaiting_suggestion = None
+        self._suggestion_failed = False
         if boxes is None:
             boxes = self._suggest(frame) if self.prelabel_check.isChecked() else []
             if boxes is None:
@@ -404,6 +406,7 @@ class LabellingTab(QWidget):
         """
         if not MODEL_LOCK.acquire(blocking=False):
             return None
+        self._suggestion_failed = False
         try:
             with MODEL_LOCK:
                 if self._detectors is None:
@@ -425,7 +428,9 @@ class LabellingTab(QWidget):
                         detect_discs(frame, *discs), MOST_ON_THE_FIELD["disc"]
                     )
         except Exception as e:
+            # Said in the status line too: a frame without boxes looks like nobody there
             logger.exception(f"Could not suggest boxes: {e}")
+            self._suggestion_failed = True
             return []
         finally:
             MODEL_LOCK.release()
@@ -544,6 +549,8 @@ class LabellingTab(QWidget):
             state = "In the dataset" + (" (changes are kept)" if self._edited else "")
         else:
             state = "Not saved yet: boxes are suggestions" if self.canvas.boxes else "Not saved yet"
+        if self._suggestion_failed:
+            state += "; the models failed, see the log"
         self.status_label.setText(state)
         self.remove_button.setEnabled(self._saved)
 

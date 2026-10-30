@@ -157,6 +157,11 @@ class TrackVectors(QThread):
     def __init__(self, source: Path, tracks: Dict[judgement_files.TrackKey, judgement_files.Track]):
         super().__init__()
         self.source, self.tracks = source, tracks
+        self._stopped = False
+
+    def stop(self) -> None:
+        """Have the work given up between two tracks; nothing of it is kept."""
+        self._stopped = True
 
     def run(self) -> None:
         try:
@@ -180,6 +185,8 @@ class TrackVectors(QThread):
         model = load_embedder(weights)
         vectors = []
         for track in self.tracks.values():
+            if self._stopped:
+                return {}
             crops = [cv2.imread(str(path)) for path in track.spread(TRACK_CROPS)]
             crops = [crop for crop in crops if crop is not None]
             # The network shares the GPU with the analysis of the main tab
@@ -375,6 +382,9 @@ class SamePlayerWidget(_Judging):
         self.why = judgement_files.RANDOM  # Why the pair is asked about
         self.vectors: dict = {}  # Track -> how the network sees it, once worked out
         self._working: Optional[TrackVectors] = None
+        # Those asked to stop, kept until they have: Qt aborts the app when a running
+        # thread is let go of
+        self._finishing: List[TrackVectors] = []
         self.why_label = QLabel("")
         self.pictures.addWidget(self.why_label)
         # What the network makes of the pair shown, worked out beside the window
@@ -419,14 +429,33 @@ class SamePlayerWidget(_Judging):
         self.judged = judgement_files.judged_pairs(self.answers)
         # Until the network has looked at the tracks, pairs are drawn at random
         self.vectors = {}
+        self._stop_vectors()
         self._working = TrackVectors(self.source, self.tracks)
         self._working.worked_out.connect(self._on_vectors)
         self._working.start()
 
     def _on_vectors(self, vectors: dict) -> None:
-        if self.sender() is self._working:
+        if self.sender() is self._working:  # Not of a thread asked to stop
             self.vectors = vectors
             self._show_status()
+
+    def _stop_vectors(self) -> None:
+        """Ask the thread working out the tracks' vectors to stop, and keep it
+        until it has."""
+        working, self._working = self._working, None
+        if working is None or working.isFinished():
+            return
+        working.stop()
+        working.finished.connect(lambda: self._finishing.remove(working))
+        self._finishing.append(working)
+
+    def closeEvent(self, event) -> None:
+        """Wait for the threads: one still running when the window goes aborts
+        the app."""
+        self._stop_vectors()
+        for thread in [*self._finishing, *self._looks]:
+            thread.wait()
+        super().closeEvent(event)
 
     def _show_status(self) -> None:
         looked = (
@@ -833,6 +862,12 @@ class HolderWidget(_Judging):
         capture.set(cv2.CAP_PROP_POS_FRAMES, int(row["frame"]))
         ok, frame = capture.read()
         return frame if ok else None
+
+    def closeEvent(self, event) -> None:
+        for capture in self._videos.values():
+            capture.release()
+        self._videos.clear()
+        super().closeEvent(event)
 
     def _pictures(
         self, row: dict, sharp: bool = True
