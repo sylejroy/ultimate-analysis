@@ -73,12 +73,6 @@ class PlayerIdentities:
         self._player_of_track: Dict[int, int] = {}
         self._next_player_id = 1
 
-    # ------------------------------------------------------------------ settings
-
-    @staticmethod
-    def _setting(name: str, default: float) -> float:
-        return float(get_setting(f"models.tracking.identity.{name}", default))
-
     # ------------------------------------------------------------------ per frame
 
     def assign(
@@ -139,7 +133,7 @@ class PlayerIdentities:
         known: Sequence[Observation] = (),
     ) -> Dict[int, int]:
         """Index of a new observation -> missing player it clearly is."""
-        longest_gap = self._setting("position_match_seconds", 0.0)
+        longest_gap = float(get_setting("models.tracking.identity.position_match_seconds", 1.5))
         missing = [
             player_id
             for player_id, profile in self._profiles.items()
@@ -151,8 +145,8 @@ class PlayerIdentities:
         if not missing:
             return {}
 
-        margin = self._setting("min_margin", 0.25)
-        kit_limit = self._setting("max_kit_distance", 60.0)
+        margin = float(get_setting("models.tracking.identity.min_margin", 0.25))
+        kit_limit = float(get_setting("models.tracking.identity.max_kit_distance", 60.0))
 
         # Cost of a match: how far the new track is from where the player was expected,
         # as a share of how far from there they can have got
@@ -244,9 +238,11 @@ class PlayerIdentities:
         course as far as a person can accelerate. After that anything is possible that
         their top speed allows.
         """
-        acceleration = self._setting("max_acceleration_heights_per_second2", 4.0)
-        speed = self._setting("max_speed_heights_per_second", 5.0)
-        carry_on = self._setting("carry_on_seconds", 1.0)
+        acceleration = float(
+            get_setting("models.tracking.identity.max_acceleration_heights_per_second2", 4.0)
+        )
+        speed = float(get_setting("models.tracking.identity.max_speed_heights_per_second", 5.0))
+        carry_on = float(get_setting("models.tracking.identity.carry_on_seconds", 1.0))
 
         coasting = min(gone_s, carry_on)
         expected = (
@@ -278,7 +274,10 @@ class PlayerIdentities:
         if observation.feature is not None:
             feature = np.asarray(observation.feature, dtype=np.float32)
             # A plain average at first, then one that slowly follows changes in lighting
-            weight = max(1.0 / (profile.samples + 1), self._setting("feature_update", 0.05))
+            weight = max(
+                1.0 / (profile.samples + 1),
+                float(get_setting("models.tracking.identity.feature_update", 0.05)),
+            )
             previous = profile.feature if profile.feature is not None else feature
             profile.feature = (1 - weight) * previous + weight * feature
             profile.samples += 1
@@ -289,7 +288,7 @@ class PlayerIdentities:
             del self._player_of_track[track_id]
 
     def _forget_long_gone(self, time_s: float) -> None:
-        memory = self._setting("memory_seconds", 30.0)
+        memory = float(get_setting("models.tracking.identity.memory_seconds", 30.0))
         followed = set(self._player_of_track.values())
         for player_id in [p for p in self._profiles if p not in followed]:
             if time_s - self._profiles[player_id].last_seen > memory:

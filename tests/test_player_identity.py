@@ -173,8 +173,11 @@ class PlayerIdentityTests(unittest.TestCase):
         # Half a second later they cannot be well behind where they were lost
         self.assertNotEqual(self.see(1.0, (5, RED_TALL, 350))[5], first[1])
 
-    def test_matching_by_position_is_off_unless_asked_for(self):
-        with patch.object(self.module, "get_setting", side_effect=lambda key, d=None: d):
+    def test_matching_by_position_is_off_when_given_no_time(self):
+        off = {"models.tracking.identity.position_match_seconds": 0.0}
+        with patch.object(
+            self.module, "get_setting", side_effect=lambda key, d=None: off.get(key, d)
+        ):
             first = self.see(0.0, (1, RED_TALL, 100))
             self.see(0.5)
             self.assertNotEqual(self.see(1.0, (7, RED_TALL, 105))[7], first[1])

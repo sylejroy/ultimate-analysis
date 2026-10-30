@@ -111,6 +111,7 @@ models:
       min_margin: 0.25                    # How much nearer than any other candidate a match must be (share of the reachable distance)
       max_kit_distance: 60.0              # Kit colours further apart than this (Lab units) are different teams
       appearance_interval: 10             # Frames analysed between looks at a player's kit colour
+      feature_update: 0.05                # How much of each new look at the kit goes into what is remembered of it, once a few have been averaged: it slowly follows the light
       number_certainty: 0.6               # Certainty of a jersey number from which it identifies a missing player
     
   # Edited games cut away from the drone to close-ups and title cards; nothing is analysed there

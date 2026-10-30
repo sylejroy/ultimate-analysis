@@ -325,9 +325,9 @@ class PossessionTracker:
         if self._resting_at is not None:
             self._resting_at = tuple(moved[-1])
 
-    def _frames(self, setting: str, default: float) -> int:
-        seconds = float(get_setting(f"models.possession.{setting}", default))
-        return max(1, round(seconds * self.frame_rate))
+    def _frames(self, seconds: float) -> int:
+        """So many seconds in frames, at least one."""
+        return max(1, round(float(seconds) * self.frame_rate))
 
     def _follow_holder(self, tracks: List[Any]) -> None:
         """Note where the holder is and their team, or how long they have not been found."""
@@ -361,7 +361,9 @@ class PossessionTracker:
                     self._follow_holder(tracks)
                     return
         self._holder_unseen += self._step
-        if self._holder_unseen > self._frames("holder_memory_seconds", 2.0):
+        if self._holder_unseen > self._frames(
+            get_setting("models.possession.holder_memory_seconds", 2.0)
+        ):
             self._holder_box = None
 
     @property
@@ -440,7 +442,8 @@ class PossessionTracker:
         elif (
             not self.on_ground
             and self._followed_from_a_player
-            and self._frame - self._resting_since >= self._frames("ground_seconds", 1.5)
+            and self._frame - self._resting_since
+            >= self._frames(get_setting("models.possession.ground_seconds", 1.0))
         ):
             self.on_ground = True
             self.holder_id = None
@@ -510,7 +513,7 @@ class PossessionTracker:
             if _is_player(track) and hasattr(track, "to_ltrb"):
                 box = tuple(float(value) for value in track.to_ltrb())
                 self._last_seen[track.track_id] = (box, getattr(track, "team", None), self._frame)
-        kept = self._frames("covered_seconds", 2.0)
+        kept = self._frames(get_setting("models.possession.covered_seconds", 2.0))
         for player in [p for p, seen in self._last_seen.items() if self._frame - seen[2] > kept]:
             del self._last_seen[player]
 
@@ -549,7 +552,7 @@ class PossessionTracker:
 
     def _frames_needed(self, at_disc: Optional[int], tracks: List[Any]) -> int:
         """How long the disc must be seen at a place before the holder changes to it."""
-        needed = self._frames("confirm_seconds", 0.33)
+        needed = self._frames(get_setting("models.possession.confirm_seconds", 0.25))
         track = next((t for t in tracks if getattr(t, "track_id", None) == at_disc), None)
         if track is None:
             return needed
@@ -560,7 +563,9 @@ class PossessionTracker:
                 needed = min(needed, max(1, round(sooner * self.frame_rate)))
         if self._holder_box is not None and _overlap(self._holder_box, track.to_ltrb()):
             # Right by the holder: the mark, most likely
-            needed = max(needed, self._frames("beside_holder_seconds", 1.5))
+            needed = max(
+                needed, self._frames(get_setting("models.possession.beside_holder_seconds", 1.5))
+            )
         # A defender at the catch is taken for the catcher easily, and an interception
         # is rare: a player of the team without the disc needs longer where a player of
         # the team with it stands right by. Alone with the disc (the pull, a pick-up
@@ -574,7 +579,9 @@ class PossessionTracker:
                 and _overlap(box, other.to_ltrb())
                 for other in tracks
             ):
-                needed = max(needed, self._frames("other_team_seconds", 1.0))
+                needed = max(
+                    needed, self._frames(get_setting("models.possession.other_team_seconds", 1.0))
+                )
         return needed
 
     def update(
