@@ -5,6 +5,7 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -174,6 +175,26 @@ class PhoneLabellingTests(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as bad:
             post("/api/save?key=secret", {"task": "1", "box": [1, 2]})
         self.assertEqual(bad.exception.code, 400)
+
+        # Bad input is refused, not left to fail on the server: a number that is not one,
+        # a picture of no size, a box with a nan (which JSON carries), a key the
+        # comparison cannot take
+        picture = f"/api/picture?task={task['task']}&x=0&y=0&w=100&h=100&key=secret"
+        for path in (
+            picture + "&out=nan",
+            picture + "&out=inf",
+            picture + "&out=0",
+            f"/api/fit?task={task['task']}&x=nan&y=1&key=secret",
+        ):
+            with self.assertRaises(urllib.error.HTTPError) as bad:
+                get(path)
+            self.assertEqual(bad.exception.code, 400, path)
+        with self.assertRaises(urllib.error.HTTPError) as bad:
+            post("/api/save?key=secret", {"task": "1", "box": [1, 2, float("nan"), 4]})
+        self.assertEqual(bad.exception.code, 400)
+        with self.assertRaises(urllib.error.HTTPError) as refused:
+            get("/api/next?key=" + urllib.parse.quote("clé"))
+        self.assertEqual(refused.exception.code, 403)
 
 
 if __name__ == "__main__":

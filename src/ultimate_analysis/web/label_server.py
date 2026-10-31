@@ -7,11 +7,12 @@ this PC, and only the holder of the key may see frames or change the dataset.
 
 import hmac
 import json
+import math
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Sequence
 from urllib.parse import parse_qs, urlparse
 
 from ..utils.logger import get_logger
@@ -21,6 +22,16 @@ logger = get_logger("PHONE_LABELLING")
 
 PAGE = Path(__file__).with_name("label_page.html")
 MAX_REQUEST_BYTES = 10_000
+MAX_PICTURE_SIDE = 1920
+
+
+def _finite(values: Sequence) -> List[float]:
+    """These values as numbers; ValueError if one is not one, or is nan or infinite,
+    which float() takes but the picture code does not."""
+    numbers = [float(value) for value in values]
+    if not all(math.isfinite(number) for number in numbers):
+        raise ValueError("not a finite number")
+    return numbers
 
 
 def create_server(session: LabelSession, key: str, host: str, port: int) -> ThreadingHTTPServer:
@@ -45,7 +56,8 @@ def create_server(session: LabelSession, key: str, host: str, port: int) -> Thre
 
         def _allowed(self, query: dict) -> bool:
             given = (query.get("key") or [""])[0]
-            if hmac.compare_digest(given, key):
+            # Compared as bytes: the comparison takes only ASCII text
+            if hmac.compare_digest(given.encode("utf-8"), key.encode("utf-8")):
                 return True
             self._send(HTTPStatus.FORBIDDEN, b"Wrong or missing key", "text/plain")
             return False
@@ -62,7 +74,7 @@ def create_server(session: LabelSession, key: str, host: str, port: int) -> Thre
                     self._json(session.next_task() or {})
             elif url.path == "/api/fit":
                 try:
-                    x, y = float(query["x"][0]), float(query["y"][0])
+                    x, y = _finite([query["x"][0], query["y"][0]])
                     task_id = query["task"][0]
                 except (KeyError, ValueError):
                     self._send(HTTPStatus.BAD_REQUEST, b"Bad fit request", "text/plain")
@@ -71,13 +83,17 @@ def create_server(session: LabelSession, key: str, host: str, port: int) -> Thre
                     self._json({"box": session.fit_box(task_id, x, y)})
             elif url.path == "/api/picture":
                 try:
-                    numbers = [float(query[name][0]) for name in ("x", "y", "w", "h", "out")]
+                    names = ("x", "y", "w", "h", "out")
+                    x, y, w, h, out = _finite([query[name][0] for name in names])
+                    out = int(min(out, MAX_PICTURE_SIDE))
+                    if out < 1:
+                        raise ValueError("a picture has at least one pixel")
                     task_id = query["task"][0]
                 except (KeyError, ValueError):
                     self._send(HTTPStatus.BAD_REQUEST, b"Bad picture request", "text/plain")
                     return
                 with lock:
-                    picture = session.picture(task_id, *numbers[:4], int(min(numbers[4], 1920)))
+                    picture = session.picture(task_id, x, y, w, h, out)
                 if picture is None:
                     self._send(HTTPStatus.NOT_FOUND, b"Unknown task", "text/plain")
                 else:
@@ -95,7 +111,7 @@ def create_server(session: LabelSession, key: str, host: str, port: int) -> Thre
                 task_id = str(body.get("task", ""))
                 box: Optional[list] = body.get("box")
                 if box is not None:
-                    box = [float(value) for value in box]
+                    box = _finite(box)
                     if len(box) != 4:
                         raise ValueError("a box has four numbers")
             except (ValueError, TypeError, AttributeError):

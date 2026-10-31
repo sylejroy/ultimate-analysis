@@ -1,6 +1,7 @@
 """Load processing modules without initializing GUI or downloading model weights."""
 
 import importlib
+import os
 import sys
 import types
 from pathlib import Path
@@ -8,6 +9,14 @@ from unittest.mock import Mock
 
 SOURCE = Path(__file__).resolve().parents[1] / "src" / "ultimate_analysis"
 sys.path.insert(0, str(SOURCE.parent))
+
+
+def qt_app():
+    """The Qt application the widget tests share, drawing to no screen."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PyQt5.QtWidgets import QApplication
+
+    return QApplication.instance() or QApplication([])
 
 
 def load_module(name):

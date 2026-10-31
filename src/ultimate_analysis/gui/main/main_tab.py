@@ -510,6 +510,9 @@ class MainTab(QWidget):
         self.progress_bar.setMaximum(100)
         self.progress_bar.setValue(0)
         self.progress_bar.sliderMoved.connect(self._on_seek)
+        # A click beside the handle or a key moves it by a step without a drag
+        self.progress_bar.actionTriggered.connect(self._on_slider_action)
+        self.progress_bar.sliderReleased.connect(self._on_slider_released)
         self.time_label, self.length_label = faint("0:00"), faint("0:00")
 
         # Previous video button
@@ -726,9 +729,12 @@ class MainTab(QWidget):
             self.homography_display_label.set_image(frame_to_pixmap(result.top_down_view))
         else:
             self.homography_display_label.setText(result.top_down_message)
-        if processed.mode == "next":
-            self.progress_bar.setValue(processed.video_position)
-        if self.tracking_checkbox.isChecked() and result.wide_shot:
+        # The bar shows the frame on screen, not where the reader is; and it is not
+        # pulled from under a drag
+        if not self.progress_bar.isSliderDown():
+            self.progress_bar.setValue(result.frame_index)
+        tracking = self.tracking_checkbox.isChecked()
+        if tracking and result.wide_shot:
             number = result.player_ids.get(result.holder_id, ("", None))[0]
             self.possession_bar.add(
                 result.frame_index,
@@ -740,10 +746,17 @@ class MainTab(QWidget):
             )
             self._show_disc(result, number)
             self._show_game_state(result.game_state)
-            self._show_point_and_score(result)
             self._show_facts(result)
+        else:
+            # Left standing, the last analysed frame's holder would read as this one's
+            self._clear_scene_labels()
+        if tracking:
+            # The point and the score run on through a close-up
+            self._show_point_and_score(result)
             if result.player_stats is not None and self.player_stats_table.isVisible():
                 self.player_stats_table.show_players(result.player_stats)
+        else:
+            self._clear_tally_labels()
         rate = self.video_info.get("fps", 0) if self.video_info else 0
         if rate > 0:
             self.time_label.setText(clock(result.frame_index / rate))
@@ -826,6 +839,19 @@ class MainTab(QWidget):
         )
         self.fact_labels["Numbers known"].setText(f"{numbers} of {len(players)}")
 
+    def _clear_scene_labels(self) -> None:
+        """Take down what was said about the frame: the disc, the phase, the facts."""
+        self.disc_label.hide()
+        self._show_game_state("unknown")
+        for label in self.fact_labels.values():
+            label.setText("")
+
+    def _clear_tally_labels(self) -> None:
+        """Take down what was counted over the frames: the point, the score, the players."""
+        self.point_label.setText("")
+        self.score_label.setText("")
+        self.player_stats_table.show_players(None)
+
     def _show_game_state(self, state: str) -> None:
         """Show the phase of the game as a coloured tag."""
         if state == getattr(self, "_shown_game_state", None):
@@ -891,6 +917,8 @@ class MainTab(QWidget):
         self.video_info = info
         self._apply_frame_step()
         self.possession_bar.clear()
+        self._clear_scene_labels()
+        self._clear_tally_labels()
         self.possession_bar.set_frame_rate(info["fps"])
         if info["fps"] > 0:
             self.length_label.setText(clock(info["total_frames"] / info["fps"]))
@@ -993,6 +1021,18 @@ class MainTab(QWidget):
         )
         self._request_display_update(immediate=True)
 
+    def _on_slider_action(self, action: int) -> None:
+        """Seek on a step of the bar: a click beside the handle, a key. A drag seeks as
+        it moves."""
+        if action not in (QSlider.SliderNoAction, QSlider.SliderMove):
+            self._on_seek(self.progress_bar.sliderPosition())
+
+    def _on_slider_released(self) -> None:
+        """Seek where the handle was let go, unless that was sought as it moved."""
+        position = self.progress_bar.value()
+        if position not in (self._seek_target, self._shown_frame):
+            self._on_seek(position)
+
     def _copy_frame_code(self) -> None:
         """Put what names the frame on screen on the clipboard."""
         if self._shown_frame < 0 or not self.video_files:
@@ -1008,6 +1048,8 @@ class MainTab(QWidget):
         """Reset the object tracker and everything derived from earlier frames."""
         self._run_on_worker(lambda worker: worker.pipeline.reset())
         self.possession_bar.clear()
+        self._clear_scene_labels()
+        self._clear_tally_labels()
         logger.info("Tracker reset")
 
     def hideEvent(self, event):

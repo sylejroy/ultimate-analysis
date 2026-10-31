@@ -4,7 +4,7 @@ import re
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import yaml
 from PyQt5.QtCore import Qt, QTimer
@@ -29,7 +29,12 @@ from PyQt5.QtWidgets import (
 )
 
 from ...utils.logger import get_logger
-from ...utils.model_files import find_training_runs, model_display_name, run_dataset_name
+from ...utils.model_files import (
+    find_training_runs,
+    get_training_args,
+    model_display_name,
+    run_dataset_name,
+)
 from ..widgets.panels import PANEL_WIDTH, compact_combo, side_panel
 from .results_widget import TrainingResultsWidget
 from .training_thread import ModelTrainingThread
@@ -40,6 +45,33 @@ logger = get_logger("TRAINING")
 SETTINGS_WIDTH = PANEL_WIDTH + 100
 # How long a stop waits for the training thread before the thread is killed
 STOP_WAIT_MS = 5000
+
+
+def model_info_lines(model_path: str) -> List[str]:
+    """What the files tell of a base model, for the Model Info box. The model is not
+    loaded for it: that takes seconds on the thread that draws the window, and a
+    pretrained weight that is not on disk would be downloaded."""
+    path = Path(model_path)
+    lines = [f"Path: {path.name}"]
+    if path.suffix == ".yaml":
+        lines.append("Built from its definition, from the base model's weights, as training starts")
+    elif not path.exists():
+        if path.parent.name == "pretrained":
+            lines.append("Not downloaded yet: Ultralytics fetches it as training starts")
+        else:
+            lines.append("Not found")
+    else:
+        lines.append(f"Size: {path.stat().st_size / (1024 * 1024):.1f} MB")
+        args = get_training_args(path)
+        if args.get("model"):
+            lines.append(f"Trained from: {Path(str(args['model'])).name}")
+        if args.get("data"):
+            lines.append(f"Trained on: {Path(str(args['data'])).parent.name}")
+        if args.get("imgsz"):
+            lines.append(f"Image size: {args['imgsz']}")
+        if args.get("epochs"):
+            lines.append(f"Epochs: {args['epochs']}")
+    return lines
 
 
 class ModelTrainingTab(QWidget):
@@ -778,25 +810,7 @@ class ModelTrainingTab(QWidget):
             self.model_info_text.clear()
             return
 
-        info_lines = []
-        model_path = Path(self.current_model_path)
-
-        info_lines.append(f"Path: {model_path.name}")
-        if model_path.exists():
-            size_mb = model_path.stat().st_size / (1024 * 1024)
-            info_lines.append(f"Size: {size_mb:.1f} MB")
-
-        # Try to extract more info from the model
-        try:
-            from ultralytics import YOLO
-
-            model = YOLO(str(model_path))
-            if hasattr(model, "model"):
-                info_lines.append(f"Type: {type(model.model).__name__}")
-        except Exception as e:
-            info_lines.append(f"Info: Could not load model details ({str(e)[:50]}...)")
-
-        self.model_info_text.setPlainText("\n".join(info_lines))
+        self.model_info_text.setPlainText("\n".join(model_info_lines(self.current_model_path)))
 
     def _update_dataset_info(self):
         """Update dataset information display."""

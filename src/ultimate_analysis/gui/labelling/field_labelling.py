@@ -29,16 +29,16 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from ...config.settings import get_setting
 from ...constants import DEFAULT_PATHS
 from ...processing.camera_motion import CameraMotionEstimator
 from ...processing.field_registration import estimate_field, found_lines
-from ...processing.field_segmentation import reset_segmentation_cache, run_field_segmentation
 from ...processing.inference import detect_players, load_detection_model
-from ...processing.model_lock import MODEL_LOCK
+from ...processing.model_lock import GPU_SETUP_LOCK, MODEL_LOCK
 from ...utils import field_label_files, field_template, label_files
 from ...utils.field_label_files import FieldLabel
 from ...utils.logger import get_logger
-from ...utils.model_files import default_model_path
+from ...utils.model_files import default_model_path, get_training_image_size
 from ...utils.painted_lines import painted_line_mask
 from ..widgets.panels import side_panel
 from ..widgets.video_list import VideoListWidget
@@ -51,8 +51,6 @@ DEFAULT_DATASET = "hand_field"
 # Labels are carried over to a frame at most this far away; further off, following the
 # camera through every frame in between takes too long and drifts
 MAX_CARRY_FRAMES = 150
-# How often the field model is asked again when it was busy
-MODEL_RETRY_MS = 300
 # How often a random frame is drawn again when it turns out to show no field
 RANDOM_FRAME_DRAWS = 6
 HELP_TEXT = (
@@ -88,10 +86,11 @@ class FieldLabellingWidget(QWidget):
         self._focals: Dict[str, Tuple[Tuple[str, ...], Optional[float]]] = {}
         # What the field model sees in the frame shown: (lines by name, unnamed goal lines)
         self._model_lines: Optional[tuple] = None
-        # (video, frame) shown without the field model's view because the model was busy
-        self._awaiting_model: Optional[Tuple[str, int]] = None
         self._model_failed = False  # The field model failed on the frame shown
-        self._player_model = None  # An own copy, loaded when first needed
+        # Own copies, loaded when first needed: the Main Analysis tab runs the shared
+        # ones on a thread of its own, and a model run twice at once fails
+        self._player_model = None
+        self._field_model: Optional[Tuple[object, int]] = None  # With its image size
         self._saved = False  # The shown frame is in the dataset
         self._edited = False
         self._template = field_template.TEMPLATES[field_template.DEFAULT_RULESET]
@@ -350,8 +349,8 @@ class FieldLabellingWidget(QWidget):
                 self.video_list.setCurrentRow(row)  # Opens the video at its first frame
             self._go_to(index)
             # A frame in which the field model sees no field at all is no drone footage.
-            # While the model is busy that cannot be told, and the frame is taken
-            if self._awaiting_model is not None or self._model_lines is None:
+            # When the model failed that cannot be told, and the frame is taken
+            if self._model_lines is None:
                 return
             named, unnamed = self._model_lines
             if named or unnamed:
@@ -369,7 +368,6 @@ class FieldLabellingWidget(QWidget):
         self.frame_slider.blockSignals(False)
         self.frame_label.setText(f"Frame {self._frame_index} of {self._frame_count}")
 
-        self._awaiting_model = None
         self._model_lines = self._lines_of_the_model()
         name = label_files.frame_name(self._video_path, self._frame_index)
         mapping = self._mapping_of(field_label_files.load_label(self._dataset_dir(), name))
@@ -442,45 +440,38 @@ class FieldLabellingWidget(QWidget):
         return focal
 
     def _lines_of_the_model(self) -> Optional[tuple]:
-        """The lines of the field that the field model sees in the current frame.
-
-        None if the model is busy (the Main Analysis tab holds the models while it loads
-        them at startup; waiting here would freeze the window) or fails.
-        """
+        """The lines of the field that the page's own field model sees in the current
+        frame; None if it fails."""
         self._model_failed = False
-        if not MODEL_LOCK.acquire(blocking=False):
-            self._awaiting_model = (self._video_path, self._frame_index)
-            QTimer.singleShot(MODEL_RETRY_MS, self._model_when_free)
-            return None
         try:
-            reset_segmentation_cache()
-            results = run_field_segmentation(self._frame, 0)
-            reset_segmentation_cache()
-            return found_lines(results, self._frame.shape[:2])
+            if self._field_model is None:
+                self._field_model = self._load_field_model()
+            model, size = self._field_model
+            # Stretched to a square, as the model was trained (see field_segmentation.py)
+            square = cv2.resize(self._frame, (size, size))
+            with GPU_SETUP_LOCK.work():
+                results = model.predict(
+                    square,
+                    conf=get_setting("models.segmentation.confidence_threshold", 0.4),
+                    iou=get_setting("models.segmentation.iou_threshold", 0.7),
+                    imgsz=size,
+                    verbose=False,
+                )
+            # The masks off the GPU: the lines are fitted on the CPU
+            return found_lines([result.cpu() for result in results], self._frame.shape[:2])
         except Exception as e:
-            # Said in the status line too: None alone reads as "busy"
+            # Said in the status line too
             logger.exception(f"Could not run the field model: {e}")
             self._model_failed = True
             return None
-        finally:
-            MODEL_LOCK.release()
 
-    def _model_when_free(self) -> None:
-        """Bring in what the field model sees for a frame that was shown without it."""
-        if self._awaiting_model != (self._video_path, self._frame_index):
-            return
-        self._awaiting_model = None
-        self._model_lines = self._lines_of_the_model()
-        if self._model_lines is None:
-            if self._model_failed:
-                self._update_status()
-            return  # Still busy (asked again by itself), or failed
-        self._show_model_lines()
-        # The frame had to start without the estimate; it gets it if nothing was done yet
-        if not self._saved and not self._edited and self.estimate_check.isChecked():
-            mapping = self._estimated_field()
-            if mapping is not None:
-                self.canvas.set_frame(self._frame, mapping, unconfirmed=True)
+    @staticmethod
+    def _load_field_model() -> Tuple[object, int]:
+        """A copy of the configured field model, with the image size it runs at."""
+        from ultralytics import YOLO
+
+        path = default_model_path("segmentation")
+        return YOLO(path), get_training_image_size(path)
 
     def _show_painted_lines(self, _checked: bool = True, only_for: Optional[tuple] = None) -> None:
         """Mark the painted lines found in the frame shown, if that is wanted."""

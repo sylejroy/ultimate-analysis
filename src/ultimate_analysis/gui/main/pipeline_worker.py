@@ -39,7 +39,6 @@ class ProcessedFrame:
     result: Optional[FrameResult]  # None if there was no frame (end of video) or it failed
     mode: str  # "next" or "current", as requested
     generation: int  # As requested; lets the GUI drop frames that became stale
-    video_position: int  # Frame index the reader is at after this request
 
 
 class PipelineWorker(QObject):
@@ -124,9 +123,7 @@ class PipelineWorker(QObject):
         except Exception:
             logger.exception("Error processing frame")
             result = None
-        self.frame_processed.emit(
-            ProcessedFrame(result, mode, generation, self.video_player.current_frame_idx)
-        )
+        self.frame_processed.emit(ProcessedFrame(result, mode, generation))
 
     @pyqtSlot(object)
     def execute(self, command: Callable[["PipelineWorker"], None]) -> None:

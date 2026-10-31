@@ -1,5 +1,6 @@
 """Filling the model dropdowns."""
 
+import json
 import re
 from pathlib import Path
 from typing import Optional
@@ -49,7 +50,7 @@ def populate_reid_model_combo(combo: QComboBox, default_model: Optional[str] = N
     combo.clear()
     for weights in find_reid_models():
         run = Path(weights).parent.name
-        combo.addItem(reid_display_name(run), weights)
+        combo.addItem(reid_display_name(run, reid_run_dataset(weights)), weights)
         combo.setItemData(combo.count() - 1, run, Qt.ToolTipRole)
         if default_model and Path(weights) == Path(default_model):
             combo.setCurrentIndex(combo.count() - 1)
@@ -85,13 +86,26 @@ def holder_display_name(run: str) -> str:
     return f"{int(day)}.{int(month)}. {name}"
 
 
-def reid_display_name(run: str) -> str:
+def reid_run_dataset(weights: str) -> str:
+    """The dataset a run of scripts/train_reid.py was trained on, from the training.json
+    it writes beside the weights when it is done ("" before that)."""
+    try:
+        with open(Path(weights).with_name("training.json"), "r", encoding="utf-8") as f:
+            return str(json.load(f).get("dataset", ""))
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def reid_display_name(run: str, dataset: str = "") -> str:
     """A run of scripts/train_reid.py by its day and what sets it apart: the runs are
-    called <date>_reid_<network and options>_<dataset>."""
-    found = re.fullmatch(r"\d{4}(\d{2})(\d{2})_reid_(.+?)(_reid_players_v\d+)?", run)
+    called <date>_reid_<network and options>_<dataset>. The dataset's name holds
+    underscores like the options do, so it is only taken off when it is known."""
+    found = re.fullmatch(r"\d{4}(\d{2})(\d{2})_reid_(.+)", run)
     if not found:
         return run
-    month, day, name, _ = found.groups()
+    month, day, name = found.groups()
+    if dataset and name.endswith(f"_{dataset}") and len(name) > len(dataset) + 1:
+        name = name[: -len(dataset) - 1]
     return f"{int(day)}.{int(month)}. {name}"
 
 
