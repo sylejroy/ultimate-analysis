@@ -378,6 +378,27 @@ class PipelineTests(unittest.TestCase):
         result = self.pipeline.process(self.frame, 2, without)
         self.assertEqual(result.top_down_message, "The top-down view needs field segmentation")
 
+    def test_a_top_down_view_that_fails_is_said_on_its_frame(self):
+        """It is drawn on another thread while the camera view is drawn; its failure
+        must be among this frame's problems, not land after they were read."""
+        options = self.module.PipelineOptions(tracking=False)
+        self.pipeline._field.follower.image_to_field = np.eye(3)
+        with patch.object(self.views, "draw_field_diagram", side_effect=RuntimeError("no")):
+            result = self.pipeline.process(self.frame, 1, options)
+        self.assertIsNone(result.top_down_view)
+        self.assertIn("Top-down view: failed (RuntimeError); see the log", result.problems)
+
+    def test_the_players_table_comes_every_so_many_frames_analysed(self):
+        """Not every so many video frames: playback passing over every second frame
+        from an odd one would never land on a multiple of thirty."""
+        every = self.module.STATS_EVERY_FRAMES
+        with patch.object(self.pipeline, "player_stats", return_value=[{"player": 1}]):
+            results = [
+                self.pipeline.process(self.frame, index, self.options)
+                for index in range(1, 2 * every + 2, 2)
+            ]
+        self.assertEqual(sum(result.player_stats is not None for result in results), 1)
+
     def test_a_crossing_exchanges_what_belongs_to_the_boxes(self):
         one = SimpleNamespace(track_id=7, class_name="player", team=0, team_colour=(1, 1, 1))
         other = SimpleNamespace(track_id=8, class_name="player", team=1, team_colour=(2, 2, 2))

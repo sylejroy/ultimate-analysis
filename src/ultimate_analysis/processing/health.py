@@ -17,13 +17,14 @@ _standing: Dict[str, str] = {}
 # What `captured` is collecting: stage -> (problem, standing), and which stages
 Caught = Dict[str, Tuple[str, bool]]
 _captures: List[Tuple[Optional[Collection[str]], Caught]] = []
+# Reports come from the frame's thread, the threads beside it and the other tabs
 _captures_lock = threading.Lock()
 
 
 def report(stage: str, problem: str, standing: bool = False) -> None:
     """Note that a stage failed, for this frame or (standing) for good."""
-    (_standing if standing else _problems)[stage] = problem
     with _captures_lock:
+        (_standing if standing else _problems)[stage] = problem
         for only, caught in _captures:
             if only is None or stage in only:
                 caught[stage] = (problem, standing)
@@ -56,13 +57,15 @@ def repeat(caught: Caught) -> None:
 
 def clear(stage: str) -> None:
     """A stage that failed for good works again (a model that loaded on a later try)."""
-    _standing.pop(stage, None)
-    _problems.pop(stage, None)
+    with _captures_lock:
+        _standing.pop(stage, None)
+        _problems.pop(stage, None)
 
 
 def start_frame() -> None:
     """Forget the problems of the frame before."""
-    _problems.clear()
+    with _captures_lock:
+        _problems.clear()
 
 
 def failed(stage: str) -> bool:
@@ -72,4 +75,5 @@ def failed(stage: str) -> bool:
 
 def problems() -> List[str]:
     """The problems to show, one line each."""
-    return [f"{stage}: {problem}" for stage, problem in {**_standing, **_problems}.items()]
+    with _captures_lock:
+        return [f"{stage}: {problem}" for stage, problem in {**_standing, **_problems}.items()]

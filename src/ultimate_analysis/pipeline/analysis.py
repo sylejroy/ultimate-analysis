@@ -58,7 +58,9 @@ def _exchange_names(rename: Callable[[int, int], None], first: int, second: int)
 # The field's place is followed by the camera's motion alone for this long at most,
 # however little the camera moves
 FIELD_UNSEEN_SECONDS = 20.0
-# The table of the players' statistics is handed out with every so many frames
+# The table of the players' statistics is handed out with every so many frames analysed
+# (not every so many video frames: playback passing over every second frame from an odd
+# one would never land on one)
 STATS_EVERY_FRAMES = 30
 # A heat map that is only shown is worked out about this often (a second of video)
 HEAT_SHOWN_A_SECOND = 30.0
@@ -183,6 +185,7 @@ class AnalysisPipeline:
         # one: playback passes over frames to keep up
         self._last_index: Optional[int] = None
         self._frames_passed = 1
+        self._analysed = 0  # Frames analysed so far, for what is handed out now and then
 
         # Results for the current frame
         self.detections: List[Dict[str, Any]] = []
@@ -435,6 +438,7 @@ class AnalysisPipeline:
             health.start_frame()
             self._analyse(frame, frame_index, options, next_frame)
             self._analysed_key = analysis_key
+            self._analysed += 1
 
         # The two views are drawn side by side, from what this frame's analysis left
         scene = self._scene(options) if options.draw else None
@@ -451,15 +455,16 @@ class AnalysisPipeline:
             drawn_on = frame if frame_is_ours else frame.copy()
             self._record("Visualization", copy_start)
             main_view = draw_camera_view(drawn_on, scene, options, self._record)
-        problems = health.problems()
-        for line, problem in enumerate(problems if options.draw else ()):
-            draw_notice(main_view, problem, line=line + 1, alarm=True)
 
         top_down_view, top_down_message = None, "Homography view disabled"
         if top_down is not None:
             top_down_view, top_down_message = top_down.result()
         elif options.top_down_view and options.draw:
             top_down_view, top_down_message = draw_top_down_view(scene, options, self._record)
+        # Only now, with the top-down view drawn: a failure there is this frame's too
+        problems = health.problems()
+        for line, problem in enumerate(problems if options.draw else ()):
+            draw_notice(main_view, problem, line=line + 1, alarm=True)
 
         total_ms = (time.perf_counter() - start) * 1000
         self._update_fps(total_ms)
@@ -473,7 +478,7 @@ class AnalysisPipeline:
             player_ids=dict(self.player_ids),
             numbers_by_looks=dict(self._identity.numbers_by_looks),
             # A table of every player is not made for every frame
-            player_stats=self.player_stats() if frame_index % STATS_EVERY_FRAMES == 0 else None,
+            player_stats=self.player_stats() if self._analysed % STATS_EVERY_FRAMES == 0 else None,
             holder_id=self._possession.holder_id,
             possession_colour=self._possession_colour(),
             disc_state=self._possession.disc_state,
