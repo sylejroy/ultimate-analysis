@@ -372,7 +372,7 @@ def _record_reading(
             else:  # x1, y1, x2, y2
                 centre = (box[0] + box[2]) / 2
             # In the pixels of the picture the reader was given: EasyOCR's is enlarged
-            centres.append(centre / metadata["final_width"])
+            centres.append(centre / (details.get("final_width") or metadata["crop_width"]))
         position = max(0.0, min(1.0, sum(centres) / len(centres))) if centres else 0.5
         add_jersey_measurement(track_id, jersey_number, details.get("confidence", 0.0), position)
 

@@ -155,6 +155,29 @@ class PlayerIdConfigTests(unittest.TestCase):
             )
         self.assertEqual(later[7][0], "17")
 
+    def test_where_a_number_was_read_is_in_the_pixels_of_the_picture_the_reader_saw(self):
+        """EasyOCR is given the crop enlarged twofold and answers in those pixels: a
+        number in the middle of the picture is in the middle of the crop."""
+        module = load_module("processing.player_id")
+        recorded = []
+        details = {
+            "confidence": 0.9,
+            "ocr_results": [([[60, 0], [100, 0], [100, 20], [60, 20]], "17", 0.9)],
+            "crop_width": 80,
+            "final_width": 160,
+        }
+        track = {"track_id": 3, "bbox": (0, 0, 80, 160), "crop_width": 80}
+        with (
+            patch.object(
+                module, "add_jersey_measurement", side_effect=lambda *a: recorded.append(a)
+            ),
+            patch.object(module, "get_jersey_probabilities", return_value=[]),
+            patch.object(module, "get_best_jersey_number", return_value=("17", 0.5)),
+            patch.object(module, "get_setting", side_effect=lambda key, d=None: d),
+        ):
+            module._record_reading(track, "17", details, 0, None, 5, set(), 0.9, False)
+        self.assertEqual(recorded[0][3], 0.5)
+
     def test_unknown_or_unavailable_reader_falls_back_to_easyocr(self):
         module = load_module("processing.player_id")
         with self.assertRaises(ValueError):
