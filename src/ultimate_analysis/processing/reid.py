@@ -130,10 +130,47 @@ if TORCH_AVAILABLE:
 
         return nn.Sequential(stage(3, 32), stage(32, 64), stage(64, 128), stage(128, 256))
 
+    class _PatchMap(nn.Module):
+        """A vision transformer from Hugging Face (DINOv2), its patch tokens laid out
+        as a map of features, so that the bands from head to foot are pooled as with
+        the other networks. Frozen: its features as they were learned without labels,
+        the neck alone learns; what that is worth tells whether the pretraining or the
+        tuning does the work. The crop has to be a multiple of the patch (14) a side:
+        --size 112 224."""
+
+        def __init__(self, name: str, pretrained: bool, frozen: bool):
+            super().__init__()
+            from transformers import AutoConfig, AutoModel
+
+            if pretrained:
+                self.net = AutoModel.from_pretrained(name)
+            else:
+                self.net = AutoModel.from_config(AutoConfig.from_pretrained(name))
+            self.patch = int(self.net.config.patch_size)
+            self.frozen = frozen
+            if frozen:
+                self.net.requires_grad_(False)
+
+        def train(self, mode: bool = True) -> "nn.Module":
+            super().train(mode)
+            if self.frozen:
+                self.net.eval()  # As it was trained: nothing of it moves
+            return self
+
+        def forward(self, batch: "torch.Tensor") -> "torch.Tensor":
+            rows, columns = batch.shape[2] // self.patch, batch.shape[3] // self.patch
+            tokens = self.net(pixel_values=batch).last_hidden_state[:, 1:]  # No class token
+            return tokens.transpose(1, 2).reshape(len(batch), -1, rows, columns)
+
+    def _dinov2(name: str, frozen: bool) -> Callable[[bool], "nn.Module"]:
+        return lambda pretrained: _PatchMap(name, pretrained, frozen)
+
     # Name -> what makes the part of a network that turns a picture into a map of
     # features. "_s3" and "_s2": a ResNet without its last one or two stages, which at
     # 128x64 would look at the player through too few cells for a pair of cleats.
     ARCHITECTURES: Dict[str, Callable[[bool], "nn.Module"]] = {
+        "dinov2_small_frozen": _dinov2("facebook/dinov2-small", frozen=True),
+        "dinov2_small": _dinov2("facebook/dinov2-small", frozen=False),
         "small_cnn": _small_cnn,
         "resnet18_s2": _resnet("resnet18", 2),
         "resnet18_s3": _resnet("resnet18", 3),
