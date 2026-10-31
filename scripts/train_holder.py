@@ -146,7 +146,11 @@ def standing(speed: float) -> float:
 def score(model: HolderNet, rows: List[dict], pictures: List[np.ndarray]) -> Dict[str, float]:
     """How well a network tells the holders on some crops: by their looks, by their
     looks and whether they stand, and by whether they stand alone."""
-    by_looks = holding(model, pictures)
+    return scores(holding(model, pictures), rows)
+
+
+def scores(by_looks: np.ndarray, rows: List[dict]) -> Dict[str, float]:
+    """The scores of `score` from how sure the network is of each crop."""
     by_speed = np.array([standing(row["speed"]) for row in rows])
     result = {}
     for title, sure in (
@@ -159,19 +163,32 @@ def score(model: HolderNet, rows: List[dict], pictures: List[np.ndarray]) -> Dic
     return result
 
 
-def _score(sure: np.ndarray, rows: List[dict]) -> Dict[str, float]:
-    truth = np.array([row["holding"] for row in rows])
+def picked_right(sure: np.ndarray, rows: List[dict]) -> List[tuple]:
+    """Per frame with a holder among two or more players: whether the one the network is
+    surest of is the holder, the frame's video, and whether a disc was detected on the
+    holder."""
+    truth = [row["holding"] for row in rows]
     by_frame = defaultdict(list)
     for index, row in enumerate(rows):
         by_frame[(row["video"], row["stretch"], row["frame"])].append(index)
-    picked = {"all": [], "disc not seen": [], "disc seen": []}
+    each = []
     for members in by_frame.values():
         holders = [i for i in members if truth[i]]
         if not holders or len(members) < 2:
             continue
-        right = float(int(np.argmax(sure[members])) == members.index(holders[0]))
-        picked["all"].append(right)
-        picked["disc seen" if rows[holders[0]]["disc_seen"] else "disc not seen"].append(right)
+        right = int(np.argmax(sure[members])) == members.index(holders[0])
+        each.append((right, rows[holders[0]]["video"], bool(rows[holders[0]]["disc_seen"])))
+    return each
+
+
+def _score(sure: np.ndarray, rows: List[dict]) -> Dict[str, float]:
+    truth = np.array([row["holding"] for row in rows])
+    each = picked_right(sure, rows)
+    picked = {
+        "all": [right for right, _, _ in each],
+        "disc not seen": [right for right, _, seen in each if not seen],
+        "disc seen": [right for right, _, seen in each if seen],
+    }
     hidden = np.array([bool(row["holding"]) and not row["disc_seen"] for row in rows])
     others = truth == 0
     said = sure >= 0.5

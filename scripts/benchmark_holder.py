@@ -21,10 +21,11 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 os.chdir(REPO)
 
-from train_holder import load_index, pictures_of, score  # noqa: E402
+from train_holder import load_index, picked_right, pictures_of, scores  # noqa: E402
 
 from ultimate_analysis.constants import DEFAULT_PATHS  # noqa: E402
-from ultimate_analysis.processing.holder import load_holder_net  # noqa: E402
+from ultimate_analysis.processing.holder import holding, load_holder_net  # noqa: E402
+from ultimate_analysis.utils.benchmarking import drawn_again, run_header, with_spread  # noqa: E402
 
 SHOWN = (
     ("holder_picked", "The one it is surest of is the holder"),
@@ -58,6 +59,7 @@ def main() -> None:
         "the network learned from the boxes themselves: cut them back",
     )
     args = parser.parse_args()
+    print("\n".join(run_header()), flush=True)
 
     rows = load_index(REPO / DEFAULT_PATHS["TRAINING_DATA"] / args.dataset)
     rows = [
@@ -69,14 +71,20 @@ def main() -> None:
     model = load_holder_net(args.weights)
     for kind in sorted({row.get("kind", "") for row in rows}):
         chosen = [row for row in rows if row.get("kind", "") == kind]
-        result = score(model, chosen, pictures_of(chosen, model.size, args.padded))
+        by_looks = holding(model, pictures_of(chosen, model.size, args.padded))
+        result = scores(by_looks, chosen)
         print(
             f"{kind or 'crops'}: {len(chosen)} crops, {result['holder_picked_frames']} frames "
             f"with a holder, {result['disc_not_seen_frames']} of them with no disc detected "
             "on the holder"
         )
         for key, title in SHOWN:
-            print(f"  {title:<55} {result[key]:>6.1%}")
+            line = f"  {title:<55} {result[key]:>6.1%}"
+            if key == "holder_picked" and (each := picked_right(by_looks, chosen)):
+                # Frames of one game are not independent of each other
+                right, games = [r for r, _, _ in each], [game for _, game, _ in each]
+                line += f"  {with_spread(drawn_again(right, games), 'games', '.1%')}"
+            print(line)
 
 
 if __name__ == "__main__":

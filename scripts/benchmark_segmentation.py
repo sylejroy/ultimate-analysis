@@ -29,7 +29,6 @@ the app sees a video frame. --as-stored scores the square images the model was t
 """
 
 import argparse
-import json
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -41,12 +40,17 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import yaml  # noqa: E402
 
-from ultimate_analysis.config.settings import get_config  # noqa: E402
 from ultimate_analysis.processing.field_analysis import create_unified_field_mask  # noqa: E402
 from ultimate_analysis.processing.field_segmentation import (  # noqa: E402
     reset_segmentation_cache,
     run_field_segmentation,
     set_field_model,
+)
+from ultimate_analysis.utils.benchmarking import (  # noqa: E402
+    apply_settings,
+    drawn_again,
+    run_header,
+    with_spread,
 )
 from ultimate_analysis.utils.model_files import (  # noqa: E402
     default_model_path,
@@ -150,8 +154,10 @@ def summarize(label: str, values: List[Optional[float]], unit: str, worst_is_hig
     missing = (
         f", not scored in {len(values) - len(scores)} images" if len(scores) < len(values) else ""
     )
+    # Every image is a group of its own: the mean with the images drawn again
+    mean = with_spread(drawn_again(scores), "images", ".3f", unit)
     return (
-        f"{label:<28} mean {scores.mean():.3f}{unit}  median {np.median(scores):.3f}{unit}"
+        f"{label:<28} mean {mean}  median {np.median(scores):.3f}{unit}"
         f"  worst tenth beyond {worst:.3f}{unit}{missing}"
     )
 
@@ -169,14 +175,7 @@ def main() -> None:
     parser.add_argument("--negatives", type=Path, help="folder of pictures without a field")
     parser.add_argument("--set", action="append", default=[], help="setting=value, as JSON")
     args = parser.parse_args()
-    config = get_config()
-    for item in args.set:
-        key, value = item.split("=", 1)
-        node = config
-        *path, last = key.split(".")
-        for part in path:
-            node = node[part]
-        node[last] = json.loads(value)
+    print("\n".join(run_header(apply_settings(args.set))), flush=True)
 
     dataset = args.dataset or Path(get_training_args(args.weights)["data"]).parent
     if not dataset.exists():
@@ -262,7 +261,8 @@ def main() -> None:
             shares.append(float((field > 0).mean()))
         marked = [share for share in shares if share > 0]
         print(
-            f"Pictures without a field: {len(marked)} of {len(shares)} get an area"
+            f"Pictures without a field: {len(marked)} of {len(shares)} get an area, "
+            + with_spread(drawn_again([share > 0 for share in shares]), "pictures")
             + (f", covering {np.median(marked):.0%} of the picture at the median" if marked else "")
         )
 

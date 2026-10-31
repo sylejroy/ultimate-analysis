@@ -54,6 +54,7 @@ from ultimate_analysis.processing.holder import (  # noqa: E402
     place_on_field,
     speed_of,
 )
+from ultimate_analysis.utils.benchmarking import frame_rate_of, frames_around  # noqa: E402
 
 BEFORE_SECONDS, AFTER_SECONDS = 2.0, 1.5
 STEP = 2  # Every so many frames are analysed
@@ -126,22 +127,13 @@ def main() -> None:
             if not path.exists():
                 said["video not found"] += 1
                 continue
-            capture = cv2.VideoCapture(str(path))
-            rate = capture.get(cv2.CAP_PROP_FPS)
-            before = int(BEFORE_SECONDS * rate) // STEP * STEP
-            start = max(anchor % STEP, anchor - before)
-            capture.set(cv2.CAP_PROP_POS_FRAMES, start)
+            rate = frame_rate_of(path)
             pipeline = AnalysisPipeline()
             pipeline.reset()
             pipeline.set_frame_rate(rate)
 
             holder_at, seen, frames, places = {}, {}, [], {}
-            for number in range(start, anchor + int(AFTER_SECONDS * rate) + 1):
-                ok, frame = capture.read()
-                if not ok:
-                    break
-                if (number - start) % STEP:
-                    continue
+            for number, frame in frames_around(path, anchor, BEFORE_SECONDS, AFTER_SECONDS, STEP):
                 result = pipeline.process(frame, number, options)
                 frames.append(number)
                 for earlier in frames[::-1]:

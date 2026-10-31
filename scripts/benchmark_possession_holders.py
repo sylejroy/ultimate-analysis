@@ -27,7 +27,6 @@ settings is scored on that in a moment with --replay, as in benchmark_possession
 
 import argparse
 import csv
-import json
 import os
 import pickle
 import sys
@@ -42,15 +41,21 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 os.chdir(REPO)
 
-import cv2  # noqa: E402
 from build_holder_ground_truth import AFTER_SECONDS, BEFORE_SECONDS, STEP  # noqa: E402
 
-from ultimate_analysis.config.settings import get_config  # noqa: E402
 from ultimate_analysis.constants import DEFAULT_PATHS  # noqa: E402
 from ultimate_analysis.pipeline import AnalysisPipeline, PipelineOptions  # noqa: E402
 from ultimate_analysis.processing.possession_replay import (  # noqa: E402
     RecordingPossessionTracker,
     replay,
+)
+from ultimate_analysis.utils.benchmarking import (  # noqa: E402
+    apply_settings,
+    drawn_again,
+    frame_rate_of,
+    frames_around,
+    run_header,
+    with_spread,
 )
 from ultimate_analysis.utils.judgement_files import holders_said  # noqa: E402
 
@@ -82,28 +87,19 @@ def named_holders(answers: Path, dataset: Path) -> list:
     return sorted(found)
 
 
-def watch(anchor_of: tuple, options: PipelineOptions) -> Union[dict, str]:
-    """Analyse the video around a frame with a named holder; what was seen, or why the
-    frame is left out."""
+def watch(anchor_of: tuple, options: PipelineOptions, step: int = STEP) -> Union[dict, str]:
+    """Analyse the video around a frame with a named holder, every `step` frames as the
+    app does in "Real time"; what was seen, or why the frame is left out."""
     video, anchor, box = anchor_of
     path = REPO / DEFAULT_PATHS["RAW_VIDEOS"] / f"{video}.mp4"
     if not path.exists():
         return "video not found"
-    capture = cv2.VideoCapture(str(path))
-    rate = capture.get(cv2.CAP_PROP_FPS)
-    start = max(anchor % STEP, anchor - int(BEFORE_SECONDS * rate) // STEP * STEP)
-    capture.set(cv2.CAP_PROP_POS_FRAMES, start)
     pipeline = AnalysisPipeline()
     pipeline._possession = RecordingPossessionTracker()
     pipeline.reset()
-    pipeline.set_frame_rate(rate)
+    pipeline.set_frame_rate(frame_rate_of(path))
     said, players, wide = [], {}, True
-    for number in range(start, anchor + int(AFTER_SECONDS * rate) + 1):
-        ok, frame = capture.read()
-        if not ok:
-            break
-        if (number - start) % STEP:
-            continue
+    for number, frame in frames_around(path, anchor, BEFORE_SECONDS, AFTER_SECONDS, step):
         result = pipeline.process(frame, number, options)
         pipeline._possession.frame_done(number)
         said.append((number, result.holder_id, result.possession_since, result.possession_team))
@@ -186,6 +182,12 @@ def main() -> None:
     parser.add_argument("--set", action="append", default=[], help="setting=value, as JSON")
     parser.add_argument("--frames", type=int, default=0, help="This many at most (a trial)")
     parser.add_argument("--videos", nargs="+", default=[], help="Only these (parts of names)")
+    parser.add_argument(
+        "--step",
+        type=int,
+        default=STEP,
+        help=f"Analyse every so many frames, as the app's Real time (default {STEP})",
+    )
     args = parser.parse_args()
     if bool(args.answers) == bool(args.replay):
         parser.error("give either --answers and --dataset, for a run over the videos, or --replay")
@@ -194,14 +196,7 @@ def main() -> None:
     out = benchmarks / args.name
     if out.exists():
         sys.exit(f"{out} exists: results are not overwritten, choose another name")
-    config = get_config()
-    for item in args.set:
-        key, value = item.split("=", 1)
-        node = config
-        *path, last = key.split(".")
-        for part in path:
-            node = node[part]
-        node[last] = json.loads(value)
+    changed = apply_settings(args.set)
 
     left_out, cases = Counter(), []
     if args.replay:
@@ -220,7 +215,7 @@ def main() -> None:
         out.mkdir(parents=True)
         options = PipelineOptions(player_id=False, top_down_view=False, draw=False)
         for count, anchor_of in enumerate(anchors):
-            case = watch(anchor_of, options)
+            case = watch(anchor_of, options, args.step)
             if isinstance(case, str):
                 left_out[case] += 1
             else:
@@ -241,15 +236,21 @@ def main() -> None:
     live = sum(
         row["kind"] == RIGHT and row["live_holder"] == row["pipeline_holder"] for row in rows
     )
-    lines = [f"Settings changed: {', '.join(args.set)}"] if args.set else []
+    # Frames of one game are not independent of each other: the games are drawn again
+    chosen = [row for row in rows if row["kind"] != "not followed"]
+    right = with_spread(
+        drawn_again([row["kind"] == RIGHT for row in chosen], [row["video"] for row in chosen])
+    )
+    lines = run_header(changed)
+    if not args.replay:
+        lines.append(f"Every {args.step} frames analysed")
     lines += [
         f"{len(rows)} frames with a holder named by hand",
         *(f"  left out: {count} {why}" for why, count in left_out.items()),
         "",
         *(f"  {kind:<14}{kinds[kind]:>5}  {kinds[kind] / max(len(rows), 1):.0%}" for kind in KINDS),
         "",
-        f"Right where the named holder is followed: {kinds[RIGHT]} of {followed} "
-        f"({kinds[RIGHT] / max(followed, 1):.0%})",
+        f"Right where the named holder is followed: {kinds[RIGHT]} of {followed}, {right}",
         f"Right, and shown so in that very frame: {live} of {len(rows)}",
     ]
     (out / "summary.txt").write_text("\n".join(lines) + "\n")

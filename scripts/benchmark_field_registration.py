@@ -23,7 +23,6 @@ Usage:
 """
 
 import argparse
-import json
 import os
 import re
 import sys
@@ -39,7 +38,6 @@ os.chdir(REPO)
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
-from ultimate_analysis.config.settings import get_config  # noqa: E402
 from ultimate_analysis.constants import DEFAULT_PATHS  # noqa: E402
 from ultimate_analysis.processing.field_analysis import create_unified_field_mask  # noqa: E402
 from ultimate_analysis.processing.field_registration import (  # noqa: E402
@@ -56,6 +54,12 @@ from ultimate_analysis.processing.inference import (  # noqa: E402
     load_detection_model,
 )
 from ultimate_analysis.utils import field_label_files, field_template  # noqa: E402
+from ultimate_analysis.utils.benchmarking import (  # noqa: E402
+    apply_settings,
+    drawn_again,
+    run_header,
+    with_spread,
+)
 from ultimate_analysis.utils.field_camera import fit_camera  # noqa: E402
 from ultimate_analysis.utils.model_files import default_model_path  # noqa: E402
 
@@ -104,14 +108,7 @@ def main() -> None:
     parser.add_argument("--model", type=Path, help="Field model to use instead of the default")
     parser.add_argument("--set", action="append", default=[], help="setting=value, as JSON")
     args = parser.parse_args()
-    config = get_config()
-    for item in args.set:
-        key, value = item.split("=", 1)
-        node = config
-        *path, last = key.split(".")
-        for part in path:
-            node = node[part]
-        node[last] = json.loads(value)
+    print("\n".join(run_header(apply_settings(args.set))), flush=True)
 
     dataset = REPO / DEFAULT_PATHS["TRAINING_DATA"] / args.dataset
     template = field_template.TEMPLATES[field_label_files.dataset_ruleset(dataset)]
@@ -185,7 +182,13 @@ def main() -> None:
 
     given = np.array([[row[3], row[4]] for row in rows if row[2] == "given"])
     left_out = np.array([row[4] for row in rows if row[2] == "left out"])
-    print(f"\nOf {len(rows)} frames, an estimate is given for {len(given)}.")
+    # Frames of one game are not independent of each other: the games are drawn again
+    games = [row[1] for row in rows]
+    is_given = [row[2] == "given" for row in rows]
+    print(
+        f"\nOf {len(rows)} frames, an estimate is given for {len(given)}: "
+        + with_spread(drawn_again(is_given, games))
+    )
     if len(given):
         print(
             f"At the worst labelled corner of these: median {np.median(given[:, 0]):.1f} px / "
@@ -193,10 +196,15 @@ def main() -> None:
             f"{np.percentile(given[:, 0], 90):.0f} px / {np.percentile(given[:, 1], 90):.1f} {unit}"
         )
         for limit in (5, 10, 20):
-            print(f"  within {limit} px: {int((given[:, 0] <= limit).sum())} of {len(rows)} frames")
+            within = [row[2] == "given" and row[3] <= limit for row in rows]
+            print(
+                f"  within {limit} px: {sum(within)} of {len(rows)} frames, "
+                + with_spread(drawn_again(within, games))
+            )
+        wrong = [row[4] > args.wrong for row in rows if row[2] == "given"]
         print(
-            f"  given and more than {args.wrong:g} {unit} off: "
-            f"{int((given[:, 1] > args.wrong).sum())} of {len(given)}"
+            f"  given and more than {args.wrong:g} {unit} off: {sum(wrong)} of {len(given)}, "
+            + with_spread(drawn_again(wrong, [row[1] for row in rows if row[2] == "given"]))
         )
     if len(left_out):
         kept_out_wrong = int((left_out > args.wrong).sum())

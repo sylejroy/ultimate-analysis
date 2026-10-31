@@ -33,7 +33,6 @@ apart by their looks, not for the tracker.
 
 import argparse
 import csv
-import json
 import os
 import sys
 from collections import Counter, defaultdict
@@ -45,12 +44,17 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 os.chdir(REPO)
 
-import cv2  # noqa: E402
-
-from ultimate_analysis.config.settings import get_config  # noqa: E402
 from ultimate_analysis.constants import DEFAULT_PATHS  # noqa: E402
 from ultimate_analysis.pipeline import AnalysisPipeline, PipelineOptions  # noqa: E402
 from ultimate_analysis.utils import judgement_files  # noqa: E402
+from ultimate_analysis.utils.benchmarking import (  # noqa: E402
+    apply_settings,
+    drawn_again,
+    frame_rate_of,
+    frames_of,
+    run_header,
+    with_spread,
+)
 
 SAME_BOX = 0.5  # A track is at a picture if their boxes overlap by this much (IoU)
 SHOWN = 8  # Pictures of a track the page shows (where it did not write them down)
@@ -115,19 +119,18 @@ def boxes_of(dataset: Path, wanted: set) -> tuple:
     return boxes, begins
 
 
-def tracks_now(video: str, first: int, frames: dict, options: PipelineOptions) -> dict:
-    """Analyse a stretch from its first frame; the track at each box of `frames`
-    (frame -> {key: box}) as key -> track number, None where no track is there."""
-    capture = cv2.VideoCapture(str(REPO / DEFAULT_PATHS["RAW_VIDEOS"] / f"{video}.mp4"))
-    capture.set(cv2.CAP_PROP_POS_FRAMES, first)
+def tracks_now(
+    video: str, first: int, frames: dict, options: PipelineOptions, step: int = 1
+) -> dict:
+    """Analyse a stretch from its first frame, every `step` frames as the app does in
+    "Real time"; the track at each box of `frames` (frame -> {key: box}) as key -> track
+    number, None where no track is there. Pictures of frames not analysed are left out."""
+    path = REPO / DEFAULT_PATHS["RAW_VIDEOS"] / f"{video}.mp4"
     pipeline = AnalysisPipeline()
     pipeline.reset()
-    pipeline.set_frame_rate(capture.get(cv2.CAP_PROP_FPS))
+    pipeline.set_frame_rate(frame_rate_of(path))
     found = {}
-    for number in range(first, max(frames) + 1):
-        ok, frame = capture.read()
-        if not ok:
-            break
+    for number, frame in frames_of(path, first, max(frames), step):
         result = pipeline.process(frame, number, options)
         for key, box in frames.get(number, {}).items():
             players = [t for t in result.tracks if getattr(t, "class_name", None) == "player"]
@@ -147,14 +150,11 @@ def main() -> None:
     parser.add_argument("--videos", nargs="+", default=[], help="Only these (parts of names)")
     parser.add_argument("--stretches", type=int, default=0, help="This many at most (a trial)")
     parser.add_argument("--set", action="append", default=[], help="setting=value, as JSON")
+    parser.add_argument(
+        "--step", type=int, default=1, help="Analyse every so many frames (the app's Real time)"
+    )
     args = parser.parse_args()
-    for item in args.set:
-        key, value = item.split("=", 1)
-        node = get_config()
-        *path, last = key.split(".")
-        for part in path:
-            node = node[part]
-        node[last] = json.loads(value)
+    changed = apply_settings(args.set)
 
     out = REPO / "data" / "benchmarks" / args.name
     if out.exists():
@@ -178,7 +178,7 @@ def main() -> None:
     options = PipelineOptions(player_id=False, top_down_view=False, draw=False)
     now = {}
     for count, stretch in enumerate(stretches):
-        now.update(tracks_now(stretch[0], begins[stretch], by_stretch[stretch], options))
+        now.update(tracks_now(stretch[0], begins[stretch], by_stretch[stretch], options, args.step))
         print(f"{count + 1} of {len(stretches)} stretches analysed", flush=True)
 
     with open(out / "pictures.csv", "w", newline="") as file:
@@ -193,56 +193,72 @@ def main() -> None:
     for key in sorted(now):
         (left_in if pictures[key[:3]][key[3]] else taken_out)[key[:3]].append(now[key])
     counts = Counter()
+    # Per picture, track or pair: whether it is as the answer asks, and its stretch, for
+    # where the share lies with the stretches drawn again
+    each = defaultdict(list)
     number_of = {}
     for track, numbers in left_in.items():
         followed = [number for number in numbers if number is not None]
         counts["pictures left in"] += len(numbers)
         counts["pictures left in, followed"] += len(followed)
+        each["pictures left in, followed"] += [
+            (number is not None, track[:2]) for number in numbers
+        ]
         if followed:
             number_of[track] = Counter(followed).most_common(1)[0][0]
         if len(followed) >= 2:
             counts["tracks"] += 1
             counts["tracks at one number"] += len(set(followed)) == 1
+            each["tracks at one number"].append((len(set(followed)) == 1, track[:2]))
             counts["changes of number"] += sum(a != b for a, b in zip(followed, followed[1:]))
     for track, numbers in taken_out.items():
         for number in numbers:
             counts["pictures taken out"] += 1
-            if number is None or track not in number_of:
-                counts["pictures taken out, not followed"] += 1
-            else:
-                counts["pictures taken out, told apart"] += number != number_of[track]
+            unfollowed = number is None or track not in number_of
+            apart = not unfollowed and number != number_of[track]
+            counts["pictures taken out, not followed"] += unfollowed
+            counts["pictures taken out, told apart"] += apart
+            each["pictures taken out, told apart"].append((apart, track[:2]))
     for answer, title in (("same", "one player"), ("different", "different players")):
         for first, second in pairs[answer]:
             if first in number_of and second in number_of:
+                one_number = number_of[first] == number_of[second]
                 counts[f"pairs said to be {title}"] += 1
-                counts[f"pairs said to be {title}, at one number"] += (
-                    number_of[first] == number_of[second]
-                )
+                counts[f"pairs said to be {title}, at one number"] += one_number
+                each[f"pairs said to be {title}, at one number"].append((one_number, first[:2]))
+    each["pairs kept apart"] = [
+        (not one_number, stretch)
+        for one_number, stretch in each["pairs said to be different players, at one number"]
+    ]
+    counts["pairs kept apart"] = sum(apart for apart, _ in each["pairs kept apart"])
 
     def share(part: str, whole: str) -> str:
         total = counts[whole]
-        return f"{counts[part]} of {total}" + (f" ({counts[part] / total:.0%})" if total else "")
+        if not total:
+            return f"{counts[part]} of {total}"
+        values, stretches = zip(*each[part])
+        return (
+            f"{counts[part]} of {total}, {with_spread(drawn_again(values, stretches), 'stretches')}"
+        )
 
-    apart = (
-        counts["pairs said to be different players"]
-        - counts["pairs said to be different players, at one number"]
-    )
-    counts["pairs kept apart"] = apart
-    lines = [
+    lines = run_header(changed)
+    lines += [
+        f"Every {args.step} frames analysed",
         f"{len(stretches)} stretches of {args.dataset}, answers of {args.answers}",
         "",
-        f"Followed: {share('pictures left in, followed', 'pictures left in')} pictures left "
-        "in their track are in a track now",
-        f"One number: {share('tracks at one number', 'tracks')} tracks carry one number in "
-        f"all their pictures ({counts['changes of number']} changes of number among them)",
-        f"Told apart: {share('pictures taken out, told apart', 'pictures taken out')} pictures "
-        "taken out carry another number than the rest of their track "
-        f"({counts['pictures taken out, not followed']} are in no track now)",
-        "Joined: "
-        + share("pairs said to be one player, at one number", "pairs said to be one player")
-        + " pairs of one stretch said to be one player carry one number",
-        f"Kept apart: {share('pairs kept apart', 'pairs said to be different players')} pairs "
-        "of one stretch said to be different players carry two numbers",
+        "Followed: pictures left in their track that are in a track now: "
+        + share("pictures left in, followed", "pictures left in"),
+        "One number: tracks that carry one number in all their pictures: "
+        + share("tracks at one number", "tracks")
+        + f" ({counts['changes of number']} changes of number among them)",
+        "Told apart: pictures taken out that carry another number than the rest of their "
+        "track: "
+        + share("pictures taken out, told apart", "pictures taken out")
+        + f" ({counts['pictures taken out, not followed']} are in no track now)",
+        "Joined: pairs of one stretch said to be one player that carry one number: "
+        + share("pairs said to be one player, at one number", "pairs said to be one player"),
+        "Kept apart: pairs of one stretch said to be different players that carry two "
+        "numbers: " + share("pairs kept apart", "pairs said to be different players"),
     ]
     (out / "summary.txt").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))

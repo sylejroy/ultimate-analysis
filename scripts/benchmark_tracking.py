@@ -37,7 +37,6 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 os.chdir(REPO)
 
-import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 from scipy.optimize import linear_sum_assignment  # noqa: E402
 
@@ -46,6 +45,14 @@ from ultimate_analysis.constants import DEFAULT_PATHS  # noqa: E402
 from ultimate_analysis.pipeline import AnalysisPipeline, PipelineOptions  # noqa: E402
 from ultimate_analysis.processing.appearance import box_overlaps  # noqa: E402
 from ultimate_analysis.processing.player_id import initialize_player_id_system  # noqa: E402
+from ultimate_analysis.utils.benchmarking import (  # noqa: E402
+    apply_settings,
+    drawn_again,
+    frame_rate_of,
+    frames_of,
+    run_header,
+    with_spread,
+)
 
 MATCH_IOU = 0.5
 
@@ -81,24 +88,14 @@ def run_tracker(video: str, start: int, count: int, step: int = 1) -> Tuple[dict
     as the tracks are joined looking back over the stretch. With `step`, only every
     so many frames is analysed, as the app does in "Real time"."""
     path = REPO / "data" / "raw" / "videos" / f"{video}.mp4"
-    capture = cv2.VideoCapture(str(path))
-    rate = capture.get(cv2.CAP_PROP_FPS)
-    capture.set(cv2.CAP_PROP_POS_FRAMES, start)
     pipeline = AnalysisPipeline()
     pipeline.new_video(str(path))
-    pipeline.set_frame_rate(rate)
+    pipeline.set_frame_rate(frame_rate_of(path))
     options = PipelineOptions()
     found = {}
-    for offset in range(count):
-        if offset % step:
-            if not capture.grab():
-                break
-            continue
-        ok, frame = capture.read()
-        if not ok:
-            break
-        result = pipeline.process(frame, start + offset, options)
-        found[offset] = [
+    for number, frame in frames_of(path, start, start + count - 1, step):
+        result = pipeline.process(frame, number, options)
+        found[number - start] = [
             (int(t.track_id), [float(v) for v in t.to_ltrb()])
             for t in result.tracks
             if t.class_name == "player"
@@ -201,13 +198,7 @@ def main() -> None:
     config["models"]["reid"]["roster_folder"] = ""
     config["homography"]["focal_folder"] = ""  # Nothing of an earlier session
     config["models"]["player_id"]["background_reading"] = False
-    for item in args.set:
-        key, value = item.split("=", 1)
-        node = config
-        *path, last = key.split(".")
-        for part in path:
-            node = node[part]
-        node[last] = json.loads(value)
+    print("\n".join(run_header(apply_settings(args.set))), flush=True)
     initialize_player_id_system()
     root = REPO / DEFAULT_PATHS["TRAINING_DATA"] / args.dataset
     folders = sorted(
@@ -243,17 +234,9 @@ def main() -> None:
             mean["players"] = sum(sums["players"])
             mean["ID switches"] = sum(sums["ID switches"])
             print(line(kind, mean))
-            low, high = spread(sums["AssA"])
-            print(f"  {'':13} AssA, stretches drawn again: 90% between {low:.3f} and {high:.3f}")
-
-
-def spread(values: list, rounds: int = 2000) -> Tuple[float, float]:
-    """Where the mean of per-stretch values lies with the stretches drawn again (5th and
-    95th percentile): with four stretches, a rough idea of what is noise."""
-    rng = np.random.default_rng(0)
-    values = np.asarray(values, dtype=float)
-    means = rng.choice(values, size=(rounds, len(values))).mean(axis=1)
-    return float(np.percentile(means, 5)), float(np.percentile(means, 95))
+            # With four stretches, a rough idea of what is noise
+            spread = with_spread(drawn_again(sums["AssA"]), "stretches", ".3f")
+            print(f"  {'':13} AssA {spread}")
 
 
 def line(kind: str, result: dict) -> str:

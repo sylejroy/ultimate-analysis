@@ -61,7 +61,6 @@ frame itself is given.
 
 import argparse
 import csv
-import json
 import os
 import pickle
 import sys
@@ -76,7 +75,6 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 os.chdir(REPO)
 
-import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 from build_holder_ground_truth import (  # noqa: E402
     AFTER_SECONDS,
@@ -95,6 +93,14 @@ from ultimate_analysis.processing.possession import player_at_disc  # noqa: E402
 from ultimate_analysis.processing.possession_replay import (  # noqa: E402
     RecordingPossessionTracker,
     replay,
+)
+from ultimate_analysis.utils.benchmarking import (  # noqa: E402
+    apply_settings,
+    drawn_again,
+    frame_rate_of,
+    frames_around,
+    run_header,
+    with_spread,
 )
 
 # A detection is of the labelled disc if it is within this share of a player's height of it
@@ -236,11 +242,7 @@ def watch(
     path = REPO / "data" / "raw" / "videos" / f"{video}.mp4"
     if not path.exists():
         return "video not found"
-    capture = cv2.VideoCapture(str(path))
-    rate = capture.get(cv2.CAP_PROP_FPS)
-    before = int(BEFORE_SECONDS * rate) // step * step
-    start = max(anchor % step, anchor - before)
-    capture.set(cv2.CAP_PROP_POS_FRAMES, start)
+    rate = frame_rate_of(path)
     pipeline = AnalysisPipeline()
     if record:
         # In place of the pipeline's own: the same tracker, writing down what it is told
@@ -253,12 +255,7 @@ def watch(
     # track, the discs detected, and whether the frame was taken for drone footage
     said, boxes, discs_at, wide = [], {}, {}, {}
     at: Optional[dict] = None
-    for number in range(start, anchor + int(AFTER_SECONDS * rate) + 1):
-        ok, frame = capture.read()
-        if not ok:
-            break
-        if (number - start) % step:
-            continue
+    for number, frame in frames_around(path, anchor, BEFORE_SECONDS, AFTER_SECONDS, step):
         result = pipeline.process(frame, number, options)
         if record:
             pipeline._possession.frame_done(number)
@@ -417,21 +414,11 @@ def judged(case: dict, said: list) -> dict:
     }
 
 
-def share_spread(rows: list, rounds: int = 2000) -> tuple:
-    """Where the share of frames right lies with the games drawn again (5th and 95th
-    percentile): frames of one game are not independent of each other."""
-    by_game = defaultdict(list)
-    for row in rows:
-        by_game[row["video"]].append(row["cause"] in (RIGHT, CAUSES[3]))
-    games = list(by_game.values())
-    if not games:
-        return 0.0, 0.0
-    rng = np.random.default_rng(0)
-    shares = []
-    for _ in range(rounds):
-        drawn = [games[i] for i in rng.integers(len(games), size=len(games))]
-        shares.append(sum(map(sum, drawn)) / max(1, sum(map(len, drawn))))
-    return float(np.percentile(shares, 5)), float(np.percentile(shares, 95))
+def share_right(rows: list) -> str:
+    """The share of frames with the holder right (the team aside), and where it lies
+    with the games drawn again: frames of one game are not independent of each other."""
+    same = [row["cause"] in (RIGHT, CAUSES[3]) for row in rows]
+    return with_spread(drawn_again(same, [row["video"] for row in rows]))
 
 
 def main() -> None:
@@ -473,15 +460,8 @@ def main() -> None:
     out = benchmarks / args.name
     if out.exists():
         sys.exit(f"{out} exists: results are not overwritten, choose another name")
-    config = get_config()
-    config["models"]["reid"]["enabled"] = False
-    for item in args.set:
-        key, value = item.split("=", 1)
-        node = config
-        *path, last = key.split(".")
-        for part in path:
-            node = node[part]
-        node[last] = json.loads(value)
+    get_config()["models"]["reid"]["enabled"] = False
+    changed = apply_settings(args.set)
 
     left_out = Counter()
     rows, cases, as_recorded = [], [], None
@@ -535,7 +515,7 @@ def main() -> None:
         index.writeheader()
         index.writerows(rows)
 
-    lines = [f"Settings changed: {', '.join(args.set)}"] if args.set else []
+    lines = run_header(changed)
     if not args.replay:
         lines.append(f"Every {args.step} frames analysed")
     if args.perfect_disc is not None:
@@ -555,18 +535,15 @@ def main() -> None:
         lines.append(
             f"  {label:<7}{len(chosen):>5} frames, {same} the same ({same / len(chosen):.0%})"
         )
-    low, high = share_spread(rows)
-    lines.append(f"  all: 90% between {low:.0%} and {high:.0%}, the games drawn again")
+    lines.append(f"  all: {share_right(rows)}")
     if args.train:
         place = {id(row): frame_of(f"{row['video']}_frame_{row['frame']}") for row in rows}
         seen = seen_frames(place.values(), args.train)
         unseen = [row for row in rows if place[id(row)] not in seen]
         same = sum(row["cause"] in (RIGHT, CAUSES[3]) for row in unseen)
-        low, high = share_spread(unseen)
         lines.append(
             f"  unseen (no frame of {', '.join(args.train)} within 10 s): {len(unseen)} "
-            f"frames, {same} the same ({same / max(1, len(unseen)):.0%}; "
-            f"90% between {low:.0%} and {high:.0%})"
+            f"frames, {same} the same: {share_right(unseen)}"
         )
     lines += [f"  left out: {times} {what}" for what, times in sorted(left_out.items())]
     lines += ["", "Causes: " + "; ".join(CAUSES), ""]

@@ -36,7 +36,6 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 os.chdir(REPO)
 
-import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 from benchmark_possession import CAUSES, RIGHT, judged  # noqa: E402
 from build_holder_ground_truth import labelled_discs  # noqa: E402
@@ -48,6 +47,12 @@ from ultimate_analysis.processing.inference import (  # noqa: E402
     load_detection_model,
 )
 from ultimate_analysis.processing.possession_replay import replay  # noqa: E402
+from ultimate_analysis.utils.benchmarking import (  # noqa: E402
+    drawn_again,
+    frames_of,
+    run_header,
+    with_spread,
+)
 
 LOWEST = 0.05
 THRESHOLDS = (0.05, 0.1, 0.15, 0.2)
@@ -64,14 +69,11 @@ def detect(cases: list, model: tuple) -> dict:
     """(video, frame) -> [(x1, y1, x2, y2, confidence)] for every analysed frame."""
     found = {}
     for count, case in enumerate(cases):
+        # The frames the recorded run analysed, whatever its step was
         frames = [number for number, *_ in case["said"]]
-        capture = cv2.VideoCapture(str(REPO / "data" / "raw" / "videos" / f"{case['video']}.mp4"))
-        capture.set(cv2.CAP_PROP_POS_FRAMES, frames[0])
+        path = REPO / "data" / "raw" / "videos" / f"{case['video']}.mp4"
         wanted = set(frames)
-        for number in range(frames[0], frames[-1] + 1):
-            ok, frame = capture.read()
-            if not ok:
-                break
+        for number, frame in frames_of(path, frames[0], frames[-1]):
             if number in wanted and (case["video"], number) not in found:
                 found[case["video"], number] = [
                     (*(float(v) for v in d["bbox"]), float(d["confidence"]))
@@ -166,7 +168,8 @@ def main() -> None:
             counts["false", recorded["label"], threshold] += len(false)
             counts["frames with false", recorded["label"], threshold] += bool(false)
 
-    lines = [f"Disc model at confidence {LOWEST} and up; the app's threshold is {sure}", ""]
+    lines = run_header()
+    lines += [f"Disc model at confidence {LOWEST} and up; the app's threshold is {sure}", ""]
     for label in ("held", "nobody"):
         frames, missed = counts["frames", label], counts["missed", label]
         lines.append(
@@ -189,12 +192,13 @@ def main() -> None:
 
     # What the possession tracking would make of them
     lines.append("The holder against the label, the possession tracking played back with:")
-    lines.append(f"  {'discs':<34}{'held right':>12}{'nobody right':>14}")
+    lines.append(f"  {'discs':<34}{'held right':>32}{'nobody right':>32}")
 
     def right(rows: list, label: str) -> str:
         chosen = [row for row in rows if row["label"] == label]
-        same = sum(row["cause"] in (RIGHT, CAUSES[3]) for row in chosen)
-        return f"{same} of {len(chosen)}"
+        same = [row["cause"] in (RIGHT, CAUSES[3]) for row in chosen]
+        spread = with_spread(drawn_again(same, [row["video"] for row in chosen]), "")
+        return f"{sum(same)} of {len(chosen)}, {spread}"
 
     played = [("as recorded", [judged(case, replay(case["calls"])) for case in cases])]
     for threshold in (sure, *THRESHOLDS[::-1]):
@@ -202,7 +206,8 @@ def main() -> None:
         rows = [judged(c, replay(with_discs(c, found, threshold, sure))) for c in cases]
         played.append((title, rows))
     for title, rows in played:
-        lines.append(f"  {title:<34}{right(rows, 'held'):>12}{right(rows, 'nobody'):>14}")
+        lines.append(f"  {title:<34}{right(rows, 'held'):>32}{right(rows, 'nobody'):>32}")
+    lines.append("  In brackets: where the share lies with the games drawn again (90%)")
     (out / "summary.txt").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
 

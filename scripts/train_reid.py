@@ -491,7 +491,11 @@ def main() -> None:
         if epoch % 3 == 0 or epoch == args.epochs:
             model.eval()
             results = score(model, held_out, device, args.skip_blurred)
-            line.update({key: round(value, 3) for key, value in results.items()})
+            # The numbers alone: where each lies with the stretches drawn again is for
+            # the benchmark's own table, not for a line per epoch
+            line.update(
+                {key: round(value, 3) for key, value in results.items() if np.isscalar(value)}
+            )
             # What is aimed at: the right teammate from one point to another. Within a
             # point only decides between epochs that are level on that.
             aim = (

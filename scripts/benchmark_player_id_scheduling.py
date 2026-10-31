@@ -28,6 +28,7 @@ from ultimate_analysis.config.settings import get_config  # noqa: E402
 from ultimate_analysis.processing import player_id  # noqa: E402
 from ultimate_analysis.processing.jersey_crops import JerseyCropSelector  # noqa: E402
 from ultimate_analysis.processing.jersey_tracker import reset_jersey_tracker  # noqa: E402
+from ultimate_analysis.utils.benchmarking import drawn_again, run_header, with_spread  # noqa: E402
 
 EVAL_DIR = REPO / "data" / "processed" / "jersey_eval"
 
@@ -71,15 +72,17 @@ def load_replay():
 
 
 def replay(clips, truth, enabled):
+    """The counts of one mode, and where the share of numbered players read right lies
+    with the clips drawn again."""
     settings = get_config()["models"]["player_id"]
     previous = settings["crop_selection"]["enabled"]
     settings["crop_selection"]["enabled"] = enabled
-    live, ever_wrong = {}, set()
+    live, ever_wrong, clip_of = {}, set(), {}
     reads = 0
     try:
         torch.cuda.synchronize()
         start = time.perf_counter()
-        for frames in clips:
+        for clip, frames in enumerate(clips):
             reset_jersey_tracker()
             selector, finalized = JerseyCropSelector(), set()
             for frame_index, (frame, tracks) in enumerate(frames):
@@ -89,6 +92,7 @@ def replay(clips, truth, enabled):
                 reads += timing.get("tracks_ocr", 0)
                 live.update({track_id: number for track_id, (number, _) in results.items()})
                 for track in tracks:
+                    clip_of[track.track_id] = clip
                     number = live.get(track.track_id, "Unknown")
                     if number != "Unknown" and number != truth[track.track_id]:
                         ever_wrong.add(track.track_id)
@@ -107,7 +111,7 @@ def replay(clips, truth, enabled):
         for track_id, number in truth.items()
         if number is None
     )
-    return {
+    counts = {
         "right": right,
         "wrong": wrong,
         "unread": len(numbered) - right - wrong,
@@ -116,12 +120,19 @@ def replay(clips, truth, enabled):
         "ocr_crops": reads,
         "seconds": round(seconds, 3),
     }
+    # Players of one clip are not independent of each other
+    right_spread = drawn_again(
+        [live.get(track_id) == number for track_id, number in numbered.items()],
+        [clip_of.get(track_id) for track_id in numbered],
+    )
+    return counts, right_spread
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--method", default="parseq")
     args = parser.parse_args()
+    print("\n".join(run_header()), flush=True)
     clips, truth = load_replay()
     player_id.set_player_id_method(args.method)
     player_id.initialize_player_id_system()
@@ -138,9 +149,9 @@ def main():
         f"{len(clips)} clips, {sum(map(len, clips))} replay steps, {len(truth)} labelled identities"
     )
     for enabled in (False, True):
-        print(
-            ("selected" if enabled else "fixed") + ": " + json.dumps(replay(clips, truth, enabled))
-        )
+        counts, right = replay(clips, truth, enabled)
+        print(("selected" if enabled else "fixed") + ": " + json.dumps(counts))
+        print(f"  numbered players read right: {with_spread(right, 'clips')}")
 
 
 if __name__ == "__main__":

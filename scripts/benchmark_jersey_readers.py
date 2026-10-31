@@ -25,6 +25,7 @@ import cv2  # noqa: E402
 import torch  # noqa: E402
 
 from ultimate_analysis.processing import jersey_readers, player_id  # noqa: E402
+from ultimate_analysis.utils.benchmarking import drawn_again, run_header, with_spread  # noqa: E402
 
 EVAL_DIR = REPO / "data" / "processed" / "jersey_eval"
 CROPS_PER_CALL = 4  # the app reads a few players per frame
@@ -63,6 +64,7 @@ def read_numbers(method, crops):
 
 def main() -> None:
     methods = sys.argv[1:] or list(jersey_readers.READER_LABELS)
+    print("\n".join(run_header()), flush=True)
     samples = load_samples()
     numbered = [s for s in samples if s[1] is not None]
     tracks = {key: number for key, number, _ in numbered}
@@ -106,6 +108,22 @@ def main() -> None:
             f"{wrong / len(numbered):.1%} wrong | reads on players without a number: "
             f"{false_reads / max(1, len(samples) - len(numbered)):.1%} | "
             f"{seconds / len(samples) * 1000:.1f} ms per crop"
+        )
+        # Crops of one player, and players of one clip, are not independent of each other
+        per_crop = drawn_again(
+            [read == number for (_, number, _), (read, _) in zip(samples, reads) if number],
+            [key for key, number, _ in samples if number],
+        )
+        players = drawn_again(
+            [
+                key in votes and votes[key].most_common(1)[0][0] == number
+                for key, number in tracks.items()
+            ],
+            [key.split("/")[0] for key in tracks],
+        )
+        print(
+            f"{'':12s} per crop correct {with_spread(per_crop, 'players', '.1%')}, "
+            f"players right {with_spread(players, 'clips')}"
         )
 
 

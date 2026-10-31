@@ -31,6 +31,12 @@ from ultimate_analysis.processing.inference import (  # noqa: E402
     load_detection_model,
 )
 from ultimate_analysis.processing.tensorrt_engines import get_engine  # noqa: E402
+from ultimate_analysis.utils.benchmarking import (  # noqa: E402
+    apply_settings,
+    drawn_again,
+    run_header,
+    with_spread,
+)
 from ultimate_analysis.utils.model_files import (  # noqa: E402
     default_model_path,
     model_display_name,
@@ -118,12 +124,14 @@ def average_precision(confidences: np.ndarray, correct: np.ndarray, labelled_cou
     return float(np.interp(np.linspace(0, 1, 101), recall, precision).mean())
 
 
-def score_model(model: Any, imgsz: int, samples: List[Sample]) -> Dict[str, Dict[str, float]]:
-    """{class name: AP50, precision, recall, labelled count} for the classes the model shares."""
+def score_model(model: Any, imgsz: int, samples: List[Sample]) -> Dict[str, Dict[str, Any]]:
+    """{class name: AP50, precision, recall, labelled count, and where precision and recall
+    lie with the images drawn again} for the classes the model shares."""
     class_names = {i: name for i, name in dict(model.names).items() if name in CLASS_SETTINGS}
+    # Per image: the confidences of its detections, whether each is a hit, its labelled boxes
     confidences: Dict[str, list] = {name: [] for name in class_names.values()}
     correct: Dict[str, list] = {name: [] for name in class_names.values()}
-    labelled_count = {name: 0 for name in class_names.values()}
+    labelled_counts: Dict[str, list] = {name: [] for name in class_names.values()}
 
     for image, labelled in samples:
         boxes = predict(model, imgsz, image, MIN_CONFIDENCE)
@@ -136,20 +144,35 @@ def score_model(model: Any, imgsz: int, samples: List[Sample]) -> Dict[str, Dict
             order = np.argsort(-conf[cls == class_id])
             confidences[name].append(conf[cls == class_id][order])
             correct[name].append(match_detections(xyxy[cls == class_id][order], labelled[name]))
-            labelled_count[name] += len(labelled[name])
+            labelled_counts[name].append(len(labelled[name]))
 
     scores = {}
     for name in class_names.values():
-        if not labelled_count[name]:
+        labelled_count = sum(labelled_counts[name])
+        if not labelled_count:
             continue
+        threshold = get_setting(f"{CLASS_SETTINGS[name]}.confidence_threshold", 0.5)
         conf = np.concatenate(confidences[name])
         hit = np.concatenate(correct[name])
-        kept = conf >= get_setting(f"{CLASS_SETTINGS[name]}.confidence_threshold", 0.5)
+        kept = conf >= threshold
+        # Per detection kept whether it is a hit, and per labelled box whether it is
+        # found, each with its image: boxes of one image are not independent
+        hit_kept, image_of_hit, found, image_of_box = [], [], [], []
+        for image, (conf_i, hit_i, count) in enumerate(
+            zip(confidences[name], correct[name], labelled_counts[name])
+        ):
+            hits = hit_i[conf_i >= threshold].tolist()
+            hit_kept += hits
+            image_of_hit += [image] * len(hits)
+            found += [True] * sum(hits) + [False] * (count - sum(hits))
+            image_of_box += [image] * count
         scores[name] = {
-            "ap50": average_precision(conf, hit, labelled_count[name]),
+            "ap50": average_precision(conf, hit, labelled_count),
             "precision": hit[kept].sum() / max(kept.sum(), 1),
-            "recall": hit[kept].sum() / labelled_count[name],
-            "labelled": labelled_count[name],
+            "recall": hit[kept].sum() / labelled_count,
+            "labelled": labelled_count,
+            "precision_spread": drawn_again(hit_kept, image_of_hit),
+            "recall_spread": drawn_again(found, image_of_box),
         }
     return scores
 
@@ -197,7 +220,9 @@ def main() -> None:
     parser.add_argument("--splits", nargs="+", default=["valid", "test"])
     parser.add_argument("--video", type=Path, help="default: the app's default video")
     parser.add_argument("--frames", type=int, default=100, help="frames to time; 0 = skip")
+    parser.add_argument("--set", action="append", default=[], help="setting=value, as JSON")
     args = parser.parse_args()
+    print("\n".join(run_header(apply_settings(args.set))), flush=True)
 
     weights = args.weights or list(
         dict.fromkeys(
@@ -226,6 +251,8 @@ def main() -> None:
                 f"{name:<8}{score['labelled']:>9}{score['ap50']:>8.3f}"
                 f"{score['precision']:>11.3f}{score['recall']:>8.3f}"
             )
+            for what in ("precision", "recall"):
+                print(f"  {what} {with_spread(score[what + '_spread'], 'images', '.3f')}")
 
 
 if __name__ == "__main__":

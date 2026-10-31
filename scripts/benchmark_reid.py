@@ -45,6 +45,7 @@ import numpy as np  # noqa: E402
 
 from ultimate_analysis.constants import DEFAULT_PATHS  # noqa: E402
 from ultimate_analysis.processing import appearance  # noqa: E402
+from ultimate_analysis.utils.benchmarking import drawn_again, run_header, with_spread  # noqa: E402
 
 MIN_CROPS = 8  # A track with fewer crops is not matched: half of them make a vector
 NUMBER_CERTAINTY = 0.6  # Of a jersey number, from which it says who a player is
@@ -188,8 +189,9 @@ def matches(
     Returns:
         same_point_all, same_point_teammates, across_points_all, across_points_teammates
         (shares, the last two missing without a player numbered in two stretches), and
-        for each the number of tracks matched (..._count) and how often picking at
-        random would be right (..._chance).
+        for each the number of tracks matched (..._count), how often picking at
+        random would be right (..._chance) and where the share lies with the stretches
+        the matched tracks are of drawn again (..._spread).
 
         Across points a match that is not right is of two kinds, and only one of them
         is known to be wrong: the track taken has another number (..._wrong), or nobody
@@ -217,9 +219,15 @@ def matches(
     hits = defaultdict(list)
     chance = defaultdict(list)
     wrong = defaultdict(list)  # Matched with a track known to be somebody else
+    stretch_of = defaultdict(list)  # The stretch of the track matched, per hit
 
     def match(
-        name: str, query: np.ndarray, gallery: Dict[tuple, np.ndarray], right, known=None
+        name: str,
+        query: np.ndarray,
+        gallery: Dict[tuple, np.ndarray],
+        right,
+        stretch: tuple,
+        known=None,
     ) -> None:
         for teammates_only, kind in ((False, "all"), (True, "teammates")):
             chosen = {
@@ -234,15 +242,22 @@ def matches(
             taken = keys[int(np.argmin(distance))]
             hits[f"{name}_{kind}"].append(float(right[1](taken)))
             chance[f"{name}_{kind}"].append(sum(right[1](key) for key in keys) / len(keys))
+            stretch_of[f"{name}_{kind}"].append(stretch)
             if known is not None:
                 wrong[f"{name}_{kind}"].append(float(not right[1](taken) and known(taken)))
 
     # Same point: the later half of each track against the earlier halves of all
-    for keys in by_stretch.values():
+    for stretch, keys in by_stretch.items():
         earlier = {key: _mean_vector(tracks[key][: len(tracks[key]) // 2]) for key in keys}
         for key in keys:
             later = _mean_vector(tracks[key][len(tracks[key]) // 2 :])
-            match("same_point", later, earlier, (light[key], lambda other, key=key: other == key))
+            match(
+                "same_point",
+                later,
+                earlier,
+                (light[key], lambda other, key=key: other == key),
+                stretch,
+            )
 
     # Across points: a numbered player's track in one stretch against the tracks of another
     whole = {key: _mean_vector(crops) for key, crops in tracks.items()}
@@ -261,6 +276,7 @@ def matches(
                 whole[key],
                 {other: whole[other] for other in keys},
                 (light[key], same_player),
+                key[:2],
                 known=lambda other: bool(number[other]),
             )
 
@@ -269,6 +285,8 @@ def matches(
         results[name] = float(np.mean(values))
         results[f"{name}_count"] = len(values)
         results[f"{name}_chance"] = float(np.mean(chance[name]))
+        # Tracks of one stretch are not independent of each other
+        results[f"{name}_spread"] = drawn_again(values, stretch_of[name])
         if name in wrong:
             results[f"{name}_wrong"] = float(np.mean(wrong[name]))
             results[f"{name}_unknown"] = 1.0 - results[name] - results[f"{name}_wrong"]
@@ -310,6 +328,7 @@ def main() -> None:
         help="Share of each track's crops, the most blurred, left out of its vector",
     )
     args = parser.parse_args()
+    print("\n".join(run_header()), flush=True)
     global cover_numbers
     cover_numbers = args.cover_number
 
@@ -338,6 +357,12 @@ def main() -> None:
     )
     first = next(iter(ways.values()))
     print(f"{'':<32}" + "".join(f"{name:>30}" for name in ways) + f"{'at random':>12}{'tracks':>8}")
+
+    def cell(result: dict, key: str) -> str:
+        if key + "_spread" in result:
+            return with_spread(result[key + "_spread"], "")
+        return f"{result[key]:.0%}"
+
     for key, title in kinds:
         if key not in first:
             print(f"{title:<32} no player numbered in two stretches")
@@ -350,9 +375,10 @@ def main() -> None:
         )
         print(
             f"{title:<32}"
-            + "".join(f"{result[key]:>30.0%}" for result in ways.values())
+            + "".join(f"{cell(result, key):>30}" for result in ways.values())
             + of_matches
         )
+    print("In brackets: where the share lies with the stretches drawn again (90%)")
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ nothing else on the GPU; profiling adds overhead, so take throughput from unprof
 Before timing, the load of the graphics card and the processor is looked at for a few
 seconds; if something else is using them the run stops (--busy-ok times it anyway and
 marks it). The summary holds the git commit, the settings changed with --set, and that
-load. What a part costs is found by switching it off:
+load (and the day and the command line). What a part costs is found by switching it off:
 
     python scripts/benchmark_pipeline.py --ahead --set models.reid.enabled=false
 """
@@ -27,7 +27,6 @@ import collections
 import cProfile
 import json
 import pstats
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -47,10 +46,11 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
-from ultimate_analysis.config.settings import get_config, get_setting  # noqa: E402
+from ultimate_analysis.config.settings import get_setting  # noqa: E402
 from ultimate_analysis.pipeline import AnalysisPipeline, PipelineOptions  # noqa: E402
 from ultimate_analysis.processing.inference import set_disc_model, set_player_model  # noqa: E402
 from ultimate_analysis.processing.player_id import initialize_player_id_system  # noqa: E402
+from ultimate_analysis.utils.benchmarking import apply_settings, run_header  # noqa: E402
 from ultimate_analysis.utils.model_files import default_model_path  # noqa: E402
 
 # Above this the machine is taken to be busy with something else (percent, averaged)
@@ -81,23 +81,6 @@ def machine_load(seconds: float = 3.0) -> dict:
     return load
 
 
-def git_commit() -> str:
-    """The commit the code is at, with "+changes" if the working tree differs from it."""
-    try:
-        commit = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"], cwd=REPO, capture_output=True, text=True
-        ).stdout.strip()
-        changed = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=no"],
-            cwd=REPO,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        return commit + ("+changes" if changed else "")
-    except OSError:
-        return "unknown"
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--video", type=Path)
@@ -123,14 +106,7 @@ def main():
         parser.error("--frames must exceed --warmup, which must be nonnegative")
     if args.threads is not None:
         cv2.setNumThreads(args.threads)
-    config = get_config()
-    for item in args.set:
-        key, value = item.split("=", 1)
-        node = config
-        *path, last = key.split(".")
-        for part in path:
-            node = node[part]
-        node[last] = json.loads(value)
+    run = run_header(apply_settings(args.set))
     load = machine_load()
     print(f"Before the run: {json.dumps(load)}")
     if load["busy"] and not args.busy_ok:
@@ -199,8 +175,7 @@ def main():
                 }
             )
     summary = {
-        "commit": git_commit(),
-        "settings_changed": args.set,
+        "run": run,
         "machine_before": load,
         "video": video.name,
         "frames": len(totals),
