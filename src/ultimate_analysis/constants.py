@@ -64,3 +64,6 @@ SUPPORTED_VIDEO_EXTENSIONS = (".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".
 # Jersey number constraints
 JERSEY_NUMBER_MIN = 0
 JERSEY_NUMBER_MAX = 99
+
+# A player's height in the frame when nobody is in the picture to measure by (pixels)
+PLAYER_HEIGHT_PIXELS = 80.0

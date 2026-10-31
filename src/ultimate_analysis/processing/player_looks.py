@@ -221,6 +221,14 @@ class PlayerLooks:
                 kept[new_track_id] = kept.pop(track_id)
         if self._last_held is not None and self._last_held[0] == track_id:
             self._last_held = (new_track_id, *self._last_held[1:])
+        # A crossing the track is in goes on under its new name, else `swapped` would
+        # find no profile under the old one and give it up, what it held unlearned
+        crossings: Dict[Tuple[int, int], int] = {}
+        for pair, until in self._crossings.items():
+            pair = tuple(sorted(new_track_id if t == track_id else t for t in pair))
+            crossings[pair] = max(until, crossings.get(pair, until))
+        self._crossings = crossings
+        self._overlapping = {new_track_id if t == track_id else t for t in self._overlapping}
         profile = self._profiles.pop(track_id, None)
         if profile is not None:
             known = self._profiles.get(new_track_id)

@@ -13,8 +13,9 @@ not known, so that nothing says how far apart two tracks lie, only numbers join 
 `players()` gives the track -> player naming at any time.
 """
 
+import heapq
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -108,6 +109,41 @@ def _mean(group: Sequence[Tracklet]) -> Optional[np.ndarray]:
     return total / max(float(np.linalg.norm(total)), 1e-12)
 
 
+def _pairs(tracklets: Sequence[Tracklet], frame_rate: float) -> Tuple[np.ndarray, np.ndarray]:
+    """`may_be_one_player` and `reach_known` of every two tracks at once, as two
+    matrices: a call per pair takes seconds for the hundreds of tracks of a stretch."""
+    first = np.array([t.first for t in tracklets], dtype=np.float64)
+    last = np.array([t.last for t in tracklets], dtype=np.float64)
+    # Of each pair the one in the row is the earlier (also when they begin together)
+    row_earlier = first[:, None] <= first[None, :]
+    earlier_last = np.where(row_earlier, last[:, None], last[None, :])
+    later_first = np.maximum(first[:, None], first[None, :])
+    same_time = later_first <= earlier_last
+    team = np.array([-1 if t.team is None else t.team for t in tracklets])
+    known = team >= 0
+    other_team = known[:, None] & known[None, :] & (team[:, None] != team[None, :])
+    codes = {number: code for code, number in enumerate(sorted({t.number for t in tracklets}))}
+    code = np.array([codes[t.number] if t.number else -1 for t in tracklets])
+    read = code >= 0
+    other_number = read[:, None] & read[None, :] & (code[:, None] != code[None, :])
+    # From where the earlier ended to where the later began, where both are known
+    nowhere = np.full(
+        max((len(t.first_place) for t in tracklets if t.first_place is not None), default=1),
+        np.nan,
+    )
+    starts = np.array([nowhere if t.first_place is None else t.first_place for t in tracklets])
+    ends = np.array([nowhere if t.last_place is None else t.last_place for t in tracklets])
+    gap = np.linalg.norm(ends[:, None, :] - starts[None, :, :], axis=2)
+    gap = np.where(row_earlier, gap, gap.T)
+    placed = ~np.isnan(gap)
+    seconds = (later_first - earlier_last) / frame_rate
+    too_far = placed & (gap > TOP_SPEED * seconds + REACH_SLACK)
+    allowed = ~(same_time | other_team | other_number | too_far)
+    np.fill_diagonal(allowed, False)
+    np.fill_diagonal(placed, False)
+    return allowed, placed
+
+
 def connect(
     tracklets: Iterable[Tracklet],
     frame_rate: float,
@@ -129,65 +165,140 @@ def connect(
         The groups, each the tracks of one player
     """
     groups: List[List[Tracklet]] = [[t] for t in tracklets]
+    count = len(groups)
+    if count < 2:
+        return groups
+    # Of every two groups, whether they may be one player and whether it is known how
+    # far apart they lie: found once, over the tracks. A group made of two is to a third
+    # what both were, so on a join only the joined group's row is done again; the group
+    # joined in stays as a dead row that nothing is alike to. The tracks of a group all
+    # carry one number and are of one team (others are never joined), and what the
+    # group looks like is the mean over its tracks.
+    allowed, placed = _pairs([group[0] for group in groups], frame_rate)
+    number = np.array([group[0].number for group in groups], dtype=object)
+    team = np.array([-1 if group[0].team is None else group[0].team for group in groups])
+    dims = max((len(t.total) for t in tracklets if t.total is not None), default=1)
+    # The sum of each group's looks, added up track by track as `_mean` does, and
+    # how many; the mean where there are enough
+    totals, looks = np.zeros((count, dims)), [0] * count
+    means, has_mean = np.zeros((count, dims)), np.zeros(count, dtype=bool)
+    alive = [True] * count
+    version = [0] * count  # Counted up each time a group's row is done again
 
-    def compatible(one: List[Tracklet], other: List[Tracklet]) -> bool:
-        return all(may_be_one_player(a, b, frame_rate) for a in one for b in other)
+    def numbered_alike(i: int) -> np.ndarray:
+        """Which groups carry the number of group i, in its team."""
+        if not number[i]:
+            return np.zeros(count, dtype=bool)
+        one_team = ((team == team[i]) & (team[i] >= 0)) | ((team >= 0) != (team[i] >= 0))
+        return (number == number[i]) & one_team
 
-    def placed(one: List[Tracklet], other: List[Tracklet]) -> bool:
-        return all(reach_known(a, b) for a in one for b in other)
+    def add_looks(i: int, tracklets: Sequence[Tracklet]) -> None:
+        for tracklet in tracklets:
+            if tracklet.total is not None:
+                totals[i] += tracklet.total
+                looks[i] += tracklet.looks
+        has_mean[i] = looks[i] >= MIN_LOOKS
+        if has_mean[i]:
+            means[i] = totals[i] / max(float(np.linalg.norm(totals[i])), 1e-12)
 
-    def numbered_alike(one: List[Tracklet], other: List[Tracklet]) -> bool:
-        numbers = {t.number for t in one if t.number}, {t.number for t in other if t.number}
-        teams = {t.team for t in one + other if t.team is not None}
-        return bool(numbers[0] & numbers[1]) and len(teams) == 1
+    def looks_like(i: int) -> np.ndarray:
+        """How alike group i looks to each, -1 where the looks are not to be gone by."""
+        # Looks alone do not tell teammates apart well enough: only tracks known to
+        # lie within a player's reach of each other are joined by them
+        told = allowed[i] & has_mean & has_mean[i] & (placed[i] | (not needs_place))
+        return np.where(told, means @ means[i], -1.0)
 
-    while len(groups) > 1:
-        count = len(groups)
-        allowed = np.zeros((count, count), dtype=bool)
-        for i in range(count):
-            for j in range(i + 1, count):
-                allowed[i, j] = allowed[j, i] = compatible(groups[i], groups[j])
+    for i in range(count):
+        add_looks(i, groups[i])
+    numbered = np.array([numbered_alike(i) for i in range(count)])
+    likeness = np.array([looks_like(i) for i in range(count)])
+
+    # The pairs that may be joined are kept in two heaps, so that a round looks at a
+    # few of them and not at every pair: the pairs with one number, first in order,
+    # and the pairs alike enough, the most alike first (of equals the later one). An
+    # entry is of the row as it was when it was put in; one of a row done since, or
+    # of a dead group, is stale and dropped when it comes up.
+    floor = max(min_likeness, 0.0)
+
+    def by_number(i: int, others: np.ndarray) -> List[Tuple[int, int, int]]:
+        low, high = np.minimum(i, others), np.maximum(i, others)
+        return list(zip((low * count + high).tolist(), low.tolist(), high.tolist()))
+
+    def by_looks(i: int, others: np.ndarray) -> List[Tuple[float, int, int, int, int, int]]:
+        # Plain Python numbers: the heap compares entries far more often than it is given
+        low, high = np.minimum(i, others), np.maximum(i, others)
+        place = -(low * count + high)
+        low, high = low.tolist(), high.tolist()
+        return [
+            (alike, where, a, b, version[a], version[b])
+            for alike, where, a, b in zip(
+                (-likeness[i, others]).tolist(), place.tolist(), low, high
+            )
+        ]
+
+    numbered_pairs = [
+        pair
+        for i in range(count)
+        for pair in by_number(i, np.flatnonzero(allowed[i, i + 1 :] & numbered[i, i + 1 :]) + i + 1)
+    ]
+    alike_pairs = [
+        pair
+        for i in range(count)
+        for pair in by_looks(i, np.flatnonzero(likeness[i, i + 1 :] >= floor) + i + 1)
+    ]
+    heapq.heapify(numbered_pairs)
+    heapq.heapify(alike_pairs)
+    while sum(alive) > 1:
         # The same number in the same team is the same player, whatever they look like
-        pair = next(
-            (
-                (i, j)
-                for i in range(count)
-                for j in range(i + 1, count)
-                if allowed[i, j] and numbered_alike(groups[i], groups[j])
-            ),
-            None,
-        )
-        if pair is None:
-            means = [_mean(group) for group in groups]
-            likeness = np.full((count, count), -1.0)
-            for i in range(count):
-                for j in range(i + 1, count):
-                    if not allowed[i, j] or means[i] is None or means[j] is None:
-                        continue
-                    # Looks alone do not tell teammates apart well enough: only tracks
-                    # known to lie within a player's reach of each other are joined by them
-                    if not needs_place or placed(groups[i], groups[j]):
-                        likeness[i, j] = likeness[j, i] = float(means[i] @ means[j])
-            best = 0.0
-            for i in range(count):
-                for j in range(i + 1, count):
-                    if likeness[i, j] < max(min_likeness, best):
-                        continue
-                    # Rivals: who else either could be, but not together with the other
-                    rivals = [
-                        likeness[a, c]
-                        for a, b in ((i, j), (j, i))
-                        for c in range(count)
-                        if c not in (i, j) and not allowed[b, c]
-                    ]
-                    if likeness[i, j] - max(rivals, default=-1.0) >= min_lead:
-                        best, pair = likeness[i, j], (i, j)
+        pair = None
+        while numbered_pairs and pair is None:
+            _, i, j = numbered_pairs[0]
+            if alive[i] and alive[j] and allowed[i, j] and numbered[i, j]:
+                pair = (i, j)
+            else:
+                heapq.heappop(numbered_pairs)
+        # Else the most alike pair that is more alike than any rival by the lead: who
+        # else either could be, but not together with the other. A pair without the
+        # lead now may have it once a rival is joined away: it goes back in.
+        without_lead = []
+        while alike_pairs and pair is None:
+            entry = heapq.heappop(alike_pairs)
+            alike, _, i, j, seen_i, seen_j = entry
+            if version[i] != seen_i or version[j] != seen_j:
+                continue
+            rivals = -1.0
+            for a, b in ((i, j), (j, i)):
+                rival_of = ~allowed[b]
+                rival_of[b] = False
+                rivals = max(rivals, likeness[a, rival_of].max(initial=-1.0))
+            if -alike - rivals >= min_lead:
+                pair = (i, j)
+            else:
+                without_lead.append(entry)
+        for entry in without_lead:
+            heapq.heappush(alike_pairs, entry)
         if pair is None:
             break
         i, j = pair
         groups[i] = groups[i] + groups[j]
-        del groups[j]
-    return groups
+        alive[j] = False
+        version[i] += 1
+        version[j] += 1
+        for matrix in (allowed, placed):
+            matrix[i] &= matrix[j]
+            matrix[:, i] = matrix[i]
+            matrix[j, :] = matrix[:, j] = False
+        number[i], team[i] = number[i] or number[j], max(team[i], team[j])
+        numbered[i] = numbered[:, i] = numbered_alike(i)
+        numbered[j, :] = numbered[:, j] = False
+        add_looks(i, groups[j])
+        likeness[i] = likeness[:, i] = looks_like(i)
+        likeness[j, :] = likeness[:, j] = -1.0
+        for entry in by_number(i, np.flatnonzero(allowed[i] & numbered[i])):
+            heapq.heappush(numbered_pairs, entry)
+        for entry in by_looks(i, np.flatnonzero(likeness[i] >= floor)):
+            heapq.heappush(alike_pairs, entry)
+    return [group for group, live in zip(groups, alive) if live]
 
 
 class TrackletBook:

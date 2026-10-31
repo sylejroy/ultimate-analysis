@@ -215,6 +215,11 @@ class PlayerIdentityTests(unittest.TestCase):
         self.identities.merge(later[5], first[1])
         self.assertEqual(self.see(6.0, (5, BLUE, 900))[5], first[1])
 
+    def test_merging_into_a_player_nobody_knows_changes_nothing(self):
+        first = self.see(0.0, (1, RED_TALL, 100))
+        self.identities.merge(first[1], first[1] + 100)
+        self.assertEqual(self.see(1.0, (1, RED_TALL, 100)), first)
+
 
 if __name__ == "__main__":
     unittest.main()

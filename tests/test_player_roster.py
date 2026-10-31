@@ -111,6 +111,31 @@ class PlayerRosterTest(unittest.TestCase):
         self.assertEqual(len(self.roster.entries), 1)
         self.assertEqual(self.roster.table()[0]["touches"], 3.0)
 
+    def test_two_tracks_renamed_into_one_are_one_entry_with_each_look_counted_once(self):
+        self.see(1, ANNA)
+        self.see(2, BEN)
+        self.roster.match([1, 2])
+        self.roster.number_read(2, "7")
+        self.roster.count(1, "seconds_seen", 2.0)
+        self.roster.count(2, "seconds_seen", 3.0)
+        self.roster.rename(2, 1)
+        self.assertEqual(len(self.roster.entries), 1)
+        (entry,) = self.roster.entries.values()
+        self.assertEqual(entry.looks, 2 * self.module.MIN_LOOKS)
+        self.assertEqual(entry.stats["seconds_seen"], 5.0)
+        self.assertEqual(self.roster.number_of(1), "7")
+        self.assertIsNone(self.roster.number_of(2))
+
+    def test_a_track_renamed_into_one_with_an_entry_brings_its_looks_to_it(self):
+        self.see(1, ANNA)
+        self.roster.match([1])
+        self.see(2, ANNA, times=4)
+        self.roster.number_read(2, "7")
+        self.roster.rename(2, 1)
+        (entry,) = self.roster.entries.values()
+        self.assertEqual(entry.looks, self.module.MIN_LOOKS + 4)
+        self.assertEqual(self.roster.number_of(1), "7")
+
     def test_the_roster_is_written_and_read_again(self):
         self.see(1, ANNA)
         self.see(2, BEN, DARK)

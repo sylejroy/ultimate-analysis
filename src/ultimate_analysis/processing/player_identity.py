@@ -338,10 +338,11 @@ class PlayerIdentities:
 
     def merge(self, player_id: int, into_player_id: int) -> None:
         """Declare a player to be an earlier, missing one, e.g. after reading their number."""
-        profile = self._profiles.pop(player_id, None)
-        if profile is None or into_player_id not in self._profiles:
+        # Checked before anything is taken out: a player whose profile is gone while
+        # tracks still map to them would fail the next `assign`
+        if player_id not in self._profiles or into_player_id not in self._profiles:
             return
-        self._profiles[into_player_id] = profile
+        self._profiles[into_player_id] = self._profiles.pop(player_id)
         for track_id, owner in self._player_of_track.items():
             if owner == player_id:
                 self._player_of_track[track_id] = into_player_id

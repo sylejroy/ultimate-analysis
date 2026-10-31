@@ -27,6 +27,8 @@ from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from ..constants import PLAYER_HEIGHT_PIXELS
+
 # The height a flying disc is taken to be at, in field units: where it is released and
 # caught. Of 0.5, 1, 1.5 and 2, this put the disc nearest to the catcher at the catch.
 DISC_HEIGHT = 1.0
@@ -468,7 +470,7 @@ class FlyingDisc:
         if len(self._seen) < FLIGHT_SIGHTINGS:
             return False
         heights = [box[3] - box[1] for box in player_boxes]
-        height = float(np.median(heights)) if heights else 80.0
+        height = float(np.median(heights)) if heights else PLAYER_HEIGHT_PIXELS
         steps = [
             (later[1] - earlier[1]) / max(later[0] - earlier[0], 1e-6)
             for earlier, later in zip(self._seen, self._seen[1:])

@@ -57,6 +57,8 @@ class SamePlayerTests(unittest.TestCase):
         self.assertEqual(track.crops[0][1].name, "0-1_100.jpg")
         self.assertEqual(len(track.spread(3)), 3)
         self.assertEqual(track.spread(3)[-1].name, "0-1_140.jpg")
+        self.assertEqual(track.spread(1), [track.crops[2][1]])
+        self.assertEqual(track.spread(0), [])
 
     def test_pairs_are_of_one_game_and_one_kind_of_shirt_and_asked_once(self):
         rng, judged, seen = random.Random(1), set(), set()

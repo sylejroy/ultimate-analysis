@@ -12,6 +12,67 @@ def looks(*weights: float) -> np.ndarray:
     return vector / np.linalg.norm(vector)
 
 
+def connect_pair_by_pair(module, tracklets, frame_rate, min_likeness, min_lead, needs_place):
+    """`connect` as it was before the pairs were kept from one join to the next: what
+    it gave is what the quick one must give."""
+    groups = [[t] for t in tracklets]
+
+    def compatible(one, other):
+        return all(module.may_be_one_player(a, b, frame_rate) for a in one for b in other)
+
+    def placed(one, other):
+        return all(module.reach_known(a, b) for a in one for b in other)
+
+    def numbered_alike(one, other):
+        numbers = {t.number for t in one if t.number}, {t.number for t in other if t.number}
+        teams = {t.team for t in one + other if t.team is not None}
+        return bool(numbers[0] & numbers[1]) and len(teams) == 1
+
+    while len(groups) > 1:
+        count = len(groups)
+        allowed = np.zeros((count, count), dtype=bool)
+        for i in range(count):
+            for j in range(i + 1, count):
+                allowed[i, j] = allowed[j, i] = compatible(groups[i], groups[j])
+        pair = next(
+            (
+                (i, j)
+                for i in range(count)
+                for j in range(i + 1, count)
+                if allowed[i, j] and numbered_alike(groups[i], groups[j])
+            ),
+            None,
+        )
+        if pair is None:
+            means = [module._mean(group) for group in groups]
+            likeness = np.full((count, count), -1.0)
+            for i in range(count):
+                for j in range(i + 1, count):
+                    if not allowed[i, j] or means[i] is None or means[j] is None:
+                        continue
+                    if not needs_place or placed(groups[i], groups[j]):
+                        likeness[i, j] = likeness[j, i] = float(means[i] @ means[j])
+            best = 0.0
+            for i in range(count):
+                for j in range(i + 1, count):
+                    if likeness[i, j] < max(min_likeness, best):
+                        continue
+                    rivals = [
+                        likeness[a, c]
+                        for a, b in ((i, j), (j, i))
+                        for c in range(count)
+                        if c not in (i, j) and not allowed[b, c]
+                    ]
+                    if likeness[i, j] - max(rivals, default=-1.0) >= min_lead:
+                        best, pair = likeness[i, j], (i, j)
+        if pair is None:
+            break
+        i, j = pair
+        groups[i] = groups[i] + groups[j]
+        del groups[j]
+    return groups
+
+
 class TrackletLinkingTest(unittest.TestCase):
     def setUp(self):
         self.module = load_module("processing.tracklet_linking")
@@ -90,6 +151,35 @@ class TrackletLinkingTest(unittest.TestCase):
             self.module, "get_setting", side_effect=lambda key, d=None: settings.get(key, d)
         ):
             self.assertEqual(self.book.players(60.0), {1: 1, 2: 1})
+
+    def test_joining_pair_by_pair_or_keeping_the_pairs_gives_the_same_groups(self):
+        module = self.module
+        for seed in range(12):
+            rng = np.random.default_rng(seed)
+            players = [looks(*rng.normal(size=6)) for _ in range(5)]
+            tracklets = []
+            for track_id in range(1, 41):
+                player = int(rng.integers(5))
+                first = int(rng.integers(0, 2000))
+                tracklet = module.Tracklet(track_id, first, first + int(rng.integers(5, 200)))
+                if rng.random() < 0.8:
+                    tracklet.team_sightings[player % 2] = 10
+                if rng.random() < 0.3:
+                    tracklet.number = str(player) if rng.random() < 0.9 else "99"
+                if rng.random() < 0.8:
+                    tracklet.first_place = rng.uniform(0, 100, size=2)
+                    tracklet.last_place = tracklet.first_place + rng.normal(size=2)
+                for _ in range(int(rng.integers(0, 6))):
+                    tracklet.learn(players[player] + rng.normal(scale=0.2, size=6))
+                tracklets.append(tracklet)
+            for needs_place in (True, False):
+                with self.subTest(seed=seed, needs_place=needs_place):
+                    slow = connect_pair_by_pair(module, tracklets, 30.0, 0.5, 0.1, needs_place)
+                    quick = module.connect(tracklets, 30.0, 0.5, 0.1, needs_place)
+                    self.assertEqual(
+                        [[t.track_id for t in group] for group in quick],
+                        [[t.track_id for t in group] for group in slow],
+                    )
 
     def test_a_track_hardly_looked_at_is_left_alone(self):
         self.track(1, 0, 100, looks(1, 0, 0))

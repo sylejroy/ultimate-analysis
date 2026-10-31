@@ -280,20 +280,13 @@ def _fill_holes_flood_fill_optimized(mask: np.ndarray) -> np.ndarray:
         if not np.any(mask) or np.all(mask):
             return mask
 
-        # Create a padded mask for flood fill (more efficient than copying)
-        flood_mask = np.zeros((h + 2, w + 2), dtype=np.uint8)
-
-        # Copy inverted mask to center (vectorized operation)
-        flood_mask[1:-1, 1:-1] = 1 - mask
-
-        # Flood fill from corner - only if corner is actually background
-        if flood_mask[0, 0] == 1:
-            cv2.floodFill(flood_mask, None, (0, 0), 0)
-
-        # Extract filled region and invert back (vectorized)
-        filled_mask = 1 - flood_mask[1:-1, 1:-1]
-
-        return filled_mask.astype(np.uint8)
+        # The background with a ring of background around it, so that every background
+        # pixel that touches the frame's edge is reached from the corner. The flood
+        # marks what it reaches; the background it does not reach is a hole.
+        outside = np.ones((h + 2, w + 2), dtype=np.uint8)
+        outside[1:-1, 1:-1] = mask == 0
+        cv2.floodFill(outside, None, (0, 0), 2)
+        return (outside[1:-1, 1:-1] != 2).astype(np.uint8)
 
     except Exception as e:
         logger.error(f"Error in optimized hole filling: {e}")

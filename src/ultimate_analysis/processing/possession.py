@@ -66,6 +66,7 @@ import cv2
 import numpy as np
 
 from ..config.settings import get_setting
+from ..constants import PLAYER_HEIGHT_PIXELS
 
 Box = Tuple[float, float, float, float]
 
@@ -101,7 +102,6 @@ MIN_AWAY = 0.2
 # Something lying on the field is known again within this share of a player's height of
 # where it lies (the detector places it a little differently in every frame), ...
 STRAY_RADIUS = 0.3
-PLAYER_HEIGHT_PIXELS = 80.0  # A player's height when none is in the picture to measure by
 # ... is the same thing for as long as it is seen there again within this time
 # (seconds: a towel at the sideline is found in one frame of eight),
 STRAY_UNSEEN_SECONDS = 3.0
@@ -653,7 +653,9 @@ class PossessionTracker:
             self._out_of_box_since = None
 
         self._follow_disc(
-            centre, at_disc is not None, float(np.median(heights)) if heights else 90.0
+            centre,
+            at_disc is not None,
+            float(np.median(heights)) if heights else PLAYER_HEIGHT_PIXELS,
         )
         self._watch_ground(centre if at_disc is None else None, tracks)
         return self._count(at_disc, tracks)

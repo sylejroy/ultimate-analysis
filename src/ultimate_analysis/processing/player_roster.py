@@ -103,7 +103,7 @@ class PlayerRoster:
         if team is not None:
             track.team = team
         if track.entry is not None:
-            self._add_look(self.entries[track.entry], vector)
+            self._add_looks(self.entries[track.entry], vector, 1)
 
     def number_read(self, track_id: int, number: str) -> None:
         """A jersey number was read on a track with certainty."""
@@ -134,12 +134,26 @@ class PlayerRoster:
         if known is None:
             self._tracks[new_track_id] = track
             return
+        # The two are one player, of the entry the kept track has (else the other's).
+        # A track's looks are in its entry already, so two entries are merged, and the
+        # looks of a track without one are put in once.
+        entry = known.entry if known.entry is not None else track.entry
+        for other in (track, known):
+            if entry is None or other.entry == entry:
+                continue
+            if other.entry is not None:
+                self._merge(self.entries[other.entry], self.entries[entry])
+            elif other.total is not None:
+                self._add_looks(self.entries[entry], other.total, other.looks)
+        if track.entry is None and track.number is not None and known.number is None:
+            if entry is not None:
+                self._name(entry, track.number)  # Not counted on any entry yet
         if track.total is not None:
             known.total = track.total if known.total is None else known.total + track.total
             known.looks += track.looks
         known.team = known.team if known.team is not None else track.team
         known.number = known.number or track.number
-        known.entry = known.entry if known.entry is not None else track.entry
+        known.entry = entry
 
     def tracks_ended(self, track_ids: Optional[Sequence[int]] = None) -> None:
         """The tracker has dropped these tracks, or all of them (a cut): their numbers
@@ -229,9 +243,10 @@ class PlayerRoster:
         return entry.entry
 
     @staticmethod
-    def _add_look(entry: Entry, vector: np.ndarray) -> None:
-        entry.vector = _unit(entry.vector * entry.looks + vector)
-        entry.looks += 1
+    def _add_looks(entry: Entry, total: np.ndarray, looks: int) -> None:
+        """Add looks to an entry: their sum, and how many."""
+        entry.vector = _unit(entry.vector * entry.looks + total)
+        entry.looks += looks
 
     def _name(self, entry_id: int, number: str) -> None:
         """Give an entry a number reading; if another entry of the team has that number
@@ -257,6 +272,9 @@ class PlayerRoster:
         into.numbers.update(gone.numbers)
         for what, amount in gone.stats.items():
             into.stats[what] = into.stats.get(what, 0.0) + amount
+        for track in self._tracks.values():
+            if track.entry == gone.entry:
+                track.entry = into.entry
         del self.entries[gone.entry]
 
     # ------------------------------------------------------------------ on disk

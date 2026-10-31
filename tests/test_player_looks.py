@@ -224,6 +224,25 @@ class PlayerLooksTest(unittest.TestCase):
         self.assertEqual(looks.swapped([1], 12), [])
         self.assertEqual(looks.swapped([1, 2], 13), [(1, 2)])
 
+    def test_a_track_renamed_in_a_crossing_is_judged_under_its_new_name(self):
+        looks, module = self.looks, self.module
+        for track_id, vector in ((1, [1.0, 0.0]), (2, [0.0, 1.0])):
+            profile = module._Profile(first=0, last=10)
+            for _ in range(module.TRUSTED_LOOKS):
+                profile.learn(np.array(vector))
+            profile.held = [(np.array(vector[::-1]), None)] * module.CROSSING_LOOKS
+            looks._profiles[track_id] = profile
+        looks._crossings = {(1, 2): 10}
+        looks._overlapping = {1, 2}
+        looks.rename(2, 9)
+        self.assertEqual(looks._crossings, {(1, 9): 10})
+        self.assertEqual(looks._overlapping, {1, 9})
+        self.assertEqual(looks.swapped([1, 9], 13), [(1, 9)])
+        # What was held since the crossing is learned, not forgotten with the old name
+        self.assertEqual(looks._crossings, {})
+        self.assertEqual(looks._profiles[9].held, [])
+        self.assertEqual(looks._profiles[9].looks, module.TRUSTED_LOOKS + module.CROSSING_LOOKS)
+
     def test_two_tracks_that_exchanged_names_exchange_what_is_theirs(self):
         self.looks._ran_from = {1: (0, np.array([1.0, 1.0]))}
         self.looks._crossings = {(1, 5): 3}

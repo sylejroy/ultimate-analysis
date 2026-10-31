@@ -127,6 +127,8 @@ class Track:
         at most."""
         if len(self.crops) <= count:
             return list(self.crops)
+        if count == 1:
+            return [self.crops[len(self.crops) // 2]]  # One crop: from the middle
         step = (len(self.crops) - 1) / (count - 1)
         return [self.crops[round(index * step)] for index in range(count)]
 
