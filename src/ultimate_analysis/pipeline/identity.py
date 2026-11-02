@@ -234,7 +234,10 @@ class IdentityStage:
         for track in _players(tracks):
             if track.track_id in self.player_ids:
                 number, certainty = get_best_jersey_number(track.track_id)
-                if number and certainty >= needed:
+                # Not a player shown without it, or going by another: the votes may be
+                # of whoever the tracker swapped them with (player_numbers.py)
+                shown = self.player_ids[track.track_id][0]
+                if number and certainty >= needed and str(shown) == str(number):
                     certain[track.track_id] = str(number)
         return certain
 

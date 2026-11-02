@@ -22,6 +22,16 @@ logger = get_logger("JERSEY_TRACKER")
 # A one-digit reading may be half of a two-digit number that is partly hidden. It backs the
 # two-digit numbers it could be part of with this share of its vote.
 PARTIAL_READING_SUPPORT = 0.5
+# In choosing between the two, a number read this often takes more, up to all of the digit's
+# vote: this times the number's own votes over the digit's. A shirt turned away gives "2"
+# off a "12" often and two misreads can say "23" off a "2", so a number needs about a
+# seventh of the digit's votes to lead it. Certainty stays with the share above: a number
+# that leads by votes it borrowed is not final, and more of the digit puts it right.
+READS_TO_TAKE_MORE = 2
+SUPPORT_PER_OWN_VOTE = 6.0
+# Digits this far from the middle of the box are mostly a neighbour's (10 of 14 readings
+# near that edge were wrong), and a reading counts as read however little it weighs
+OFF_THE_PLAYER = 0.3
 
 
 @dataclass
@@ -30,6 +40,7 @@ class JerseyReading:
 
     jersey_number: str
     weight: float
+    order: int = 0  # Among the readings of all players: the higher, the later
 
 
 class JerseyNumberTracker:
@@ -37,6 +48,7 @@ class JerseyNumberTracker:
 
     def __init__(self):
         self._readings: Dict[int, Deque[JerseyReading]] = defaultdict(deque)
+        self._read_so_far = 0
         self.max_readings = int(get_setting("models.player_id.tracking.max_history_length", 40))
         self.min_readings = int(get_setting("models.player_id.tracking.min_readings", 2))
         self.unknown_weight = float(get_setting("models.player_id.tracking.unknown_weight", 1.0))
@@ -72,9 +84,12 @@ class JerseyNumberTracker:
         """
         if not jersey_number or jersey_number == "Unknown" or confidence <= 0:
             return
+        if abs(bbox_center_x - 0.5) >= OFF_THE_PLAYER:
+            return
         readings = self._readings[track_id]
         weight = float(confidence) * self._spatial_weight(bbox_center_x)
-        readings.append(JerseyReading(str(jersey_number), weight))
+        self._read_so_far += 1
+        readings.append(JerseyReading(str(jersey_number), weight, self._read_so_far))
         while len(readings) > self.max_readings:
             readings.popleft()
 
@@ -97,15 +112,22 @@ class JerseyNumberTracker:
 
         # One-digit readings also back the two-digit numbers that contain the digit
         support = dict(votes)
+        lead = dict(votes)
         support_counts = dict(counts)
         for number in votes:
             if len(number) == 2:
                 for digit in set(number):
-                    support[number] += PARTIAL_READING_SUPPORT * votes.get(digit, 0.0)
+                    digit_votes = votes.get(digit, 0.0)
+                    support[number] += PARTIAL_READING_SUPPORT * digit_votes
+                    share = PARTIAL_READING_SUPPORT
+                    if digit_votes and counts[number] >= READS_TO_TAKE_MORE:
+                        scaled = SUPPORT_PER_OWN_VOTE * votes[number] / digit_votes
+                        share = min(1.0, max(share, scaled))
+                    lead[number] += share * digit_votes
                     support_counts[number] += counts.get(digit, 0)
 
         total = sum(votes.values()) + self.unknown_weight
-        ranked = sorted(support, key=lambda number: support[number], reverse=True)
+        ranked = sorted(lead, key=lambda number: lead[number], reverse=True)
         return [
             (number, min(1.0, support[number] / total), counts[number])
             for number in ranked
@@ -116,6 +138,11 @@ class JerseyNumberTracker:
         """(number, certainty) of a player, or (None, 0.0) while there is too little to go on."""
         top = self.get_top_probabilities(track_id, top_k=1)
         return (top[0][0], top[0][1]) if top else (None, 0.0)
+
+    def last_read(self, track_id: int, number: str) -> int:
+        """When a number was last read on a player, among all readings (0: never)."""
+        readings = self._readings.get(track_id, ())
+        return max((r.order for r in readings if r.jersey_number == number), default=0)
 
     def tracked_ids(self) -> List[int]:
         """Players with at least one reading."""
@@ -169,6 +196,11 @@ def get_jersey_read_count(track_id: int, number: str) -> int:
         ),
         0,
     )
+
+
+def get_jersey_last_read(track_id: int, number: str) -> int:
+    """When a number was last read on a player, among all readings (0: never)."""
+    return get_jersey_tracker().last_read(track_id, number)
 
 
 def merge_jersey_readings(from_id: int, into_id: int) -> None:

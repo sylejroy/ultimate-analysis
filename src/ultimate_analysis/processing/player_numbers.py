@@ -4,8 +4,12 @@ Only some players are read in a frame (processing/player_id.py), and a reading m
 nothing. This keeps for every player on screen the number last read, falls back to the
 number most of their readings agreed on (processing/jersey_tracker.py), and uses a number
 that is read often enough to tell that a "new" player is one who had gone missing.
+
+A number shown stays until another clearly leads it, and a team has one player of a
+number: where two show it, the tracker has swapped them, and the votes went along.
 """
 
+from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
@@ -15,6 +19,8 @@ from ..utils.logger import get_logger
 from .jersey_crops import JerseyCropSelector
 from .jersey_tracker import (
     get_best_jersey_number,
+    get_jersey_last_read,
+    get_jersey_probabilities,
     get_jersey_read_count,
     merge_jersey_readings,
     reset_jersey_tracker,
@@ -28,6 +34,10 @@ logger = get_logger("PLAYER_NUMBERS")
 # it: a number misread twice on one box is not rare, and a join cannot be undone
 MIN_READS_TO_JOIN = 3
 
+# Share of the votes by which another number must lead the one a player shows to take its
+# place. A digit that turns out to be part of a two-digit number needs no lead.
+KEEP_LEAD = 0.2
+
 NO_NUMBER = ("Unknown", None, "")
 
 
@@ -39,6 +49,7 @@ class PlayerNumbers:
         self._tracker = tracker
         # Player ID -> (number or "Unknown", details of the reading)
         self.numbers: Dict[int, Tuple[str, Any]] = {}
+        self._shown: Dict[int, str] = {}  # Player ID -> the number they went by last
         self.crops = JerseyCropSelector()
         self._finalized: Set[int] = set()  # Players whose number is settled
         # Asked before two players are joined by their number: whether anything else
@@ -53,6 +64,7 @@ class PlayerNumbers:
         if readings_too:
             reset_jersey_tracker()
         self.numbers.clear()
+        self._shown.clear()
         self._finalized.clear()
 
     def update(
@@ -73,21 +85,22 @@ class PlayerNumbers:
             crop_selector=self.crops,
             background=bool(get_setting("models.player_id.background_reading", True)),
         )
-        self.numbers.update(read)
+        for player_id, (number, details) in read.items():
+            self.numbers[player_id] = (self._to_show(player_id) or number, details)
 
         # Players not read this frame, or read as unknown, take the number most of their
         # readings so far agreed on
         for track in tracks:
             current = self.numbers.get(track.track_id)
             if current is None or current[0] in NO_NUMBER:
-                best_number, best_probability = get_best_jersey_number(track.track_id)
-                if best_number and best_probability > 0.0:
+                number = self._to_show(track.track_id)
+                if number:
                     details = (current[1] if current else None) or {}
                     details["best_tracked"] = {
-                        "jersey_number": best_number,
-                        "probability": best_probability,
+                        "jersey_number": number,
+                        "probability": get_best_jersey_number(track.track_id)[1],
                     }
-                    self.numbers[track.track_id] = (best_number, details)
+                    self.numbers[track.track_id] = (number, details)
 
         renamed = self._merge_by_number(tracks)
 
@@ -95,7 +108,41 @@ class PlayerNumbers:
         on_screen = {track.track_id for track in tracks}
         for player_id in [player for player in self.numbers if player not in on_screen]:
             del self.numbers[player_id]
+        self._one_of_a_number_per_team(tracks)
         return timing, renamed
+
+    def _to_show(self, player_id: int) -> Optional[str]:
+        """The number a player goes by, if any: the one the votes lead with, unless the
+        one they go by already is not clearly led."""
+        best, certainty = get_best_jersey_number(player_id)
+        shown = self._shown.get(player_id)
+        if not best:
+            return shown
+        if shown and best != shown and not (len(best) > len(shown) and shown in best):
+            ranked = get_jersey_probabilities(player_id, top_k=10)
+            held = next((sure for number, sure, _ in ranked if number == shown), 0.0)
+            if certainty - held < KEEP_LEAD:
+                return shown
+        self._shown[player_id] = best
+        return best
+
+    def _one_of_a_number_per_team(self, tracks: List[Any]) -> None:
+        """Where two players of a team show one number, only the one it was read on last
+        shows it: the other was left with the votes of whoever the tracker swapped them with.
+        A settled player is read no more and can lose it to a teammate. Putting them first
+        was worse: 1,231 wrong frames against 1,061, since a swap leaves the wrong one settled."""
+        wearers: Dict[Tuple[int, str], List[int]] = defaultdict(list)
+        for track in tracks:
+            number = self.numbers.get(track.track_id, NO_NUMBER)[0]
+            team = getattr(track, "team", None)
+            if track.class_name == "player" and team is not None and str(number).isdigit():
+                wearers[(team, str(number))].append(track.track_id)
+        for (_, number), players in wearers.items():
+            if len(players) > 1:
+                keeper = max(players, key=lambda player: get_jersey_last_read(player, number))
+                for player in players:
+                    if player != keeper:
+                        self.numbers[player] = ("Unknown", self.numbers[player][1])
 
     def join(self, track: Any, earlier: int) -> None:
         """A track is a player known before and missing since: it goes on as that player,
@@ -106,6 +153,12 @@ class PlayerNumbers:
         track.track_id = earlier
         if player_id in self.numbers:
             self.numbers[earlier] = self.numbers.pop(player_id)
+        # The player goes by the votes of both, not by what the newcomer went by
+        self._shown.pop(player_id, None)
+        self._shown.pop(earlier, None)
+        shown = self._to_show(earlier)
+        if shown and earlier in self.numbers:
+            self.numbers[earlier] = (shown, self.numbers[earlier][1])
         if player_id in self._finalized:
             self._finalized.discard(player_id)
             self._finalized.add(earlier)

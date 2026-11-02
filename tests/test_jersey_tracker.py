@@ -59,6 +59,41 @@ class JerseyTrackerTests(unittest.TestCase):
         self.read("23", times=2, player=3)
         self.assertEqual(self.read("7", times=3, player=3)[0], "7")
 
+    def test_a_number_read_twice_leads_a_digit_read_about_as_often(self):
+        self.read("2", times=6)
+        self.read("12")
+        self.assertEqual(self.tracker.get_best_jersey_number(1)[0], "2")  # A stray "12"
+        self.assertEqual(self.read("12")[0], "12")
+
+    def test_a_number_read_first_stays_ahead_of_a_digit_read_many_times_after(self):
+        self.read("12", times=2)
+        self.assertEqual(self.read("2", times=12)[0], "12")
+
+    def test_two_misreads_do_not_overturn_a_digit_read_for_long(self):
+        self.read("2", times=30)
+        number, certainty = self.read("23", times=2)
+        self.assertEqual(number, "2")
+        self.assertGreater(certainty, 0.9)
+
+    def test_a_number_leading_on_borrowed_votes_is_not_final_and_more_of_the_digit_undoes_it(self):
+        self.read("2", times=5)
+        self.read("23", times=2)
+        number, certainty = self.read("2")
+        self.assertEqual(number, "23")
+        self.assertLess(certainty, 0.9)  # finalized_certainty_threshold: it is read on
+        self.assertEqual(self.read("2", times=9)[0], "2")
+
+    def test_digits_at_the_side_of_the_box_are_a_neighbours_and_not_counted(self):
+        self.read("79", times=3, center_x=0.15)
+        self.read("79", times=3, center_x=0.85)
+        self.assertEqual(self.tracker.tracked_ids(), [])
+
+    def test_it_is_known_which_of_two_players_a_number_was_read_on_last(self):
+        self.read("19", times=2, player=6)
+        self.read("19", player=32)
+        self.assertGreater(self.tracker.last_read(32, "19"), self.tracker.last_read(6, "19"))
+        self.assertEqual(self.tracker.last_read(32, "77"), 0)
+
     def test_readings_at_the_edge_of_the_box_and_unreadable_ones_count_less_or_not(self):
         self.read("5", times=2, center_x=0.5)
         self.assertEqual(self.read("8", times=3, center_x=0.02)[0], "5")
