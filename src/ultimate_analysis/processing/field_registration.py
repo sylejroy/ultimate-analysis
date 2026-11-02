@@ -30,18 +30,40 @@ Line = np.ndarray  # Two pixels, shape (2, 2)
 CENTRAL_FIELD, END_ZONE = 0, 1  # Classes of the field model
 # A line counts as running across the field if it is this flat in the picture
 ACROSS_MAX_DEGREES = 20.0
+# ... or, where a goal line is seen, if it is this near the way that runs. With the camera
+# turned aside a sideline can lie as flat as the back line, but not near the way of a goal
+# line: on the labelled frames the sidelines were 15.6 degrees or more from it, the lines
+# across 2.2 or less, and edges of a mask that are neither up to 13
+SAME_WAY_DEGREES = 12.0
 # Rows between the two pixels compared to find where one area ends and the next begins,
 # as a share of the masks' height (and at least 3): the areas may leave a seam of some
 # rows between them
 BOUNDARY_SHARE = 1.0 / 100.0
+# Lines of the outline this near the top one, as a share of the picture's height, are two
+# fits of the same edge of the field: where the mask spills over it the longer is the truer
+TOP_LINES_SHARE = 0.015
 # A goal line must be found over at least this share of the picture's width
 MIN_GOAL_LINE_SHARE = 0.12
 # Pixels of a boundary count towards a line up to this far from it, in mask pixels
 GOAL_LINE_REACH = 3.0
-# Lines that agree on one camera this well, in pixels, are all taken as found
-GOOD_MISFIT_PIXELS = 4.0
+# Lines that agree on one camera this well, in pixels, are all taken as found, and may
+# teach the focal length. Beyond it a line may be false: a caption's edge 40 pixels from
+# a goal line misses by 2.4 and takes the field 11 pixels off, whereas without it the lines
+# agree. On the labelled frames anything from 2 to 4 gives the same
+GOOD_MISFIT_PIXELS = 2.0
 # Lines that agree worse than this give no estimate
-MAX_MISFIT_PIXELS = 8.0
+MAX_MISFIT_PIXELS = 4.0
+# A camera can zoom. With five lines, enough to say the focal length themselves, they
+# are fitted without it if they miss the known one by this much. That is taken if its
+# misfit is less than this share, and it is no more than the last number: a false goal
+# line can be fitted away by a wrong focal length, but not this well
+ZOOM_MISFIT_PIXELS = 1.0
+ZOOM_MISFIT_SHARE = 0.75
+ZOOM_FITS_PIXELS = 1.5
+# The focal lengths a lens has that shows a field, as shares of the picture's width. Four
+# lines fix a camera with little left over, and can agree on any focal length: over ten
+# videos they gave 0.19 to 10.5, five lines 0.5 to 0.99, the field labels 0.70 to 0.90
+MIN_FOCAL_SHARE, MAX_FOCAL_SHARE = 0.5, 1.5
 # A video's focal length is taken as known once this many frames have given one. After
 # that only every so many frames are asked, up to the last number: frames one after
 # the other show the same view and say the same
@@ -85,9 +107,9 @@ SEEN_LATELY = 0.3
 # An estimate is left out if fewer than this share of the players stand on the field as
 # estimated (with some room around it: a player may be out of bounds), or if the field as
 # estimated and the field the model sees share less than this much of what either covers.
-# Of 41 estimates on labelled frames, the 16 within 2 yd at the labelled corners had all
-# players on the field and shared 0.91 or more; the far-off ones went down to 0.47 and 0.15
-MIN_FEET_ON_FIELD = 0.9
+# Substitutes, coaches and cameramen stand beside the field: on the labelled frames
+# estimates with 0.70 of the detected on the field were within 2 yd at the labelled corners
+MIN_FEET_ON_FIELD = 0.65
 FEET_MARGIN = 3.0
 MIN_PLAYERS_FOR_CHECK = 6
 MIN_MASK_AGREEMENT = 0.85
@@ -223,6 +245,7 @@ class FieldFollower:
         self.left_out = ""  # Why the last estimate was not taken, if it was not
         self._focal = FocalLength()
         self._known_focal: Optional[float] = None
+        self._zoomed_to: Optional[float] = None  # Of the estimate taken last
         # An estimate far from where the field was followed to, waiting to be said again
         self._doubted: Optional[np.ndarray] = None
         self.max_frames_unseen = MAX_FRAMES_UNSEEN
@@ -232,8 +255,10 @@ class FieldFollower:
 
     @property
     def focal(self) -> Optional[float]:
-        """The focal length of the video's camera in pixels, as far as it is known."""
-        return self._known_focal if self._known_focal is not None else self._focal.value
+        """The focal length of the video's camera in pixels, as far as it is known; if
+        the camera has zoomed, the one the field was last estimated with."""
+        known = self._known_focal if self._known_focal is not None else self._focal.value
+        return None if known is None else self._zoomed_to or known
 
     def new_video(self, focal: Optional[float] = None, kept_in: Optional[Path] = None) -> None:
         """Another camera: forget its focal length too, or take the one that is known.
@@ -245,6 +270,7 @@ class FieldFollower:
         """
         self._focal = FocalLength(kept_in if focal is None else None)
         self._known_focal = focal
+        self._zoomed_to = None
         self.reset()
 
     def reset(self) -> None:
@@ -349,11 +375,11 @@ class FieldFollower:
             estimated = estimated @ np.linalg.inv(since)
         self._frame_shape = tuple(frame_shape)
         if self.image_to_field is None:
-            self.image_to_field = estimated
+            self.image_to_field, self._zoomed_to = estimated, estimate.focal
             self._seen()
             return
         if self._apart(self.image_to_field, estimated, frame_shape) <= JUMP_DISTANCE:
-            self._doubted = None
+            self._doubted, self._zoomed_to = None, estimate.focal
             self._seen()
             self.image_to_field = self._blend(self.image_to_field, estimated, frame_shape)
             return
@@ -364,6 +390,7 @@ class FieldFollower:
             and self._apart(self._doubted, estimated, frame_shape) <= JUMP_DISTANCE
         ):
             self.image_to_field, self._doubted = estimated, None
+            self._zoomed_to = estimate.focal
             self._seen()
         else:
             self._doubted = estimated
@@ -541,8 +568,17 @@ def estimate_field(
             and tried["near_goal_line"][:, 1].mean() <= tried["far_goal_line"][:, 1].mean()
         ):
             return None
+        if focal is None:
+            return fit_finding_focal(tried)
         by_name = {name: [tuple(pixel) for pixel in line] for name, line in tried.items()}
         return fit_camera(template, by_name, {}, size, focal)
+
+    def fit_finding_focal(tried: Dict[str, Line]) -> Optional[CameraFit]:
+        by_name = {name: [tuple(pixel) for pixel in line] for name, line in tried.items()}
+        fit = fit_camera(template, by_name, {}, size)
+        if fit is None or not MIN_FOCAL_SHARE <= fit.focal / size[0] <= MAX_FOCAL_SHARE:
+            return None
+        return fit
 
     # A goal line the classes do not name is tried as either; the camera decides
     best: Optional[Tuple[CameraFit, Dict[str, Line]]] = None
@@ -553,6 +589,20 @@ def estimate_field(
         fit = camera_for(tried)
         if fit is not None and (best is None or fit.error < best[0].error):
             best = (fit, tried)
+    if (
+        focal is not None
+        and best is not None
+        and len(best[1]) >= 5
+        and best[0].error > ZOOM_MISFIT_PIXELS
+    ):
+        # Before any line is given up: four lines would agree on the wrong focal length
+        free = fit_finding_focal(best[1])
+        if (
+            free is not None
+            and free.error <= ZOOM_FITS_PIXELS
+            and free.error < ZOOM_MISFIT_SHARE * best[0].error
+        ):
+            best = (free, best[1])
     if best is not None and best[0].error > GOOD_MISFIT_PIXELS:
         # The lines do not agree on one camera: one of the goal lines may be none (an end
         # zone seen where there is a caption, say), so each is left out in turn
@@ -588,19 +638,26 @@ def found_lines(
         mask = create_unified_field_mask(segmentation_results, frame_shape)
         outline_lines = fit_lines_from_mask(mask)[0] if mask is not None else []
 
+    meetings = _meetings(segmentation_results, frame_shape)
+    goal_line = max(meetings, key=lambda found: found[0], default=(0.0, None))[1]
     across, along = [], []
     for line in outline_lines:
         line = np.asarray(line, dtype=np.float64).reshape(2, 2)
-        (across if _is_across(line) else along).append(line)
+        (across if _runs_across(line, goal_line) else along).append(line)
     lines: Dict[str, Line] = {}
     if across:
-        lines["far_back_line"] = min(across, key=lambda line: line[:, 1].sum())
+        top = min(float(line[:, 1].mean()) for line in across)
+        reach = TOP_LINES_SHARE * frame_shape[0]
+        lines["far_back_line"] = max(
+            (line for line in across if line[:, 1].mean() <= top + reach),
+            key=lambda line: np.linalg.norm(line[1] - line[0]),
+        )
     if len(along) >= 2:
         by_place = sorted(along, key=lambda line: line[:, 0].sum())
         lines["left_sideline"], lines["right_sideline"] = by_place[0], by_place[-1]
     unsure: List[Line] = []
     if "far_back_line" in lines:
-        named, unsure = _goal_lines(segmentation_results, frame_shape, lines["far_back_line"])
+        named, unsure = _goal_lines(meetings, lines["far_back_line"])
         lines.update(named)
     return lines, unsure
 
@@ -609,6 +666,16 @@ def _is_across(line: Line) -> bool:
     (x1, y1), (x2, y2) = line
     angle = abs(np.degrees(np.arctan2(y2 - y1, x2 - x1))) % 180.0
     return min(angle, 180.0 - angle) <= ACROSS_MAX_DEGREES
+
+
+def _runs_across(line: Line, goal_line: Optional[Line]) -> bool:
+    """Whether a line of the outline runs across the field: as a goal line does if one is
+    seen, otherwise if it is flat in the picture."""
+    if goal_line is None:
+        return _is_across(line)
+    ways = [np.degrees(np.arctan2(*(end[1] - end[0])[::-1])) for end in (line, goal_line)]
+    apart = abs(ways[0] - ways[1]) % 180.0
+    return min(apart, 180.0 - apart) <= SAME_WAY_DEGREES
 
 
 def _areas(segmentation_results: List[Any]) -> Tuple[Optional[np.ndarray], List[int]]:
@@ -637,17 +704,14 @@ def _to_numpy(values: Any) -> Any:
     return values.cpu().numpy() if hasattr(values, "cpu") else values
 
 
-def _goal_lines(
-    segmentation_results: List[Any], frame_shape: Tuple[int, int], far_back_line: Line
-) -> Tuple[Dict[str, Line], List[Line]]:
-    """The goal lines: where an end zone and the central field, or two areas, meet.
-
-    Returns:
-        (goal lines by name, those of which the classes do not tell whether far or near)
-    """
+def _meetings(
+    segmentation_results: List[Any], frame_shape: Tuple[int, int]
+) -> List[Tuple[float, Line, int, int]]:
+    """Where two areas of the masks meet in a line running across the picture: each as
+    (length, line, class above, class below)."""
     areas, classes = _areas(segmentation_results)
     if areas is None:
-        return {}, []
+        return []
     # A model that runs at 960 gives four times the pixels of one at 640, and a goal
     # line is fitted to thousands of them either way: every second one will do
     if areas.shape[0] > GOAL_LINE_MASK_ROWS:
@@ -672,11 +736,21 @@ def _goal_lines(
             continue
         upper, lower = divmod(int(pair), len(classes) + 1)
         found.append((length, line, classes[upper], classes[lower]))
+    return found
 
+
+def _goal_lines(
+    meetings: List[Tuple[float, Line, int, int]], far_back_line: Line
+) -> Tuple[Dict[str, Line], List[Line]]:
+    """The goal lines: where an end zone and the central field, or two areas, meet.
+
+    Returns:
+        (goal lines by name, those of which the classes do not tell whether far or near)
+    """
     far_height = float(far_back_line[:, 1].mean())
     lines: Dict[str, Line] = {}
     unsure: List[Line] = []
-    for _, line, upper, lower in sorted(found, key=lambda item: -item[0]):  # The longest first
+    for _, line, upper, lower in sorted(meetings, key=lambda item: -item[0]):  # The longest first
         if float(line[:, 1].mean()) <= far_height:
             continue  # Beyond the field: the neighbouring one
         if upper == END_ZONE and lower == CENTRAL_FIELD:

@@ -4,10 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import cv2
 import numpy as np
 
+from ultimate_analysis.processing import field_registration
 from ultimate_analysis.processing.field_registration import (
     MIN_FOCAL_SAMPLES,
     FieldEstimate,
@@ -15,6 +17,7 @@ from ultimate_analysis.processing.field_registration import (
     FocalLength,
     estimate_field,
     field_to_canvas,
+    found_lines,
     implausible,
 )
 from ultimate_analysis.utils.field_camera import (
@@ -165,6 +168,153 @@ class FieldEstimateTest(unittest.TestCase):
 
     def test_no_field_without_masks(self):
         self.assertIsNone(estimate_field([], self.shape, self.template))
+
+    def pixels_of_line(self, name: str, mapping: np.ndarray = None) -> np.ndarray:
+        start, end = self.template.lines[name]
+        mapping = self.mapping if mapping is None else mapping
+        return np.array([pixel_of(mapping, start), pixel_of(mapping, end)])
+
+    def test_a_flat_sideline_is_a_sideline_where_a_goal_line_says_which_way_across_is(self):
+        flat = np.array([[1000.0, 300.0], [1800.0, 520.0]])  # 15 degrees from level
+        outline = [
+            np.array([[900.0, 200.0], [300.0, 1000.0]]),
+            flat,
+            np.array([[500.0, 180.0], [1400.0, 180.0]]),
+        ]
+        lines, _ = found_lines(self.results, self.shape, outline)
+        np.testing.assert_array_equal(lines["right_sideline"], flat)
+        np.testing.assert_array_equal(lines["far_back_line"], outline[2])
+
+    def test_of_two_fits_of_the_top_edge_the_longer_is_the_back_line(self):
+        spilled = np.array([[700.0, 170.0], [1200.0, 170.0]])
+        truer = np.array([[500.0, 180.0], [1400.0, 180.0]])
+        lines, _ = found_lines(self.results, self.shape, [spilled, truer])
+        np.testing.assert_array_equal(lines["far_back_line"], truer)
+
+    def test_a_long_line_further_down_is_not_the_back_line(self):
+        back = np.array([[700.0, 170.0], [1200.0, 170.0]])
+        lower = np.array([[300.0, 300.0], [1600.0, 300.0]])
+        lines, _ = found_lines(self.results, self.shape, [back, lower])
+        np.testing.assert_array_equal(lines["far_back_line"], back)
+
+    def test_without_a_goal_line_a_flat_line_runs_across(self):
+        flat = np.array([[1000.0, 300.0], [1800.0, 520.0]])
+        outline = [np.array([[900.0, 200.0], [300.0, 1000.0]]), flat]
+        lines, _ = found_lines([], self.shape, outline)
+        np.testing.assert_array_equal(lines["far_back_line"], flat)
+        self.assertNotIn("right_sideline", lines)
+
+    def seen_from_behind_the_near_end(self):
+        return camera_mapping(FOCAL, looking_down_the_field(), (18.0, -20.0, 14.0), SIZE)
+
+    def test_a_far_end_zone_taken_for_central_field_leaves_the_top_line_the_back_line(self):
+        for result in self.results:
+            result.boxes.cls = np.zeros_like(result.boxes.cls)
+        lines, unsure = found_lines(self.results, self.shape)
+        self.assertIn("far_back_line", lines)
+        self.assertEqual(len(unsure), 1)
+        for focal in (FOCAL, None):
+            estimate = estimate_field(self.results, self.shape, self.template, focal=focal)
+            self.assertIsNotNone(estimate)
+            self.assertIn("far_back_line", estimate.lines)
+            self.assertAlmostEqual(estimate.focal, FOCAL, delta=0.05 * FOCAL)
+            self.assertLess(self.far_corner_error(estimate.field_to_image), 8.0)
+
+    def test_a_far_end_zone_merged_with_central_field_leaves_the_top_line_the_back_line(self):
+        self.mapping = self.seen_from_behind_the_near_end()
+        results = masks_as_the_field_model_gives_them(self.template, self.mapping)
+        for result in results:
+            data = np.array(result.masks.data)
+            data[0] = np.maximum(data[0], data[1])
+            result.masks.data = np.delete(data, 1, axis=0)
+            result.boxes.cls = np.delete(result.boxes.cls, 1)
+            result.boxes.conf = np.delete(result.boxes.conf, 1)
+        for focal in (FOCAL, None):
+            estimate = estimate_field(results, self.shape, self.template, focal=focal)
+            self.assertIsNotNone(estimate)
+            self.assertIn("far_back_line", estimate.lines)
+            self.assertLess(self.far_corner_error(estimate.field_to_image), 8.0)
+
+    def five_lines(self):
+        self.mapping = self.seen_from_behind_the_near_end()
+        return {
+            name: self.pixels_of_line(name)
+            for name in (
+                "left_sideline",
+                "right_sideline",
+                "far_back_line",
+                "far_goal_line",
+                "near_goal_line",
+            )
+        }
+
+    def test_a_false_goal_line_is_left_out_not_fitted_away_by_another_focal_length(self):
+        for off in (40.0, 60.0, 80.0, 120.0):
+            named = self.five_lines()
+            named["near_goal_line"] = named["near_goal_line"] - [[0.0, off], [0.0, 0.6 * off]]
+            estimate = estimate_field([], self.shape, self.template, FOCAL, lines=(named, []))
+            self.assertIsNotNone(estimate)
+            self.assertNotIn("near_goal_line", estimate.lines)
+            self.assertAlmostEqual(estimate.focal, FOCAL)
+            self.assertLess(self.far_corner_error(estimate.field_to_image), 1.0)
+
+    def test_no_focal_length_outside_what_a_lens_has_is_learned(self):
+        fit = SimpleNamespace(
+            field_to_image=self.mapping,
+            image_to_field=np.linalg.inv(self.mapping),
+            focal=5710.0,
+            position=np.array(POSITION),
+            error=0.06,
+        )
+        follower = FieldFollower(self.template)
+        with patch.object(field_registration, "fit_camera", return_value=fit):
+            for _ in range(MIN_FOCAL_SAMPLES):
+                self.assertIsNone(follower.estimate(self.results, self.shape))
+        self.assertIsNone(follower.focal)
+        self.assertEqual(follower._focal._samples, [])
+
+    def test_the_follower_says_the_focal_length_of_a_camera_that_zoomed(self):
+        follower = FieldFollower(self.template)
+        follower.new_video(focal=FOCAL)
+        self.assertEqual(follower.focal, FOCAL)
+        follower.take(
+            SimpleNamespace(
+                field_to_image=self.mapping,
+                image_to_field=np.linalg.inv(self.mapping),
+                focal=1.1 * FOCAL,
+            ),
+            self.shape,
+        )
+        self.assertAlmostEqual(follower.focal, 1.1 * FOCAL)
+        follower.new_video(focal=FOCAL)
+        self.assertEqual(follower.focal, FOCAL)
+
+    def test_an_estimate_in_doubt_says_nothing_of_the_focal_length(self):
+        follower = FieldFollower(self.template)
+        follower.new_video(focal=FOCAL)
+
+        def estimate(moved, focal):
+            shift = np.eye(3)
+            shift[0, 2] = moved
+            return SimpleNamespace(
+                field_to_image=self.mapping,
+                image_to_field=shift @ np.linalg.inv(self.mapping),
+                focal=focal,
+            )
+
+        follower.take(estimate(0.0, FOCAL), self.shape)
+        follower.take(estimate(40.0, 1.5 * FOCAL), self.shape)  # Far off: it waits for a second
+        self.assertEqual(follower.focal, FOCAL)
+        follower.take(estimate(40.0, 1.5 * FOCAL), self.shape)
+        self.assertAlmostEqual(follower.focal, 1.5 * FOCAL)
+
+    def test_five_lines_say_the_focal_length_of_a_camera_that_zoomed(self):
+        named = self.five_lines()
+        estimate = estimate_field(
+            [], self.shape, self.template, focal=1.15 * FOCAL, lines=(named, [])
+        )
+        self.assertIsNotNone(estimate)
+        self.assertAlmostEqual(estimate.focal, FOCAL, delta=0.02 * FOCAL)
 
     def test_follower_moves_with_the_camera(self):
         follower = FieldFollower(self.template)
