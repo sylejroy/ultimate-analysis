@@ -64,6 +64,9 @@ SPEED_SECONDS = 0.6
 # Without a line-up seen: holding the disc in an end zone while everyone slows down for
 # this long is a score
 SLOW_SCORE_SECONDS = 2.5
+# A throw: the disc flew at least this long and a different player has it. The holder
+# also changes with no flight, between players standing close, and that says nothing
+MIN_THROW_SECONDS = 0.3
 
 
 @dataclass
@@ -117,6 +120,8 @@ class GameStateTracker:
         self._lined_up, self._line_broken = _Seen(), _Seen()
         self._scoring, self._slow_in_end_zone = _Seen(), _Seen()
         self._lost, self._playing, self._walking = _Seen(), _Seen(), _Seen()
+        self._held_by: Optional[int] = None
+        self._flown = 0.0  # How long the disc has flown since it was last held
 
     def reset(self) -> None:
         """Start again (new video, seek); the events so far are forgotten."""
@@ -216,6 +221,14 @@ class GameStateTracker:
         )
         walking_for = self._walking.update(typical_speed < WALKING, seconds)
 
+        # A throw needs no one to run: slow play is told from walking by this alone
+        if disc_state == "air":
+            self._flown = max(self._flown, flight_seconds or 0.0)
+        thrown = False
+        if holder is not None:
+            thrown = self._held_by not in (None, holder) and self._flown >= MIN_THROW_SECONDS
+            self._held_by, self._flown = holder, 0.0
+
         # A score: the holder stands in the end zone their team attacks
         end = self._in_end_zone(holding.y) if holding is not None else 0
         attacked = self.attacks.get(holding.team) if holding is not None else None
@@ -250,8 +263,12 @@ class GameStateTracker:
             if seconds - self.since >= SCORE_SHOWN_SECONDS:
                 self._enter(BETWEEN_POINTS, seconds)
         elif self.state in (UNKNOWN, BETWEEN_POINTS):
-            # A point under way that did not begin with a line-up that was seen
-            if playing_for >= 2.0 and typical_speed >= RUNNING:
+            # A point under way that did not begin with a line-up that was seen. Between
+            # points a throw says nothing: the disc is tossed about, and a toss in the end
+            # zone would be a score
+            if (thrown and self.state == UNKNOWN) or (
+                playing_for >= 2.0 and typical_speed >= RUNNING
+            ):
                 self._enter(LIVE, seconds)
             elif self.state == UNKNOWN and walking_for >= 3.0:
                 self._enter(BETWEEN_POINTS, seconds)

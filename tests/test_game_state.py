@@ -37,6 +37,43 @@ class GameStateTest(unittest.TestCase):
             self.time += 1 / RATE
         return state
 
+    def walking(self, t):
+        """Both teams spread over the field and nobody hurrying."""
+        return self.mixed(shift=1.0 * t)
+
+    def throw(self, flying_for, catcher):
+        """The disc held by player 3, in the air, then held by `catcher`."""
+        self.see(0.3, self.walking, disc_state="held", holder=3)
+        for step in range(int(flying_for * RATE)):
+            self.see(0.1, self.walking, disc_state="air", flight_seconds=(step + 1) / RATE)
+        return self.see(0.3, self.walking, disc_state="held", holder=catcher)
+
+    def test_a_throw_says_there_is_play_though_nobody_runs(self):
+        self.assertEqual(self.throw(0.6, catcher=5), self.module.LIVE)
+
+    def test_a_toss_between_points_is_no_play(self):
+        self.see(4.0, self.walking, disc_state="held", holder=3)
+        self.assertEqual(self.tracker.state, self.module.BETWEEN_POINTS)
+        self.assertEqual(self.throw(0.6, catcher=5), self.module.BETWEEN_POINTS)
+
+    def test_a_holder_who_changes_with_no_flight_is_no_throw(self):
+        self.see(1.0, self.walking, disc_state="held", holder=3)
+        state = self.see(1.0, self.walking, disc_state="held", holder=5)
+        self.assertEqual(state, self.module.UNKNOWN)
+
+    def test_a_moment_in_the_air_is_no_throw(self):
+        self.assertEqual(self.throw(0.2, catcher=5), self.module.UNKNOWN)
+
+    def test_the_disc_back_in_the_same_hands_is_no_throw(self):
+        self.assertEqual(self.throw(0.6, catcher=3), self.module.UNKNOWN)
+
+    def test_a_flight_before_a_cut_is_not_a_throw_after_it(self):
+        self.see(0.3, self.walking, disc_state="held", holder=3)
+        self.see(0.6, self.walking, disc_state="air", flight_seconds=0.6)
+        self.tracker.cut()
+        state = self.see(0.3, self.walking, disc_state="held", holder=5)
+        self.assertEqual(state, self.module.UNKNOWN)
+
     def test_a_point_goes_from_line_up_to_pull_to_live_to_score(self):
         m = self.module
         self.assertEqual(self.see(0.5, self.lined_up()), m.UNKNOWN)
