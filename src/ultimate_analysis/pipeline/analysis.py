@@ -6,6 +6,7 @@ The results are drawn onto the camera view and onto the top-down view. There is 
 this module: the GUI owns one AnalysisPipeline and runs it on a worker thread.
 """
 
+import gc
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -31,7 +32,7 @@ from ..processing.game_state import GameStateTracker, Player
 from ..processing.inference import DETECTOR_STAGES, reset_inference_state
 from ..processing.model_lock import GPU_SETUP_LOCK
 from ..processing.possession import PossessionTracker, players_at_disc
-from ..processing.shot_type import ShotWatcher, players_are_elsewhere
+from ..processing.shot_type import CUT_MIN_PLAYERS, ShotWatcher, is_a_cut
 from ..processing.steady_places import SteadyPlaces
 from ..processing.tracking import PlayerTracker
 from ..rendering.overlays import draw_notice
@@ -148,6 +149,9 @@ class AnalysisPipeline:
     FPS_WINDOW = 30  # Frames the displayed processing rate is averaged over
 
     def __init__(self):
+        # A pipeline dropped is in cycles with its parts, and keeps its threads and the
+        # graphics card's memory until collected: scripts make one for each stretch
+        gc.collect()
         # For what can be done beside the main work of a frame
         self._threads = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pipeline")
         self._timings: Dict[str, float] = {}
@@ -180,6 +184,7 @@ class AnalysisPipeline:
         # and where the players stood in it
         self._motion_known = False
         self._players_before = np.zeros((0, 4))
+        self.restarts = 0  # Times everything was forgotten: track IDs begin again at each
         self._follow_field = False
         # The frame analysed before, and how many video frames lie between it and this
         # one: playback passes over frames to keep up
@@ -254,6 +259,7 @@ class AnalysisPipeline:
 
     def reset(self) -> None:
         """Forget everything derived from earlier frames."""
+        self.restarts += 1
         self._field.reset()
         self._off_field.reset()
         self._steady.reset()
@@ -827,10 +833,12 @@ class AnalysisPipeline:
             players = np.array(
                 [d["bbox"] for d in self.detections if d["class_name"] == "player"]
             ).reshape(-1, 4)
+            seconds = abs(passed) / max(self._possession.frame_rate, 1.0)
             if (
-                motion is None
-                and self._motion_known
-                and players_are_elsewhere(self._players_before, players)
+                self._motion_known
+                and options.detection  # No players because nobody looked say nothing
+                and not health.failed("Detection")
+                and is_a_cut(self._players_before, players, motion, seconds)
             ):
                 # A cut to another view: every track would break and be matched with
                 # whoever stands near. What was followed belongs to the view before.
@@ -838,6 +846,9 @@ class AnalysisPipeline:
                 detections = self.detections
                 self.reset()
                 self.detections = detections
+                motion = None  # Whatever was found between the two views is no motion
+                if len(players) >= CUT_MIN_PLAYERS:
+                    self._shot.go_on()
             self._motion_known, self._players_before = motion is not None, players
             if options.detection:
                 # The next frame goes before the detectors only now: what they work out

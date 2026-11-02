@@ -343,7 +343,9 @@ class PlayerTracker:
         if self._player_tracker is None:
             return [], 0.0
         followed = self._player_tracker.tracked_stracks + self._player_tracker.lost_stracks
-        return followed, 1.0 / self._frame_rate  # Reported from its second frame on
+        # Reported from its second frame analysed on, which live playback may reach several
+        # video frames later; half a frame more, for two clocks taken apart in fractions
+        return followed, (self._frames_per_step + 0.5) / self._frame_rate
 
     def _assign_player_identities(self, frame: np.ndarray, tracks: List[Track]) -> None:
         """Replace the track IDs of this frame's tracks by the IDs of the players they are.

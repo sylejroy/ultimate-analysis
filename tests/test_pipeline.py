@@ -1,7 +1,10 @@
 """The per-frame pipeline: result reuse, state resets, and jersey number bookkeeping."""
 
+import gc
 import sys
 import unittest
+import weakref
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -123,6 +126,16 @@ class PipelineTests(unittest.TestCase):
         self.options = self.module.PipelineOptions(top_down_view=False)
         self.frame = np.zeros((8, 8, 3), dtype=np.uint8)
 
+    def test_a_new_pipeline_frees_the_one_dropped(self):
+        # Only the pipeline may collect: dropped, one stays, in cycles with its parts
+        gc.disable()
+        self.addCleanup(gc.enable)
+        gc.collect()
+        dropped = weakref.ref(self.module.AnalysisPipeline())
+        self.assertIsNotNone(dropped())
+        self.module.AnalysisPipeline()
+        self.assertIsNone(dropped())
+
     def test_redrawing_a_frame_reuses_its_analysis_and_new_frames_advance_it(self):
         first = self.pipeline.process(self.frame, 0, self.options)
         self.pipeline.process(self.frame, 0, self.options)
@@ -168,10 +181,84 @@ class PipelineTests(unittest.TestCase):
         self.pipeline.process(self.frame, 3, self.options)
         self.assertEqual(self.mocks["detect_players_and_discs"].call_count, 4)
 
+    @staticmethod
+    def row_of_players(top, count=8):
+        return [
+            {
+                "bbox": [10 + 100 * i, top, 40 + 100 * i, top + 80],
+                "class_name": "player",
+                "confidence": 0.9,
+                "class_id": 1,
+            }
+            for i in range(count)
+        ]
+
+    def followed_with_a_motion(self, motion=np.eye(3)):
+        """Two frames of drone footage with the camera's motion known; patched from then on."""
+        patcher = patch.object(self.pipeline, "_camera_motion_of", return_value=motion)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.mocks["detect_players_and_discs"].return_value = self.row_of_players(10)
+        self.pipeline.process(self.frame, 0, self.options)
+        self.pipeline.process(self.frame, 1, self.options)
+        return self.mocks["reset"].call_count, self.pipeline.restarts
+
+    def test_a_cut_is_told_also_where_a_motion_is_found_between_the_two_views(self):
+        resets, restarts = self.followed_with_a_motion()
+        self.pipeline.process(self.frame, 2, self.options)  # The same view: nothing happens
+        self.assertEqual(self.mocks["reset"].call_count, resets)
+        self.mocks["detect_players_and_discs"].return_value = self.row_of_players(400)
+        self.pipeline.process(self.frame, 3, self.options)
+        self.assertEqual(self.mocks["reset"].call_count, resets + 1)
+        self.assertEqual(self.pipeline.restarts, restarts + 1)
+        # Players missed in the frame after are no reason to stop
+        self.mocks["detect_players_and_discs"].return_value = self.row_of_players(400, 2)
+        self.assertTrue(self.pipeline.process(self.frame, 4, self.options).wide_shot)
+
+    def test_a_swing_of_the_camera_with_few_players_left_forgets_nothing(self):
+        resets, _ = self.followed_with_a_motion()
+        self.mocks["detect_players_and_discs"].return_value = self.row_of_players(400, 2)
+        result = self.pipeline.process(self.frame, 2, self.options)
+        self.assertEqual(self.mocks["reset"].call_count, resets)
+        self.assertTrue(result.wide_shot)
+
+    def test_a_hitch_in_playback_forgets_nothing(self):
+        resets, _ = self.followed_with_a_motion()
+        self.mocks["detect_players_and_discs"].return_value = self.row_of_players(400)
+        self.pipeline.process(self.frame, 31, self.options)  # A second on
+        self.assertEqual(self.mocks["reset"].call_count, resets)
+
+    def test_a_hitch_with_the_motion_lost_forgets_nothing(self):
+        resets, _ = self.followed_with_a_motion(motion=None)
+        self.pipeline._motion_known = True
+        self.mocks["detect_players_and_discs"].return_value = self.row_of_players(400)
+        self.pipeline.process(self.frame, 91, self.options)
+        self.assertEqual(self.mocks["reset"].call_count, resets)
+
+    def test_a_frame_without_players_forgets_nothing(self):
+        resets, _ = self.followed_with_a_motion()
+        self.mocks["detect_players_and_discs"].return_value = []
+        self.pipeline.process(self.frame, 2, self.options)
+        self.assertEqual(self.mocks["reset"].call_count, resets)
+
+    def test_a_detector_that_failed_says_nothing_of_a_cut(self):
+        resets, _ = self.followed_with_a_motion(motion=None)
+        self.pipeline._motion_known = True  # The motion is lost in this frame only
+        self.mocks["detect_players_and_discs"].return_value = []
+        with patch.object(self.module.health, "failed", return_value=True):
+            self.pipeline.process(self.frame, 2, self.options)
+        self.assertEqual(self.mocks["reset"].call_count, resets)
+
+    def test_detection_switched_off_says_nothing_of_a_cut(self):
+        resets, _ = self.followed_with_a_motion(motion=None)
+        self.pipeline._motion_known = True
+        self.pipeline.process(self.frame, 2, replace(self.options, detection=False))
+        self.assertEqual(self.mocks["reset"].call_count, resets)
+
     def test_nothing_is_followed_during_a_close_up_and_tracking_starts_afresh_after_it(self):
         self.pipeline.process(self.frame, 0, self.options)
         tracked = self.mocks["run_tracking"].call_count
-        resets = self.mocks["reset"].call_count
+        resets, restarts = self.mocks["reset"].call_count, self.pipeline.restarts
 
         # The footage cuts to a close-up: the detector finds nobody
         self.mocks["detect_players_and_discs"].return_value = []
@@ -182,6 +269,7 @@ class PipelineTests(unittest.TestCase):
         # A few frames pass before the cut is believed; from then on nothing is tracked
         self.assertLess(self.mocks["run_tracking"].call_count - tracked, 20)
         self.assertEqual(self.mocks["reset"].call_count, resets + 1)
+        self.assertEqual(self.pipeline.restarts, restarts + 1)  # IDs begin again here too
 
         # Back on the drone
         self.mocks["detect_players_and_discs"].return_value = self.players
@@ -277,6 +365,16 @@ class PipelineTests(unittest.TestCase):
                 self.pipeline._identity.numbers.crops.observe(7, self.frame, 3, 5, 100)
                 reset()
                 self.assertIsNone(self.pipeline._identity.numbers.crops.take(7, 3))
+
+    def test_a_player_shown_without_a_number_or_with_another_is_not_named_by_it(self):
+        identity = self.pipeline._identity
+        tracks = [
+            SimpleNamespace(track_id=track_id, class_name="player") for track_id in (6, 32, 40)
+        ]
+        identity.numbers.numbers.update({6: ("Unknown", None), 32: ("19", None), 40: ("7", None)})
+        module = sys.modules[type(identity).__module__]
+        with patch.object(module, "get_best_jersey_number", return_value=("19", 0.8)):
+            self.assertEqual(identity.certain_numbers(tracks), {32: "19"})
 
     def test_jersey_numbers_persist_fall_back_to_the_tracker_and_follow_the_tracks(self):
         self.pipeline.process(self.frame, 0, self.options)

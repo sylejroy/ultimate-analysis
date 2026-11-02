@@ -21,6 +21,11 @@ that run; the association numbers are what one tracker is compared with another 
     python scripts/benchmark_tracking.py hand_tracks
     python scripts/benchmark_tracking.py hand_tracks --set models.tracking.max_age_seconds=5
     python scripts/benchmark_tracking.py hand_tracks --step 2      # as "Real time" at 60 fps
+
+hand_tracks is named by the labelled run's tracks, with their swaps, and across a cut one
+name is two people. hand_tracks_audited2 names box by box from IDs looked at by eye.
+
+    python scripts/benchmark_tracking.py hand_tracks_audited2 --step 2
 """
 
 import argparse
@@ -57,6 +62,9 @@ from ultimate_analysis.utils.benchmarking import (  # noqa: E402
 MATCH_IOU = 0.5
 
 
+AFTER_A_CUT = 1000  # Added to the IDs after each restart
+
+
 def truth_of(folder: Path) -> dict:
     """Frame -> [(player label, box)], with the unlabelled left out and "x" kept apart."""
     data = json.loads((folder / "tracks.json").read_text())
@@ -86,21 +94,35 @@ def truth_of(folder: Path) -> dict:
 def run_tracker(video: str, start: int, count: int, step: int = 1) -> Tuple[dict, dict]:
     """Frame -> [(tracker ID, box)] of the pipeline as it is now, and track -> player
     as the tracks are joined looking back over the stretch. With `step`, only every
-    so many frames is analysed, as the app does in "Real time"."""
+    so many frames is analysed, as the app does in "Real time". IDs begin again at a
+    cut or a close-up, where the same number is somebody else: they are kept apart here,
+    and the tracks joined before each are taken along, as the restart forgets them."""
     path = REPO / "data" / "raw" / "videos" / f"{video}.mp4"
     pipeline = AnalysisPipeline()
     pipeline.new_video(str(path))
     pipeline.set_frame_rate(frame_rate_of(path))
     options = PipelineOptions()
+    naming = {}
+
+    def keep_joined() -> None:
+        since = AFTER_A_CUT * pipeline.restarts
+        naming.update({t + since: p + since for t, p in pipeline.players_of_tracks().items()})
+
+    def reset() -> None:
+        keep_joined()
+        restart()
+
+    restart, pipeline.reset = pipeline.reset, reset
     found = {}
     for number, frame in frames_of(path, start, start + count - 1, step):
         result = pipeline.process(frame, number, options)
         found[number - start] = [
-            (int(t.track_id), [float(v) for v in t.to_ltrb()])
+            (int(t.track_id) + AFTER_A_CUT * pipeline.restarts, [float(v) for v in t.to_ltrb()])
             for t in result.tracks
             if t.class_name == "player"
         ]
-    return found, pipeline.players_of_tracks()
+    keep_joined()
+    return found, naming
 
 
 def score(truth: dict, found: dict) -> dict:

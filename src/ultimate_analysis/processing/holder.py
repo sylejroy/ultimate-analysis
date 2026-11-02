@@ -12,6 +12,7 @@ player at a time and so cannot know that nobody holds the disc: it is not asked 
 the disc is seen to fly (disc_flight.FlyingDisc).
 """
 
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -38,6 +39,11 @@ BOX_ALONE = 0.0
 DEFAULT_ARCHITECTURE = "resnet18_s3"
 # A player's speed over the ground is taken over this long
 SPEED_SECONDS = 0.5
+
+# (weights file, device) -> its CompiledHolderNet. Tracing keeps what it makes to the end
+# of the process, used or not, so each is made once; restart to pick up a new one.
+_compiled: Dict[Tuple[str, str], Any] = {}
+_compiled_lock = threading.Lock()
 
 Box = Tuple[int, int, int, int]
 
@@ -167,18 +173,29 @@ class CompiledHolderNet:
 def load_holder_net(
     weights: Path, device: Optional[str] = None, compiled: bool = False
 ) -> "HolderNet":
-    """A trained network, ready to use; `compiled`, as a CompiledHolderNet."""
+    """A trained network, ready to use; `compiled`, as a CompiledHolderNet, the same one
+    for all who ask."""
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    if not compiled:
+        return _trained(weights, device)
+    key = (str(weights), str(device))
+    with _compiled_lock:
+        if key not in _compiled:
+            model = _trained(weights, device)
+            try:
+                _compiled[key] = CompiledHolderNet(model)
+            except Exception as error:  # Slower, and the same answers
+                logger.warning(f"The holder network runs as it is, not compiled: {error}")
+                return model
+        return _compiled[key]
+
+
+def _trained(weights: Path, device: str) -> "HolderNet":
+    """The network of a file."""
     saved = torch.load(str(weights), map_location=device)
     model = HolderNet(saved["architecture"], pretrained=False, size=saved["size"])
     model.load_state_dict(saved["state"])
-    model = model.to(device).eval()
-    if compiled:
-        try:
-            return CompiledHolderNet(model)
-        except Exception as error:  # Slower, and the same answers
-            logger.warning(f"The holder network runs as it is, not compiled: {error}")
-    return model
+    return model.to(device).eval()
 
 
 def holding(model: "HolderNet", crops: Sequence[np.ndarray], batch_size: int = 256) -> np.ndarray:

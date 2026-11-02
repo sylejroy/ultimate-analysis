@@ -115,6 +115,19 @@ class TrackingTests(unittest.TestCase):
         self.assertEqual((self.tracker._frame_count, self.tracker._calls), (5, 3))
         self.tracker.reset()
 
+    def test_a_new_track_is_older_by_the_frames_skipped(self):
+        # A track is reported from its second frame analysed on: a player seen in the
+        # frame it began in is somebody else, also where every second frame is analysed
+        self.tracker.set_frame_rate(60.0)
+        with patch.multiple(self.tracker, _player_tracker=bytetrack(), _disc_tracker=bytetrack()):
+            _, one_by_one = self.tracker._followed_tracks()
+            self.tracker._frames_per_step = 2
+            _, every_second = self.tracker._followed_tracks()
+        self.assertGreaterEqual(one_by_one, 1 / 60)
+        self.assertLess(one_by_one, 2 / 60)
+        self.assertGreaterEqual(every_second, 2 / 60)
+        self.assertLess(every_second, 3 / 60)
+
     def test_a_trail_reaches_back_a_time_however_many_frames_are_skipped(self):
         settings = {
             "models.tracking.track_history_length": 300,

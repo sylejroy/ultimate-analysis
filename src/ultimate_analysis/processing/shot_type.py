@@ -17,6 +17,8 @@ motion cannot be told. So the drone footage is only held to have stopped once th
 picture broke, or when there has been hardly anybody for much longer than a swing.
 """
 
+from typing import Optional
+
 import numpy as np
 
 from ..config.settings import get_setting
@@ -39,6 +41,12 @@ class ShotWatcher:
         self.wide = True
         self._disagreeing = self._confirm_frames()
         self._broken = True
+
+    def go_on(self) -> None:
+        """A cut to other drone footage, seen to be that in this frame: players missed
+        in the next are no reason to take it for a close-up at once."""
+        self.wide = True
+        self._disagreeing = 0
 
     def pause(self) -> None:
         """Hold that this is no drone footage, after whatever else was reset.
@@ -85,12 +93,55 @@ class ShotWatcher:
         return self.wide
 
 
-# A cut within drone footage: from one frame to the next the camera's motion cannot be
-# told and the players are elsewhere. With at least this many players before, fewer than
-# this share of them have a detection where they stood (boxes overlapping this much).
+# A cut within drone footage: from one frame to the next the players are elsewhere. With
+# at least this many players before, fewer than this share of them have a detection where
+# they stood (boxes overlapping this much). Only between frames this close together: of
+# 28 skips of 1.5 to 3 s on real footage two looked like cuts with the camera's motion lost.
 CUT_MIN_PLAYERS = 6
 CUT_MAX_STAYING = 0.3
 CUT_SAME_PLACE_IOU = 0.3
+CUT_MOST_SECONDS = 0.1
+# Two views of one field share enough for a motion to be found, so a cut can come with
+# one. It then takes more, since a reset in the middle of a point costs everything: there
+# are as many players as a view of the game shows, and they are elsewhere either way
+# round, by the picture and by that motion. In 25,400 frames the motion alone sent two
+# frames of steady play elsewhere (boxes staying 1.00 by the picture, 0.08 and 0.21 moved),
+# and a swing of the camera leaves few players, who may be anywhere.
+
+
+def moved_with_camera(boxes: np.ndarray, motion: np.ndarray) -> np.ndarray:
+    """Boxes (n, 4) as x1, y1, x2, y2 where the camera's motion (a homography from their
+    frame to the next) puts them."""
+    corners = np.asarray(boxes, dtype=np.float64).reshape(-1, 2)
+    mapped = np.column_stack([corners, np.ones(len(corners))]) @ np.asarray(motion).T
+    return (mapped[:, :2] / mapped[:, 2:]).reshape(-1, 4)
+
+
+def is_a_cut(
+    before: np.ndarray, now: np.ndarray, motion: Optional[np.ndarray], seconds: float
+) -> bool:
+    """Whether the footage cut to another view between two frames.
+
+    Args:
+        before: Player boxes (n, 4) of the frame before
+        now: Player boxes of this frame
+        motion: The camera's motion between the two, None if it could not be told
+        seconds: Time between the two
+    """
+    if seconds > CUT_MOST_SECONDS:
+        return False  # After a hitch everybody is elsewhere, and a cut in it goes unseen
+    if motion is None:
+        return players_are_elsewhere(before, now)
+    before, now = np.asarray(before, dtype=np.float64), np.asarray(now, dtype=np.float64)
+    if len(before) < CUT_MIN_PLAYERS or len(now) < CUT_MIN_PLAYERS:
+        return False
+    moved = moved_with_camera(before, motion)
+    return (
+        players_are_elsewhere(before, now)
+        and players_are_elsewhere(now, before)
+        and players_are_elsewhere(moved, now)
+        and players_are_elsewhere(now, moved)
+    )
 
 
 def players_are_elsewhere(before: np.ndarray, now: np.ndarray) -> bool:
