@@ -14,11 +14,12 @@ from the drone, the mark often covers the thrower, or the disc is held out past 
 These keep the disc with the thrower then:
 
 - While the disc is in the holder's box it is the holder's, however near it is to someone
-  else. So is a disc at no player but within a body's height of the holder: a throw is
-  further away than that within a moment, and a disc held out or badly placed by the
-  detector is not. Unless it is flying away from them (`thrown_speed`): a disc held
-  out stays where the hand is, a thrown one is further from the holder at every
-  sighting, and is then nobody's from the sighting it set off at.
+  else. So is a disc at no player but within an arm's length of that box (`reach`): a
+  disc held out or badly placed by the detector is no further off. A throw is further
+  away than that within a moment, even a long one that hardly crosses the picture. It
+  is nobody's sooner if it is flying away from them (`thrown_speed`): a disc held out
+  stays where the hand is, a thrown one is further from the holder at every sighting,
+  and is then nobody's from the sighting it set off at.
 - A holder whose track the tracker loses and begins again under a new number stays
   the holder.
 - A holder who is not found for a moment (covered by the mark) is remembered where they
@@ -634,7 +635,7 @@ class PossessionTracker:
 
         thrown = self._holder_box is not None and self._thrown(centre)
         if self._holder_box is not None and at_disc != self.holder_id:
-            reach = float(get_setting("models.possession.reach", 1.0))
+            reach = float(get_setting("models.possession.reach", 0.4))
             arm = reach * (self._holder_box[3] - self._holder_box[1])
             x1, y1, x2, y2 = self._holder_box
             if _contains(_widened(self._holder_box, margin), *centre):
@@ -666,7 +667,7 @@ class PossessionTracker:
         """A frame without a disc to go by: a player the holder network is sure of, and
         clearly surer of than of anybody else, counts as the disc seen at them, for less
         than a disc (models.holder.sure, 0: never; models.holder.weight)."""
-        sure = float(get_setting("models.holder.sure", 0.0))
+        sure = float(get_setting("models.holder.sure", 0.7))
         if not holder_scores or sure <= 0:
             return self.holder_id
         present = {track.track_id for track in tracks if _is_player(track)}

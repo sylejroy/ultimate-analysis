@@ -335,7 +335,7 @@ class AnalysisPipeline:
         # (or in every frame, for a recording that is to be played back with other
         # settings: scripts/benchmark_possession.py)
         if get_setting("models.holder.ask_everybody", False) or (
-            float(get_setting("models.holder.sure", 0.0)) > 0
+            float(get_setting("models.holder.sure", 0.7)) > 0
             and (not discs or self._possession.strays)
         ):
             asked.update({t.track_id: t for t in players})

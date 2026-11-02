@@ -52,6 +52,7 @@ from ultimate_analysis.processing.holder import (  # noqa: E402
     place_on_field,
     speed_of,
 )
+from ultimate_analysis.processing.possession_replay import said_of_frames  # noqa: E402
 
 MIN_HEIGHT = 40  # Pixels: of a smaller player nothing is seen of how they stand
 SETTLED_SECONDS = 0.25  # A possession counts this long after it began and before it ends
@@ -108,7 +109,7 @@ def main() -> None:
             pipeline.reset()
             pipeline.set_frame_rate(rate)
 
-            holder_at = {}  # Frame -> who held the disc (None: nobody), as known afterwards
+            said = []  # What the pipeline says of who holds the disc, frame by frame
             places = {}  # Frame -> {player: where they stand on the field}
             seen = {}  # Frame -> [(player, box, crop as JPEG, disc seen on it)]
             frames = []
@@ -123,11 +124,7 @@ def main() -> None:
                 if not result.wide_shot:
                     continue
                 frames.append(number)
-                # Who has the disc is known late and holds from earlier on
-                for earlier in frames[::-1]:
-                    if earlier < result.possession_since:
-                        break
-                    holder_at[earlier] = result.holder_id
+                said.append((number, result.holder_id, result.possession_since, None))
                 places[number] = {
                     track.track_id: place
                     for track in result.tracks
@@ -150,6 +147,9 @@ def main() -> None:
                     players.append((track.track_id, (x1, y1, x2, y2), crop, disc_seen))
                 seen[number] = players
 
+            # Who has the disc is known late and holds from earlier on: frame -> who held
+            # it (None: nobody), as known afterwards
+            holder_at = {frame: spoken[1] for frame, spoken in said_of_frames(said).items()}
             settled = int(SETTLED_SECONDS * rate)
             folder = out / "crops" / video / f"{stretch:02d}"
             folder.mkdir(parents=True, exist_ok=True)

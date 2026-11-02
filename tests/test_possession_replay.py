@@ -51,6 +51,26 @@ class PossessionReplayTests(unittest.TestCase):
         self.assertEqual({holder for _, holder, _, _ in said}, {None, 1, 7})
         self.assertEqual(self.module.replay(calls), said)
 
+    def test_a_date_speaks_of_the_frames_since_it_but_not_of_a_name_or_a_reset(self):
+        said = [(10, None, 0, None), (12, 1, 11, 0), (14, 1, 11, 0)]
+        self.assertEqual(self.module.spoken_from(said), [10, 11, 11])
+        # The tracker joins the holder with an earlier track: frames 12 and 14 keep the name
+        said += [(16, 7, 11, 0), (18, 7, 11, 0), (20, 2, 19, 0)]
+        self.assertEqual(self.module.spoken_from(said)[3:], [16, 16, 19])
+        # A cut: the reset says nothing of the frames before it
+        self.assertEqual(self.module.spoken_from(said + [(22, None, 0, None)])[-1], 22)
+
+    def test_frames_keep_the_holder_they_had_when_a_cut_or_a_new_name_comes(self):
+        said = [(10, 1, 8, 0), (12, 1, 8, 0), (14, 7, 8, 0), (16, None, 0, None), (18, 2, 17, 0)]
+        holders = {f: spoken[1] for f, spoken in self.module.said_of_frames(said).items()}
+        # Not the holder of the frames after the cut, nor the name they got later
+        self.assertEqual(holders, {10: 1, 12: 1, 14: 7, 16: None, 18: 2})
+
+    def test_the_holder_found_late_holds_from_when_it_began(self):
+        said = [(10, None, 5, None), (12, None, 5, None), (14, None, 5, None), (16, 3, 12, 0)]
+        holders = {f: spoken[1] for f, spoken in self.module.said_of_frames(said).items()}
+        self.assertEqual(holders, {10: None, 12: 3, 14: 3, 16: 3})
+
     def test_a_replay_follows_the_settings_of_the_moment(self):
         calls, said = self.recorded()
         self.settings["models.possession.confirm_seconds"] = 5.0

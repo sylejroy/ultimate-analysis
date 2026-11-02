@@ -54,6 +54,7 @@ from ultimate_analysis.processing.holder import (  # noqa: E402
     place_on_field,
     speed_of,
 )
+from ultimate_analysis.processing.possession_replay import said_of_frames  # noqa: E402
 from ultimate_analysis.utils.benchmarking import frame_rate_of, frames_around  # noqa: E402
 
 BEFORE_SECONDS, AFTER_SECONDS = 2.0, 1.5
@@ -132,14 +133,12 @@ def main() -> None:
             pipeline.reset()
             pipeline.set_frame_rate(rate)
 
-            holder_at, seen, frames, places = {}, {}, [], {}
+            said_there, wide, seen, frames, places = [], {}, {}, [], {}
             for number, frame in frames_around(path, anchor, BEFORE_SECONDS, AFTER_SECONDS, STEP):
                 result = pipeline.process(frame, number, options)
                 frames.append(number)
-                for earlier in frames[::-1]:
-                    if earlier < result.possession_since:
-                        break
-                    holder_at[earlier] = result.holder_id if result.wide_shot else "unknown"
+                said_there.append((number, result.holder_id, result.possession_since, None))
+                wide[number] = result.wide_shot
                 height, width = frame.shape[:2]
                 places[number] = {
                     track.track_id: place
@@ -161,6 +160,10 @@ def main() -> None:
                 if number == anchor:
                     disc = (disc_share[0] * width, disc_share[1] * height)
 
+            holder_at = {
+                earlier: holder if wide[number] else "unknown"
+                for earlier, (number, holder, _, _) in said_of_frames(said_there).items()
+            }
             if anchor not in seen or not seen[anchor]:
                 said["no players followed at the labelled frame"] += 1
                 continue

@@ -92,6 +92,34 @@ def _track(track_id: int, box: tuple, team: Optional[int], class_name: Optional[
     return SimpleNamespace(track_id=track_id, class_name=class_name, team=team, to_ltrb=lambda: box)
 
 
+def spoken_from(said: List[Said]) -> List[int]:
+    """For each thing said, the first frame it speaks of: the date it gives, earlier than
+    the frame it was said in. A new name for the holder (the same date) says nothing of
+    the frames before it, under the name they had then; nor does a reset (date 0)."""
+    first, before, dates = 0, None, []
+    for number, holder, since, _ in said:
+        if since == 0 or (before is not None and since == before[1] and holder != before[0]):
+            first = number
+        elif before is None or since != before[1]:
+            first = since
+        before = (holder, since)
+        dates.append(first)
+    return dates
+
+
+def said_of_frames(said: List[Said]) -> Dict[int, Said]:
+    """Frame -> what was said of it last: who held the disc there, as known afterwards."""
+    frames: List[int] = []
+    of_frame: Dict[int, Said] = {}
+    for spoken, first in zip(said, spoken_from(said)):
+        frames.append(spoken[0])
+        for earlier in frames[::-1]:
+            if earlier < first:
+                break
+            of_frame[earlier] = spoken
+    return of_frame
+
+
 def replay(calls: List[tuple]) -> List[Said]:
     """Tell a new possession tracker what was recorded; what it says after every frame
     that was marked as done. Where the recording says what the discs were made of,

@@ -127,7 +127,7 @@ models:
     beside_holder_seconds: 1.5   # The same for a player standing right by the holder: the mark, who has not been passed the disc
     holder_memory_seconds: 2.0   # A holder who is not found (covered by the mark) keeps the disc where they were last seen for this long
     other_team_seconds: 1.0      # The same for a player of the team without the disc who stands right by one of the team with it: a defender at the catch far more often than an interception
-    reach: 1.0                   # A disc at no player this near to the holder (share of their height) is still the holder's: held out, or badly placed by the detector; a throw is further off within a moment
+    reach: 0.4                   # A disc at no player this near to the holder's box (share of their height) is still the holder's: an arm's length, held out or badly placed by the detector. A long throw seen along its way hardly crosses the picture: at a whole height it stayed the thrower's for over a second
     thrown_speed: 3.0            # ... unless it moves away from them at this speed or faster (heights of the holder a second): thrown, not held out. 0: off
     release_from_box: true       # A disc that turns out to have been thrown left the holder when it left their box, not when it was out of their reach (4 of 447 labelled frames better, none worse)
     ground_seconds: 1.0          # A disc lying still at no player for this long is on the ground: a turnover, the other team has it
@@ -158,7 +158,7 @@ models:
     show_guess: true                    # Draw the network's guess on the video: light-blue corner marks around every player, as bright as it is sure that they hold the disc. What the network says, not what is made of it
     not_while_flying: true              # The network is not asked while the disc is seen to fly (found surely, frame after frame, on a smooth course away from every player): it looks at one player at a time and names a holder in a fifth of such frames
     ask_everybody: false                # Ask the network about every player in every frame, for a recording to be played back with other settings (scripts/benchmark_possession.py)
-    sure: 0.0                           # In a frame without a disc, a player the network is at least this sure of counts as the disc seen at them. 0 = never
+    sure: 0.7                           # In a frame without a disc, a player the network is at least this sure of counts as the disc seen at them. 0 = never
     weight: 0.5                         # ... for this much of a frame in which the disc itself is seen
 
   reid:

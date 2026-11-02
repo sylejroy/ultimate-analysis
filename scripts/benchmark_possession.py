@@ -93,6 +93,7 @@ from ultimate_analysis.processing.possession import player_at_disc  # noqa: E402
 from ultimate_analysis.processing.possession_replay import (  # noqa: E402
     RecordingPossessionTracker,
     replay,
+    said_of_frames,
 )
 from ultimate_analysis.utils.benchmarking import (  # noqa: E402
     apply_settings,
@@ -363,14 +364,11 @@ def judged(case: dict, said: list) -> dict:
     anchor, rate, boxes = case["anchor"], case["rate"], case["boxes"]
     at = dict(case["at"])
     # The holder and the team of every frame, dated back as the pipeline dates them
-    holder_at, team_at, frames = {}, {}, []
-    for number, holder, since, team in said:
-        frames.append(number)
-        for earlier in frames[::-1]:
-            if earlier < since:
-                break
-            holder_at[earlier] = holder if case["wide"][number] else "unknown"
-            team_at[earlier] = team
+    frames = [number for number, *_ in said]
+    holder_at, team_at = {}, {}
+    for earlier, (number, holder, _, team) in said_of_frames(said).items():
+        holder_at[earlier] = holder if case["wide"][number] else "unknown"
+        team_at[earlier] = team
     live = {number: holder for number, holder, _, _ in said}.get(anchor)
     at["live"] = live if case["wide"].get(anchor) else "unknown"
     labelled = at["labelled"]

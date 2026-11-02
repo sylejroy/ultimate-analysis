@@ -48,6 +48,7 @@ from ultimate_analysis.pipeline import AnalysisPipeline, PipelineOptions  # noqa
 from ultimate_analysis.processing.possession_replay import (  # noqa: E402
     RecordingPossessionTracker,
     replay,
+    said_of_frames,
 )
 from ultimate_analysis.utils.benchmarking import (  # noqa: E402
     apply_settings,
@@ -130,14 +131,7 @@ def watch(anchor_of: tuple, options: PipelineOptions, step: int = STEP) -> Union
 def judged(case: dict, said: list) -> dict:
     """The row of a frame: the pipeline's holder against the one named by hand."""
     anchor, players = case["anchor"], case["players"]
-    holder_at, frames = {}, []
-    for number, holder, since, _ in said:
-        frames.append(number)
-        for earlier in frames[::-1]:
-            if earlier < since:
-                break
-            holder_at[earlier] = holder
-    says = holder_at.get(anchor)
+    says = said_of_frames(said).get(anchor, (None, None))[1]
     live = {number: holder for number, holder, _, _ in said}.get(anchor)
     # The track at the named holder, if any
     at_holder = max(players, key=lambda player: iou(players[player][0], case["box"]))
