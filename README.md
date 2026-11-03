@@ -6,7 +6,7 @@ Built with PyQt5 and YOLO.
 
 A whole point as the app sees it:
 
-<!-- demo video: replace this line with the video dropped in through GitHub's editor -->
+https://github.com/user-attachments/assets/e92d9d47-9577-4924-934d-8aab7dad49b6
 
 ![Main Analysis tab](docs/gui_example_main_analysis.png)
 
