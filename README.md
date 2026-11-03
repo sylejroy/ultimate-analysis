@@ -4,6 +4,10 @@ A desktop app that analyses Ultimate Frisbee video: it finds the players and the
 follows them, reads jersey numbers, tells who has the disc, and shows the play from above.
 Built with PyQt5 and YOLO.
 
+A whole point as the app sees it:
+
+<!-- demo video: replace this line with the video dropped in through GitHub's editor -->
+
 ![Main Analysis tab](docs/gui_example_main_analysis.png)
 
 ## What it does

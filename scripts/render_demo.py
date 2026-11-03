@@ -3,7 +3,9 @@
 Every frame goes through the analysis pipeline, as in the main tab. The camera view with
 its overlays, the top-down view, and a strip with who holds the disc are put together
 into one picture per frame. Nothing is skipped to keep up, unlike live playback, so the
-video shows what the analysis does when it gets every frame.
+video shows what the analysis does when it gets every frame. With --plain the video is the
+camera view with its overlays and the field from above in a corner, and the possession of the
+stretch drawn on it.
 
 OpenCV writes very large files. With imageio-ffmpeg installed
 (`pip install --no-deps imageio-ffmpeg`) the video is compressed afterwards to a size
@@ -39,6 +41,7 @@ from ultimate_analysis.utils.video import seconds_of  # noqa: E402
 WIDTH, HEIGHT = 1920, 1080
 CAMERA_SIZE = (1440, 810)  # The camera view, top left
 STRIP_SECONDS = 20.0  # How far back the strip of who held the disc reaches
+TOP_DOWN_HEIGHT = 420  # Of the field from above in the bottom right, with --plain
 BACKGROUND = (30, 30, 30)
 TEXT = (235, 235, 235)
 FAINT = (150, 150, 150)
@@ -147,6 +150,81 @@ def compose(result, held: deque, frames_per_second: float, title: str, clock: st
     return picture
 
 
+def shade(picture, top_left, bottom_right, alpha=0.65) -> None:
+    """Darken a rectangle of the picture (in place), so that what is written on it reads."""
+    (x1, y1), (x2, y2) = top_left, bottom_right
+    part = picture[y1:y2, x1:x2]
+    part[:] = cv2.addWeighted(part, 1 - alpha, np.zeros_like(part), alpha, 0)
+
+
+def field_of(view: np.ndarray, margin: int = 6) -> np.ndarray:
+    """The top-down view without the dark ground around the field: the rows and columns
+    a third of which differ from its corner, and a few pixels more."""
+    drawn = np.abs(view.astype(int) - view[0, 0].astype(int)).sum(axis=2) > 40
+    rows, columns = (
+        np.flatnonzero(drawn.mean(axis=1) > 0.3),
+        np.flatnonzero(drawn.mean(axis=0) > 0.3),
+    )
+    if not len(rows) or not len(columns):
+        return view
+    top, bottom = max(0, rows[0] - margin), rows[-1] + margin + 1
+    left, right = max(0, columns[0] - margin), columns[-1] + margin + 1
+    return view[top:bottom, left:right]
+
+
+def compose_plain(result, teams: dict, passes: dict, timeline: list, length: int, clock: str):
+    """The camera view with its overlays, the top-down view, and the possession of the
+    stretch on it.
+
+    `teams`: team -> its colour; `passes`: team -> passes caught by a teammate;
+    `timeline`: for each frame written, the team in possession or None; `length`: how many
+    frames will be written in all.
+    """
+    picture = cv2.resize(result.main_view, (WIDTH, HEIGHT), interpolation=cv2.INTER_AREA)
+    known = [team for team in timeline if team is not None]
+    rows = sorted(teams.items())
+
+    # Bottom right, where the grass near the camera is mostly empty: the field from above,
+    # cut to the field, where it is known
+    if result.top_down_view is not None:
+        view = field_of(result.top_down_view)
+        width = round(view.shape[1] * TOP_DOWN_HEIGHT / view.shape[0])
+        view = cv2.resize(view, (width, TOP_DOWN_HEIGHT), interpolation=cv2.INTER_AREA)
+        bottom = HEIGHT - 48
+        picture[bottom - TOP_DOWN_HEIGHT : bottom, WIDTH - 24 - width : WIDTH - 24] = view
+
+    # Top left: each team's share of the possession and its passes, and where the disc is
+    shade(picture, (24, 24), (380, 132 + 44 * len(rows)))
+    put_text(picture, "Possession", (40, 60), 0.75, TEXT, 2)
+    put_text(picture, clock, (300, 60), 0.65, FAINT)
+    for row, (team, colour) in enumerate(rows):
+        y = 104 + 44 * row
+        cv2.rectangle(picture, (40, y - 20), (64, y + 4), colour, -1)
+        share = 100 * known.count(team) / len(known) if known else 0
+        put_text(picture, f"{share:.0f}%", (80, y), 0.75, TEXT, 2)
+        put_text(picture, f"{passes.get(team, 0)} passes", (180, y), 0.65, TEXT)
+    if result.holder_id is not None:
+        number = result.player_ids.get(result.holder_id, ("", None))[0]
+        number = number if is_number(number) else result.numbers_by_looks.get(result.holder_id)
+        where = f"held by #{number}" if number else "held"
+    elif result.flight_seconds is not None:
+        where = "in the air"
+    else:
+        where = "on the ground" if result.disc_state == "ground" else ""
+    if where:
+        put_text(picture, f"Disc {where}", (40, 104 + 44 * len(rows)), 0.65, FAINT)
+
+    # Along the bottom: which team had the disc, over the whole stretch
+    left, right, top = 24, WIDTH - 24, HEIGHT - 34
+    shade(picture, (left, top), (right, top + 14))
+    step = (right - left) / length
+    for position, team in enumerate(timeline):
+        if team is not None and team in teams:
+            x = left + position * step
+            cv2.rectangle(picture, (int(x), top), (int(x + step) + 1, top + 14), teams[team], -1)
+    return picture
+
+
 def open_writer(path: Path, frames_per_second: float) -> cv2.VideoWriter:
     """A writer for H.264 if this OpenCV can write it, else MPEG-4."""
     for code in ("avc1", "mp4v"):
@@ -198,6 +276,12 @@ def main() -> None:
         help="Write every n-th frame; by default as many as give about 30 frames per second",
     )
     parser.add_argument("--title", default="Ultimate Analysis")
+    parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="The camera view with the top-down view in a corner and the possession of "
+        "the stretch drawn on it",
+    )
     args = parser.parse_args()
 
     capture = cv2.VideoCapture(str(args.video))
@@ -222,6 +306,13 @@ def main() -> None:
     written = args.output.with_name(args.output.stem + ".uncompressed.mp4")
     writer = open_writer(written, out_rate)
     held: deque = deque(maxlen=int(STRIP_SECONDS * out_rate))
+    # For --plain: the team in possession per frame written, the teams' colours, the
+    # passes, the last holder (team, ID), and whether the disc was seen flying since
+    timeline: list = []
+    teams: dict = {}
+    passes: dict = {}
+    last_holder, flew = None, False
+    length = len(range(start, last, every))
     began = time.perf_counter()
     try:
         for index in range(first, last):
@@ -230,6 +321,29 @@ def main() -> None:
                 break
             result = pipeline.process(frame, index, options)
             if index < start or (index - start) % every:
+                continue
+            seconds = index / frames_per_second
+            if args.plain:
+                team = result.possession_team
+                if team is not None and result.possession_colour is not None:
+                    teams[team] = result.possession_colour
+                if timeline and timeline[-1] != team:
+                    # A change is confirmed a moment after it happened
+                    for back in range(
+                        1, min(len(timeline), (index - result.possession_since) // every) + 1
+                    ):
+                        timeline[-back] = team
+                timeline.append(team)
+                # A pass: the disc seen to fly from one player to another of the same team
+                flew = flew or result.flight_seconds is not None
+                if result.holder_id is not None:
+                    holder = (team, result.holder_id)
+                    if flew and last_holder and holder != last_holder and team == last_holder[0]:
+                        passes[team] = passes.get(team, 0) + 1
+                    last_holder, flew = holder, False
+                gone = (index - start) / frames_per_second
+                clock = f"{int(gone // 60)}:{int(gone % 60):02d}"
+                writer.write(compose_plain(result, teams, passes, timeline, length, clock))
                 continue
             holder = (
                 None
@@ -243,7 +357,6 @@ def main() -> None:
                 ):
                     held[-back] = holder
             held.append(holder)
-            seconds = index / frames_per_second
             clock = f"{int(seconds // 60)}:{int(seconds % 60):02d}"
             writer.write(compose(result, held, out_rate, args.title, clock))
     finally:
