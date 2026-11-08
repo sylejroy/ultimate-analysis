@@ -20,6 +20,9 @@ ALLOWED = {
     "training": BASE | {"training"},
     "rendering": BASE | {"processing", "rendering"},
     "pipeline": BASE | {"processing", "rendering", "pipeline"},
+    # The simulated game: its teams use what the processing knows of the field, and it
+    # is drawn as the top-down view is
+    "simulation": BASE | {"processing", "rendering", "simulation"},
     # The phone labelling page; like the GUI it sits on top, but must work without Qt
     "web": BASE | {"processing", "web"},
 }

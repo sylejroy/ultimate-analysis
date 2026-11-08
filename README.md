@@ -17,12 +17,18 @@ https://github.com/user-attachments/assets/e92d9d47-9577-4924-934d-8aab7dad49b6
 - **The phase of the game**: pull, live play, score, between points.
 - **Jersey numbers**, collected per player over time.
 - **Top-down view** of the field with the players and the disc.
+- **Maps over the field**, on the video and from above: where the next throw is likely to
+  go, or the space that is dangerous for the defence and who leaves it open.
 - **3D view** of the same: the field with players, disc and camera, seen from any side.
 - **Player statistics**: time on the field, distance run, passes thrown and caught.
 - **Export** of what the analysis finds, frame by frame, as tables.
 - **Labelling** of players, discs, and the field on frames of your own videos, and of
   who holds the disc and which tracks are one player, with a key or a click per answer.
 - **Training** of detection and segmentation models on those labels from the app.
+- **Simulation**: two teams play a point in 3D or from above, in wind: a scripted team,
+  or teams of players who learned the game by playing each other, from nothing but where
+  everyone is and how they move. Click a player to see what they know and their brain at
+  work.
 
 | The game in 3D | Labelling players and discs |
 | --- | --- |
@@ -31,6 +37,10 @@ https://github.com/user-attachments/assets/e92d9d47-9577-4924-934d-8aab7dad49b6
 | Labelling the field | Naming who holds the disc |
 | --- | --- |
 | ![Field labelling](docs/gui_example_field_labelling.png) | ![Click the holder](docs/gui_example_holder_labelling.png) |
+
+| The simulation, a player's brain at work | The simulation from above |
+| --- | --- |
+| ![Simulation tab](docs/gui_example_simulation.png) | ![Simulation from above](docs/gui_example_simulation_above.png) |
 
 ## Quick start
 

@@ -41,29 +41,39 @@ class ExportRowsTest(unittest.TestCase):
             flight_seconds=None,
             disc_state="held",
             possession_team=1,
+            places={7: (12.04, 28.51)},
+            game_state="live",
+            attacks={0: -1, 1: 1},
         )
 
     def test_a_player_row_has_the_box_the_feet_on_the_field_and_the_disc(self):
         rows = self.rows["player_rows"](self.result, 12, 0.4)
-        self.assertEqual(rows, [[12, 0.4, 7, "23", 1, 100.0, 200.0, 140.0, 290.0, 12.0, 29.0, 1]])
+        self.assertEqual(
+            rows,
+            [[12, 0.4, 7, "23", 1, 100.0, 200.0, 140.0, 290.0, 12.0, 29.0, 12.04, 28.51, 1]],
+        )
 
     def test_the_disc_row_takes_the_surest_disc_and_its_place(self):
-        row = self.rows["disc_row"](self.result, 12, 0.4)
-        self.assertEqual(row, [12, 0.4, "held", 7, 1, "", 305.0, 405.0, 30.5, 40.5])
+        row = self.rows["disc_row"](self.result, 12, 0.4, 3)
+        self.assertEqual(
+            row, [12, 0.4, 3, "held", 7, 1, "", 305.0, 405.0, 30.5, 40.5, "live", -1, 1]
+        )
         # In flight the place worked out for it stands in for the ground under its pixel
         self.result.disc_place, self.result.flight_seconds = (28.0, 37.5), 1.234
         self.result.holder_id, self.result.disc_state = None, "air"
-        row = self.rows["disc_row"](self.result, 12, 0.4)
-        self.assertEqual(row, [12, 0.4, "air", "", 1, 1.23, 305.0, 405.0, 28.0, 37.5])
+        row = self.rows["disc_row"](self.result, 12, 0.4, 3)
+        self.assertEqual(row[3:11], ["air", "", 1, 1.23, 305.0, 405.0, 28.0, 37.5])
 
     def test_what_is_not_known_is_left_empty(self):
         self.result.image_to_field = None
         self.result.detections = []
         self.result.tracks[0].team = None
         self.result.player_ids = {7: ("Unknown", None)}
+        self.result.places, self.result.attacks = {}, {}
         rows = self.rows["player_rows"](self.result, 12, 0.4)
-        self.assertEqual(rows[0][3:5] + rows[0][9:11], ["", "", "", ""])
-        self.assertEqual(self.rows["disc_row"](self.result, 12, 0.4)[6:], ["", "", "", ""])
+        self.assertEqual(rows[0][3:5] + rows[0][9:13], [""] * 6)
+        row = self.rows["disc_row"](self.result, 12, 0.4, 0)
+        self.assertEqual(row[7:11] + row[12:], [""] * 6)
 
 
 if __name__ == "__main__":

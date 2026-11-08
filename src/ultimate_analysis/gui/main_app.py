@@ -136,6 +136,12 @@ class UltimateAnalysisApp(QMainWindow):
 
         return ModelTrainingTab()
 
+    def _create_simulation_tab(self) -> QWidget:
+        """Factory method to create the simulation tab."""
+        from .simulation.simulation_tab import SimulationTab
+
+        return SimulationTab()
+
     def _create_labelling_tab(self) -> QWidget:
         """Factory method to create labelling tab."""
         from .labelling.labelling_modes import LabellingModes
@@ -187,6 +193,11 @@ class UltimateAnalysisApp(QMainWindow):
 
         self.model_training_tab = LazyLoadingTab(self._create_model_training_tab, "Model Training")
         self.tab_widget.addTab(self.model_training_tab, "Model Training")
+
+        # Simulated teams playing each other: scripted, copied from the recorded players, or
+        # changed by playing
+        self.simulation_tab = LazyLoadingTab(self._create_simulation_tab, "Simulation")
+        self.tab_widget.addTab(self.simulation_tab, "Simulation")
 
         # Status bar
         self.status_bar = self.statusBar()

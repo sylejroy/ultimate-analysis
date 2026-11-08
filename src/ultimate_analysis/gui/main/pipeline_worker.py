@@ -168,6 +168,14 @@ class PipelineWorker(QObject):
         self.pipeline.show_disc_heat = shown
         self.pipeline.invalidate()
 
+    # The maps over the field are worked out from what the frame's analysis left:
+    # nothing to analyse again
+    def set_field_map(self, kind: str) -> None:
+        self.pipeline.field_map = kind
+
+    def set_map_lines(self, lines: bool) -> None:
+        self.pipeline.map_lines = lines
+
     def set_looks_model(self, model_path: str) -> None:
         self.pipeline.set_looks_model(model_path)
 

@@ -141,6 +141,18 @@ models:
     weights: "data/models/disc_heatmap/three_frames_pretrained/best.pt"
     show: false                         # Draw the heat map on the video: a glow where a disc is likely. The network runs only while this is on
 
+  throw_targets:
+    # A network that says, while a player holds the disc, how likely the next throw is to
+    # go to each square of the field (scripts/train_throw_targets.py). Drawn on the
+    # top-down view only
+    weights: "data/models/throw_targets/20261108_002251_players/model.pt"
+
+  open_space:
+    # The dangerous space (processing/open_space.py): how likely a possession is to score
+    # from a catch along the field, fitted to recorded games (scripts/fit_field_value.py);
+    # "" or no such file = a rough curve
+    value: "data/models/field_value/20261108.json"
+
   disc_fusion:
     # The disc from the disc model and the heat map together: the two rarely take the
     # same thing for a disc that is none
@@ -212,3 +224,5 @@ homography:
   diagram_height: 900                        # Height of that drawing in pixels
   ruleset: "usau"                            # The field the field model's view is laid on: "usau" or "wfdf"
   focal_folder: "data/cache/focal"           # The focal length learned of each video without field labels, kept between sessions; "" = not kept
+  field_map: "off"                           # A map over the field on both views: "off", "throws" (where the next throw goes) or "danger" (the dangerous space)
+  field_map_lines: false                     # That map as lines of equal height instead of shading

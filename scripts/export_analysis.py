@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Write what the analysis finds in a stretch of a game to files.
 
-Every frame goes through the analysis pipeline, as in the main tab, without anything
-being skipped. Two tables are written, one row per player and frame and one row per
-frame for the disc:
+The frames go through the analysis pipeline as in the main tab: by default as many as
+give about 30 a second, as the app plays a video of 60 (--every 1 for every frame). Two
+tables are written, one row per player and frame and one row per frame for the disc:
 
     <output>/players.csv   frame, seconds, player, number, team, x1, y1, x2, y2,
-                           field_x, field_y, has_disc
-    <output>/disc.csv      frame, seconds, state, holder, team_in_possession,
-                           flight_seconds, x, y, field_x, field_y
+                           field_x, field_y, place_x, place_y, has_disc
+    <output>/disc.csv      frame, seconds, restart, state, holder, team_in_possession,
+                           flight_seconds, x, y, field_x, field_y, game_state,
+                           attack_0, attack_1
 
 - player is the ID the tracker follows a player by; number their jersey number once it
   has been read; team is 0 or 1 once the tracker knows it.
@@ -18,12 +19,20 @@ frame for the disc:
   player's place is that of their feet. A flying disc's place is where it would be one
   yard up (see docs/MEASUREMENTS.md); a disc that is held or lies on the ground is
   placed as the ground under its pixel.
-- state is "held", "air" (also: not seen) or "ground".
+- place_x and place_y are the player's place as the top-down view shows it: the same,
+  held steady over the frames, and kept for a player whose feet are covered.
+- restart counts the times the pipeline started again (a camera cut): player IDs and
+  the teams' 0 and 1 begin anew with it.
+- state is "held", "air" (also: not seen) or "ground"; game_state the phase of the game
+  (processing/game_state.py).
+- attack_0 and attack_1 are +1 where that team attacks the far end zone (y grows), -1
+  the near one, empty until a line-up has shown it since the last restart.
 
 These are estimates: docs/MEASUREMENTS.md says how far off each is.
 
 Usage:
     python scripts/export_analysis.py VIDEO --start 12:30 --seconds 60 --output data/exports/run1
+    python scripts/export_analysis.py VIDEO --no-numbers --output data/exports/whole_game
 """
 
 import argparse
@@ -45,8 +54,14 @@ from ultimate_analysis.pipeline import AnalysisPipeline, PipelineOptions  # noqa
 from ultimate_analysis.processing.player_id import discard_pending_readings  # noqa: E402
 from ultimate_analysis.utils.video import seconds_of  # noqa: E402
 
-PLAYER_COLUMNS = "frame seconds player number team x1 y1 x2 y2 field_x field_y has_disc"
-DISC_COLUMNS = "frame seconds state holder team_in_possession flight_seconds x y field_x field_y"
+PLAYER_COLUMNS = (
+    "frame seconds player number team x1 y1 x2 y2 field_x field_y place_x place_y has_disc"
+)
+DISC_COLUMNS = (
+    "frame seconds restart state holder team_in_possession flight_seconds x y field_x field_y "
+    "game_state attack_0 attack_1"
+)
+PROGRESS_SECONDS = 600  # Of video between the lines that say how far the export has come
 
 
 def on_field(image_to_field, x: float, y: float) -> tuple:
@@ -68,6 +83,7 @@ def player_rows(result, index: int, seconds: float) -> list:
         x1, y1, x2, y2 = (round(float(value), 1) for value in track.to_ltrb())
         number = result.player_ids.get(track.track_id, ("", None))[0]
         team = getattr(track, "team", None)
+        place = result.places.get(track.track_id)
         rows.append(
             [
                 index,
@@ -80,13 +96,14 @@ def player_rows(result, index: int, seconds: float) -> list:
                 x2,
                 y2,
                 *on_field(result.image_to_field, (x1 + x2) / 2, y2),
+                *(("", "") if place is None else (round(place[0], 2), round(place[1], 2))),
                 int(track.track_id == result.holder_id),
             ]
         )
     return rows
 
 
-def disc_row(result, index: int, seconds: float) -> list:
+def disc_row(result, index: int, seconds: float, restart: int) -> list:
     """The row of a frame for the disc."""
     found = [d for d in result.detections if d["class_name"] == "disc"]
     x = y = ""
@@ -101,6 +118,7 @@ def disc_row(result, index: int, seconds: float) -> list:
     return [
         index,
         seconds,
+        restart,
         result.disc_state,
         "" if result.holder_id is None else result.holder_id,
         "" if result.possession_team is None else result.possession_team,
@@ -108,6 +126,9 @@ def disc_row(result, index: int, seconds: float) -> list:
         x,
         y,
         *place,
+        result.game_state,
+        result.attacks.get(0, ""),
+        result.attacks.get(1, ""),
     ]
 
 
@@ -117,7 +138,12 @@ def main() -> None:
     )
     parser.add_argument("video", type=Path)
     parser.add_argument("--start", default="0", help="Where to start: seconds or m:ss")
-    parser.add_argument("--seconds", type=float, default=60.0)
+    parser.add_argument("--seconds", type=float, help="How much; by default to the end")
+    parser.add_argument(
+        "--every",
+        type=int,
+        help="Analyse every n-th frame; by default as many as give about 30 a second",
+    )
     parser.add_argument("--output", type=Path, required=True, help="Folder for the tables")
     parser.add_argument("--no-numbers", action="store_true", help="Do not read jersey numbers")
     args = parser.parse_args()
@@ -129,6 +155,10 @@ def main() -> None:
         sys.exit(f"Cannot open {args.video}")
     frames_per_second = capture.get(cv2.CAP_PROP_FPS) or 30.0
     first = int(seconds_of(args.start) * frames_per_second)
+    last = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    if args.seconds is not None:
+        last = min(last, first + int(args.seconds * frames_per_second))
+    every = args.every or max(1, round(frames_per_second / 30.0))
     capture.set(cv2.CAP_PROP_POS_FRAMES, first)
 
     pipeline = AnalysisPipeline()
@@ -147,16 +177,29 @@ def main() -> None:
         players.writerow(PLAYER_COLUMNS.split())
         disc.writerow(DISC_COLUMNS.split())
         try:
-            for index in range(first, first + int(args.seconds * frames_per_second)):
+            for index in range(first, last):
+                if (index - first) % every:
+                    if not capture.grab():
+                        break
+                    continue
                 ok, frame = capture.read()
                 if not ok:
                     break
                 result = pipeline.process(frame, index, options)
+                seconds = round(index / frames_per_second, 3)
+                if (
+                    int(seconds) // PROGRESS_SECONDS
+                    != int(seconds - every / frames_per_second) // PROGRESS_SECONDS
+                ):
+                    rate = (index - first) / every / (time.perf_counter() - began)
+                    print(
+                        f"{seconds / 60:.0f} min of the video, {rate:.1f} frames a second",
+                        flush=True,
+                    )
                 if not result.wide_shot:
                     continue  # A close-up: nothing is followed
-                seconds = round(index / frames_per_second, 3)
                 players.writerows(player_rows(result, index, seconds))
-                disc.writerow(disc_row(result, index, seconds))
+                disc.writerow(disc_row(result, index, seconds, pipeline.restarts))
                 written += 1
         finally:
             capture.release()

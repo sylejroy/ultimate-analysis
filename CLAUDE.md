@@ -32,7 +32,11 @@ what the app does and how to use it, not how it works inside.
   not headless from a script. Dataset building, benchmarks, and TensorRT export are fine
   from the terminal. The tab only trains YOLO models: the networks that tell players
   apart by their looks (`scripts/train_reid.py`), tell who holds the disc
-  (`scripts/train_holder.py`) and draw the disc heat map (`scripts/train_disc_heatmap.py`)
-  are trained from the terminal, with their progress printed per epoch.
+  (`scripts/train_holder.py`), draw the disc heat map (`scripts/train_disc_heatmap.py`)
+  say where the next throw goes (`scripts/train_throw_targets.py`) and move the
+  simulated players (`scripts/train_movement.py`, `scripts/evolve_teams.py`,
+  `scripts/imitate_scripted.py`, `scripts/train_ppo.py`,
+  `scripts/train_spots.py`, `scripts/train_spots_gpu.py`) are trained
+  from the terminal, with their progress printed per epoch or generation.
 - Commit only when asked.
 - Source files use Windows line endings (CRLF); keep them.

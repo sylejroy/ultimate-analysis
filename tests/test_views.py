@@ -59,6 +59,31 @@ class ViewsTest(unittest.TestCase):
         self.assertTrue(view.any())
         self.assertIn("Top-down view", self.records)
 
+    def test_where_the_next_throw_goes_is_shaded_over_the_field(self):
+        plain, _ = self.views.draw_top_down_view(self.scene, self.options, self.record)
+        chances = np.zeros((55, 20))
+        chances[52, 2] = 1.0  # Near the far back line, on the left
+        self.scene.field_map = chances
+        shaded, _ = self.views.draw_top_down_view(self.scene, self.options, self.record)
+        rows, columns = np.nonzero((shaded != plain).any(axis=2))
+        self.assertTrue(len(rows))
+        self.assertLess(rows.mean(), 0.15 * shaded.shape[0])  # The far end is at the top
+        self.assertLess(columns.mean(), 0.5 * shaded.shape[1])
+
+    def test_where_the_next_throw_goes_is_shaded_on_the_camera_view_too(self):
+        def drawn():
+            frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+            return self.views.draw_camera_view(frame, self.scene, self.options, self.record)
+
+        plain = drawn()
+        chances = np.zeros((55, 20))
+        chances[52, 2] = 1.0  # Around (5, 105) on the field: pixel (240, 1030) here
+        self.scene.field_map = chances
+        rows, columns = np.nonzero((drawn() != plain).any(axis=2))
+        self.assertTrue(len(rows))
+        self.assertAlmostEqual(rows.mean(), 1030, delta=40)
+        self.assertAlmostEqual(columns.mean(), 240, delta=60)
+
     def test_without_the_field_there_is_no_top_down_view(self):
         self.scene.image_to_field = None
         view, message = self.views.draw_top_down_view(self.scene, self.options, self.record)

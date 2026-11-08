@@ -5,6 +5,8 @@ from typing import Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
+from .field_maps import GIVES_UP_COLOUR, GIVES_UP_SHOWN, shade_from_above
+
 # The colours of the drawn field (BGR): grass, the end zones a little lighter, what lies
 # around the field darker, and the lines
 DIAGRAM_GRASS = (45, 83, 20)
@@ -29,6 +31,9 @@ def draw_field_diagram(
     disc: Optional[Tuple[float, float]] = None,
     in_camera: Optional[np.ndarray] = None,
     disc_path: Sequence[np.ndarray] = (),
+    field_map: Optional[np.ndarray] = None,
+    map_lines: bool = False,
+    opening: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """The field drawn from above, with the players as dots in their team's colour.
 
@@ -41,11 +46,17 @@ def draw_field_diagram(
         field_to_view: 3x3, place on the field -> pixel of the picture
         players: For each player a dict: "place" (x, y on the field), "colour" (BGR, or
             None for a team not known), "label" (a jersey number or ""), "holder"
-            (whether they have the disc) and "trail" (places on the field, oldest first)
+            (whether they have the disc), "trail" (places on the field, oldest first)
+            and "gives_up" (a defender's share of the dangerous space, if shown)
         disc: Where the disc is on the field, if it is seen and nobody holds it
         in_camera: The outline, on the field, of what the camera sees (N, 2): drawn
             lighter than the rest, which is out of view
         disc_path: Where the disc has been: lines of places on the field (N, 2)
+        field_map: A number per square of the field (rows along it from the near back
+            line, columns across): where the next throw goes or the dangerous space,
+            drawn over the field, the highest brightest
+        map_lines: The map as lines of equal height instead of shading
+        opening: How much more the map is than a moment ago, drawn as thin lines
 
     Returns:
         The picture (BGR)
@@ -83,6 +94,9 @@ def draw_field_diagram(
         cv2.copyTo(bright, seen, view)
         cv2.polylines(view, [outline], True, DIAGRAM_VIEW_EDGE, max(1, line), cv2.LINE_AA)
 
+    if field_map is not None:
+        shade_from_above(view, field_map, in_view, width, length, map_lines, opening)
+
     radius = max(4, int(round(unit * 1.1)))
     for player in players:
         trail = np.asarray(player.get("trail", ()), dtype=float).reshape(-1, 2)
@@ -106,6 +120,15 @@ def draw_field_diagram(
         rim = (20, 20, 20) if sum(colour) > 380 else (235, 235, 235)
         if player.get("holder"):
             cv2.circle(view, (x, y), radius + 5, DIAGRAM_DISC, 3, cv2.LINE_AA)
+        gives_up = player.get("gives_up", 0.0)
+        if gives_up >= GIVES_UP_SHOWN:
+            # A defender who leaves much of the dangerous space: ringed red, with the share
+            cv2.circle(view, (x, y), radius + 5, GIVES_UP_COLOUR, 3, cv2.LINE_AA)
+            text = f"{gives_up:.0%}"
+            scale = radius / 22.0 + 0.2
+            origin = (x - radius, y + radius + int(18 * scale) + 6)
+            cv2.putText(view, text, origin, font, scale, (20, 20, 20), 4, cv2.LINE_AA)
+            cv2.putText(view, text, origin, font, scale, GIVES_UP_COLOUR, 2, cv2.LINE_AA)
         cv2.circle(view, (x, y), radius, colour, -1, cv2.LINE_AA)
         cv2.circle(view, (x, y), radius, rim, 1, cv2.LINE_AA)
         if player.get("label"):

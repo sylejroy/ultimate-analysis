@@ -387,6 +387,35 @@ class MainTab(QWidget):
         )
         self.disc_heat_checkbox.stateChanged.connect(self._on_disc_heat_toggled)
         models_layout.addRow(self.disc_heat_checkbox)
+        # A map over the field, on both views
+        self.field_map_combo = compact_combo(QComboBox())
+        for label, kind in (
+            ("Off", "off"),
+            ("Where the next throw goes", "throws"),
+            ("Dangerous space", "danger"),
+        ):
+            self.field_map_combo.addItem(label, kind)
+        self.field_map_combo.setCurrentIndex(
+            max(0, self.field_map_combo.findData(get_setting("homography.field_map", "off")))
+        )
+        self.field_map_combo.setToolTip(
+            "A map over the field, on the video and on the top-down view, while a player\n"
+            "holds the disc and which end their team attacks is known (from the last\n"
+            "line-up, or from where its throws went since the last cut).\n"
+            "Where the next throw goes: what a network learned from recorded games\n"
+            "(scripts/train_throw_targets.py), from where the players stand and run.\n"
+            "Dangerous space: where the offence would get the disc before any defender,\n"
+            "and how much more likely they would be to score from there, looking one throw\n"
+            "ahead: a dump that opens the other side counts. Thin blue lines: space\n"
+            "that is opening. Red rings: the defenders nearest to most of the danger."
+        )
+        self.field_map_combo.currentIndexChanged.connect(self._on_field_map_changed)
+        models_layout.addRow(faint("Map"), self.field_map_combo)
+        self.map_lines_checkbox = ToggleSwitch("Draw the map as lines")
+        self.map_lines_checkbox.setChecked(bool(get_setting("homography.field_map_lines", False)))
+        self.map_lines_checkbox.setToolTip("Lines of equal height instead of shading")
+        self.map_lines_checkbox.stateChanged.connect(self._on_map_lines_toggled)
+        models_layout.addRow(self.map_lines_checkbox)
 
         # Disc detection model dropdown
         self.disc_model_combo = compact_combo(QComboBox())
@@ -1118,6 +1147,18 @@ class MainTab(QWidget):
         """Show or hide the heat map of where a disc is likely."""
         shown = self.disc_heat_checkbox.isChecked()
         self._run_on_worker(lambda worker: worker.show_disc_heat(shown))
+        self._request_display_update()
+
+    def _on_field_map_changed(self, _index: int):
+        """Show another map over the field, or none."""
+        kind = self.field_map_combo.currentData()
+        self._run_on_worker(lambda worker: worker.set_field_map(kind))
+        self._request_display_update()
+
+    def _on_map_lines_toggled(self, _state: int):
+        """Draw the map over the field as lines or as shading."""
+        lines = self.map_lines_checkbox.isChecked()
+        self._run_on_worker(lambda worker: worker.set_map_lines(lines))
         self._request_display_update()
 
     def _on_holder_model_changed(self, _index: int):
