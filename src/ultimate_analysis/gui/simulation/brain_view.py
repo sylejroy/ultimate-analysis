@@ -53,7 +53,7 @@ class NetworkView(QWidget):
     def _places(self) -> List[np.ndarray]:
         """Where each node of each layer is drawn: (n, 2) per layer."""
         width, height = self.width(), self.height()
-        left, right, top, bottom = 150.0, width - 90.0, 14.0, height - 14.0
+        left, right, top, bottom = 200.0, width - 190.0, 14.0, height - 14.0
         columns = np.linspace(left, right, len(self.layers))
         places = []
         for k, layer in enumerate(self.layers):
@@ -129,12 +129,12 @@ class NetworkView(QWidget):
             ys = places[0][start : start + count, 1]
             if len(ys):
                 painter.drawText(
-                    QRectF(4, ys.mean() - 8, 140, 16), Qt.AlignRight | Qt.AlignVCenter, name
+                    QRectF(4, ys.mean() - 8, 190, 16), Qt.AlignRight | Qt.AlignVCenter, name
                 )
             start += count
         for name, value, (x, y) in zip(self.outputs, self.layers[-1], places[-1]):
             painter.drawText(
-                QRectF(x + 10, y - 8, 90, 16),
+                QRectF(x + 10, y - 8, 180, 16),
                 Qt.AlignLeft | Qt.AlignVCenter,
                 f"{name} {value:+.2f}",
             )

@@ -164,10 +164,11 @@ class BrainPanel(QWidget):
             self.network.clear("Play a step first")
             return
         view = views[k]
-        self.knowledge.setPixmap(frame_to_pixmap(knowledge_picture(view, team)))
         if hasattr(getattr(teams[team], "brains", None), "spots"):
+            self._team = team
             self._show_spots(teams[team], view, k, side)
             return
+        self.knowledge.setPixmap(frame_to_pixmap(knowledge_picture(view, team)))
         brain = getattr(teams[team], "minds", None) or getattr(
             getattr(teams[team], "brains", None), "minds", None
         )
@@ -199,8 +200,9 @@ class BrainPanel(QWidget):
         )
 
     def _show_spots(self, team, view, k: int, side: str) -> None:
-        """A player who chooses spots: the network that scores their choices, at work on
-        the one they think best; the holder's, on the throw (or holding on)."""
+        """A player who chooses spots: on their view, the spots they weigh (the holder:
+        where they could throw), the likelier the brighter; beside it the network that
+        scores each of them, at work on the one it scores highest."""
         import torch
 
         from ...simulation import spot_features as sf
@@ -212,37 +214,78 @@ class BrainPanel(QWidget):
                 features = sf.throw_choices(sf.views_of([view]))[0]
                 network = team.brains.throws
                 scores = network(features)[:, 0].numpy() + THROW_PRIOR
-                groups = sf.THROW_GROUPS
             else:
                 plan = team.plans[k].choice if k < len(team.plans) else None
-                features = sf.spot_choices(sf.views_of([view], [plan]))[0][0]
+                features, kinds, players, params = sf.spot_choices(sf.views_of([view], [plan]))
+                features, kinds, players, params = features[0], kinds[0], players[0], params[0]
                 network = team.brains.spots[side]
                 scores = network(features)[:, 0].numpy()
-                groups = sf.SPOT_GROUPS
         chances = np.exp(scores - scores.max())
         chances = chances / chances.sum()
-        best = int(np.argmax(chances))
-        layers = activations(network, features[best].numpy())
-        self.network.show_brain(layers, weights_of(network), None, groups, ("Score",))
         if holder:
-            what = (
-                "hold on"
-                if best == 0
-                else f"throw to ({sf.THROW_TARGETS[best - 1][0]:.0f}, {sf.THROW_TARGETS[best - 1][1]:.0f})"
-            )
+            # Where they could throw (holding on is not a place)
+            places, weights = sf.THROW_TARGETS, chances[1:]
+            best = int(np.argmax(chances))
+            on_view = (places, weights, int(np.argmax(weights)))  # Starred: the likeliest throw
+        else:
+            places = _spot_places(view, kinds.numpy(), players.numpy(), params.numpy())
+            best = int(np.argmax(chances))
+            on_view = (places, chances, best)
+        self.knowledge.setPixmap(
+            frame_to_pixmap(knowledge_picture(view, self._team, considered=on_view))
+        )
+        layers = activations(network, features[best].numpy())
+        if holder:
+            outputs = ("Score of this choice",)
+            groups = sf.THROW_GROUPS
+        else:
+            outputs = ("Score of this spot",)
+            groups = sf.SPOT_GROUPS
+        self.network.show_brain(layers, weights_of(network), None, groups, outputs)
+        if holder:
+            what = "to hold on" if best == 0 else "a throw"
             self.said.setText(
-                f"The holder's network, on its likeliest choice: {what}, {chances[best]:.0%}. "
-                f"Holds on {chances[0]:.0%} of the time now."
+                "The holder's network gives a score to holding on and to throwing to each "
+                "of 481 spots over the field; the higher, the likelier it is chosen "
+                "(on the left, brighter). Shown: what goes in for its likeliest choice, "
+                f"{what} ({chances[best]:.0%}); starred on the left, the throw it likes best. "
+                f"It holds on {chances[0]:.0%} of the time now. "
+                "For each throw it sees where the target is, how long the disc would take with "
+                "the wind, and where the 3 teammates and 3 opponents nearest the target are, "
+                "how they run, speed up and face."
             )
         else:
-            kinds = ("a spot on the field", "beside a teammate", "beside an opponent", "the disc")
+            kinds_said = (
+                "a spot on the field",
+                "beside a teammate",
+                "beside an opponent",
+                "the disc",
+            )
             kind = int(features[best, 5:9].argmax())
             self.said.setText(
-                f"The {side}'s network, on the spot it likes best ({kinds[kind]}): "
-                f"{chances[best]:.0%} of choosing it among {len(chances)}. It sees only what is "
-                "around each spot: where the nearest players are and how they move, the disc, "
-                "the wind, the stall."
+                f"The {side}'s network gives a score to each of {len(chances)} spots this player "
+                "could run to: a grid around the disc, a step beside any player (following "
+                "them), the disc itself; the higher, the likelier it is chosen (on the left, "
+                "brighter). Shown: what goes in for the spot it likes best "
+                f"({kinds_said[kind]}, starred, {chances[best]:.0%}). For each spot it sees "
+                "where the spot is, where the 3 teammates and 3 opponents nearest it are, how "
+                "they run, speed up and face, the disc, the wind, the stall and its role."
             )
+
+
+def _spot_places(view, kinds, players, params) -> np.ndarray:
+    """Where each spot of spot_features.spot_choices is now, as the team sees the field."""
+    from ...simulation import spot_features as sf
+    from ...simulation.spots import _disc_place
+
+    places = np.array(params, dtype=float)
+    mates = kinds == sf.TEAMMATE
+    places[mates] += view.ours[players[mates], :2]
+    them = kinds == sf.OPPONENT
+    places[them] += view.theirs[players[them], :2]
+    disc = kinds == sf.DISC
+    places[disc] = _disc_place(view) if view.disc is None else np.asarray(view.disc, dtype=float)
+    return places
 
 
 class SimulationTab(QWidget):

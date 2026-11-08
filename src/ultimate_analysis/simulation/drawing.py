@@ -230,11 +230,15 @@ def scene_of_game(state: game.GameState) -> GameScene:
     return GameScene(int(round(state.seconds / game.STEP)), players, disc, disc_state)
 
 
-def knowledge_picture(view, team: int, size: tuple = (240, 620)) -> np.ndarray:
+def knowledge_picture(
+    view, team: int, size: tuple = (240, 620), considered: Optional[tuple] = None
+) -> np.ndarray:
     """What one player knows, from above with their team attacking upwards: teammates
     and opponents where they believe them, solid where seen, a ring as wide as how
     unsure where remembered, faint where lost; the player themselves ringed in yellow;
-    the disc where they judge it comes down."""
+    the disc where they judge it comes down. `considered`: (places (n, 2), chances (n,),
+    best): the spots or throws a player weighs, the likelier the brighter, the one they
+    like best starred."""
     from .learned import KNOWN_UNSURE
 
     template = TEMPLATES["usau"]
@@ -248,6 +252,16 @@ def knowledge_picture(view, team: int, size: tuple = (240, 620)) -> np.ndarray:
         return int(round(x / w)), int(round(y / w))
 
     unit = abs((to_view @ [1.0, 0.0, 1.0])[0] - (to_view @ [0.0, 0.0, 1.0])[0])
+    if considered is not None:
+        places, chances, best = considered
+        top = float(np.max(chances)) or 1.0
+        for k in np.argsort(chances):  # The likeliest drawn last, on top
+            share = float(chances[k]) / top
+            if share < 0.02:
+                continue
+            colour = (int(40 + 40 * share), int(120 + 135 * share), int(255 * share))  # BGR
+            cv2.circle(picture, at(places[k]), 2 + int(4 * share), colour, -1, cv2.LINE_AA)
+        cv2.drawMarker(picture, at(places[best]), (80, 220, 255), cv2.MARKER_STAR, 18, 2)
     groups = (
         (view.ours, view.ours_unsure, COLOURS[team]),
         (view.theirs, view.theirs_unsure, COLOURS[1 - team]),

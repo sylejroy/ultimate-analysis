@@ -34,21 +34,21 @@ THROW_FEATURES = 1 + 2 + 3 + 3 + 2 * NEAREST * AROUND + 2
 NO_DISC, HELD, IN_AIR, ON_GROUND = range(4)  # What the disc is doing, in a view
 # What a spot's or a throw's numbers are, by kind, in order (for drawing the networks)
 SPOT_GROUPS = (
-    ("The spot", 5),
-    ("Kind of spot", 4),
-    ("Chosen before", 1),
-    ("Teammates near it", NEAREST * AROUND),
-    ("Opponents near it", NEAREST * AROUND),
-    ("The disc", 9),
-    ("Wind, stall, role", 2 + 2 + PLAYERS + 1 + 2),
+    ("Where the spot is", 5),
+    ("What kind of spot", 4),
+    ("Same as last choice", 1),
+    ("3 teammates nearest it", NEAREST * AROUND),
+    ("3 opponents nearest it", NEAREST * AROUND),
+    ("The disc, from the spot", 9),
+    ("Wind, stall, role, speed", 2 + 2 + PLAYERS + 1 + 2),
 )
 THROW_GROUPS = (
-    ("Hold on", 1),
-    ("The target", 5),
-    ("Flight, wind", 3),
-    ("Teammates near it", NEAREST * AROUND),
-    ("Opponents near it", NEAREST * AROUND),
-    ("Stall", 2),
+    ("Hold on instead", 1),
+    ("Where the target is", 5),
+    ("Flight time, wind", 3),
+    ("3 teammates nearest it", NEAREST * AROUND),
+    ("3 opponents nearest it", NEAREST * AROUND),
+    ("Stall, time held", 2),
 )
 
 # A view: name -> (shape per player, kind)

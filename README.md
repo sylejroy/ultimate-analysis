@@ -38,7 +38,7 @@ https://github.com/user-attachments/assets/e92d9d47-9577-4924-934d-8aab7dad49b6
 | --- | --- |
 | ![Field labelling](docs/gui_example_field_labelling.png) | ![Click the holder](docs/gui_example_holder_labelling.png) |
 
-| The simulation, a player's brain at work | The simulation from above |
+| Simulation: a cutter weighing where to run | Simulation: the holder weighing where to throw |
 | --- | --- |
 | ![Simulation tab](docs/gui_example_simulation.png) | ![Simulation from above](docs/gui_example_simulation_above.png) |
 
