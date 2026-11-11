@@ -4,17 +4,17 @@ by reinforcement (PPO).
 
 Each iteration the present team plays points against the scripted team (without set
 plays: the base game first) or itself, a
-random wind each point. Every choice its players make is kept: what was around each spot
+random wind each point. Every choice its players make is kept: what was around each place
 they could have chosen, which they chose, how likely that was, and the value (on the game
 as it is) at that moment. A choice's reward: what the team and the player got
-(ppo.rewards_of and ppo.player_rewards: completions and the yards two passes on,
+(ppo.rewards_of and ppo.player_rewards: completions and the yards each gained,
 turnovers, scores, the stall counted; a throw caught, a catch, a score, a block, a disc
 lost) from then until their next choice, discounted as time goes; its advantage, how
 much better it went than the value said (GAE over the player's choices). The choices
 then move towards what went better, never far from what played (clipped, PPO).
 
 Printed per iteration: points scored and conceded, completions, the reward per point,
-how much of what happened the values foresaw. Every --report iterations the team plays
+the time. Every --report iterations the team plays
 16 points against the scripted team and is kept in a new folder:
 
     <output>/<run>/iter_0010/spots.pt ... and latest/
@@ -47,7 +47,7 @@ from ultimate_analysis.simulation.ppo import (  # noqa: E402
     rewards_of,
     stall_watch,
 )
-from ultimate_analysis.simulation.scripted import ScriptedTeam  # noqa: E402
+from ultimate_analysis.simulation.scripted import ScriptedTeam, ScriptedTeam2  # noqa: E402
 from ultimate_analysis.simulation.spots import (  # noqa: E402
     SpotBrains,
     SpotTeam,
@@ -73,20 +73,26 @@ def _brains(state) -> SpotBrains:
 
 
 def play(job) -> list:
-    """Play points with the present team (its state) against the scripted team or
-    itself. Per point: the choices made, the rewards, and what came of it."""
+    """Play points with the present team (its state) against the scripted team, itself,
+    or another team of spots (its state, a dict: not learned from). Per point: the
+    choices made, the rewards, and what came of it."""
     state, opponent, seeds, limit, stall_reward, stalled, *more = job
     record = more[0] if more else True  # False: only to see how it plays
     brains = _brains(state)
+    other = _brains(opponent) if isinstance(opponent, dict) else None
     found = []
     for k, seed in enumerate(seeds):
         rng = np.random.default_rng(seed)
         side = k % 2
         ours = SpotTeam(brains, side, rng, record=record)
-        if opponent == "self":
+        if other is not None:
+            theirs = SpotTeam(other, 1 - side, rng, record=False)
+        elif opponent == "self":
             theirs = SpotTeam(brains, 1 - side, rng, record=record)
         else:
-            theirs = ScriptedTeam(seed, plays=False)  # The base game first: no set plays
+            # The base game first: no set plays
+            kind = ScriptedTeam2 if opponent == "scripted2" else ScriptedTeam
+            theirs = kind(seed, plays=False)
         teams = (ours, theirs) if side == 0 else (theirs, ours)
         start = game.pull_start(rng, int(rng.integers(2)), game.a_wind(rng))
         counted, watch = stall_watch()
@@ -136,18 +142,11 @@ def advantages(points: list, credit: float, gamma: float = GAMMA) -> list:
                 between = discounted[start] - gamma**gap * discounted[end]
                 after = choices[i + 1].value if i + 1 < len(choices) else 0.0
                 delta = between + gamma**gap * after - c.value
-                running = delta + (gamma * LAMBDA) ** gap * running
+                # Faded once per choice, not per step: choices far apart keep their credit
+                running = delta + gamma**gap * LAMBDA * running
                 c.advantage, c.returned, c.happened = running, running + c.value, discounted[start]
                 kept.append(c)
     return kept
-
-
-def foreseen(choices: list, sides: tuple) -> float:
-    mine = [(c.happened, c.value) for c in choices if c.side in sides]
-    if len(mine) < 2:
-        return float("nan")
-    happened, value = np.array(mine).T
-    return float(1.0 - np.var(happened - value) / max(np.var(happened), 1e-9))
 
 
 def learn(brains, choices, optimisers, value_optimisers, values_only=False, device="cpu") -> None:
@@ -160,7 +159,8 @@ def learn(brains, choices, optimisers, value_optimisers, values_only=False, devi
         network = brains.throws if side == "throw" else brains.spots[side]
         value_side = "offence" if side == "throw" else side
         features = torch.from_numpy(np.stack([c.features for c in mine])).to(device)  # float16
-        prior = None if mine[0].prior is None else torch.from_numpy(mine[0].prior).to(device)
+        # Added to the scores: the throws' lean at first, the spots that may not be chosen
+        prior = torch.from_numpy(np.stack([c.prior for c in mine])).to(device)
         chosen = torch.tensor([c.chosen for c in mine], device=device)
         old = torch.tensor([c.log_chance for c in mine], dtype=torch.float32, device=device)
         advantage = torch.tensor([c.advantage for c in mine], dtype=torch.float32, device=device)
@@ -180,8 +180,7 @@ def learn(brains, choices, optimisers, value_optimisers, values_only=False, devi
                 if values_only:
                     continue
                 scores = network(features[batch].float())[..., 0]
-                if prior is not None:
-                    scores = scores + prior
+                scores = scores + prior[batch]
                 log_chances = torch.log_softmax(scores, dim=1)
                 new = log_chances[torch.arange(len(batch), device=device), chosen[batch]]
                 ratio = torch.exp(new - old[batch])
@@ -282,9 +281,7 @@ def main() -> None:
                 f"iteration {iteration}: {len(points)} points, scored "
                 f"{sum(p['scored'] for p in points)}, conceded {sum(p['conceded'] for p in points)}, "
                 f"completed {sum(p['catches'] for p in points)}/{throws}, "
-                f"{len(choices)} choices, values foresaw "
-                f"{foreseen(choices, ('offence', 'throw')):.0%} offence, "
-                f"{foreseen(choices, ('defence',)):.0%} defence, "
+                f"{len(choices)} choices, "
                 f"{played:.0f} s playing, {time.perf_counter() - began - played:.0f} s learning"
                 + (" (values only)" if iteration <= args.warmup else ""),
                 flush=True,

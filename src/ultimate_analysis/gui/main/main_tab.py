@@ -392,7 +392,6 @@ class MainTab(QWidget):
         for label, kind in (
             ("Off", "off"),
             ("Where the next throw goes", "throws"),
-            ("Dangerous space", "danger"),
         ):
             self.field_map_combo.addItem(label, kind)
         self.field_map_combo.setCurrentIndex(
@@ -403,11 +402,7 @@ class MainTab(QWidget):
             "holds the disc and which end their team attacks is known (from the last\n"
             "line-up, or from where its throws went since the last cut).\n"
             "Where the next throw goes: what a network learned from recorded games\n"
-            "(scripts/train_throw_targets.py), from where the players stand and run.\n"
-            "Dangerous space: where the offence would get the disc before any defender,\n"
-            "and how much more likely they would be to score from there, looking one throw\n"
-            "ahead: a dump that opens the other side counts. Thin blue lines: space\n"
-            "that is opening. Red rings: the defenders nearest to most of the danger."
+            "(scripts/train_throw_targets.py), from where the players stand and run."
         )
         self.field_map_combo.currentIndexChanged.connect(self._on_field_map_changed)
         models_layout.addRow(faint("Map"), self.field_map_combo)

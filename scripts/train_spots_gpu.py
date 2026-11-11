@@ -7,18 +7,30 @@ Each iteration every point plays on for --steps tenths of a second (a point that
 starts again with a new pull). Every choice is kept: the view it was made from, which
 spot or throw, how likely it was, and the value (on the game as it is). Its reward:
 what the team and the player got (as scripts/train_spots.py: completions and the yards
-two passes on, turnovers, scores, the stall counted and a stall's extra cost; a throw
+each gained, turnovers, scores, the stall counted and a stall's extra cost; a throw
 caught, a catch, a score, a block, a disc lost) until the player's next choice; its
 advantage, how much better that went than the value said (GAE). The choices then move
 towards what went better (clipped, PPO), what is around each spot worked out again from
 the views kept.
 
-Printed per iteration: points ended and scored, throws and completions, how much of
-what happened the values foresaw, the time. Every --report iterations the team is kept
-(<run>/iter_0010/spots.pt ... and latest/) and plays --check points against the scripted
-team on the processor (as scripts/train_spots.py), while learning goes on.
+With --marking, in that share of the points one team defends by rules, man to man
+(batch.BatchPlayers): the offence learns to beat a defender before self-play. With
+--league, in that share one team is an earlier team: the run's start and its
+--league-size latest kept teams, not learned from, so that it does not only learn to
+beat itself as it is.
 
-    python scripts/train_spots_gpu.py --points 2048 --iterations 500
+Printed per iteration: points ended and scored, throws and completions, the time. Every
+--report iterations the team is kept
+(<run>/iter_0010/spots.pt ... and latest/) and plays --check points against the scripted
+team on the processor (as scripts/train_spots.py), and the benchmark one (scripted 2,
+set as the recorded teams play), while learning goes on; and, as a
+ladder, as many points against the team of --ladder iterations before (each) and the
+team the run started from: whether self-play makes it better than it was. The best team
+against the benchmark so far is named in <run>/best.json; with --revert, a team that does
+that many points worse against it than the best goes back to the best (its learning
+afresh), so that a bad stretch does not lose a good team.
+
+    python scripts/train_spots_gpu.py --points 2048 --iterations 500 --marking 1
 """
 
 import argparse
@@ -124,15 +136,12 @@ def advantages(game, kept, final_value, credit, gamma=GAMMA, lam=LAMBDA):
     advantage = torch.zeros(n, device=dev)
     for level in range(int(count_after.max()) + 1):
         at = count_after == level
-        carry = torch.where(same_point[at], (gamma * lam) ** gap[at] * advantage[nxt[at]], 0.0)
+        # Faded once per choice, not per step: choices far apart keep their credit
+        carry = torch.where(same_point[at], gamma ** gap[at] * lam * advantage[nxt[at]], 0.0)
         advantage[at] = delta[at] + carry
     back = torch.empty_like(order)
     back[order] = torch.arange(n, device=dev)
     return advantage[back], happened[back]
-
-
-def foreseen(happened, value):
-    return float(1.0 - torch.var(happened - value) / torch.var(happened).clamp(min=1e-9))
 
 
 # ---------------------------------------------------------------------- learning
@@ -178,7 +187,8 @@ def learn(
                 if kind == 2:
                     scores = network(sf.throw_choices(view))[..., 0] + prior
                 else:
-                    scores = network(sf.spot_choices(view)[0])[..., 0]
+                    parts = sf.spot_parts(view)
+                    scores = sf.spot_scores(network, parts) + sf.spot_leans(view, parts["allowed"])
                 log_chances = torch.log_softmax(scores, -1)
                 new = log_chances.gather(1, kept["chosen"][rows][:, None])[:, 0]
                 ratio = torch.exp(new - kept["log_chance"][rows])
@@ -215,13 +225,44 @@ def main() -> None:
         help="Of the choices of an iteration, the share each pass learns from",
     )
     parser.add_argument("--warmup", type=int, default=0, help="Iterations of values only")
+    parser.add_argument(
+        "--marking",
+        type=float,
+        default=0.0,
+        help="Share of points where one team defends by rules, man to man (0: self-play)",
+    )
     parser.add_argument("--credit", type=float, default=1.0)
     parser.add_argument("--gamma", type=float, default=GAMMA)
     parser.add_argument("--stall-reward", type=float, default=STALL_REWARD)
     parser.add_argument("--stalled", type=float, default=3.0)
-    parser.add_argument("--report", type=int, default=10)
-    parser.add_argument("--check", type=int, default=48, help="Points against the scripted team")
+    parser.add_argument("--report", type=int, default=20)
+    parser.add_argument("--check", type=int, default=192, help="Points against the scripted team")
     parser.add_argument("--workers", type=int, default=12, help="For the checks, on the processor")
+    parser.add_argument(
+        "--spread",
+        type=float,
+        default=0.0,
+        help="Share of points where one team attacks by rules, spread out, for the defence",
+    )
+    parser.add_argument(
+        "--league",
+        type=float,
+        default=0.0,
+        help="Share of points where one team is an earlier team of the run (or its start)",
+    )
+    parser.add_argument("--league-size", type=int, default=5, help="Latest teams kept to play")
+    parser.add_argument(
+        "--ladder",
+        default="10,50",
+        help="Iterations back of the teams each kept team also plays (and the run's start)",
+    )
+    parser.add_argument(
+        "--revert",
+        type=int,
+        default=16,
+        help="Back to the best team when one does this many points worse (of the margin) "
+        "against scripted 2 (0: never)",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output", type=Path, default=Path("data/models/movement"))
     args = parser.parse_args()
@@ -242,13 +283,24 @@ def main() -> None:
     game = batch.BatchGame(
         args.points, dev, args.seed, args.point_seconds, args.stalled, args.stall_reward
     )
-    players = batch.BatchPlayers(game, brains)
+    players = batch.BatchPlayers(game, brains, args.marking, args.league, args.spread)
     run = args.output / f"{datetime.now():%Y%m%d_%H%M%S}_spots_gpu"
     run.mkdir(parents=True)
     settings = {**vars(args), "start": str(args.start), "output": str(args.output)}
     (run / "settings.json").write_text(json.dumps(settings, indent=2))
     print(f"Written to {run}", flush=True)
     checking = None
+    best = None  # (margin against scripted 2, iteration)
+    ladder = [int(n) for n in args.ladder.split(",") if n.strip()]
+    start_state = brains.state() if args.start else None  # The team the run started from
+
+    def rival(state):
+        found = SpotBrains()
+        found.load(state)
+        return found.to(dev)
+
+    if args.league > 0 and start_state is not None:
+        players.set_rivals([rival(start_state)])
     with Pool(args.workers) as pool:
         for iteration in range(1, args.iterations + 1):
             began = time.perf_counter()
@@ -271,52 +323,94 @@ def main() -> None:
             )
             torch.cuda.synchronize()
             tally = {k: v - before.get(k, 0) for k, v in game.tally.items()}
-            offence = kept["kind"] != 1
             print(
                 f"iteration {iteration}: {int(game.done.sum())} points ended, "
                 f"{tally.get('score', 0)} scored; completed {tally.get('catch', 0)}/"
-                f"{tally.get('throw', 0)}; {len(advantage)} choices; values foresaw "
-                f"{foreseen(happened[offence], kept['value'][offence]):.0%} offence, "
-                f"{foreseen(happened[~offence], kept['value'][~offence]):.0%} defence; "
+                f"{tally.get('throw', 0)}; {len(advantage)} choices; "
                 f"{played:.0f} s playing, {time.perf_counter() - began - played:.0f} s learning"
                 + (" (values only)" if iteration <= args.warmup else ""),
                 flush=True,
             )
             if checking is not None and checking[1].ready():
-                at, result = checking
-                found = [p for part in result.get() for p in part]
-                scored = sum(p["scored"] for p in found)
-                conceded = sum(p["conceded"] for p in found)
+                at, result, names = checking
+                parts = result.get()
+                results = {}
+                for name in dict.fromkeys(names):
+                    found = [p for part, n in zip(parts, names) if n == name for p in part]
+                    scored = sum(p["scored"] for p in found)
+                    conceded = sum(p["conceded"] for p in found)
+                    results[name] = {"scored": scored, "conceded": conceded, "points": len(found)}
+                    print(
+                        f"  against {name} (iteration {at}): scored {scored}, conceded "
+                        f"{conceded} of {len(found)}; completed "
+                        f"{sum(p['catches'] for p in found)}/{sum(p['throws'] for p in found)}",
+                        flush=True,
+                    )
                 (run / f"iter_{at:04d}" / "against_scripted.json").write_text(
-                    json.dumps({"scored": scored, "conceded": conceded, "points": len(found)})
+                    json.dumps(results["scripted"])
                 )
-                print(
-                    f"  against scripted (iteration {at}): scored {scored}, conceded {conceded} "
-                    f"of {len(found)}; completed {sum(p['catches'] for p in found)}/"
-                    f"{sum(p['throws'] for p in found)}",
-                    flush=True,
-                )
+                (run / f"iter_{at:04d}" / "checks.json").write_text(json.dumps(results, indent=2))
                 checking = None
+                bench = results["scripted 2"]
+                margin = bench["scored"] - bench["conceded"]
+                if best is None or margin > best[0]:
+                    best = (margin, at)
+                    (run / "best.json").write_text(
+                        json.dumps({"iteration": at, "margin against scripted 2": margin})
+                    )
+                elif args.revert and margin <= best[0] - args.revert:
+                    kept_best = run / f"iter_{best[1]:04d}" / "spots.pt"
+                    brains.load(torch.load(kept_best, map_location="cpu", weights_only=True))
+                    for optimiser in [*optimisers.values(), *value_optimisers.values()]:
+                        optimiser.state.clear()
+                    print(
+                        f"  {margin:+d} against scripted 2, the best {best[0]:+d} (iteration "
+                        f"{best[1]}): back to that team",
+                        flush=True,
+                    )
             if iteration % args.report == 0:
                 folder = run / f"iter_{iteration:04d}"
                 save_spot_brains(brains, folder, iteration=iteration)
                 save_spot_brains(brains, run / "latest", iteration=iteration)
+                if args.league > 0:
+                    # The league: the run's start and its latest kept teams
+                    kept_teams = sorted(run.glob("iter_*/spots.pt"))[-args.league_size :]
+                    states = [start_state] if start_state is not None else []
+                    states += [
+                        torch.load(p, map_location="cpu", weights_only=True) for p in kept_teams
+                    ]
+                    players.set_rivals([rival(s) for s in states])
                 if checking is None:
                     state = brains.state()
                     share = max(1, args.check // args.workers)
-                    jobs = [
-                        (
-                            state,
-                            "scripted",
-                            [int(s) for s in rng.integers(0, 2**31, share)],
-                            120.0,
-                            0.0,
-                            0.0,
-                            False,  # Played to see, not kept
-                        )
-                        for _ in range(args.workers)
-                    ]
-                    checking = (iteration, pool.map_async(train_spots.play, jobs))
+                    # The scripted team, the teams of this run some iterations back, and
+                    # the one it started from
+                    opponents = [("scripted", "scripted"), ("scripted 2", "scripted2")]
+                    for back in ladder:
+                        earlier = run / f"iter_{iteration - back:04d}" / "spots.pt"
+                        if iteration - back > 0 and earlier.exists():
+                            kept = torch.load(earlier, map_location="cpu", weights_only=True)
+                            opponents.append((f"iteration {iteration - back}", kept))
+                    if start_state is not None:
+                        opponents.append(("the start", start_state))
+                    jobs, names = [], []
+                    for name, opponent in opponents:
+                        # The benchmark twice as many points: 48 are too few to tell
+                        times = 2 if name == "scripted 2" else 1
+                        for _ in range(args.workers * times):
+                            jobs.append(
+                                (
+                                    state,
+                                    opponent,
+                                    [int(s) for s in rng.integers(0, 2**31, share)],
+                                    120.0,
+                                    0.0,
+                                    0.0,
+                                    False,  # Played to see, not kept
+                                )
+                            )
+                            names.append(name)
+                    checking = (iteration, pool.map_async(train_spots.play, jobs), names)
 
 
 if __name__ == "__main__":

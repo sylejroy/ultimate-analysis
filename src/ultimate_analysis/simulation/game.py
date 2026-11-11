@@ -49,10 +49,15 @@ CATCH_REACH = (
 DEFENDER_REACH = 2.5  # Yards: a defender this near contests the catch
 TIGHT_WINDOW = 0.75  # Yards: how much nearer a receiver must be to be sure of a contested catch
 POSITION_SECONDS = 0.3  # ... or how much sooner they must have got there
+# Getting there sooner counts up to this many seconds: a receiver waiting under a long
+# throw does not keep a defender coming in from behind off it
+POSITION_MOST = 0.3
 DROPPED = 0.02  # Of catches nobody contests
 # How far a throw goes from where it was aimed, as a typical error: a little, more for a
 # long throw, and more again with the mark close
 AIM_OFF, AIM_OFF_PER_YARD, MARKED_AIM = 0.4, 0.03, 1.5
+# ... and more again, by the square of the length: a long huck is much harder to place
+AIM_OFF_PER_SQUARE_YARD = 0.0005
 MARKED_WITHIN = 2.0  # Yards from the thrower
 AIM_OFF_PER_CURVE, AIM_OFF_PER_HEIGHT = 0.02, 0.02  # More off, per yard of curve or height
 CAUGHT_ON_THE_WAY = 0.3  # Of discs a defender gets a hand to on their way: the rest fall
@@ -71,11 +76,27 @@ PULL_HEIGHT = 15.0  # Yards: the top of the pull's arc
 # backpedal, they turn and run, and so lose sight of it; turning takes time
 BACKPEDAL_SPEED = 5.0  # Yards a second
 FORWARD_WITHIN, BACKWARD_FROM = np.radians(60.0), np.radians(120.0)  # Of the facing
-TURN_RATE = np.radians(360.0)  # A second: half a second to turn round
+TURN_RATE = np.radians(360.0)  # A second: half a second to turn round, standing
+# Turning costs: the faster they run the slower they turn (at top speed by TURN_SLOWER of
+# the rate); a change of direction beyond TURN_FREE loses speed first, up to TURN_LOSS of
+# it for a turn right round; and sideways, across the way they run, they speed up at
+# most SIDE_ACCELERATION, not ACCELERATION
+TURN_SLOWER, TURN_FREE, TURN_LOSS = 0.5, np.radians(60.0), 0.3
+SIDE_ACCELERATION = 4.0  # Yards a second per second
+# Crowds: players in the way slow a runner (picks, bumps), each by a share of top
+# speed, down to at most the slowest share; each defender within reach of where a
+# disc comes down beyond the nearest makes a contested catch harder, by CROWD_WEIGHT of
+# the measure it is weighed by (who is nearer, who got there first): a receiver well
+# first still mostly catches it, one level with them less with every defender more; a
+# defender near a low disc's path, beyond where they knock it down for sure, may tip it,
+# by a chance each tenth of a second
+TRAFFIC_REACH, TRAFFIC_SLOW, TRAFFIC_SLOWEST = 1.5, 0.2, 0.4
+CROWD_WEIGHT = 0.5
+TIP_REACH, TIP_CHANCE = 2.0, 0.1
 # A disc that hangs gives a defender near where it comes down time to make a play on it:
 # from LONG_FLIGHT seconds on, a contested catch is harder, up to HANG_WEIGHT (of the
 # measure a catch is weighed by) at HANGING seconds longer
-LONG_FLIGHT, HANGING, HANG_WEIGHT = 2.0, 2.0, 0.5
+LONG_FLIGHT, HANGING, HANG_WEIGHT = 2.0, 2.0, 1.0
 POINT_SECONDS = 120.0  # A point not scored by then ends without a score
 
 
@@ -89,7 +110,8 @@ class Event:
     team: int  # The team that had the disc
     place: Tuple[float, float]
     # Who did it: the thrower of a throw, the receiver of a catch or a score, the player
-    # whose throw, catch or stall lost the disc; and the defender who blocked it
+    # whose throw, catch or stall lost the disc; and the defender who blocked it (of a
+    # catch: the defender matched with the receiver)
     player: Optional[int] = None
     by: Optional[int] = None
 
@@ -111,10 +133,26 @@ class GameState:
     wind: np.ndarray = field(default_factory=lambda: np.zeros(2))  # Yards a second
     events: List[Event] = field(default_factory=list)
     facing: Optional[np.ndarray] = None  # (14, 2) the way each faces (unit); None: the disc
+    # Who is matched with whom this possession (match_up): each player's opponent (0 to
+    # 13), set when the offence first holds the disc; None before
+    pairs: Optional[np.ndarray] = None
 
     @property
     def over(self) -> bool:
         return self.scored is not None or self.seconds >= POINT_SECONDS
+
+
+def match_up(places: np.ndarray, offence: int) -> np.ndarray:
+    """(14,): each player's opponent for the possession, as teams pick up: the nearest
+    pair of attacker and defender first, then the nearest of the rest, and so on."""
+    attackers, defenders = _team_players(offence), _team_players(1 - offence)
+    gaps = np.hypot(*(places[attackers][:, None] - places[defenders][None]).transpose(2, 0, 1))
+    pairs = np.full(2 * PLAYERS, -1)
+    for _ in range(PLAYERS):
+        a, d = np.unravel_index(int(np.argmin(gaps)), gaps.shape)
+        pairs[attackers[a]], pairs[defenders[d]] = defenders[d], attackers[a]
+        gaps[a, :], gaps[:, d] = np.inf, np.inf
+    return pairs
 
 
 def team_of(player: int) -> int:
@@ -255,19 +293,57 @@ def _move(state: GameState, wanted: np.ndarray) -> None:
     )
     share = np.clip((facing_angle - FORWARD_WITHIN) / (BACKWARD_FROM - FORWARD_WITHIN), 0.0, 1.0)
     fastest = RUN_SPEED + (BACKPEDAL_SPEED - RUN_SPEED) * share
+    fastest = fastest * _traffic(state.places)
     too_fast = speed > fastest
     wanted[too_fast] *= (fastest[too_fast] / speed[too_fast])[:, None]
-    change = wanted - state.velocities
+    velocities = _after_turning(state.velocities, wanted)
+    change = wanted - velocities
+    change = _limit_sideways(velocities, change)
     size = np.hypot(*change.T)
     most = ACCELERATION * STEP
     over = size > most
     change[over] *= (most / size[over])[:, None]
-    state.velocities = state.velocities + change
+    state.velocities = velocities + change
     state.places = state.places + state.velocities * STEP
     _make_room(state)
     # Players may stand out of bounds but not far from the field
     state.places[:, 0] = np.clip(state.places[:, 0], -5.0, WIDTH + 5.0)
     state.places[:, 1] = np.clip(state.places[:, 1], -5.0, LENGTH + 5.0)
+
+
+def _after_turning(velocities: np.ndarray, wanted: np.ndarray) -> np.ndarray:
+    """The velocities after the speed lost to a sharp change of direction."""
+    now, goal = np.hypot(*velocities.T), np.hypot(*wanted.T)
+    cosine = np.sum(velocities * wanted, axis=1) / np.maximum(now * goal, 1e-9)
+    angle = np.arccos(np.clip(cosine, -1.0, 1.0))
+    sharp = (now > 1.0) & (goal > 1.0)
+    lost = TURN_LOSS * np.clip((angle - TURN_FREE) / (np.pi - TURN_FREE), 0.0, 1.0)
+    return velocities * (1.0 - np.where(sharp, lost, 0.0))[:, None]
+
+
+def _limit_sideways(velocities: np.ndarray, change: np.ndarray) -> np.ndarray:
+    """A change of velocity with what is across the way they run held to
+    SIDE_ACCELERATION."""
+    speed = np.hypot(*velocities.T)
+    way = velocities / np.maximum(speed, 1e-9)[:, None]
+    along = np.sum(change * way, axis=1)[:, None] * way
+    across = change - along
+    size = np.hypot(*across.T)
+    most = SIDE_ACCELERATION * STEP
+    across = np.where(
+        ((speed > 1.0) & (size > most))[:, None],
+        across * (most / np.maximum(size, 1e-9))[:, None],
+        across,
+    )
+    return np.where((speed > 1.0)[:, None], along + across, change)
+
+
+def _traffic(places: np.ndarray) -> np.ndarray:
+    """The share of top speed each player keeps for the others in their way."""
+    apart = np.hypot(*(places[:, None] - places[None]).transpose(2, 0, 1))
+    np.fill_diagonal(apart, np.inf)
+    crowd = (apart < TRAFFIC_REACH).sum(axis=1)
+    return np.clip(1.0 - TRAFFIC_SLOW * crowd, TRAFFIC_SLOWEST, 1.0)
 
 
 def _turn(state: GameState, wanted: np.ndarray) -> None:
@@ -295,7 +371,10 @@ def _turn(state: GameState, wanted: np.ndarray) -> None:
     now = np.arctan2(state.facing[:, 1], state.facing[:, 0])
     goal = np.arctan2(target[:, 1], target[:, 0])
     change = (goal - now + np.pi) % (2.0 * np.pi) - np.pi
-    now = now + np.clip(change, -TURN_RATE * STEP, TURN_RATE * STEP)
+    rate = TURN_RATE * (
+        1.0 - TURN_SLOWER * np.minimum(np.hypot(*state.velocities.T) / RUN_SPEED, 1.0)
+    )
+    now = now + np.clip(change, -rate * STEP, rate * STEP)
     state.facing = np.column_stack([np.cos(now), np.sin(now)])
 
 
@@ -335,6 +414,7 @@ def _turnover(
     `fault`, blocked by `by`."""
     state.events.append(Event(state.seconds, kind, state.offence, tuple(place), fault, by))
     state.offence = 1 - state.offence
+    state.pairs = None  # Matched afresh when the other team holds the disc
     state.throw = None
     state.holder = holder
     # A disc that falls in the end zone the team now attacks is brought to its goal line
@@ -374,7 +454,9 @@ def _start_throw(
     defenders = _team_players(1 - state.offence)
     marked = (np.hypot(*(state.places[defenders] - start).T) < MARKED_WITHIN).any()
     aimed = float(np.hypot(*(np.asarray(target) - start)))
-    off = (AIM_OFF + AIM_OFF_PER_YARD * aimed) * (MARKED_AIM if marked else 1.0)
+    off = (AIM_OFF + AIM_OFF_PER_YARD * aimed + AIM_OFF_PER_SQUARE_YARD * aimed**2) * (
+        MARKED_AIM if marked else 1.0
+    )
     # A curve and height are harder to put just right
     off *= (
         1.0 + AIM_OFF_PER_CURVE * abs(curve) + AIM_OFF_PER_HEIGHT * max(0.0, (height or 0) - FLAT)
@@ -422,7 +504,13 @@ def _in_the_way(state: GameState, rng: np.random.Generator) -> bool:
     defenders = _team_players(1 - state.offence)
     near = np.hypot(*(state.places[defenders] - place).T)
     if near.min() > PATH_REACH:
-        return False
+        # Further off, each defender near its path may get a fingertip to it
+        tippers = (near > PATH_REACH) & (near <= TIP_REACH)
+        if not tippers.any() or rng.random() >= 1.0 - (1.0 - TIP_CHANCE) ** int(tippers.sum()):
+            return False
+        tipper = defenders[int(np.argmin(np.where(tippers, near, np.inf)))]
+        _turnover(state, "block", place, None, flight.thrower, tipper)
+        return True
     blocker = defenders[int(np.argmin(near))]
     if rng.random() < CAUGHT_ON_THE_WAY:
         _turnover(state, "block", state.places[blocker].copy(), blocker, flight.thrower, blocker)
@@ -476,11 +564,14 @@ def _land(state: GameState, rng: np.random.Generator) -> None:
             position = throw.in_reach_since.get(
                 near_defence, state.seconds
             ) - throw.in_reach_since.get(near_offence, state.seconds)
+            position = float(np.clip(position, -POSITION_MOST, POSITION_MOST))
             hang = np.clip((throw.lands - throw.released - LONG_FLIGHT) / HANGING, 0.0, 1.0)
             measure = (d_def - d_off) / TIGHT_WINDOW + position / POSITION_SECONDS
-            caught = rng.random() < (1.0 - dropped) * (
-                0.5 + 0.5 * np.tanh(measure - HANG_WEIGHT * hang)
-            )
+            # Every other defender there makes it harder still
+            crowd = max(int((distance[defence] <= DEFENDER_REACH).sum()) - 1, 0)
+            measure -= CROWD_WEIGHT * crowd
+            chance = 0.5 + 0.5 * np.tanh(measure - HANG_WEIGHT * hang)
+            caught = rng.random() < (1.0 - dropped) * chance
         if caught:
             _catch(state, near_offence)
         elif d_def <= CATCH_REACH:
@@ -518,7 +609,9 @@ def _catch(state: GameState, player: int) -> None:
         return
     state.throw = None
     attack = attack_of(state.offence)
-    state.events.append(Event(state.seconds, "catch", state.offence, tuple(place), player))
+    # The defender matched with the receiver, whose player got it
+    guard = None if state.pairs is None else int(state.pairs[player])
+    state.events.append(Event(state.seconds, "catch", state.offence, tuple(place), player, guard))
     along = turn(place, attack)[1]
     if along >= LENGTH - END_ZONE:
         state.scored = state.offence
@@ -581,4 +674,6 @@ def step(
             state.events.append(
                 Event(state.seconds, "pick up", state.offence, tuple(state.places[state.holder]))
             )
+    if state.holder is not None and state.pairs is None:
+        state.pairs = match_up(state.places, state.offence)
     return state

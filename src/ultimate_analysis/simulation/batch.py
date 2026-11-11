@@ -14,6 +14,7 @@ from typing import Dict
 import numpy as np
 import torch
 
+from . import perception
 from . import spot_features as sf
 from .disc import (
     BLADE_ANGLE,
@@ -41,12 +42,14 @@ from .game import (
     AIM_OFF,
     AIM_OFF_PER_CURVE,
     AIM_OFF_PER_HEIGHT,
+    AIM_OFF_PER_SQUARE_YARD,
     AIM_OFF_PER_YARD,
     BACKPEDAL_SPEED,
     BACKWARD_FROM,
     BODY,
     CATCH_REACH,
     CAUGHT_ON_THE_WAY,
+    CROWD_WEIGHT,
     DEFENDER_REACH,
     DROPPED,
     END_ZONE,
@@ -63,15 +66,25 @@ from .game import (
     MARKED_WITHIN,
     PICK_UP_REACH,
     PLAYERS,
+    POSITION_MOST,
     POSITION_SECONDS,
     PULL_HEIGHT,
     RUN_SPEED,
+    SIDE_ACCELERATION,
     STALL,
     STALL_REACH,
     STEP,
     STRONGEST_WIND,
     TIGHT_WINDOW,
+    TIP_CHANCE,
+    TIP_REACH,
+    TRAFFIC_REACH,
+    TRAFFIC_SLOW,
+    TRAFFIC_SLOWEST,
+    TURN_FREE,
+    TURN_LOSS,
     TURN_RATE,
+    TURN_SLOWER,
     WIDTH,
 )
 from .perception import (
@@ -81,6 +94,9 @@ from .perception import (
     LANDING_GUESS,
     NOTICED,
     REACTION,
+    RECEIVER_GUESS,
+    RECEIVER_SURE,
+    RECEIVER_UNSURE,
     SEEN_OFF,
     TEAM_REACTION,
     VIEW_ANGLE,
@@ -96,6 +112,7 @@ from .ppo import (
     SCORE,
     SCORED,
     STALL_REWARD,
+    THEIRS_CAUGHT,
     THROWN,
     TURNOVER,
 )
@@ -112,11 +129,18 @@ from .scripted import (
     STYLE,
     UNDER_PATH,
 )
-from .spots import DECIDE_EVERY, SHORTEST_HOLD, THROW_EVERY, THROW_PRIOR
+from .spots import (
+    COMMIT,
+    DECIDE_EVERY,
+    REACT_STEPS,
+    SHORTEST_HOLD,
+    THROW_EVERY,
+    THROW_PRIOR,
+)
 
 P = 2 * PLAYERS
 SIZE = (WIDTH, LENGTH)
-HISTORY = 6  # Snapshots kept: now and 5 steps back
+HISTORY = 9  # Snapshots kept: now and 8 steps back (REACTION and ACCELERATION_OVER)
 STEPS_BACK = {  # Steps back: the latest snapshot at least so long ago
     "opponents": math.ceil(REACTION / STEP - 1e-4),
     "team": math.ceil(TEAM_REACTION / STEP - 1e-4),
@@ -124,7 +148,6 @@ STEPS_BACK = {  # Steps back: the latest snapshot at least so long ago
     "team before": math.ceil((TEAM_REACTION + ACCELERATION_OVER) / STEP - 1e-4),
     "own before": math.ceil(ACCELERATION_OVER / STEP - 1e-4),
 }
-MAX_PENDING = 2  # Catches whose reward waits for the catch two passes on
 
 
 def _norm(v):
@@ -252,16 +275,16 @@ class BatchGame:
         self.scored = zl(B) - 1
         self.wind = z(B, 2)
         self.guess = z(B, PLAYERS, 2)  # The defence's misjudgement of where a throw comes down
+        self.guess_off = z(B, PLAYERS, 2)  # ... and the offence's (perception.landing_guess)
         # What each team's players know: per team, per player of it, of every player
         self.seen_at, self.seen_going = z(B, 2, PLAYERS, P, 2), z(B, 2, PLAYERS, P, 2)
         self.seen_when = torch.full((B, 2, PLAYERS, P), -float("inf"), device=device)
         self.seen_accel, self.seen_facing = z(B, 2, PLAYERS, P, 2), z(B, 2, PLAYERS, P, 2)
         self.past_places, self.past_velocities = z(B, HISTORY, P, 2), z(B, HISTORY, P, 2)
-        # Rewards waiting: the last catches of the possession
-        self.pending_along = z(B, MAX_PENDING)
-        self.pending_step = zl(B, MAX_PENDING)
-        self.pending_count = zl(B)
-        self.last_thrower = zl(B) - 1
+        # Who is matched with whom this possession (game.match_up): -1 before
+        self.pairs = torch.full((B, P), -1, dtype=torch.long, device=device)
+        # Who threw the disc last, and from how far up the field as their team attacks
+        self.last_thrower, self.thrown_along = zl(B) - 1, z(B)
         self.step_count = 0  # Steps of the present rollout
         self.tally = {}  # What happened, counted: throws, catches, kinds of turnover, scores
         self.rewards = None  # (T, B, 2) the teams', (T, B, P) the players' own
@@ -291,6 +314,7 @@ class BatchGame:
         n = len(idx)
         if n == 0:
             return
+        self.pairs[idx] = -1
         receiving = (self._rand(n) < 0.5).long()
         attack = self.attack_of(receiving)
         across = torch.linspace(4.0, WIDTH - 4.0, PLAYERS, device=self.device)
@@ -337,6 +361,7 @@ class BatchGame:
         )
         self.reach_since[idx] = float("inf")
         self.guess[idx] = LANDING_GUESS * self._normal(n, PLAYERS, 2)
+        self.guess_off[idx] = 0.0  # The pull: as before, only the defence (kicking) misjudges
         towards = start[:, None] - places
         size = _norm(towards)[..., None]
         self.facing[idx] = torch.where(
@@ -349,7 +374,6 @@ class BatchGame:
         self.seen_accel[idx], self.seen_facing[idx] = 0.0, 0.0
         self.past_places[idx] = places[:, None]
         self.past_velocities[idx] = 0.0
-        self.pending_count[idx] = 0
         self.last_thrower[idx] = -1
 
     # ------------------------------------------------------------------ seeing
@@ -390,7 +414,9 @@ class BatchGame:
         seen[b[holds], (self.holder[holds] - first)] = True  # The holder looks round
         fresh = ~torch.isfinite(self.seen_when[:, team]).any(-1)  # (B, 7)
         seen = seen | fresh[..., None]
-        noise = SEEN_OFF * self._normal(B, PLAYERS, P, 2)
+        if perception.PERFECT:
+            seen = torch.ones_like(seen)
+        noise = (0.0 if perception.PERFECT else SEEN_OFF) * self._normal(B, PLAYERS, P, 2)
         noise[:, ks, mes] = 0.0
         places = seen_places[:, None].repeat(1, PLAYERS, 1, 1)
         velocities = seen_velocities[:, None].repeat(1, PLAYERS, 1, 1)
@@ -415,11 +441,14 @@ class BatchGame:
         ahead = since.clamp(max=CARRY_ON) + lag
         ahead[:, ks, mes] = 0.0
         believed = self.seen_at[:, team] + self.seen_going[:, team] * ahead[..., None]
-        unsure = SEEN_OFF + DRIFT * since
+        unsure = (0.0 if perception.PERFECT else SEEN_OFF) + DRIFT * since
         attack_t = torch.full((B, PLAYERS, P), attack, device=dev)
         rows = torch.cat([_turn(believed, attack_t), self.seen_going[:, team] * attack], -1)
         known = unsure < sf_known()
+        partner = self.pairs[:, mine]  # (B, 7): each of ours, matched with whom
+        partner = torch.where(partner >= 0, partner - other.start, torch.full_like(partner, -1))
         v = {
+            "partner": partner[:, None].expand(-1, PLAYERS, -1),
             "ours": rows[:, :, mine],
             "theirs": rows[:, :, other],
             "ours_known": known[:, :, mine],
@@ -449,7 +478,7 @@ class BatchGame:
         ).clamp(0.0, 1.0)
         defending = (self.offence != team)[:, None, None]
         target = target + torch.where(
-            defending, self.guess * left[:, None, None], torch.zeros_like(self.guess)
+            defending, self.guess * left[:, None, None], self.guess_off * left[:, None, None]
         )
         lies = self.disc[:, None].expand(-1, PLAYERS, -1)
         disc = torch.where(self.air[:, None, None], target, lies)
@@ -549,7 +578,6 @@ class BatchGame:
         self.done = torch.zeros(steps, self.B, dtype=torch.bool, device=self.device)
         self.stall_counted = torch.zeros(steps, self.B, dtype=torch.long, device=self.device) - 1
         self.step_count = 0
-        self.pending_step[:] = 0  # Rewards still waiting land at the start of this rollout
 
     def _count(self, what, n):
         self.tally[what] = self.tally.get(what, 0) + int(n)
@@ -565,67 +593,29 @@ class BatchGame:
         ok = player >= 0
         self.own[self.step_count, idx[ok], player[ok]] += amount
 
-    def _settle(self, idx, final_along):
-        """The possession is over at `idx`: each catch still waiting gets its pass and the
-        yards to the catch two on, or to `final_along` (the last catch's place, or the
-        goal line for a score)."""
-        team = self.offence[idx]
-        for slot in range(MAX_PENDING):
-            has = self.pending_count[idx] > slot
-            if not has.any():
-                continue
-            i = idx[has]
-            later = torch.where(
-                self.pending_count[i] > slot + 2,
-                self.pending_along[i, slot],  # Not reached: at most MAX_PENDING wait
-                final_along[has],
-            )
-            amount = COMPLETION + PER_YARD * (later - self.pending_along[i, slot])
-            for s in self.pending_step[i, slot].unique():
-                at = self.pending_step[i, slot] == s
-                self._give_team(i[at], team[has][at], amount[at], int(s))
-        self.pending_count[idx] = 0
-
     def _caught(self, idx, player):
-        """A completed pass at `idx` by `player` (a catch that is not a score)."""
+        """A pass caught at `idx` by `player`: to the team the pass and the yards it gained
+        (to the goal line at most; none for a pull caught), to the two their catch and
+        their throw."""
         attack = self.attack_of(self.offence[idx])
         along = _turn(self.places[idx, player], attack)[:, 1].clamp(max=GOAL_LINE)
-        # The catch two back gets its reward now: the yards to this one
-        full = self.pending_count[idx] >= MAX_PENDING
-        if full.any():
-            i = idx[full]
-            amount = COMPLETION + PER_YARD * (along[full] - self.pending_along[i, 0])
-            for s in self.pending_step[i, 0].unique():
-                at = self.pending_step[i, 0] == s
-                self._give_team(i[at], self.offence[i[at]], amount[at], int(s))
-            self.pending_along[i, 0] = self.pending_along[i, 1]
-            self.pending_step[i, 0] = self.pending_step[i, 1]
-            self.pending_count[i] -= 1
-        slot = self.pending_count[idx]
-        self.pending_along[idx, slot] = along
-        self.pending_step[idx, slot] = self.step_count
-        self.pending_count[idx] += 1
+        gained = torch.where(self.last_thrower[idx] >= 0, along - self.thrown_along[idx], 0.0)
+        self._give_team(idx, self.offence[idx], COMPLETION + PER_YARD * gained)
         self._give_own(idx, player, CAUGHT)
         self._give_own(idx, self.last_thrower[idx], THROWN)
-        return along
 
     def _turnover(self, idx, place, holder, fault, by, stalled=False, kind="turnover"):
         """game._turnover for the points `idx` (holder -1: the disc lies at `place`)."""
         if len(idx) == 0:
             return
         self._count(kind, len(idx))
-        last = torch.where(
-            self.pending_count[idx] > 0,
-            self.pending_along[idx, (self.pending_count[idx] - 1).clamp(min=0)],
-            0.0,
-        )
-        self._settle(idx, last)
         self._give_team(idx, self.offence[idx], -TURNOVER)
         if stalled:
             self._give_team(idx, self.offence[idx], -self.stalled)
         self._give_own(idx, fault, LOST)
         self._give_own(idx, by, BLOCKED)
         self.offence[idx] = 1 - self.offence[idx]
+        self.pairs[idx] = -1  # Matched afresh when the other team holds the disc
         self.air[idx] = False
         self.holder[idx] = holder
         lies = holder < 0
@@ -667,6 +657,8 @@ class BatchGame:
         idx, player, place = idx[~out], player[~out], place[~out]
         if len(idx) == 0:
             return
+        # The defender matched with the receiver, whose player got it (ppo.THEIRS_CAUGHT)
+        self._give_own(idx, self.pairs[idx, player], THEIRS_CAUGHT)
         self.air[idx] = False
         attack = self.attack_of(self.offence[idx])
         along = _turn(place, attack)[:, 1]
@@ -675,9 +667,7 @@ class BatchGame:
         if score.any():
             i, p = idx[score], player[score]
             self._count("score", len(i))
-            self._give_own(i, p, CAUGHT)
-            self._give_own(i, self.last_thrower[i], THROWN)
-            self._settle_with_catch(i, along[score].clamp(max=GOAL_LINE))
+            self._caught(i, p)
             self.scored[i] = self.offence[i]
             self._give_team(i, self.offence[i], SCORE)
             self._give_own(i, p, SCORED)
@@ -691,25 +681,6 @@ class BatchGame:
             self.held_since[i] = self.seconds[i]
             self.stall[i] = 0.0
 
-    def _settle_with_catch(self, idx, along):
-        """A scoring catch: it waits like any other, then the possession is settled to the
-        goal line."""
-        full = self.pending_count[idx] >= MAX_PENDING
-        if full.any():
-            i = idx[full]
-            amount = COMPLETION + PER_YARD * (along[full] - self.pending_along[i, 0])
-            for s in self.pending_step[i, 0].unique():
-                at = self.pending_step[i, 0] == s
-                self._give_team(i[at], self.offence[i[at]], amount[at], int(s))
-            self.pending_along[i, 0] = self.pending_along[i, 1]
-            self.pending_step[i, 0] = self.pending_step[i, 1]
-            self.pending_count[i] -= 1
-        slot = self.pending_count[idx]
-        self.pending_along[idx, slot] = along
-        self.pending_step[idx, slot] = self.step_count
-        self.pending_count[idx] += 1
-        self._settle(idx, torch.full_like(along, GOAL_LINE))
-
     def _start_throws(self, idx, target, curve, height, tilt):
         """game._start_throw for the points `idx` (field places)."""
         n = len(idx)
@@ -722,7 +693,9 @@ class BatchGame:
         their_places = self.places[idx[:, None], defenders]
         marked = (_norm(their_places - start[:, None]) < MARKED_WITHIN).any(-1)
         aimed = _norm(target - start)
-        off = (AIM_OFF + AIM_OFF_PER_YARD * aimed) * torch.where(marked, MARKED_AIM, 1.0)
+        off = (
+            AIM_OFF + AIM_OFF_PER_YARD * aimed + AIM_OFF_PER_SQUARE_YARD * aimed**2
+        ) * torch.where(marked, MARKED_AIM, 1.0)
         given = torch.nan_to_num(height, nan=0.0)
         off = off * (
             1.0
@@ -733,6 +706,8 @@ class BatchGame:
         target = target + off[:, None] * self._normal(n, 2)
         self._count("throw", n)
         self.last_thrower[idx] = thrower
+        along = _turn(start, self.attack_of(self.offence[idx]))[:, 1]
+        self.thrown_along[idx] = along.clamp(max=GOAL_LINE)
         self.flight.throw(
             idx, start, target, self.seconds[idx], thrower, curve, height, self.wind[idx], tilt
         )
@@ -740,6 +715,9 @@ class BatchGame:
         self.holder[idx] = -1
         self.reach_since[idx] = float("inf")
         self.guess[idx] = LANDING_GUESS * self._normal(n, PLAYERS, 2)
+        flight = self.flight.lands[idx] - self.flight.released[idx]
+        unsure = ((flight - RECEIVER_SURE) / RECEIVER_UNSURE).clamp(0.0, 1.0) * RECEIVER_GUESS
+        self.guess_off[idx] = unsure[:, None, None] * self._normal(n, PLAYERS, 2)
         # The mark
         away = their_places - start[:, None]
         way = self.flight.leaving(idx)
@@ -784,7 +762,8 @@ class BatchGame:
         now = torch.atan2(self.facing[..., 1], self.facing[..., 0])
         goal = torch.atan2(target[..., 1], target[..., 0])
         change = torch.remainder(goal - now + math.pi, 2 * math.pi) - math.pi
-        now = now + change.clamp(-TURN_RATE * STEP, TURN_RATE * STEP)
+        rate = TURN_RATE * (1.0 - TURN_SLOWER * (_norm(self.velocities) / RUN_SPEED).clamp(max=1.0))
+        now = now + torch.maximum(torch.minimum(change, rate * STEP), -rate * STEP)
         self.facing = torch.stack([now.cos(), now.sin()], -1)
         # Fastest the way they face
         angle = torch.arccos(
@@ -792,18 +771,40 @@ class BatchGame:
         )
         share = ((angle - FORWARD_WITHIN) / (BACKWARD_FROM - FORWARD_WITHIN)).clamp(0.0, 1.0)
         fastest = RUN_SPEED + (BACKPEDAL_SPEED - RUN_SPEED) * share
+        # Others in the way slow them (game._traffic)
+        apart = _norm(self.places[:, :, None] - self.places[:, None])
+        apart = apart + torch.eye(P, device=dev) * 1e9
+        crowd = (apart < TRAFFIC_REACH).sum(-1).float()
+        fastest = fastest * (1.0 - TRAFFIC_SLOW * crowd).clamp(TRAFFIC_SLOWEST, 1.0)
         wanted = torch.where(
             (speed > fastest)[..., None],
             wanted * (fastest / speed.clamp(min=1e-9))[..., None],
             wanted,
         )
-        change = wanted - self.velocities
+        # Turning costs (game._after_turning and _limit_sideways)
+        now_speed, goal_speed = _norm(self.velocities), _norm(wanted)
+        cosine = (self.velocities * wanted).sum(-1) / (now_speed * goal_speed).clamp(min=1e-9)
+        turned = torch.arccos(cosine.clamp(-1.0, 1.0))
+        lost = TURN_LOSS * ((turned - TURN_FREE) / (math.pi - TURN_FREE)).clamp(0.0, 1.0)
+        sharp = (now_speed > 1.0) & (goal_speed > 1.0)
+        velocities = (
+            self.velocities * (1.0 - torch.where(sharp, lost, torch.zeros_like(lost)))[..., None]
+        )
+        change = wanted - velocities
+        speed_now = _norm(velocities)
+        way = velocities / speed_now.clamp(min=1e-9)[..., None]
+        along = (change * way).sum(-1, keepdim=True) * way
+        across = change - along
+        across_size = _norm(across)
+        side_most = SIDE_ACCELERATION * STEP
+        across = across * (side_most / across_size.clamp(min=1e-9)).clamp(max=1.0)[..., None]
+        change = torch.where((speed_now > 1.0)[..., None], along + across, change)
         size = _norm(change)
         most = ACCELERATION * STEP
         change = torch.where(
             (size > most)[..., None], change * (most / size.clamp(min=1e-9))[..., None], change
         )
-        self.velocities = self.velocities + change
+        self.velocities = velocities + change
         self.places = self.places + self.velocities * STEP
         # Room: pairs nearer than BODY pushed apart, all at once
         apart = self.places[:, :, None] - self.places[:, None]
@@ -867,6 +868,20 @@ class BatchGame:
                 holder = torch.where(caught, blocker, -1)
                 where = torch.where(caught[:, None], self.places[j, blocker], place[hit])
                 self._turnover(j, where, holder, self.flight.thrower[j], blocker, kind="block")
+            # Further off, each defender near its path may get a fingertip to it
+            low = (share > 0.1) & (share < 0.85) & (height_now <= JUMP_REACH) & ~hit
+            tippers = (gaps > PATH_REACH) & (gaps <= TIP_REACH)
+            count = tippers.sum(-1).float()
+            chance = 1.0 - (1.0 - TIP_CHANCE) ** count
+            tipped = low & (count > 0) & (self._rand(len(i)) < chance)
+            if tipped.any():
+                j = i[tipped]
+                masked = torch.where(tippers, gaps, torch.full_like(gaps, float("inf")))
+                tipper = defenders[tipped, masked[tipped].argmin(-1)]
+                minus = torch.full_like(tipper, -1)
+                self._turnover(
+                    j, place[tipped], minus, self.flight.thrower[j], tipper, kind="block"
+                )
         # Coming down
         landing = self.air & (self.seconds >= self.flight.lands)
         if landing.any():
@@ -917,6 +932,10 @@ class BatchGame:
                 self.velocities[j, who] = 0.0
                 self.held_since[j] = self.seconds[j]
                 self.stall[j] = 0.0
+        # A possession's match-ups, as the offence first holds the disc (game.match_up)
+        unmatched = (self.holder >= 0) & (self.pairs[:, 0] < 0)
+        if unmatched.any():
+            self._match_up(torch.nonzero(unmatched)[:, 0])
         # Snapshots for what is seen late
         self.past_places = torch.cat([self.places[:, None], self.past_places[:, :-1]], 1)
         self.past_velocities = torch.cat(
@@ -924,19 +943,28 @@ class BatchGame:
         )
         # Points over: start again
         over = (self.scored >= 0) | (self.seconds >= self.point_seconds - 1e-6)
-        timed_out = over & (self.scored < 0)
-        if timed_out.any():
-            i = torch.nonzero(timed_out)[:, 0]
-            last = torch.where(
-                self.pending_count[i] > 0,
-                self.pending_along[i, (self.pending_count[i] - 1).clamp(min=0)],
-                0.0,
-            )
-            self._settle(i, last)
         self.done[t] = over
         self.scores_this_step = torch.where(over, self.scored, -2)
         self.step_count += 1
         self.reset(over)
+
+    def _match_up(self, idx):
+        """game.match_up for the points `idx`: the nearest attacker and defender first."""
+        n = len(idx)
+        r = torch.arange(n, device=self.device)
+        attackers = self.team_rows(self.offence[idx])  # (n, 7)
+        defenders = self.team_rows(1 - self.offence[idx])
+        gaps = _norm(
+            self.places[idx[:, None], attackers][:, :, None]
+            - self.places[idx[:, None], defenders][:, None]
+        )  # (n, 7, 7)
+        for _ in range(PLAYERS):
+            flat = gaps.reshape(n, -1).argmin(-1)
+            a, d = flat // PLAYERS, flat % PLAYERS
+            ga, gd = attackers[r, a], defenders[r, d]
+            self.pairs[idx, ga], self.pairs[idx, gd] = gd, ga
+            gaps[r, a, :] = float("inf")
+            gaps[r, :, d] = float("inf")
 
     def _land(self, idx):
         """game._land for the points `idx`."""
@@ -982,11 +1010,15 @@ class BatchGame:
         position = torch.where(torch.isfinite(since_def), since_def, now) - torch.where(
             torch.isfinite(since_off), since_off, now
         )
+        position = position.clamp(-POSITION_MOST, POSITION_MOST)
         hang = ((self.flight.lands[i] - self.flight.released[i] - LONG_FLIGHT) / HANGING).clamp(
             0.0, 1.0
         )
         measure = (d_def - d_off) / TIGHT_WINDOW + position / POSITION_SECONDS
-        contested = (1.0 - dropped) * (0.5 + 0.5 * torch.tanh(measure - HANG_WEIGHT * hang))
+        crowd = ((d_def_all <= DEFENDER_REACH).sum(-1) - 1).clamp(min=0).float()
+        measure = measure - CROWD_WEIGHT * crowd  # Every other defender there (game._land)
+        chance = 0.5 + 0.5 * torch.tanh(measure - HANG_WEIGHT * hang)
+        contested = (1.0 - dropped) * chance
         draw = self._rand(n)
         caught = torch.where(d_def > DEFENDER_REACH, draw >= dropped, draw < contested)
         there = d_off <= CATCH_REACH
@@ -1087,15 +1119,59 @@ def throw_prior(device):
     return THROW_PRIOR_T
 
 
+# A defence by rules, to learn to attack against (BatchPlayers' `marking`), as the
+# scripted teams defend (scripted.ScriptedTeam2): each defender marks the attacker of
+# their own number where the attacker will be MARK_AHEAD seconds on, GOAL_SIDE towards
+# their own end and FORCE_SIDE across; the defender of whoever is deepest DEEP_SIDE
+# further back; the holder's marker MARK_GAP from them, between them and the end they
+# attack, to the force side
+MARK_GAP, MARK_AHEAD = 1.5, 0.3
+GOAL_SIDE, FORCE_SIDE, DEEP_SIDE = 1.5, 1.0, 4.0
+FORCE = (0.6, -1.0)  # As the defence sees the field: across, and towards the end attacked
+# An offence by rules, for the defence to learn to mark (BatchPlayers' `spread`), spread as
+# the recorded teams are: a stack zig-zagging STACK_ACROSS either side of the middle,
+# STACK_GAP apart from STACK_FROM ahead of the holder; a dump DUMP behind and across; one
+# cutter at a time, every CUT_EVERY seconds, a jab of JAB seconds the other way and then
+# to CUT_TO ahead of the holder; the holder throws, from HOLD_FOR on, to the teammate
+# most clear of defenders (OPEN_BY) within THROW_WITHIN, leading them; late in the
+# stall (LATE) to the most open whoever
+STACK_ACROSS, STACK_GAP, STACK_FROM = 6.0, 9.0, 16.0
+DUMP = (6.0, -6.0)
+CUT_EVERY, JAB, CUT_TO = 3.0, 0.5, (13.0, 8.0)
+HOLD_FOR, OPEN_BY, THROW_WITHIN, LATE = 1.5, 3.0, 30.0, 7.0
+
+
 class BatchPlayers:
     """Both teams of every point, played by one set of spots.SpotBrains (it plays itself):
     each player's choice of spot, the holder's of a throw, as spots.SpotTeam makes them,
     for every point at once. What was chosen is kept for learning: the view it was chosen
-    from (spot_features.VIEW_FIELDS), the choice, its chance, the value."""
+    from (spot_features.VIEW_FIELDS), the choice, its chance, the value.
 
-    def __init__(self, game: BatchGame, brains):
-        self.game, self.brains = game, brains
+    In a share `marking` of the points one team (drawn each point) defends by rules
+    instead, man to man (MARK_GAP): the other team's offence learns to beat a defender
+    first. That team's networks still play its offence. In a share `league` of the
+    others one team is played by an earlier team (`rivals`, set with set_rivals: frozen,
+    its choices not kept), so that the team does not only learn to beat itself."""
+
+    def __init__(
+        self,
+        game: BatchGame,
+        brains,
+        marking: float = 0.0,
+        league: float = 0.0,
+        spread: float = 0.0,
+    ):
+        self.game, self.brains, self.marking, self.league = game, brains, marking, league
+        self.spread = spread
         B, dev = game.B, game.device
+        self.rivals: list = []
+        self.marker = torch.full((B,), -1, dtype=torch.long, device=dev)
+        self.passer = torch.full((B,), -1, dtype=torch.long, device=dev)  # Offence by rules
+        self.rival = torch.full((B,), -1, dtype=torch.long, device=dev)  # Which rival
+        self.rival_team = torch.full((B,), -1, dtype=torch.long, device=dev)
+        self._draw_markers(torch.ones(B, dtype=torch.bool, device=dev))
+        # Where each team's players saw the opponents in the last steps, oldest first
+        self.before = ([], [])
         self.kind = torch.full((B, P), -1, dtype=torch.long, device=dev)
         self.player = torch.full((B, P), -1, dtype=torch.long, device=dev)
         self.param = torch.zeros(B, P, 2, device=dev)
@@ -1104,8 +1180,146 @@ class BatchPlayers:
         self.thrown_at = torch.full((B, 2), -float("inf"), device=dev)
         self.kept = []
 
+    def set_rivals(self, rivals: list) -> None:
+        """The earlier teams (spots.SpotBrains on the game's device) points may be played
+        against from the next new point on."""
+        self.rivals = list(rivals)
+        self.rival[:] = -1
+        self.rival_team[:] = -1
+
+    def _draw_markers(self, mask):
+        """Which team defends by rules, and which is an earlier team, in the points where
+        `mask` (-1: neither)."""
+        n = int(mask.sum())
+        if not n:
+            return
+        dev = self.game.device
+        draw = torch.rand(n, generator=self.game.gen, device=dev)
+        ruled = draw < self.marking
+        team = torch.randint(0, 2, (n,), generator=self.game.gen, device=dev)
+        none = torch.full_like(team, -1)
+        self.marker[mask] = torch.where(ruled, team, none)
+        # An offence by rules: in a share `spread` of the points
+        passing = ~ruled & (draw < self.marking + self.spread)
+        self.passer[mask] = torch.where(passing, team, none)
+        # Against an earlier team: in a share `league` of the points not played by rules
+        taken = self.marking + self.spread
+        rivalled = ~ruled & ~passing & (draw < taken + self.league) & bool(self.rivals)
+        which = torch.randint(
+            0, max(len(self.rivals), 1), (n,), generator=self.game.gen, device=dev
+        )
+        self.rival_team[mask] = torch.where(rivalled, 1 - team, none)
+        self.rival[mask] = torch.where(rivalled, which, none)
+
+    def _passing(self, v, disc_at):
+        """An offence by rules (STACK_GAP...), as the team sees the field, set up around
+        `disc_at` (B, 2: the holder, or where the disc lies or comes down): each player's
+        velocity (B, 7, 2), where the holder throws (B, 2) and whether they throw now."""
+        dev = self.game.device
+        B = v["held"].shape[0]
+        b = torch.arange(B, device=dev)
+        ks = torch.arange(PLAYERS, device=dev)
+        rows, them = v["ours"][:, 0], v["theirs"][:, 0]
+        place, going = rows[..., :2], rows[..., 2:4]
+        h = v["holder"][:, 0].clamp(min=0)
+        at = disc_at
+        role = (ks[None] - h[:, None]) % PLAYERS  # 0 the holder, 1 the dump
+        r = (role - 2).float()
+        across = WIDTH / 2 + STACK_ACROSS * torch.where(role % 2 == 0, -1.0, 1.0)
+        along = (at[:, 1:2] + STACK_FROM + STACK_GAP * r).clamp(2.0, LENGTH - 2.0)
+        spot = torch.stack([across.expand(B, -1), along], -1)
+        side = torch.where(at[:, 0] < WIDTH / 2, 1.0, -1.0)
+        dump = at + torch.stack([DUMP[0] * side, torch.full_like(side, DUMP[1])], -1)
+        dump = torch.stack([dump[:, 0].clamp(1.0, WIDTH - 1.0), dump[:, 1].clamp(1.0, LENGTH)], -1)
+        spot = torch.where((role == 1)[..., None], dump[:, None], spot)
+        # One cutter at a time: a jab, then the cut
+        held = v["held"][:, 0]
+        turn = (held // CUT_EVERY).long() % (PLAYERS - 2)
+        into = held % CUT_EVERY
+        way = torch.where(turn % 2 == 0, -1.0, 1.0)
+        cut = at + torch.stack([CUT_TO[0] * way, torch.full_like(way, CUT_TO[1])], -1)
+        cut = torch.stack([cut[:, 0].clamp(1.0, WIDTH - 1.0), cut[:, 1].clamp(1.0, LENGTH)], -1)
+        cutter = (role == (turn + 2)[:, None]) & (into < CUT_EVERY - 0.5)[:, None]
+        away = place - cut[:, None]
+        jab = place + 3.0 * away / _norm(away).clamp(min=1e-6)[..., None]
+        going_to = torch.where((into < JAB)[:, None, None], jab, cut[:, None])
+        spot = torch.where(cutter[..., None], going_to, spot)
+        velocity = _towards(place, spot)
+        # The throw: to whoever is most clear, forward liked a little more
+        clear = _norm(place[:, :, None] - them[:, None, :, :2]).min(-1).values
+        far = _norm(place - at[:, None])
+        able = (role > 0) & (clear >= OPEN_BY) & (far <= THROW_WITHIN)
+        score = torch.where(able, clear + 0.2 * (place[..., 1] - at[:, 1:2]), -1e9)
+        best = score.argmax(-1)
+        fallback = torch.where(role > 0, clear, -1e9).argmax(-1)
+        late = v["stall"][:, 0] >= LATE
+        to = torch.where(able.any(-1), best, fallback)
+        now = (held >= HOLD_FOR) & (able.any(-1) | late)
+        flight = RELEASE_SECONDS + far[b, to] / DISC_YARDS_PER_SECOND
+        lead = place[b, to] + going[b, to] * flight.clamp(max=1.5)[:, None]
+        lead = torch.stack(
+            [lead[:, 0].clamp(1.0, WIDTH - 1.0), lead[:, 1].clamp(1.0, LENGTH - 1.0)], -1
+        )
+        return velocity, lead, now
+
+    def _rival_scores(self, scores, gi, team, network_of):
+        """Scores of the rows (games `gi`) whose team here is an earlier team's, by that
+        team's network (network_of(brains, rows)); and which rows those are."""
+        rivalled = self.rival_team[gi] == team
+        for r in self.rival[gi][rivalled].unique().tolist():
+            rows = rivalled & (self.rival[gi] == r)
+            scores[rows] = network_of(self.rivals[r], rows)
+        return rivalled
+
+    def _marks(self, v, disc_spot):
+        """Where each defender marking by rules stands (B, 7, 2), as the team sees it."""
+        dev = self.game.device
+        ks = torch.arange(PLAYERS, device=dev)
+        attackers = v["theirs"][:, 0]  # (B, 7, 4): the same for every player of the team
+        place, going = attackers[..., :2], attackers[..., 2:4]
+        # The offence attacks the near end, as the defence sees it: goal side is -y
+        deepest = place[..., 1].argmin(-1, keepdim=True)
+        back = GOAL_SIDE + DEEP_SIDE * (ks[None] == deepest).float()
+        side = torch.full_like(back, FORCE_SIDE)
+        marks = place + MARK_AHEAD * going + torch.stack([side, -back], -1)
+        force = torch.tensor(FORCE, device=dev)
+        on_holder = place + MARK_GAP * force / _norm(force)
+        holds = (ks[None] == v["holder"][:, :1]) & (v["disc_mode"][:, :1] == sf.HELD)
+        return torch.where(holds[..., None], on_holder, marks)
+
+    def _spots(self, v, rows):
+        """(B, 7, 2): where the spot each player of a team chose last is now, as the team
+        sees the field (a spot beside a player follows them, an opponent a moment late); their own place without
+        one."""
+        ks = torch.arange(PLAYERS, device=self.game.device)
+        place = v["ours"][:, ks, ks, :2]
+        kind = self.kind[:, rows]
+        who = self.player[:, rows].clamp(min=0)
+        at = who[..., None, None].expand(-1, -1, 1, 2)
+        # An opponent is followed REACT_STEPS late (as they are now in a point just begun)
+        theirs = v["theirs"][..., :2]
+        before = self.before[rows.start // PLAYERS]
+        if len(before) > REACT_STEPS:
+            theirs = torch.where(before[0].isnan(), theirs, before[0])
+        opponent = theirs.gather(2, at)[:, :, 0]
+        mate = v["ours"][..., :2].gather(2, at)[:, :, 0]
+        param = self.param[:, rows]
+        return torch.where(
+            (kind == sf.OPPONENT)[..., None],
+            opponent + param,
+            torch.where(
+                (kind == sf.TEAMMATE)[..., None],
+                mate + param,
+                torch.where((kind == sf.FIELD)[..., None], param, place),
+            ),
+        )
+
     def forget(self, mask):
         """New points where `mask`: no plans."""
+        self._draw_markers(mask)
+        for before in self.before:
+            for seen in before:
+                seen[mask] = float("nan")
         self.kind[mask] = -1
         self.decided_at[mask] = -float("inf")
         self.key[mask] = -9
@@ -1128,17 +1342,21 @@ class BatchPlayers:
         curve = torch.zeros(B, device=dev)
         height = torch.full((B,), float("nan"), device=dev)
         tilt = torch.full((B,), float("nan"), device=dev)
+        ks = torch.arange(PLAYERS, device=dev)
         for team in (0, 1):
             first = team * PLAYERS
             rows = slice(first, first + PLAYERS)
             v = game.look(team)
+            self.before[team].append(v["theirs"][..., :2].clone())
+            del self.before[team][: -(REACT_STEPS + 1)]
             v["plan_kind"], v["plan_player"], v["plan_param"] = (
                 self.kind[:, rows],
                 self.player[:, rows],
                 self.param[:, rows],
             )
+            age = (game.seconds[:, None] - self.decided_at[:, rows]).clamp(0.0, 5.0)
+            v["plan_age"] = torch.where(self.kind[:, rows] >= 0, age, torch.zeros_like(age))
             attack = 1.0 if team == 0 else -1.0
-            ks = torch.arange(PLAYERS, device=dev)
             attacking = game.offence == team
             holder_here = attacking & (game.holder >= first) & (game.holder < first + PLAYERS)
             is_holder = torch.zeros(B, PLAYERS, dtype=torch.bool, device=dev)
@@ -1153,21 +1371,41 @@ class BatchPlayers:
                 ],
                 -1,
             )
-            due = (game.seconds[:, None] - self.decided_at[:, rows]) >= DECIDE_EVERY - 1e-9
+            # An attacker on their way chooses again every COMMIT seconds only (they may
+            # break the run off); a defender chooses again every time
+            elapsed = game.seconds[:, None] - self.decided_at[:, rows]
+            there = _norm(self._spots(v, rows) - v["ours"][:, ks, ks, :2]) <= sf.REACHED
+            run_out = ~attacking[:, None] | there | (elapsed >= COMMIT - 1e-9)
+            due = (elapsed >= DECIDE_EVERY - 1e-9) & run_out
             changed = (key != self.key[:, rows]).any(-1)
-            deciding = ~is_holder & ~reflex_on & (due | changed | (self.kind[:, rows] < 0))
+            ruled = ((self.marker == team) & ~attacking)[:, None] & ~reflex_on
+            passing = (self.passer == team) & attacking
+            ruled_attack = passing[:, None] & ~reflex_on
+            deciding = ~is_holder & ~reflex_on & ~ruled & ~ruled_attack
+            deciding &= due | changed | (self.kind[:, rows] < 0)
             if deciding.any():
                 gi, ki = torch.nonzero(deciding, as_tuple=True)
                 view = {name: v[name][gi, ki] for name in sf.VIEW_FIELDS}
                 with torch.no_grad():
-                    features, kinds, players, params = sf.spot_choices(view)
+                    parts = sf.spot_parts(view)
+                    kinds, players, params = parts["kinds"], parts["players"], parts["params"]
+                    allowed = parts["allowed"]
                     offence = view["attacking"]
-                    scores = torch.empty(features.shape[:2], device=dev)
-                    if offence.any():
-                        scores[offence] = self.brains.spots["offence"](features[offence])[..., 0]
-                    if (~offence).any():
-                        scores[~offence] = self.brains.spots["defence"](features[~offence])[..., 0]
-                    chosen, log_chance = self._draw(scores)
+
+                    def spots_by(brains, rows):
+                        found = torch.empty(int(rows.sum()), sf.SPOT_CHOICES, device=dev)
+                        on = offence[rows]
+                        for side, of in (("offence", on), ("defence", ~on)):
+                            if of.any():
+                                some = sf.take_parts(sf.take_parts(parts, rows), of)
+                                found[of] = sf.spot_scores(brains.spots[side], some)
+                        return found
+
+                    scores = spots_by(self.brains, torch.ones_like(offence))
+                    rival_spots = spots_by
+
+                    rivalled = self._rival_scores(scores, gi, team, rival_spots)
+                    chosen, log_chance = self._draw(scores + sf.spot_leans(view, allowed))
                     seen = critic_inputs(game, team)[gi, ki]
                     value = torch.empty(len(gi), device=dev)
                     if offence.any():
@@ -1183,28 +1421,23 @@ class BatchPlayers:
                 )
                 self.decided_at[gi, first + ki] = game.seconds[gi] + jitter
                 self.key[gi, first + ki] = key[gi, ki]
-                if record:
+                if record and (~rivalled).any():
+                    own = ~rivalled  # An earlier team's choices are not learned from
                     self.kept.append(
                         {
-                            "view": view,
-                            "chosen": chosen,
-                            "log_chance": log_chance,
-                            "value": value,
-                            "seen": seen,
-                            "game": gi,
-                            "player": first + ki,
-                            "step": torch.full_like(gi, game.step_count),
-                            "kind": torch.where(offence, 0, 1),  # Offence, defence spots
+                            "view": {name: view[name][own] for name in view},
+                            "chosen": chosen[own],
+                            "log_chance": log_chance[own],
+                            "value": value[own],
+                            "seen": seen[own],
+                            "game": gi[own],
+                            "player": (first + ki)[own],
+                            "step": torch.full_like(gi[own], game.step_count),
+                            "kind": torch.where(offence[own], 0, 1),  # Offence, defence spots
                         }
                     )
             # Where each goes: the reflex, or the spot chosen (as it is now)
-            ours, theirs = v["ours"][..., :2], v["theirs"][..., :2]
-            place = ours[:, ks, ks]
-            kind = self.kind[:, rows]
-            who = self.player[:, rows].clamp(min=0)
-            param = self.param[:, rows]
-            mate = ours.gather(2, who[..., None, None].expand(-1, -1, 1, 2))[:, :, 0]
-            opponent = theirs.gather(2, who[..., None, None].expand(-1, -1, 1, 2))[:, :, 0]
+            place = v["ours"][:, ks, ks, :2]
             holder_rows = torch.where(v["attacking"][..., None, None], v["ours"], v["theirs"])[
                 ..., :2
             ]
@@ -1219,21 +1452,31 @@ class BatchPlayers:
                     place,
                 ),
             )
-            spot = torch.where(
-                (kind == sf.FIELD)[..., None],
-                param,
-                torch.where(
-                    (kind == sf.TEAMMATE)[..., None],
-                    mate + param,
-                    torch.where((kind == sf.OPPONENT)[..., None], opponent + param, disc_spot),
-                ),
-            )
+            spot = self._spots(v, rows)
             velocity = torch.where(reflex_on[..., None], reflex_velocity, _towards(place, spot))
+            if ruled.any():
+                marks = _towards(place, self._marks(v, disc_spot[:, :1].expand(-1, PLAYERS, -1)))
+                velocity = torch.where(ruled[..., None], marks, velocity)
+            rule_throw = torch.zeros(B, dtype=torch.bool, device=dev)
+            if ruled_attack.any():
+                moves, rule_aim, rule_now = self._passing(v, disc_spot[:, 0])
+                velocity = torch.where(ruled_attack[..., None], moves, velocity)
+                rule_throw = passing & holder_here & rule_now
             velocity = torch.where(is_holder[..., None], torch.zeros_like(velocity), velocity)
             wanted[:, rows] = velocity * attack
             # The holder: hold on, or throw where
+            if rule_throw.any():
+                gt = torch.nonzero(rule_throw)[:, 0]
+                kt = game.holder[gt] - first
+                holder_view = {name: v[name][gt, kt] for name in sf.VIEW_FIELDS}
+                aim = rule_aim[gt]
+                c, h, t = game.throw_shape(holder_view, aim)
+                throwing[gt] = True
+                target[gt] = _turn(aim, torch.full((len(gt),), attack, device=dev))
+                curve[gt], height[gt], tilt[gt] = c, h, t
             ready = (
                 holder_here
+                & ~passing
                 & (v["held"][:, 0] >= SHORTEST_HOLD)
                 & (game.seconds - self.thrown_at[:, team] >= THROW_EVERY)
             )
@@ -1245,30 +1488,38 @@ class BatchPlayers:
                 with torch.no_grad():
                     features = sf.throw_choices(view)
                     scores = self.brains.throws(features)[..., 0] + throw_prior(dev)
+                    rivalled = self._rival_scores(
+                        scores,
+                        gi,
+                        team,
+                        lambda brains, rows: brains.throws(features[rows])[..., 0]
+                        + throw_prior(dev),
+                    )
                     chosen, log_chance = self._draw(scores)
                     seen = critic_inputs(game, team)[gi, ki]
                     value = self.brains.values["offence"](seen)[:, 0]
-                if record:
+                if record and (~rivalled).any():
+                    own = ~rivalled
                     self.kept.append(
                         {
-                            "view": view,
-                            "chosen": chosen,
-                            "log_chance": log_chance,
-                            "value": value,
-                            "seen": seen,
-                            "game": gi,
-                            "player": first + ki,
-                            "step": torch.full_like(gi, game.step_count),
-                            "kind": torch.full_like(gi, 2),  # A throw
+                            "view": {name: view[name][own] for name in view},
+                            "chosen": chosen[own],
+                            "log_chance": log_chance[own],
+                            "value": value[own],
+                            "seen": seen[own],
+                            "game": gi[own],
+                            "player": (first + ki)[own],
+                            "step": torch.full_like(gi[own], game.step_count),
+                            "kind": torch.full_like(gi[own], 2),  # A throw
                         }
                     )
                 throws = chosen > 0
                 if throws.any():
                     gt = gi[throws]
-                    aim = torch.as_tensor(sf.THROW_TARGETS, dtype=torch.float32, device=dev)[
-                        chosen[throws] - 1
-                    ]
                     holder_view = {name: view[name][throws] for name in sf.VIEW_FIELDS}
+                    aim = sf.throw_aims(holder_view)[
+                        torch.arange(len(gt), device=dev), chosen[throws] - 1
+                    ]
                     c, h, t = game.throw_shape(holder_view, aim)
                     throwing[gt] = True
                     target[gt] = _turn(aim, torch.full((len(gt),), attack, device=dev))

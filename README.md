@@ -18,7 +18,7 @@ https://github.com/user-attachments/assets/e92d9d47-9577-4924-934d-8aab7dad49b6
 - **Jersey numbers**, collected per player over time.
 - **Top-down view** of the field with the players and the disc.
 - **Maps over the field**, on the video and from above: where the next throw is likely to
-  go, or the space that is dangerous for the defence and who leaves it open.
+  go.
 - **3D view** of the same: the field with players, disc and camera, seen from any side.
 - **Player statistics**: time on the field, distance run, passes thrown and caught.
 - **Export** of what the analysis finds, frame by frame, as tables.

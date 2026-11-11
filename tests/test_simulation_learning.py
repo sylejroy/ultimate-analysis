@@ -151,38 +151,41 @@ class RewardsTest(unittest.TestCase):
         state.scored = scored
         return state
 
-    def test_a_completion_earns_its_pass_and_the_yards_two_passes_on(self):
-        # Team 0 attacks up the field: catches at 30, 40, 55 yards, then it loses the disc
+    def test_a_completion_earns_its_pass_and_the_yards_it_gained(self):
+        # Team 0 attacks up the field: a pass from 20 to 30 yards, one back to 25, a drop
         state = self.point(
             [
+                (0.5, "throw", 0, (20.0, 20.0)),
                 (1.0, "catch", 0, (20.0, 30.0)),
-                (2.0, "catch", 0, (20.0, 40.0)),
-                (3.0, "catch", 0, (20.0, 55.0)),
+                (1.5, "throw", 0, (20.0, 30.0)),
+                (2.0, "catch", 0, (20.0, 25.0)),
+                (3.5, "throw", 0, (20.0, 25.0)),
                 (4.0, "drop", 0, (20.0, 70.0)),
             ]
         )
         rewards = ppo.rewards_of(state, 60, game.STEP)
-        first = rewards[0, 9]  # At 1 s: the pass, and 25 yards gained two passes on
-        self.assertAlmostEqual(first, ppo.COMPLETION + ppo.PER_YARD * 25.0, places=5)
+        self.assertAlmostEqual(rewards[0, 9], ppo.COMPLETION + ppo.PER_YARD * 10.0, places=5)
+        self.assertAlmostEqual(rewards[0, 19], ppo.COMPLETION - ppo.PER_YARD * 5.0, places=5)
         self.assertAlmostEqual(rewards[0, 39], -ppo.TURNOVER, places=5)
         np.testing.assert_allclose(rewards[1], -rewards[0])  # The other team: the opposite
 
     def test_a_score_is_rewarded_and_counts_to_the_goal_line_wherever_caught(self):
         state = self.point(
             [
-                (1.0, "catch", 1, (20.0, 30.0)),
+                (1.0, "catch", 1, (20.0, 30.0)),  # No throw before it: no yards
+                (1.5, "throw", 1, (20.0, 30.0)),
                 (2.0, "catch", 1, (20.0, 15.0)),
                 (2.0, "score", 1, (20.0, 15.0)),
             ],
             scored=1,
         )
         rewards = ppo.rewards_of(state, 40, game.STEP)
-        # Team 1 attacks down the field: 30 is 80 yards from its end, its goal line 90
+        self.assertAlmostEqual(rewards[1, 9], ppo.COMPLETION, places=5)
+        # Team 1 attacks down the field: 30 is 80 yards from its end, its goal line 90.
+        # The scoring catch, 5 yards into the end zone: the pass, 10 yards and the score
         self.assertAlmostEqual(
-            rewards[1, 9], ppo.COMPLETION + ppo.PER_YARD * (90.0 - 80.0), places=5
+            rewards[1, 19], ppo.COMPLETION + ppo.PER_YARD * 10.0 + ppo.SCORE, places=5
         )
-        # The scoring catch, 5 yards into the end zone: the pass and the score, no yards
-        self.assertAlmostEqual(rewards[1, 19], ppo.COMPLETION + ppo.SCORE, places=5)
 
     def test_each_player_is_credited_for_what_they_did(self):
         state = self.point(

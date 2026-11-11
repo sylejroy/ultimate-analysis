@@ -13,12 +13,13 @@ from ..config.settings import get_setting
 from ..processing.field_registration import field_to_canvas
 from ..processing.open_space import FieldValue, dangerous_space
 from ..processing.throw_targets import COLUMNS, ROWS, Moment
+from ..rendering.field_maps import shade_from_above
 from ..rendering.game_scene import GameScene, ScenePlayer
 from ..rendering.top_down import draw_field_diagram
 from ..utils.field_template import TEMPLATES
 from . import game
 from .plays import PLAYS
-from .scripted import CALL, ScriptedTeam
+from .scripted import CALL, ScriptedTeam, ScriptedTeam2
 
 COLOURS = ((235, 235, 235), (60, 60, 210))  # BGR: team 0 white, team 1 red
 NAMES = ("White", "Red")
@@ -31,12 +32,15 @@ BANNER = 80  # Pixels
 
 
 def team_of(kind: str, seed: Optional[int] = None, team: int = 0):
-    """The scripted team ("scripted"), or one played by the networks in a folder: a team
+    """The scripted team ("scripted"), the benchmark one ("scripted2", scripted.ScriptedTeam2),
+    or one played by the networks in a folder: a team
     that chooses spots if it holds a spots.pt (spots.SpotTeam, drawing its choices as it
     learned them); trained by reinforcement if it holds a ppo.pt (then playing its
     likeliest moves); else as learned.LearnedTeam."""
     if kind == "scripted":
         return ScriptedTeam(seed)
+    if kind == "scripted2":
+        return ScriptedTeam2(seed, plays=False)
     from pathlib import Path
 
     folder = Path(kind)
@@ -231,14 +235,22 @@ def scene_of_game(state: game.GameState) -> GameScene:
 
 
 def knowledge_picture(
-    view, team: int, size: tuple = (240, 620), considered: Optional[tuple] = None
+    view,
+    team: int,
+    size: tuple = (240, 620),
+    considered: Optional[list] = None,
+    heat: Optional[tuple] = None,
+    trail: Optional[list] = None,
 ) -> np.ndarray:
     """What one player knows, from above with their team attacking upwards: teammates
     and opponents where they believe them, solid where seen, a ring as wide as how
     unsure where remembered, faint where lost; the player themselves ringed in yellow;
-    the disc where they judge it comes down. `considered`: (places (n, 2), chances (n,),
-    best): the spots or throws a player weighs, the likelier the brighter, the one they
-    like best starred."""
+    the disc where they judge it comes down. `considered`: the choices a player weighs,
+    [(place on the field, or None for holding on, chance)], the one taken first: each
+    ringed and numbered in that order, the one taken in yellow with its chance and an
+    arrow from the player. `heat`: (places (n, 2), chances (n,)): every choice weighed,
+    shaded over the field. `trail`: where the player has been, oldest first: the path
+    they ran, drawn behind them."""
     from .learned import KNOWN_UNSURE
 
     template = TEMPLATES["usau"]
@@ -252,16 +264,14 @@ def knowledge_picture(
         return int(round(x / w)), int(round(y / w))
 
     unit = abs((to_view @ [1.0, 0.0, 1.0])[0] - (to_view @ [0.0, 0.0, 1.0])[0])
-    if considered is not None:
-        places, chances, best = considered
-        top = float(np.max(chances)) or 1.0
-        for k in np.argsort(chances):  # The likeliest drawn last, on top
-            share = float(chances[k]) / top
-            if share < 0.02:
-                continue
-            colour = (int(40 + 40 * share), int(120 + 135 * share), int(255 * share))  # BGR
-            cv2.circle(picture, at(places[k]), 2 + int(4 * share), colour, -1, cv2.LINE_AA)
-        cv2.drawMarker(picture, at(places[best]), (80, 220, 255), cv2.MARKER_STAR, 18, 2)
+    if heat is not None:
+        _shade_chances(picture, to_view, template, *heat)
+    if trail is not None and len(trail) > 1:
+        points = [at(place) for place in trail]
+        recent = len(points) - 30  # The last three seconds drawn thicker
+        for n in range(1, len(points)):
+            wide = 2 if n >= recent else 1
+            cv2.line(picture, points[n - 1], points[n], TRAIL, wide, cv2.LINE_AA)
     groups = (
         (view.ours, view.ours_unsure, COLOURS[team]),
         (view.theirs, view.theirs_unsure, COLOURS[1 - team]),
@@ -278,4 +288,60 @@ def knowledge_picture(
     cv2.circle(picture, at(view.ours[view.me, :2]), 9, DISC, 2, cv2.LINE_AA)
     if view.disc is not None:
         cv2.drawMarker(picture, at(view.disc), DISC, cv2.MARKER_TILTED_CROSS, 12, 2)
+    if considered:
+        _draw_choices(picture, at, at(view.ours[view.me, :2]), considered)
     return picture
+
+
+HEAT_SPREAD = 2.0  # Yards: how far each choice's chance is spread over the field
+TRAIL = (235, 200, 120)  # The path a player ran (blue, green, red)
+
+
+def _shade_chances(picture, to_view, template, places, chances) -> None:
+    """Every choice's chance spread over the field around it and shaded, in place."""
+    across = np.arange(0.5, template.width, 1.0)
+    along = np.arange(0.5, template.length, 1.0)
+    grid = np.zeros((len(along), len(across)))
+    for (x, y), chance in zip(np.asarray(places, dtype=float), chances):
+        if chance <= 0:
+            continue
+        grid += chance * np.exp(
+            -((along[:, None] - y) ** 2 + (across[None] - x) ** 2) / (2 * HEAT_SPREAD**2)
+        )
+
+    def in_view(points: np.ndarray) -> np.ndarray:
+        rows = np.column_stack([points, np.ones(len(points))]) @ to_view.T
+        return np.rint(rows[:, :2] / rows[:, 2:]).astype(int)
+
+    shade_from_above(picture, grid, in_view, template.width, template.length)
+
+
+def _draw_choices(picture: np.ndarray, at, start: tuple, considered) -> None:
+    """The choices a player weighs, ringed and numbered in order, the one taken (the
+    first) in yellow with its chance and an arrow from the player, the others with a
+    thin line."""
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    def label(text: str, origin: tuple, colour: tuple) -> None:
+        cv2.putText(picture, text, origin, font, 0.42, (20, 20, 20), 3, cv2.LINE_AA)
+        cv2.putText(picture, text, origin, font, 0.42, colour, 1, cv2.LINE_AA)
+
+    for n in reversed(range(len(considered))):  # The one taken drawn last, on top
+        place, chance = considered[n]
+        taken = n == 0
+        colour = (64, 214, 255) if taken else (235, 235, 235)
+        if place is None:  # Holding on is not a place: said at the top
+            label(f"Hold on {chance:.0%}", (8, 18 if taken else 36), colour)
+            continue
+        end = at(place)
+        if taken:
+            long = float(np.hypot(end[0] - start[0], end[1] - start[1]))
+            if long > 1.0:
+                cv2.arrowedLine(
+                    picture, start, end, colour, 2, cv2.LINE_AA, tipLength=min(0.5, 10.0 / long)
+                )
+        else:
+            cv2.line(picture, start, end, (150, 150, 150), 1, cv2.LINE_AA)
+        cv2.circle(picture, end, 8 if taken else 5, colour, 2 if taken else 1, cv2.LINE_AA)
+        said = f"{n + 1}  {chance:.0%}" if taken else str(n + 1)
+        label(said, (end[0] + 11, end[1] + 5), colour)

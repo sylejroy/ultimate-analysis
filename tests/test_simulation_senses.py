@@ -25,6 +25,13 @@ def spread():
 
 
 class SensesTest(unittest.TestCase):
+    # The senses as they are with perception.PERFECT off
+    def setUp(self):
+        self.perfect, perception.PERFECT = perception.PERFECT, False
+
+    def tearDown(self):
+        perception.PERFECT = self.perfect
+
     def test_a_move_is_seen_late_and_the_mover_knows_it_at_once(self):
         state = standing(spread())
         senses = perception.Senses(1, np.random.default_rng(0))
@@ -55,15 +62,26 @@ class SensesTest(unittest.TestCase):
             views = senses.look(state)
         self.assertGreater(views[3].theirs_unsure[6], 1.5)
 
-    def test_the_defence_reads_a_throw_off_at_first_and_the_offence_knows_it(self):
+    def test_the_defence_reads_a_throw_off_at_first_and_the_offence_knows_a_short_one(self):
         state = standing(spread())
-        state.throw = game.flight_of([5.0, 50.0], [30.0, 80.0], 0.0, 0)
+        state.throw = game.flight_of([5.0, 50.0], [15.0, 58.0], 0.0, 0)  # 13 yd
         state.holder = None
         offence = perception.Senses(0, np.random.default_rng(0)).look(state)
         defence = perception.Senses(1, np.random.default_rng(1)).look(state)
-        np.testing.assert_allclose(offence[2].disc, [30.0, 80.0])
+        np.testing.assert_allclose(offence[2].disc, [15.0, 58.0])
         read = [game.turn(v.disc, -1) for v in defence]
-        self.assertGreater(max(np.hypot(*(r - [30.0, 80.0])) for r in read), 0.5)
+        self.assertGreater(max(np.hypot(*(r - [15.0, 58.0])) for r in read), 0.5)
+
+    def test_a_long_throw_is_misjudged_by_the_offence_too_less_as_it_comes_down(self):
+        state = standing(spread())
+        state.throw = game.flight_of([5.0, 30.0], [30.0, 90.0], 0.0, 0)  # 65 yd
+        state.holder = None
+        senses = perception.Senses(0, np.random.default_rng(0))
+        first = np.array([np.hypot(*(v.disc - [30.0, 90.0])) for v in senses.look(state)])
+        self.assertGreater(first.max(), 0.5)
+        state.seconds = state.throw.lands - 0.1
+        late = np.array([np.hypot(*(v.disc - [30.0, 90.0])) for v in senses.look(state)])
+        self.assertLess(late.max(), first.max() / 5)
 
     def test_what_a_player_says_is_heard_by_the_team_the_step_after(self):
         state = standing(spread())
@@ -81,6 +99,18 @@ class ScriptedTeamsTest(unittest.TestCase):
             state = match.play_point((scripted.ScriptedTeam(i), scripted.ScriptedTeam(9 + i)), rng)
             self.assertTrue(state.over)
             self.assertIn("throw", [e.kind for e in state.events])
+
+    def test_the_benchmark_team_plays_wider_and_holds_longer(self):
+        rng = np.random.default_rng(1)
+        teams = (scripted.ScriptedTeam2(0, plays=False), scripted.ScriptedTeam(1, plays=False))
+        state = match.play_point(teams, rng)
+        self.assertTrue(state.over)
+        # Its stack zig-zags across the field, a good deal wider than the old one's
+        old, new = scripted.ScriptedTeam, scripted.ScriptedTeam2
+        self.assertGreater(new.stack_gap, old.stack_gap)
+        self.assertGreater(new.stack_across, 0.0)
+        # Its holder waits longer before throwing
+        self.assertGreater(new.shortest_hold, old.shortest_hold)
 
     def test_defenders_switch_when_both_call_it(self):
         team = scripted.ScriptedTeam(0)

@@ -15,6 +15,10 @@ side they force, the mark beside the thrower. Two defenders whose players are ne
 each other's defender by enough each call to switch; when both have called it, they
 switch. Whoever can get to where a throw comes down in time goes for it, once they have
 seen it thrown.
+
+ScriptedTeam2 is the same team set as the recorded teams play, a benchmark: a wider
+stack, cuts that start with a jab the other way, a thrower who waits for a cutter clear
+of their defender, and a deep defender on whoever is furthest downfield.
 """
 
 from typing import List, Optional
@@ -189,6 +193,14 @@ class ScriptedTeam:
     """A team of players who play by the rules above, either way round. What each keeps
     from step to step is theirs alone: whom they guard, when they heard a play called."""
 
+    # How the team plays (see the constants above); ScriptedTeam2 sets them otherwise
+    stack_gap, stack_from, stack_across = STACK_GAP, STACK_FROM, 0.0
+    cut_every, cut_seconds, jab = CUT_EVERY, CUT_SECONDS, 0.0
+    shortest_hold, open_enough, clear_of = SHORTEST_HOLD, OPEN_ENOUGH, CLEAR_OF
+    huck_from, huck_open = np.inf, 1.0  # Throws this long only to a teammate this open
+    length_cost = 0.0  # Per yard: a longer throw is liked less by exp(-this * length)
+    goal_side, force_side, deep_goal_side = GOAL_SIDE, FORCE_SIDE, 0.0
+
     def __init__(self, seed: Optional[int] = None, plays: bool = True) -> None:
         self.rng = np.random.default_rng(seed)
         self.plays = plays
@@ -266,15 +278,25 @@ class ScriptedTeam:
             side = -1.0 if mark[0] > thrower[0] else 1.0
             return thrower + [side * DUMP_ACROSS, -DUMP_BEHIND]
         k = role - 2
-        spot = np.array([WIDTH / 2, min(thrower[1] + STACK_FROM + STACK_GAP * k, LENGTH - 2.0)])
+        ahead = thrower[1] + self.stack_from + self.stack_gap * k
+        # Zig-zag across the field by stack_across, every other one
+        across = WIDTH / 2 + self.stack_across * (1 if k % 2 else -1)
+        spot = np.array([across, min(ahead, LENGTH - 2.0)])
         # Cutters take turns from when the holder got the disc
-        turn = int(view.held // CUT_EVERY) % (PLAYERS - 2)
-        if k == turn and view.held % CUT_EVERY < CUT_SECONDS and view.holder is not None:
+        every = self.cut_every
+        turn = int(view.held // every) % (PLAYERS - 2)
+        if k == turn and view.held % every < self.cut_seconds and view.holder is not None:
             # A cut commits to its spot, chosen as it starts
-            began = round(view.seconds - view.held % CUT_EVERY, 3)
+            began = round(view.seconds - view.held % every, 3)
             if self.cutting.get(me, (None,))[0] != began:
                 self.cutting[me] = (began, self._cut_to(view, me))
-            return self.cutting[me][1]
+            target = self.cutting[me][1]
+            if view.seconds - began < self.jab:
+                # First a jab: a few steps the other way, to take the defender with them
+                place = view.ours[me, :2]
+                away = place - target
+                return place + 3.0 * away / max(float(np.hypot(*away)), 1e-6)
+            return target
         return spot
 
     def _cut_to(self, view: PlayerView, me: int) -> np.ndarray:
@@ -287,19 +309,23 @@ class ScriptedTeam:
 
     def _throw(self, view: PlayerView) -> Optional[np.ndarray]:
         """Where the thrower throws now, if they do: to an open teammate, led."""
-        if view.held < SHORTEST_HOLD:
+        if view.held < self.shortest_hold:
             return None
         best, best_score, best_open = None, -np.inf, 0.0
         # Late in the count; or held as long, unmarked (nobody counts, but nobody waits for
         # ever)
         late = max(view.stall, view.held)
+        thrower = view.ours[view.holder, :2]
         for lead_x, lead_y, chance, gain, clear in throw_options(view):
             lead = np.array([lead_x, lead_y])
+            if np.hypot(*(lead - thrower)) >= self.huck_from and chance < self.huck_open:
+                continue  # A long throw only to someone well clear
             forward = gain > 0 or late >= LATE_IN_THE_STALL
             score = chance * (1.0 + 4.0 * gain) if forward else -np.inf
+            score *= np.exp(-self.length_cost * np.hypot(*(lead - thrower)))
             # Open: a step clear of the nearest defender, unless the stall is late
-            covered = clear < CLEAR_OF and late < LATE_IN_THE_STALL
-            if chance >= OPEN_ENOUGH and score > best_score and not covered:
+            covered = clear < self.clear_of and late < LATE_IN_THE_STALL
+            if chance >= self.open_enough and score > best_score and not covered:
                 best, best_score = lead, score
             if chance > best_open:
                 best_open, last_resort = chance, lead
@@ -340,7 +366,10 @@ class ScriptedTeam:
         # Seen by the defence, the offence attacks the near end: goal side is -y; all
         # stand on the side the mark stands, which they deny
         man = view.theirs[mine]
-        wanted = man[:2] + man[2:] * REACT + [FORCE_SIDE, -GOAL_SIDE]
+        # The defender of whoever is furthest downfield (the least y, as the defence
+        # sees it) stands further goal side: the deep defender
+        deep = self.deep_goal_side if mine == int(np.argmin(view.theirs[:, 1])) else 0.0
+        wanted = man[:2] + man[2:] * REACT + [self.force_side, -(self.goal_side + deep)]
         if view.holder is not None and mine == view.holder:
             wanted = man[:2] + MARK_OFFSET
         if view.disc is not None and view.lands_in is not None and view.flown >= SEEN_THROWN:
@@ -353,3 +382,17 @@ class ScriptedTeam:
             if receiver == mine or first or peels(view):
                 wanted = view.disc
         return towards(place, wanted), said
+
+
+class ScriptedTeam2(ScriptedTeam):
+    """The scripted team set as the recorded teams play (a benchmark, not to learn
+    from): spaced as wide as they are (nearest teammate about 8 yd), cuts that start
+    with a jab, a thrower who holds the disc about as long as recorded throwers do and
+    throws to a cutter clear of their defender, and a deep defender."""
+
+    stack_gap, stack_from, stack_across = 8.0, 12.0, 8.0
+    cut_every, cut_seconds, jab = 3.0, 2.5, 0.5
+    shortest_hold, open_enough, clear_of = 1.8, 0.85, 3.0
+    huck_from, huck_open = 30.0, 0.97
+    length_cost = 0.07
+    goal_side, force_side, deep_goal_side = 1.5, 1.0, 4.0

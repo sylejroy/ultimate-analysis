@@ -1,22 +1,26 @@
 """Teams that learn where to go and where to throw, from nothing (scripts/train_spots.py).
 
-Players do not steer: each chooses a spot about once a second (and at once when the
-disc changes hands, is thrown or comes down), and runs there as the game lets them
-(game.py: top speed, backpedalling, turning). The spots: a grid around the disc; spots
-a step from any player, which follow that player; and the disc itself. The holder
-chooses every few tenths of a second between holding on and throwing to a spot of a
-grid over the field.
+Players do not steer: each chooses where to run, and runs there as the game lets them
+(game.py: top speed, backpedalling, turning). The choices: staying; going on to where
+they were going; a cut from where they are, eight ways round them and three lengths; a
+place around the disc; a step behind, ahead, left or right of any other player, a spot
+that follows them (an opponent REACT_STEPS late: reacting takes time). An attacker runs to where they chose, and every
+COMMIT seconds may break the run off for another; a defender chooses again every DECIDE_EVERY;
+everyone at once when the disc changes hands, is thrown or comes down. The holder
+chooses every few tenths of a second between holding on, throwing to a spot of a grid
+over the field, and throwing to a teammate, led.
 
-Every choice is scored by a small network from what is around the spot, as the player
+Every choice is scored by a small network from what is around the place, as the player
 knows it: where it is; the players nearest it, of both teams (where, how they run, how
-they speed up or turn, which way they face); the disc; the wind; the stall; the
-player's role. Nothing else: no notion of open space, of a stack or of a matchup. At
-first every choice is as likely as any other (the holder holds on most of the time,
-or a team would throw at once every time). How the throw is shaped (curve, height,
-angle) is as scripted.py has it, and players go for a disc in the air or on the ground
-by reflex (learned.reflexes), as before.
+they speed up or turn, which way they face); how open it is (who is near, who gets
+there first, whether a throw from the disc gets through); the disc; the wind; the
+stall; the player's role. At first every choice is as likely as any other (the holder
+holds on most of the time, or a team would throw at once every time). How the throw is
+shaped (curve, height, angle) is as scripted.py has it, and players go for a disc in
+the air or on the ground by reflex (learned.reflexes), as before.
 """
 
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -29,37 +33,25 @@ from .learned import reflexes
 from .perception import MESSAGE_SIZE, PlayerView
 from .ppo import CRITIC_INPUTS, _mlp, critic_inputs
 from .scripted import STYLE, throw_shape, towards
-from .spot_features import (
-    DISC,
-    FIELD,
-    OPPONENT,
-    SPOT_FEATURES,
-    TEAMMATE,
-    THROW_CHOICES,
-    THROW_FEATURES,
-    THROW_TARGETS,
-)
+from .spot_features import OPPONENT, REACHED, SPOT_FEATURES, TEAMMATE, THROW_FEATURES
 
-DECIDE_EVERY = 1.0  # Seconds between a player's choices of spot
+HIDDEN = 128  # Nodes in each hidden layer of the spot and throw networks
+DECIDE_EVERY = 0.5  # Seconds between a player's choices of where to run, at least
+# An attacker chooses again once there (spot_features.REACHED), or every COMMIT seconds
+# on the way: they may break a cut off, and mostly go on at first (spot_leans)
+COMMIT = 1.0
+# A spot beside an opponent follows where they were this many steps ago (0.3 s): the
+# time it takes to react, which a change of direction gains on whoever follows
+REACT_STEPS = 3
 THROW_EVERY = 0.3  # Seconds between the holder's choices (hold on, or throw where)
 SHORTEST_HOLD = 0.3  # Seconds before a holder may throw
 HOLD_AT_FIRST = 0.9  # The chance of holding on, at first, each time the holder chooses
 
 
-def _disc_place(view: PlayerView) -> np.ndarray:
-    if view.holder is not None:
-        return (view.ours if view.attacking else view.theirs)[view.holder, :2]
-    if view.disc is not None:
-        return np.asarray(view.disc, dtype=float)
-    return view.ours[view.me, :2]
-
-
 # The holder holds on most of the time at first: holding on gets this much more weight
 # than all the targets together
 HOLD_PRIOR = float(np.log(HOLD_AT_FIRST / (1.0 - HOLD_AT_FIRST)))
-THROW_PRIOR = np.r_[HOLD_PRIOR, np.full(THROW_CHOICES - 1, -np.log(THROW_CHOICES - 1))].astype(
-    np.float32
-)
+THROW_PRIOR = np.r_[HOLD_PRIOR, sf.THROW_SHARES].astype(np.float32)
 
 
 # ---------------------------------------------------------------------- the networks
@@ -72,8 +64,8 @@ class SpotBrains:
     def __init__(self) -> None:
         import torch
 
-        self.spots = {side: _mlp(SPOT_FEATURES, 1, 64) for side in ("offence", "defence")}
-        self.throws = _mlp(THROW_FEATURES, 1, 64)
+        self.spots = {side: _mlp(SPOT_FEATURES, 1, HIDDEN) for side in ("offence", "defence")}
+        self.throws = _mlp(THROW_FEATURES, 1, HIDDEN)
         self.values = {side: _mlp(CRITIC_INPUTS, 1) for side in ("offence", "defence")}
         with torch.no_grad():  # At first every choice as likely as any other
             for network in [*self.spots.values(), self.throws]:
@@ -106,9 +98,21 @@ class SpotBrains:
 
     def load(self, state: Dict[str, Any]) -> None:
         for side in ("offence", "defence"):
-            self.spots[side].load_state_dict(state["spots"][side])
+            self.spots[side].load_state_dict(_fitting(state["spots"][side], SPOT_FEATURES))
             self.values[side].load_state_dict(state["values"][side])
-        self.throws.load_state_dict(state["throws"])
+        self.throws.load_state_dict(_fitting(state["throws"], THROW_FEATURES))
+
+
+def _fitting(state: Dict[str, Any], inputs: int) -> Dict[str, Any]:
+    """A network's weights, if it takes what players see of a choice now."""
+    found = state["0.weight"].shape[1]
+    if found != inputs:
+        raise ValueError(
+            f"This team was trained on {found} numbers per choice; players now see {inputs} "
+            "(what they choose between, or see of it, has changed since). It cannot play "
+            "as it is: train a new team."
+        )
+    return state
 
 
 def save_spot_brains(brains: SpotBrains, folder: Path, **more: Any) -> None:
@@ -171,6 +175,8 @@ class SpotTeam:
         self.greedy = greedy
         self.choices: List[Choice] = []
         self.plans = [_Plan() for _ in range(PLAYERS)]
+        # Where each player saw the opponents in the last steps, oldest first
+        self.before: deque = deque(maxlen=REACT_STEPS + 1)
         self.thrown_at = -np.inf
         self.step = 0
         self.game: Optional[GameState] = None
@@ -232,6 +238,8 @@ class SpotTeam:
         throw_to = None
         shape = (0.0, None, None)
         seen = value = None
+        self.before.append([view.theirs[:, :2].copy() for view in views])
+        late = self.before[0]
         disc_now = (views[0].holder, views[0].lands_in is not None, views[0].disc is None)
         reflex = reflexes(views) if views[0].disc is not None and views[0].holder is None else {}
         deciding = []
@@ -250,35 +258,45 @@ class SpotTeam:
                         view, "throw", features, THROW_PRIOR, chosen, log_chance, seen, value
                     )
                     if chosen > 0:
-                        target = THROW_TARGETS[chosen - 1].astype(float)
+                        aims = sf.throw_aims(sf.views_of([view]))[0]
+                        target = aims[chosen - 1].numpy().astype(float)
                         shape = throw_shape(view, target, STYLE)
                         throw_to = target
                 continue
             if k in reflex:
                 continue
             plan = self.plans[k]
-            due = view.seconds - plan.decided_at >= DECIDE_EVERY - 1e-9
+            elapsed = view.seconds - plan.decided_at
+            due = elapsed >= DECIDE_EVERY - 1e-9
+            if due and attacking and plan.choice is not None and elapsed < COMMIT - 1e-9:
+                # An attacker runs their cut out before choosing again
+                left = _spot_of(view, plan.choice, late[k]) - view.ours[k, :2]
+                due = float(np.hypot(*left)) <= REACHED
             if due or plan.seen != disc_now or plan.choice is None:
                 deciding.append(k)
         if deciding:
             if seen is None:
                 seen, value = self._values(side)
             with torch.no_grad():
-                features, kinds, players, params = sf.spot_choices(
-                    sf.views_of(
-                        [views[k] for k in deciding], [self.plans[k].choice for k in deciding]
-                    )
+                seeing = sf.views_of(
+                    [views[k] for k in deciding],
+                    [self.plans[k].choice for k in deciding],
+                    ages=[views[k].seconds - self.plans[k].decided_at for k in deciding],
                 )
+                features, kinds, players, params, allowed = sf.spot_choices(seeing)
+                barred = sf.spot_leans(seeing, allowed).numpy()
             features = features.numpy()
             for row, k in enumerate(deciding):
-                chosen, log_chance = self._draw(self.brains.spots[side], features[row], None)
-                self._keep(views[k], side, features[row], None, chosen, log_chance, seen, value)
+                chosen, log_chance = self._draw(self.brains.spots[side], features[row], barred[row])
+                self._keep(
+                    views[k], side, features[row], barred[row], chosen, log_chance, seen, value
+                )
                 kind = int(kinds[row, chosen])
                 plan = self.plans[k]
                 plan.choice = (
                     kind,
                     int(players[row, chosen]),
-                    None if kind == DISC else params[row, chosen].numpy().astype(float),
+                    params[row, chosen].numpy().astype(float),
                 )
                 # Staggered, so that a team does not all choose at once
                 plan.decided_at = views[k].seconds + 0.1 * self.rng.integers(-2, 3)
@@ -289,18 +307,19 @@ class SpotTeam:
             if k in reflex:
                 velocities[k] = reflex[k]
             else:
-                velocities[k] = towards(view.ours[k, :2], _spot_of(view, self.plans[k].choice))
+                spot = _spot_of(view, self.plans[k].choice, late[k])
+                velocities[k] = towards(view.ours[k, :2], spot)
         self.step += 1
         return Decision(velocities, throw_to, np.zeros((PLAYERS, MESSAGE_SIZE)), *shape)
 
 
-def _spot_of(view: PlayerView, choice: tuple) -> np.ndarray:
-    """Where a choice is now: a place, a step from a player as they are now, the disc."""
+def _spot_of(view: PlayerView, choice: tuple, late: Optional[np.ndarray] = None) -> np.ndarray:
+    """Where a choice is now: a place, a step from a teammate as they are now, or a step
+    from an opponent where they were a moment ago (`late`: the opponents' places then;
+    None: as they are now)."""
     kind, player, where = choice
-    if kind == FIELD:
-        return np.asarray(where, dtype=float)
+    if kind == OPPONENT:
+        return (view.theirs if late is None else late)[player, :2] + where
     if kind == TEAMMATE:
         return view.ours[player, :2] + where
-    if kind == OPPONENT:
-        return view.theirs[player, :2] + where
-    return _disc_place(view) if view.disc is None else np.asarray(view.disc, dtype=float)
+    return np.asarray(where, dtype=float)

@@ -589,25 +589,6 @@ def _fit_line_ransac_numpy(
         return None
 
 
-def extract_raw_lines_from_segmentation(
-    segmentation_results: List[Any], frame_shape: Tuple[int, int]
-) -> Tuple[List[Tuple[np.ndarray, np.ndarray]], List[float]]:
-    """Extract raw RANSAC lines directly from segmentation results.
-
-    Args:
-        segmentation_results: YOLO segmentation results
-        frame_shape: Shape of the frame (height, width)
-
-    Returns:
-        Tuple of (detected_lines, confidences) where:
-        - detected_lines: List of (start_point, end_point) tuples
-        - confidences: List of confidence scores for each line
-    """
-    unified_mask = create_unified_field_mask(segmentation_results, frame_shape)
-    detected_lines, confidences, _, _ = fit_lines_from_mask(unified_mask)
-    return detected_lines, confidences
-
-
 def fit_lines_from_mask(
     unified_mask: np.ndarray,
 ) -> Tuple[List[np.ndarray], List[float], Optional[np.ndarray], Optional[RansacFit]]:

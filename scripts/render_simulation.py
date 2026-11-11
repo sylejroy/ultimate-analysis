@@ -34,8 +34,12 @@ FRAMES_PER_STEP = 3  # At 30 frames a second: as fast as the game
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--points", type=int, default=3)
-    parser.add_argument("--white", default="scripted", help='"scripted" or a folder of minds')
-    parser.add_argument("--red", default="scripted", help='"scripted" or a folder of minds')
+    parser.add_argument(
+        "--white", default="scripted", help='"scripted", "scripted2" or a folder of a team'
+    )
+    parser.add_argument(
+        "--red", default="scripted", help='"scripted", "scripted2" or a folder of a team'
+    )
     parser.add_argument("--wind", type=float, default=0.0, help="Strongest wind, yards a second")
     parser.add_argument(
         "--names",

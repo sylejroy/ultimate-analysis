@@ -34,6 +34,25 @@ class MovementTest(unittest.TestCase):
         self.assertLessEqual(max(speeds), game.RUN_SPEED + 1e-9)
         self.assertAlmostEqual(speeds[-1], game.RUN_SPEED, places=6)
 
+    def test_turning_costs_speed_and_sideways_acceleration_is_limited(self):
+        def after(wanted):
+            state = state_with(far_away(7, 5.0), far_away())
+            state.velocities[1] = [0.0, game.RUN_SPEED]
+            state.facing = np.tile([0.0, 1.0], (game.PLAYERS * 2, 1))
+            run = np.zeros((game.PLAYERS, 2))
+            run[1] = wanted
+            game.step(state, (game.Decision(run), still()), np.random.default_rng(0))
+            return state.velocities[1]
+
+        straight = after([0.0, game.RUN_SPEED])
+        sideways = after([game.RUN_SPEED, game.RUN_SPEED])
+        round_about = after([0.0, -game.RUN_SPEED])
+        self.assertAlmostEqual(straight[1], game.RUN_SPEED, places=6)  # Nothing lost
+        # Across the way they run: no more than the sideways acceleration
+        self.assertLessEqual(abs(sideways[0]), game.SIDE_ACCELERATION * game.STEP + 1e-9)
+        # Right round: speed is lost before it is turned
+        self.assertLess(round_about[1], game.RUN_SPEED * (1 - game.TURN_LOSS) - 0.1)
+
     def test_the_holder_does_not_run(self):
         state = game.line_up(np.random.default_rng(0))
         before = state.places[0].copy()
@@ -101,6 +120,41 @@ class ThrowTest(unittest.TestCase):
         # a receiver who does not move can reach
         self.assertGreaterEqual(sum(caught(6.0, seed) for seed in range(40)), 32)
 
+    def test_more_defenders_under_the_disc_make_a_catch_harder_but_first_still_counts(self):
+        def caught(defenders, seed):
+            receiver = [20.0, 50.0]
+            state = state_with(
+                [[20.0, 30.0], receiver] + far_away(5, 5.0),
+                defenders + far_away(7 - len(defenders)),
+            )
+            return self.play(state, receiver, seed).offence == 0
+
+        one = [[20.0, 51.2]]
+        three = one + [[21.2, 50.0], [18.8, 50.0]]
+        one_level = sum(caught(one, seed) for seed in range(120))
+        three_level = sum(caught(three, seed) for seed in range(120))
+        self.assertLess(three_level, one_level - 15)  # Two more there: harder
+        # Three defenders a good step behind: still mostly the receiver's
+        behind = [[20.0, 52.4], [22.4, 50.0], [17.6, 50.0]]
+        self.assertGreater(sum(caught(behind, seed) for seed in range(120)), three_level + 15)
+
+    def test_players_are_matched_up_and_a_defender_answers_for_their_attacker(self):
+        ppo = load_module("simulation.ppo")
+        state = state_with([[20.0, 30.0], [20.0, 48.0]] + far_away(5, 5.0), far_away())
+        state.places[7] = [24.0, 50.0]  # Nearest to the receiver
+        game.step(state, (still(), still()), np.random.default_rng(0))  # Matched up
+        pairs = state.pairs
+        self.assertIsNotNone(pairs)
+        for player, opponent in enumerate(pairs):  # Each with one of the other team, both ways
+            self.assertEqual(game.team_of(int(opponent)), 1 - game.team_of(player))
+            self.assertEqual(int(pairs[opponent]), player)
+        self.assertEqual(int(pairs[1]), 7)
+        self.play(state, [20.0, 48.0])
+        catch = next(e for e in state.events if e.kind == "catch")
+        self.assertEqual((catch.player, catch.by), (1, 7))
+        own = ppo.player_rewards(state, 60, game.STEP)
+        self.assertAlmostEqual(float(own[7].sum()), ppo.THEIRS_CAUGHT)
+
     def test_a_catch_in_the_end_zone_scores_the_point(self):
         state = state_with([[20.0, 75.0], [20.0, 95.0]] + far_away(5, 5.0), far_away(7, 40.0))
         self.play(state, [20.0, 95.0])
@@ -145,6 +199,7 @@ class FacingTest(unittest.TestCase):
         self.state.places[0] = [20.0, 50.0]
         self.state.places[3] = [20.0, 40.0]
         self.state.places[7:] = [[39.0, 109.0 - k] for k in range(7)]  # The others far off
+        self.state.places[[1, 2, 4, 5, 6]] = [[1.0, 100.0 - 3.0 * k] for k in range(5)]
 
     def move(self, velocity, steps):
         wanted = np.zeros((game.PLAYERS, 2))

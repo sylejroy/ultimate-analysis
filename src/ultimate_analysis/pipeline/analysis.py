@@ -31,7 +31,7 @@ from ..processing.field_segmentation import reset_segmentation_cache
 from ..processing.game_state import GameStateTracker, Player
 from ..processing.inference import DETECTOR_STAGES, reset_inference_state
 from ..processing.model_lock import GPU_SETUP_LOCK
-from ..processing.open_space import SpaceMap, SpaceWatcher, load_field_value
+from ..processing.open_space import SpaceMap
 from ..processing.possession import PossessionTracker, players_at_disc
 from ..processing.shot_type import CUT_MIN_PLAYERS, ShotWatcher, is_a_cut
 from ..processing.steady_places import SteadyPlaces
@@ -233,16 +233,12 @@ class AnalysisPipeline:
         self._heat_frames = 0
         # The map drawn over the field on both views: "off", "throws" (where the next
         # throw goes, processing/throw_targets.py: a network of its own, asked only while
-        # shown) or "danger" (the dangerous space, processing/open_space.py), and whether
-        # as lines. What both need followed from frame to frame, the network and the
-        # field's worth once asked for (False: the network does not load), and the map
-        # of this frame
+        # shown), and whether as lines. What it needs followed from frame to frame, the
+        # network once asked for (False: it does not load), and the map of this frame
         self.field_map = str(get_setting("homography.field_map", "off"))
         self.map_lines = bool(get_setting("homography.field_map_lines", False))
         self._throws = ThrowReader()
-        self._space = SpaceWatcher()
         self._throw_net: Any = None
-        self._field_value: Any = None
         self.space_map: Optional[SpaceMap] = None
         self._holder_loading = threading.Lock()
         self._camera_motion = CameraMotionEstimator()
@@ -300,7 +296,6 @@ class AnalysisPipeline:
             self._disc_heatmap.reset()
         self.disc_heat = self.disc_heat_shown = None
         self._throws.reset()
-        self._space.reset()
         self.space_map = None
         self._camera_motion.reset()
         self._motion_known = False
@@ -555,9 +550,7 @@ class AnalysisPipeline:
             holder_guess=dict(self.holder_guess) if self.holder_guess else self.holder_guess,
             disc_heat=self.disc_heat_shown,
             field_map=None if self.space_map is None else self.space_map.danger,
-            map_opening=None if self.space_map is None else self.space_map.opening,
             map_lines=self.map_lines,
-            gives_up={} if self.space_map is None else dict(self.space_map.given_up),
             field_results=self._field.results,
             field_mask=self._field.mask,
             image_to_field=self._field.follower.image_to_field,
@@ -571,21 +564,14 @@ class AnalysisPipeline:
     def _map_of(self, options: PipelineOptions, frame_index: int) -> Optional[SpaceMap]:
         """The map over the field that is shown, if one is and it can be said: while
         someone holds the disc and which end their team attacks is known."""
-        if self.field_map not in ("throws", "danger") or not options.tracking:
+        if self.field_map != "throws" or not options.tracking:
             return None
         template = self._field.template
         if (template.width, template.length) != (THROW_FIELD_WIDTH, THROW_FIELD_LENGTH):
             return None  # Both know the USAU field only
         start = time.perf_counter()
         found = None
-        if self.field_map == "danger":
-            moment = self._throws.moment()
-            if self._field_value is None:
-                self._field_value = load_field_value(get_setting("models.open_space.value"))
-            if moment is not None:
-                seconds = frame_index / self._possession.frame_rate
-                found = self._space.update(seconds, *moment, self._field_value)
-        elif self._throw_net is not False:
+        if self._throw_net is not False:
             if self._throw_net is None:
                 self._throw_net = load_throw_targets(get_setting("models.throw_targets.weights"))
             if self._throw_net is None:

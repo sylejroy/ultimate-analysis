@@ -9,14 +9,16 @@ new point; the wind of a new point blows from any direction, as strong as set.
 
 In 3D the field is the 3D View's: drag to turn it, right-drag to move it, the wheel to
 come closer. From above, the dangerous space for the team with the disc is shaded.
-Clicking a player in 3D shows their brain beside the field: what they know of the game,
-and their network as it works in the present step.
+Clicking a player in 3D shows their brain beside the field: what they know of the game
+and the path they ran; for a player who chooses where to run, what they are weighing
+now, drawn (choices_view.py); and their network as it works in the present step.
 """
 
 from typing import List, Optional
 
 import numpy as np
 from PyQt5.QtCore import QPointF, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -34,6 +36,7 @@ from PyQt5.QtWidgets import (
 
 from ...simulation import game
 from ...simulation.drawing import (
+    COLOURS,
     NAMES,
     call_of,
     caption_of,
@@ -52,6 +55,7 @@ from ..widgets.controls import ToggleSwitch
 from ..widgets.images import frame_to_pixmap
 from ..widgets.panels import compact_combo, side_panel
 from .brain_view import NetworkView
+from .choices_view import ChoicesView
 
 logger = get_logger("GUI")
 
@@ -62,21 +66,36 @@ SPEEDS = (
     ("Four times", 4.0),
 )
 PICK_REACH = 25  # Pixels from a player's figure that a click picks them
+TRAIL = 150  # Steps of the picked player's path kept to draw: 15 seconds
 
 
 def teams_available() -> List[tuple]:
-    """(label, kind) of every team one can pick: the scripted one, then learned ones
-    whose networks see what the players see now, newest first."""
+    """(label, kind) of every team one can pick: the scripted one, then the latest of
+    each learned run whose networks see what the players see now, newest first."""
     import torch
 
-    found = [("Scripted", "scripted")]
+    found = [("Scripted", "scripted"), ("Scripted 2 (plays as recorded teams)", "scripted2")]
     root = models_root() / "movement"
     if root.is_dir():
         # Teams that choose spots: the latest of each run, newest first
         runs = sorted(root.glob("*/latest/spots.pt"), key=lambda p: p.stat().st_mtime, reverse=True)
+        from ...simulation.spot_features import SPOT_FEATURES
+        from ...simulation.spots import HIDDEN
+
         for spots in runs:
+            try:
+                kept = torch.load(spots, map_location="cpu", weights_only=True)
+                rows, inputs = kept["spots"]["offence"]["0.weight"].shape
+                if rows != HIDDEN or inputs != SPOT_FEATURES:
+                    continue  # Made for what players chose between, or saw of it, before
+            except Exception:  # noqa: BLE001 (a file that does not load is not offered)
+                continue
             found.append((f"{spots.parent.parent.name} (chooses spots)", str(spots.parent)))
         newest_first = sorted(root.rglob("minds.pt"), key=lambda p: p.stat().st_mtime, reverse=True)
+        # A run's latest only, not every checkpoint it kept on the way
+        newest_first = [
+            m for m in newest_first if m.parent.parent == root or m.parent.name == "latest"
+        ]
         for minds in newest_first:
             try:
                 kept = torch.load(minds, map_location="cpu", weights_only=True)
@@ -141,19 +160,54 @@ class BrainPanel(QWidget):
         self.knowledge.setToolTip(
             "What they know, from above with their team attacking upwards: solid where\n"
             "they see a player, a ring as wide as they are unsure where they remember one,\n"
-            "faint where they have lost one; themselves ringed in yellow; the cross where\n"
-            "they judge the disc comes down"
+            "faint where they have lost one; themselves ringed in yellow, the path they ran\n"
+            "behind them; the cross where they judge the disc comes down. A player who\n"
+            "chooses where to run: shaded by how likely each place (the holder: each throw)\n"
+            "is, an arrow to the one taken, the others numbered as in the list"
         )
         self.network = NetworkView()
+        self.choices = ChoicesView()
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self.choices)
+        self.pages.addWidget(self.network)
+        self.pages.setCurrentWidget(self.network)
+        self.show_network = QPushButton("Show the network")
+        self.show_network.setCheckable(True)
+        self.show_network.setToolTip(
+            "The network that scores each choice, at work on the one taken: what goes in,\n"
+            "its hidden layers, and the connections that carry the most now"
+        )
+        self.show_network.toggled.connect(self._page)
+        self.show_network.setVisible(False)
+        self._trail: list = []  # (seconds, place as their team sees the field)
+        self._trail_of: Optional[tuple] = None  # The player and the point it is of
         self.said = QLabel()
         self.said.setWordWrap(True)
+        self.said.setVisible(False)  # Shown for the players whose network says something
         layout = QVBoxLayout(self)
-        layout.addWidget(self.title)
+        top = QHBoxLayout()
+        top.addWidget(self.title, 1)
+        top.addWidget(self.show_network)
+        layout.addLayout(top)
         row = QHBoxLayout()
+        row.addWidget(self.pages, 1)
         row.addWidget(self.knowledge)
-        row.addWidget(self.network, 1)
         layout.addLayout(row, 1)
         layout.addWidget(self.said)
+
+    def _page(self, _checked: bool = False) -> None:
+        """The choices in words, or the network, for a player who chooses."""
+        chooses = self.show_network.isVisible() and not self.show_network.isChecked()
+        self.pages.setCurrentWidget(self.choices if chooses else self.network)
+
+    def _follow(self, match: Match, player: int, view) -> list:
+        """The path the picked player ran in this point, with where they are now."""
+        if self._trail_of != (player, id(match)):
+            self._trail_of, self._trail = (player, id(match)), []
+        if not self._trail or view.seconds > self._trail[-1][0]:
+            self._trail.append((view.seconds, view.ours[view.me, :2].copy()))
+            del self._trail[:-TRAIL]
+        return [place for _, place in self._trail]
 
     def show_player(self, match: Match, teams, player: int) -> None:
         team, k = game.team_of(player), player % game.PLAYERS
@@ -164,11 +218,16 @@ class BrainPanel(QWidget):
             self.network.clear("Play a step first")
             return
         view = views[k]
-        if hasattr(getattr(teams[team], "brains", None), "spots"):
+        trail = self._follow(match, player, view)
+        chooses = hasattr(getattr(teams[team], "brains", None), "spots")
+        self.show_network.setVisible(chooses)
+        self.said.setVisible(not chooses)
+        self._page()
+        if chooses:
             self._team = team
-            self._show_spots(teams[team], view, k, side)
+            self._show_spots(teams[team], view, k, side, trail)
             return
-        self.knowledge.setPixmap(frame_to_pixmap(knowledge_picture(view, team)))
+        self.knowledge.setPixmap(frame_to_pixmap(knowledge_picture(view, team, trail=trail)))
         brain = getattr(teams[team], "minds", None) or getattr(
             getattr(teams[team], "brains", None), "minds", None
         )
@@ -199,14 +258,15 @@ class BrainPanel(QWidget):
             + ", ".join(f"{v:+.2f}" for v in np.tanh(out[2:]))
         )
 
-    def _show_spots(self, team, view, k: int, side: str) -> None:
-        """A player who chooses spots: on their view, the spots they weigh (the holder:
-        where they could throw), the likelier the brighter; beside it the network that
-        scores each of them, at work on the one it scores highest."""
+    def _show_spots(self, team, view, k: int, side: str, trail: list) -> None:
+        """A player who chooses where to run: the network that scores each choice (the
+        holder: holding on or each throw), at work on the one they took, with the
+        choices it scores highest as its outputs, numbered as on their view."""
         import torch
 
         from ...simulation import spot_features as sf
         from ...simulation.spots import THROW_PRIOR
+        from . import choices as said
 
         holder = view.attacking and view.holder == k
         with torch.no_grad():
@@ -216,75 +276,78 @@ class BrainPanel(QWidget):
                 scores = network(features)[:, 0].numpy() + THROW_PRIOR
             else:
                 plan = team.plans[k].choice if k < len(team.plans) else None
-                features, kinds, players, params = sf.spot_choices(sf.views_of([view], [plan]))
-                features, kinds, players, params = features[0], kinds[0], players[0], params[0]
+                age = view.seconds - team.plans[k].decided_at if plan is not None else 0.0
+                seeing = sf.views_of([view], [plan], ages=[age])
+                found = sf.spot_choices(seeing)
+                leans = sf.spot_leans(seeing, found[4])[0]
+                features, kinds, players, params, allowed = (each[0] for each in found)
                 network = team.brains.spots[side]
-                scores = network(features)[:, 0].numpy()
+                scores = (network(features)[:, 0] + leans).numpy()
         chances = np.exp(scores - scores.max())
         chances = chances / chances.sum()
+        rows = features.numpy()
+        me = view.ours[view.me, :2]
         if holder:
-            # Where they could throw (holding on is not a place)
-            places, weights = sf.THROW_TARGETS, chances[1:]
-            best = int(np.argmax(chances))
-            on_view = (places, weights, int(np.argmax(weights)))  # Starred: the likeliest throw
-        else:
-            places = _spot_places(view, kinds.numpy(), players.numpy(), params.numpy())
-            best = int(np.argmax(chances))
-            on_view = (places, chances, best)
-        self.knowledge.setPixmap(
-            frame_to_pixmap(knowledge_picture(view, self._team, considered=on_view))
-        )
-        layers = activations(network, features[best].numpy())
-        if holder:
-            outputs = ("Score of this choice",)
+            taken = int(np.argmax(chances))  # Drawn afresh every 0.3 s: the likeliest
+            listed = said.ranked(chances, taken)
+            labels = [said.throw_label(view, i) for i in listed]
+            aims = sf.throw_aims(sf.views_of([view]))[0].numpy()
+            places = [None if i == 0 else aims[i - 1] for i in listed]
+            heat = (aims, chances[1:])
+            notes = said.throw_notes(rows[taken])
             groups = sf.THROW_GROUPS
         else:
-            outputs = ("Score of this spot",)
+            where = _spot_places(view, kinds.numpy(), players.numpy(), params.numpy())
+            # Where they run to now is the choice of going on, while they may
+            taken = sf.KEEP if bool(allowed[sf.KEEP]) else int(np.argmax(chances))
+            listed = said.ranked(chances, taken)
+            labels = [
+                said.spot_label(i, int(players[i]), params[i].numpy(), where[i] - me)
+                for i in listed
+            ]
+            places = [where[i] for i in listed]
+            heat = (where, chances)
+            notes = said.spot_notes(rows[taken])
             groups = sf.SPOT_GROUPS
-        self.network.show_brain(layers, weights_of(network), None, groups, outputs)
-        if holder:
-            what = "to hold on" if best == 0 else "a throw"
-            self.said.setText(
-                "The holder's network gives a score to holding on and to throwing to each "
-                "of 481 spots over the field; the higher, the likelier it is chosen "
-                "(on the left, brighter). Shown: what goes in for its likeliest choice, "
-                f"{what} ({chances[best]:.0%}); starred on the left, the throw it likes best. "
-                f"It holds on {chances[0]:.0%} of the time now. "
-                "For each throw it sees where the target is, how long the disc would take with "
-                "the wind, and where the 3 teammates and 3 opponents nearest the target are, "
-                "how they run, speed up and face."
-            )
-        else:
-            kinds_said = (
-                "a spot on the field",
-                "beside a teammate",
-                "beside an opponent",
-                "the disc",
-            )
-            kind = int(features[best, 5:9].argmax())
-            self.said.setText(
-                f"The {side}'s network gives a score to each of {len(chances)} spots this player "
-                "could run to: a grid around the disc, a step beside any player (following "
-                "them), the disc itself; the higher, the likelier it is chosen (on the left, "
-                "brighter). Shown: what goes in for the spot it likes best "
-                f"({kinds_said[kind]}, starred, {chances[best]:.0%}). For each spot it sees "
-                "where the spot is, where the 3 teammates and 3 opponents nearest it are, how "
-                "they run, speed up and face, the disc, the wind, the stall and its role."
-            )
+        options = [(label, float(chances[i])) for label, i in zip(labels, listed)]
+        considered = [(place, chance) for place, (_, chance) in zip(places, options)]
+        picture = knowledge_picture(view, self._team, considered=considered, heat=heat, trail=trail)
+        self.knowledge.setPixmap(frame_to_pixmap(picture))
+        layers = activations(network, rows[taken])
+        self.network.show_brain(
+            layers, weights_of(network), None, groups, ("Score",), notes, options
+        )
+        drawn = [
+            said.throw_glyph(rows[i]) if holder else said.spot_glyph(rows[i], view.attacking)
+            for i in listed
+        ]
+        for glyph, (_, chance) in zip(drawn, options):
+            glyph["chance"] = chance
+        mine, other = (
+            QColor(r, g, b) for b, g, r in (COLOURS[self._team], COLOURS[1 - self._team])
+        )
+        self.choices.show_choices(drawn, (mine, other))
+        self.said.setText("")
+        self.said.setToolTip(
+            "The holder chooses every 0.3 s between holding on and a throw: to any of 481 "
+            "places over the field, or to a teammate, led."
+            if holder
+            else "They choose again "
+            + ("every second on the way" if view.attacking else "every half second")
+            + f", between {int(allowed.sum())} things: staying, going on, a cut, a place by "
+            "the disc, a spot beside any other player."
+        )
 
 
 def _spot_places(view, kinds, players, params) -> np.ndarray:
-    """Where each spot of spot_features.spot_choices is now, as the team sees the field."""
+    """Where each choice of spot_features.spot_choices is now, as the team sees the field."""
     from ...simulation import spot_features as sf
-    from ...simulation.spots import _disc_place
 
     places = np.array(params, dtype=float)
-    mates = kinds == sf.TEAMMATE
-    places[mates] += view.ours[players[mates], :2]
     them = kinds == sf.OPPONENT
     places[them] += view.theirs[players[them], :2]
-    disc = kinds == sf.DISC
-    places[disc] = _disc_place(view) if view.disc is None else np.asarray(view.disc, dtype=float)
+    mates = kinds == sf.TEAMMATE
+    places[mates] += view.ours[players[mates], :2]
     return places
 
 

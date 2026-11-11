@@ -5,7 +5,7 @@ Each iteration the present team plays points, both sides of a point when it play
 itself, against the scripted team or an earlier version of itself otherwise, a random
 wind each point, at most --point-seconds each. Every player's every step is kept: what
 they saw, what they did, how likely that was, and the value they saw in it. Rewards
-come from what happened (ppo.rewards_of: completions and the yards gained two passes on,
+come from what happened (ppo.rewards_of: completions and the yards each gained,
 turnovers, scores; the other team gets the opposite; the defence also gains
 --stall-reward a second its mark counts the stall), shared by the team; each step's
 advantage is how much better it went than its value said (GAE). The policy then moves
@@ -143,7 +143,7 @@ def play(job) -> list:
 def advantages(points: list, credit: float = 1.0) -> list:
     """Each sample with its advantage and return (GAE over each player's steps), and what
     the team really got from then on (`happened`: the rewards to the end of the point,
-    discounted as the values are), to see how much of it the values foresaw. Each
+    discounted as the values are). Each
     player's reward: their team's, and `credit` times their own (ppo.player_rewards)."""
     kept = []
     for p, point in enumerate(points):
@@ -164,16 +164,6 @@ def advantages(points: list, credit: float = 1.0) -> list:
                 s.advantage, s.returned, s.happened = running, running + s.value, happened
                 kept.append(s)
     return kept
-
-
-def foreseen(samples: list, side: str) -> float:
-    """How much of what happened the values foresaw: 1 - the variance left over / the
-    variance of what happened (1 all of it, 0 nothing, below 0 worse than its average)."""
-    mine = [(s.happened, s.value) for s in samples if s.side == side]
-    if len(mine) < 2:
-        return float("nan")
-    happened, value = np.array(mine).T
-    return float(1.0 - np.var(happened - value) / max(np.var(happened), 1e-9))
 
 
 def learn(
@@ -410,9 +400,7 @@ def main() -> None:
                 f"{np.mean([p['stalled'] for p in points]):.1f} s a point, {len(samples)} steps, "
                 f"spread {torch.exp(brains.offence.log_spread[:2]).mean():.3f}, "
                 f"{played:.0f} s playing, {time.perf_counter() - began - played:.0f} s learning, "
-                f"loss {said.get('offence', 0):.3f} offence, {said.get('defence', 0):.3f} defence, "
-                f"values foresaw {foreseen(samples, 'offence'):.0%} offence, "
-                f"{foreseen(samples, 'defence'):.0%} defence"
+                f"loss {said.get('offence', 0):.3f} offence, {said.get('defence', 0):.3f} defence"
                 + (" (values only)" if iteration <= args.warmup else ""),
                 flush=True,
             )

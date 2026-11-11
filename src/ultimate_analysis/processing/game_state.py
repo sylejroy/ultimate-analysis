@@ -37,7 +37,6 @@ UNKNOWN, BETWEEN_POINTS, LINED_UP, PULL, LIVE, SCORE = (
     "live",
     "score",
 )
-STATES = (UNKNOWN, BETWEEN_POINTS, LINED_UP, PULL, LIVE, SCORE)
 
 # A team is at an end of the field if this many of its players, and this share of them,
 # stand no further than this beyond the goal line (field units; places are rough)

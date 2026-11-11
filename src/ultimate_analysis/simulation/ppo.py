@@ -14,8 +14,8 @@ are there and how clear of a defender. It starts at throwing into open, dangerou
 space. How the throw is shaped (curve, height, angle, the wind) is as learned.py has it.
 
 Rewards for the team with the disc, the other team getting the opposite: a completed
-pass, and the yards gained from its catch to the catch two passes later (or to the end
-of the possession); losing the disc; scoring. The defence also gains a little for every
+pass, and the yards it gained (from where it was thrown to where it was caught, to
+the goal line at most); losing the disc; scoring. The defence also gains a little for every
 second its mark counts the stall (not taken from the offence: it would throw sooner).
 Besides what the team gets, each player gets credit for what they did themselves
 (player_rewards): a throw caught, a catch, a score thrown or caught, a block; and loses
@@ -44,15 +44,16 @@ from .learned import (
 from .perception import PlayerView
 from .scripted import CALL, aim_off, throw_options, throw_shape, to_the_open_side
 
-# Rewards, to the team with the disc (the other team gets the opposite)
-COMPLETION, PER_YARD, TURNOVER, SCORE = 0.5, 0.1, 2.0, 5.0
-PASSES_ON = 2  # The yards gained are counted to the catch this many passes later
+# Rewards, to the team with the disc (the other team gets the opposite): losing the
+# disc costs as much as a score is worth
+COMPLETION, PER_YARD, TURNOVER, SCORE = 0.5, 0.1, 5.0, 5.0
 GOAL_LINE = LENGTH - END_ZONE  # The attacked one, as the team attacks
 TURNOVERS = ("block", "mark block", "drop", "out", "stall")
 STALL_REWARD = 0.1  # To the defence per second the stall is counted
 # To the player alone: a throw caught, a catch, a score thrown or caught, a block, a
-# disc they lost
-THROWN, CAUGHT, SCORED, BLOCKED, LOST = 0.3, 0.3, 1.0, 1.0, -1.0
+# disc they lost; a pass caught by the attacker a defender is matched with (game.match_up)
+THROWN, CAUGHT, SCORED, BLOCKED, LOST = 0.3, 0.3, 1.0, 1.0, -2.0
+THEIRS_CAUGHT = -2.0  # As much as an attacker losing the disc
 SQUARE_FEATURES = 18
 # What the values see: the game as it is (they are used only in learning), as the team
 # attacks: every player's place and velocity (the team's own first, by number), the
@@ -518,6 +519,7 @@ def player_rewards(state: GameState, steps: int, step_seconds: float) -> np.ndar
         elif event.kind == "catch":
             give(event.player, event.seconds, CAUGHT)
             give(thrower, event.seconds, THROWN)
+            give(event.by, event.seconds, THEIRS_CAUGHT)
         elif event.kind == "score":
             give(event.player, event.seconds, SCORED)
             give(thrower, event.seconds, SCORED)
@@ -550,26 +552,22 @@ def rewards_of(
         found[team, at(seconds)] += amount
         found[1 - team, at(seconds)] -= amount
 
-    catches: List[tuple] = []  # (seconds, team, along as attacked) of the possession
-    events = state.events
-    for i, event in enumerate(events):
+    def along(event) -> float:
+        # As far as the attacked goal line: a score is a score wherever it is caught
+        return min(float(turn(np.array(event.place), attack_of(event.team))[1]), GOAL_LINE)
+
+    thrown = None  # How far up the field the disc in the air was thrown from
+    for event in state.events:
+        if event.kind == "throw":
+            thrown = along(event)
         if event.kind == "catch":
-            # As far as the attacked goal line: a score is a score wherever it is caught
-            along = min(float(turn(np.array(event.place), attack_of(event.team))[1]), GOAL_LINE)
-            catches.append((event.seconds, event.team, along))
-        ended = event.kind in TURNOVERS or event.kind == "score" or i == len(events) - 1
+            # The pass, and the yards it gained (none for a pull caught)
+            gained = 0.0 if thrown is None else along(event) - thrown
+            give(event.team, event.seconds, COMPLETION + PER_YARD * gained)
         if event.kind in TURNOVERS:
             give(event.team, event.seconds, -TURNOVER)
         if event.kind == "stall":  # Holding on to the end costs more than losing it
             give(event.team, event.seconds, -stalled)
         if event.kind == "score":
             give(event.team, event.seconds, SCORE)
-        if ended and catches:
-            # The possession is over: each completion's reward, with the yards gained to
-            # the catch two passes on (or to the end: the goal line for a score)
-            final = GOAL_LINE if event.kind == "score" else catches[-1][2]
-            for k, (seconds, team, along) in enumerate(catches):
-                later = catches[k + PASSES_ON][2] if k + PASSES_ON < len(catches) else final
-                give(team, seconds, COMPLETION + PER_YARD * (later - along))
-            catches = []
     return found

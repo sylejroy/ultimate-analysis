@@ -20,7 +20,7 @@ from ..rendering.field import (
     draw_unified_field_mask,
     get_primary_field_color,
 )
-from ..rendering.field_maps import mark_defenders, shade_camera_view
+from ..rendering.field_maps import shade_camera_view
 from ..rendering.overlays import draw_fps_overlay, draw_jersey_table, draw_notice
 from ..rendering.top_down import draw_field_diagram
 from ..rendering.tracks import (
@@ -60,13 +60,10 @@ class Scene:
     holder_guess: Optional[Dict[int, float]] = None  # The holder network's, if shown
     disc_heat: Optional[np.ndarray] = None  # The disc heat map, if shown
     # A map over the field, if shown: a number per square (rows along the field from the
-    # near back line), where the next throw goes (processing/throw_targets.py) or the
-    # dangerous space (processing/open_space.py); how much more it is than a moment ago;
-    # whether it is drawn as lines; and each defender's share of the danger by track
+    # near back line), where the next throw goes (processing/throw_targets.py), and
+    # whether it is drawn as lines
     field_map: Optional[np.ndarray] = None
-    map_opening: Optional[np.ndarray] = None
     map_lines: bool = False
-    gives_up: Dict[int, float] = field(default_factory=dict)
     field_results: List[Any] = field(default_factory=list)  # The field model's masks
     field_mask: Optional[np.ndarray] = None  # The field the model sees, one mask
     image_to_field: Optional[np.ndarray] = None  # Where the field lies, if known
@@ -109,7 +106,6 @@ def draw_camera_view(frame: np.ndarray, scene: Scene, options: Any, record: Reco
             scene.template.width,
             scene.template.length,
             scene.map_lines,
-            scene.map_opening,
         )
 
     # Plain detections only without tracking; tracks carry the same boxes
@@ -125,8 +121,6 @@ def draw_camera_view(frame: np.ndarray, scene: Scene, options: Any, record: Reco
         draw_possession(
             frame, scene.tracks, scene.holder_id, scene.holder_box, scene.possession_colour
         )
-        if scene.gives_up:
-            mark_defenders(frame, scene.tracks, scene.gives_up)
         # As the network says it, in every frame: nothing is held back, so that what
         # it gets wrong can be seen
         if scene.show_holder_guess:
@@ -208,7 +202,6 @@ def _field_diagram(scene: Scene, options: Any) -> np.ndarray:
                 else (str(number) if str(number).startswith("~") else ""),
                 "holder": track.track_id == scene.holder_id,
                 "trail": on_field(np.asarray(trail, dtype=float)) if trail is not None else (),
-                "gives_up": scene.gives_up.get(track.track_id, 0.0),
             }
         )
     return draw_field_diagram(
@@ -223,7 +216,6 @@ def _field_diagram(scene: Scene, options: Any) -> np.ndarray:
         scene.disc_path if options.tracking else (),
         scene.field_map,
         scene.map_lines,
-        scene.map_opening,
     )
 
 

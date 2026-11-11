@@ -14,6 +14,10 @@ step after. Teams may use it to switch, to call a play, or however they learn to
 holder's call of a set play is heard by all of the team.
 
 A team's players see the game turned so that their team attacks the far end zone.
+
+With PERFECT on, everybody sees everybody, wherever they look, exactly: no field of
+view, nothing remembered or unsure. Moves are still seen late (REACTION, TEAM_REACTION),
+carried on as the player was running; the defence still judges where a throw lands.
 """
 
 from collections import deque
@@ -24,16 +28,28 @@ import numpy as np
 
 from .game import PLAYERS, STEP, GameState, attack_of, turn
 
+PERFECT = True  # Everybody sees every player, exactly: no field of view, no noise
 MESSAGE_SIZE = 4  # Numbers a player says each step
 VIEW_ANGLE = np.radians(110.0)  # Either side of where a player looks
 NOTICED = 3.0  # Yards: a player this near is noticed wherever they are
 SEEN_OFF = 0.3  # Yards: how far off a place seen is, as a typical error
 DRIFT = 1.0  # Yards a second: how fast a remembered place becomes unsure
 CARRY_ON = 1.0  # Seconds: how long someone out of sight is believed to keep running
-REACTION = 0.25  # Seconds: how late the other team's moves are seen
-TEAM_REACTION = 0.1  # ... and teammates': a team knows its patterns and reads its cutters
+REACTION = 0.3  # Seconds: how late the other team's moves are seen
+TEAM_REACTION = 0.2  # ... and teammates': a team knows its patterns and reads its cutters
 ACCELERATION_OVER = 0.2  # Seconds: how a change of pace or way is seen
 LANDING_GUESS = 4.0  # Yards: how far off the defence judges where a throw comes down, at first
+# ... and the offence, but only a long throw: nothing for one in the air RECEIVER_SURE
+# seconds or less, up to RECEIVER_GUESS yards for one RECEIVER_UNSURE seconds longer
+RECEIVER_GUESS, RECEIVER_SURE, RECEIVER_UNSURE = 3.0, 1.0, 2.0
+
+
+def landing_guess(defending: bool, flight: float) -> float:
+    """Yards: how far off a player judges where a throw of `flight` seconds comes down, at
+    first (a typical error; surer the longer it flies)."""
+    if defending:
+        return LANDING_GUESS
+    return RECEIVER_GUESS * float(np.clip((flight - RECEIVER_SURE) / RECEIVER_UNSURE, 0.0, 1.0))
 
 
 @dataclass
@@ -62,6 +78,9 @@ class PlayerView:
     theirs_accel: np.ndarray = None  # (0 for those not seen now)
     ours_facing: np.ndarray = None  # (7, 2): the way each faces, as seen (0: not seen)
     theirs_facing: np.ndarray = None
+    # (7,): the opponent each of ours is matched with this possession (game.match_up), as
+    # an index among `theirs`; -1 before
+    partner: np.ndarray = None
 
 
 class Senses:
@@ -89,15 +108,16 @@ class Senses:
         first = 0 if self.team == 0 else PLAYERS
         focus = _disc_now(state)
         # Others are seen as they were REACTION ago
+        reaction, team_reaction = REACTION, TEAM_REACTION
         self._before.append((state.seconds, state.places.copy(), state.velocities.copy()))
-        _, seen_places, seen_velocities = self._as_of(state.seconds - REACTION)
-        _, team_places, team_velocities = self._as_of(state.seconds - TEAM_REACTION)
+        _, seen_places, seen_velocities = self._as_of(state.seconds - reaction)
+        _, team_places, team_velocities = self._as_of(state.seconds - team_reaction)
         mine = slice(first, first + PLAYERS)
         seen_places, seen_velocities = seen_places.copy(), seen_velocities.copy()
         seen_places[mine], seen_velocities[mine] = team_places[mine], team_velocities[mine]
         # How each was speeding up or turning, seen as late
-        before = self._as_of(state.seconds - REACTION - ACCELERATION_OVER)[2].copy()
-        before[mine] = self._as_of(state.seconds - TEAM_REACTION - ACCELERATION_OVER)[2][mine]
+        before = self._as_of(state.seconds - reaction - ACCELERATION_OVER)[2].copy()
+        before[mine] = self._as_of(state.seconds - team_reaction - ACCELERATION_OVER)[2][mine]
         seen_accel = (seen_velocities - before) / ACCELERATION_OVER
         own_before = self._as_of(state.seconds - ACCELERATION_OVER)[2]
         # All the team's players at once: k the player, me their number in the game
@@ -119,7 +139,9 @@ class Senses:
         if state.holder is not None and first <= state.holder < first + PLAYERS:
             seen[state.holder - first] = True  # The holder pivots and looks round
         seen[~np.isfinite(self._seen_when).any(axis=1)] = True  # At the line-up, everybody
-        noise = self.rng.normal(0.0, SEEN_OFF, (PLAYERS, 2 * PLAYERS, 2))
+        if PERFECT:
+            seen[:] = True
+        noise = self.rng.normal(0.0, 0.0 if PERFECT else SEEN_OFF, (PLAYERS, 2 * PLAYERS, 2))
         noise[ks, mes] = 0.0
         places = np.repeat(seen_places[None], PLAYERS, axis=0)
         velocities = np.repeat(seen_velocities[None], PLAYERS, axis=0)
@@ -152,7 +174,7 @@ class Senses:
         ahead = np.minimum(since, CARRY_ON) + lag
         ahead[np.arange(PLAYERS), first + np.arange(PLAYERS)] = 0.0
         believed = self._seen_at + self._seen_going * ahead[..., None]
-        unsure = SEEN_OFF + DRIFT * since
+        unsure = (0.0 if PERFECT else SEEN_OFF) + DRIFT * since
         rows = np.concatenate([turn(believed, attack), self._seen_going * attack], axis=2)
         accel = self._seen_accel * attack
         facing = self._seen_facing * attack
@@ -170,9 +192,13 @@ class Senses:
         if state.throw is not None:
             throw = state.throw
             target = throw.target
-            if state.offence != self.team:
-                # The defence reads where it comes down from its flight: off at first,
-                # surer the longer it flies
+            defending = state.offence != self.team
+            guess = landing_guess(defending, throw.lands - throw.released)
+            if throw.pull and not defending:
+                guess = 0.0  # The pull: only the kicking team misjudges it, as before
+            if guess > 0.0:
+                # Where it comes down is read from its flight: off at first, surer the
+                # longer it flies (the offence only on a long throw)
                 # A throw is known by when and by whom it was thrown (an object's id may
                 # come back for a later one)
                 which = (throw.released, throw.thrower)
@@ -180,7 +206,7 @@ class Senses:
                 if key not in self._guesses:
                     if any(seen != which for seen, _ in self._guesses):
                         self._guesses = {}  # Those of an earlier throw
-                    self._guesses[key] = self.rng.normal(0.0, LANDING_GUESS, 2)
+                    self._guesses[key] = self.rng.normal(0.0, guess, 2)
                 left = (throw.lands - state.seconds) / max(throw.lands - throw.released, 1e-6)
                 target = target + self._guesses[key] * float(np.clip(left, 0.0, 1.0))
             disc = turn(target, attack)
@@ -214,6 +240,11 @@ class Senses:
             accel[other],
             facing[mine],
             facing[other],
+            partner=(
+                np.full(PLAYERS, -1)
+                if state.pairs is None
+                else state.pairs[mine] - (PLAYERS - first)
+            ),
         )
 
 
