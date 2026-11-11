@@ -241,6 +241,7 @@ def knowledge_picture(
     considered: Optional[list] = None,
     heat: Optional[tuple] = None,
     trail: Optional[list] = None,
+    window: bool = False,
 ) -> np.ndarray:
     """What one player knows, from above with their team attacking upwards: teammates
     and opponents where they believe them, solid where seen, a ring as wide as how
@@ -250,7 +251,7 @@ def knowledge_picture(
     ringed and numbered in that order, the one taken in yellow with its chance and an
     arrow from the player. `heat`: (places (n, 2), chances (n,)): every choice weighed,
     shaded over the field. `trail`: where the player has been, oldest first: the path
-    they ran, drawn behind them."""
+    they ran, drawn behind them. `window`: the part of the field close_up shows, framed."""
     from .learned import KNOWN_UNSURE
 
     template = TEMPLATES["usau"]
@@ -290,7 +291,113 @@ def knowledge_picture(
         cv2.drawMarker(picture, at(view.disc), DISC, cv2.MARKER_TILTED_CROSS, 12, 2)
     if considered:
         _draw_choices(picture, at, at(view.ours[view.me, :2]), considered)
+    if window:
+        me = view.ours[view.me, :2]
+        half = np.array(CLOSE) / 2.0
+        corner, other = at(me - half), at(me + half)
+        cv2.rectangle(picture, corner, other, (255, 255, 255), 1, cv2.LINE_AA)
     return picture
+
+
+CLOSE = (52.0, 56.0)  # Yards across and along that close_up shows around a player
+PER_YARD = 11  # Pixels a yard in it
+MATCHED = (255, 200, 60)  # The opponent a player is matched with (blue, green, red)
+
+
+def close_up(
+    view,
+    team: int,
+    considered: Optional[list] = None,
+    heat: Optional[tuple] = None,
+    trail: Optional[list] = None,
+) -> np.ndarray:
+    """The field around one player (CLOSE yards, their team attacking upwards), as
+    they know it: shaded by how likely they are to run to each place (the holder: to
+    throw there); the path they ran; a bold arrow to where they run now, with its
+    chance; a ring at each other place they weigh, the wider the likelier; everyone
+    known with an arrow for where they will be in half a second; the opponent they are
+    matched with ringed in blue; themselves ringed in yellow (two bars beside them:
+    holding on); the disc as a cross. `considered`, `heat`, `trail`: as knowledge_picture."""
+    from .learned import KNOWN_UNSURE
+
+    template = TEMPLATES["usau"]
+    size = (int(template.width * PER_YARD * 1.2), int(template.length * PER_YARD * 1.2))
+    to_view = field_to_canvas(template, size)
+    picture = draw_field_diagram(
+        size, template.width, template.length, template.end_zone, to_view, []
+    )
+    unit = float(to_view[0, 0])
+
+    def at(place) -> tuple:
+        x, y, w = to_view @ [place[0], place[1], 1.0]
+        return int(round(x / w)), int(round(y / w))
+
+    if heat is not None:
+        _shade_chances(picture, to_view, template, *heat)
+    if trail is not None and len(trail) > 1:
+        points = np.array([at(place) for place in trail], dtype=np.int32)
+        cv2.polylines(picture, [points], False, TRAIL, 3, cv2.LINE_AA)
+    me = view.ours[view.me, :2]
+    start = at(me)
+    yellow = (64, 214, 255)
+    holds_on = False
+    places = [(place, chance) for place, chance in considered or [] if place is not None]
+    most = max([chance for _, chance in places], default=0.0) or 1.0
+    for n in reversed(range(len(considered or []))):  # The one taken drawn last, on top
+        place, chance = considered[n]
+        if place is None:
+            holds_on = holds_on or n == 0
+            continue
+        end = at(place)
+        if n == 0:
+            long = float(np.hypot(end[0] - start[0], end[1] - start[1]))
+            if long > 1.0:
+                tip = min(0.5, 18.0 / long)
+                cv2.arrowedLine(picture, start, end, yellow, 4, cv2.LINE_AA, tipLength=tip)
+            cv2.circle(picture, end, 13, yellow, 3, cv2.LINE_AA)
+            said, origin = f"{chance:.0%}", (end[0] + 18, end[1] + 6)
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            cv2.putText(picture, said, origin, font, 0.6, (20, 20, 20), 4, cv2.LINE_AA)
+            cv2.putText(picture, said, origin, font, 0.6, yellow, 2, cv2.LINE_AA)
+        else:
+            cv2.line(picture, start, end, (170, 170, 170), 1, cv2.LINE_AA)
+            wide = int(round(5 + 13 * chance / most))
+            cv2.circle(picture, end, wide, (240, 240, 240), 2, cv2.LINE_AA)
+    groups = (
+        (view.ours, view.ours_unsure, COLOURS[team]),
+        (view.theirs, view.theirs_unsure, COLOURS[1 - team]),
+    )
+    for rows, unsure, colour in groups:
+        for row, doubt in zip(rows, unsure):
+            centre = at(row[:2])
+            if doubt >= KNOWN_UNSURE:
+                cv2.circle(picture, centre, 7, (90, 90, 90), 2, cv2.LINE_AA)  # Lost
+                continue
+            ahead = at(row[:2] + 0.5 * row[2:4])
+            if ahead != centre:
+                cv2.arrowedLine(picture, centre, ahead, colour, 2, cv2.LINE_AA, tipLength=0.35)
+            if doubt > 0.6:
+                cv2.circle(picture, centre, max(9, int(doubt * unit)), colour, 1, cv2.LINE_AA)
+            cv2.circle(picture, centre, 8, colour, -1, cv2.LINE_AA)
+            cv2.circle(picture, centre, 8, (25, 25, 25), 1, cv2.LINE_AA)
+    partner = None if view.partner is None else int(view.partner[view.me])
+    if partner is not None and partner >= 0 and view.theirs_unsure[partner] < KNOWN_UNSURE:
+        cv2.circle(picture, at(view.theirs[partner, :2]), 14, MATCHED, 3, cv2.LINE_AA)
+    cv2.circle(picture, start, 14, yellow, 3, cv2.LINE_AA)
+    if holds_on:  # Two bars: holding on
+        for side in (22, 32):
+            corner = (start[0] + side, start[1] - 10)
+            cv2.rectangle(picture, corner, (corner[0] + 5, corner[1] + 20), yellow, -1)
+    if view.disc is not None:
+        cv2.drawMarker(picture, at(view.disc), DISC, cv2.MARKER_TILTED_CROSS, 20, 3)
+    # Cut out around the player (the picture padded, for a player near a line)
+    half_x, half_y = int(CLOSE[0] * unit / 2), int(CLOSE[1] * unit / 2)
+    ground = tuple(int(c) for c in picture[0, 0])
+    padded = cv2.copyMakeBorder(
+        picture, half_y, half_y, half_x, half_x, cv2.BORDER_CONSTANT, value=ground
+    )
+    x, y = start[0] + half_x, start[1] + half_y
+    return padded[y - half_y : y + half_y, x - half_x : x + half_x].copy()
 
 
 HEAT_SPREAD = 2.0  # Yards: how far each choice's chance is spread over the field

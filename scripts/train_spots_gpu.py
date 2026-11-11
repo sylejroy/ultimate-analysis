@@ -288,7 +288,14 @@ def main() -> None:
     run.mkdir(parents=True)
     settings = {**vars(args), "start": str(args.start), "output": str(args.output)}
     (run / "settings.json").write_text(json.dumps(settings, indent=2))
-    print(f"Written to {run}", flush=True)
+
+    def say(text: str, flush: bool = True) -> None:
+        """Printed, and kept in the run's log.txt (scripts/watch_spots.py shows it)."""
+        print(text, flush=flush)
+        with open(run / "log.txt", "a", encoding="utf-8") as log:
+            log.write(text + "\n")
+
+    say(f"Written to {run}")
     checking = None
     best = None  # (margin against scripted 2, iteration)
     ladder = [int(n) for n in args.ladder.split(",") if n.strip()]
@@ -323,7 +330,7 @@ def main() -> None:
             )
             torch.cuda.synchronize()
             tally = {k: v - before.get(k, 0) for k, v in game.tally.items()}
-            print(
+            say(
                 f"iteration {iteration}: {int(game.done.sum())} points ended, "
                 f"{tally.get('score', 0)} scored; completed {tally.get('catch', 0)}/"
                 f"{tally.get('throw', 0)}; {len(advantage)} choices; "
@@ -340,7 +347,7 @@ def main() -> None:
                     scored = sum(p["scored"] for p in found)
                     conceded = sum(p["conceded"] for p in found)
                     results[name] = {"scored": scored, "conceded": conceded, "points": len(found)}
-                    print(
+                    say(
                         f"  against {name} (iteration {at}): scored {scored}, conceded "
                         f"{conceded} of {len(found)}; completed "
                         f"{sum(p['catches'] for p in found)}/{sum(p['throws'] for p in found)}",
@@ -363,7 +370,7 @@ def main() -> None:
                     brains.load(torch.load(kept_best, map_location="cpu", weights_only=True))
                     for optimiser in [*optimisers.values(), *value_optimisers.values()]:
                         optimiser.state.clear()
-                    print(
+                    say(
                         f"  {margin:+d} against scripted 2, the best {best[0]:+d} (iteration "
                         f"{best[1]}): back to that team",
                         flush=True,

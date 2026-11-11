@@ -11,14 +11,13 @@ In 3D the field is the 3D View's: drag to turn it, right-drag to move it, the wh
 come closer. From above, the dangerous space for the team with the disc is shaded.
 Clicking a player in 3D shows their brain beside the field: what they know of the game
 and the path they ran; for a player who chooses where to run, what they are weighing
-now, drawn (choices_view.py); and their network as it works in the present step.
+now, drawn on the field around them; and their network as it works in the present step.
 """
 
 from typing import List, Optional
 
 import numpy as np
 from PyQt5.QtCore import QPointF, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -36,10 +35,10 @@ from PyQt5.QtWidgets import (
 
 from ...simulation import game
 from ...simulation.drawing import (
-    COLOURS,
     NAMES,
     call_of,
     caption_of,
+    close_up,
     knowledge_picture,
     picture_of,
     scene_of_game,
@@ -55,7 +54,6 @@ from ..widgets.controls import ToggleSwitch
 from ..widgets.images import frame_to_pixmap
 from ..widgets.panels import compact_combo, side_panel
 from .brain_view import NetworkView
-from .choices_view import ChoicesView
 
 logger = get_logger("GUI")
 
@@ -162,13 +160,24 @@ class BrainPanel(QWidget):
             "they see a player, a ring as wide as they are unsure where they remember one,\n"
             "faint where they have lost one; themselves ringed in yellow, the path they ran\n"
             "behind them; the cross where they judge the disc comes down. A player who\n"
-            "chooses where to run: shaded by how likely each place (the holder: each throw)\n"
-            "is, an arrow to the one taken, the others numbered as in the list"
+            "chooses where to run: the whole field shaded by how likely each place (the\n"
+            "holder: each throw) is, and framed, the part shown large beside"
         )
         self.network = NetworkView()
-        self.choices = ChoicesView()
+        self.close = QLabel()
+        self.close.setAlignment(Qt.AlignCenter)
+        self.close.setMinimumHeight(320)
+        self.close.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+        self.close.setToolTip(
+            "The field around them, their team attacking upwards. Shaded: how likely they\n"
+            "are to run to each place (the holder: to throw there). The yellow arrow: where\n"
+            "they run now, and how likely that was; the rings: what else they weigh, the\n"
+            "wider the likelier. The blue line behind them: the path they ran. Everyone\n"
+            "has an arrow to where they will be in half a second; the opponent they are\n"
+            "matched with is ringed in blue; the cross is the disc"
+        )
         self.pages = QStackedWidget()
-        self.pages.addWidget(self.choices)
+        self.pages.addWidget(self.close)
         self.pages.addWidget(self.network)
         self.pages.setCurrentWidget(self.network)
         self.show_network = QPushButton("Show the network")
@@ -198,7 +207,7 @@ class BrainPanel(QWidget):
     def _page(self, _checked: bool = False) -> None:
         """The choices in words, or the network, for a player who chooses."""
         chooses = self.show_network.isVisible() and not self.show_network.isChecked()
-        self.pages.setCurrentWidget(self.choices if chooses else self.network)
+        self.pages.setCurrentWidget(self.close if chooses else self.network)
 
     def _follow(self, match: Match, player: int, view) -> list:
         """The path the picked player ran in this point, with where they are now."""
@@ -311,22 +320,19 @@ class BrainPanel(QWidget):
             groups = sf.SPOT_GROUPS
         options = [(label, float(chances[i])) for label, i in zip(labels, listed)]
         considered = [(place, chance) for place, (_, chance) in zip(places, options)]
-        picture = knowledge_picture(view, self._team, considered=considered, heat=heat, trail=trail)
-        self.knowledge.setPixmap(frame_to_pixmap(picture))
+        # The whole field small, with the part shown large framed
+        whole = knowledge_picture(view, self._team, heat=heat, trail=trail, window=True)
+        self.knowledge.setPixmap(frame_to_pixmap(whole))
+        near = close_up(view, self._team, considered=considered, heat=heat, trail=trail)
+        self.close.setPixmap(
+            frame_to_pixmap(near).scaled(
+                self.close.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+        )
         layers = activations(network, rows[taken])
         self.network.show_brain(
             layers, weights_of(network), None, groups, ("Score",), notes, options
         )
-        drawn = [
-            said.throw_glyph(rows[i]) if holder else said.spot_glyph(rows[i], view.attacking)
-            for i in listed
-        ]
-        for glyph, (_, chance) in zip(drawn, options):
-            glyph["chance"] = chance
-        mine, other = (
-            QColor(r, g, b) for b, g, r in (COLOURS[self._team], COLOURS[1 - self._team])
-        )
-        self.choices.show_choices(drawn, (mine, other))
         self.said.setText("")
         self.said.setToolTip(
             "The holder chooses every 0.3 s between holding on and a throw: to any of 481 "
