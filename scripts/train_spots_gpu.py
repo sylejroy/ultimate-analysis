@@ -17,7 +17,9 @@ With --marking, in that share of the points one team defends by rules, man to ma
 (batch.BatchPlayers): the offence learns to beat a defender before self-play. With
 --league, in that share one team is an earlier team: the run's start and its
 --league-size latest kept teams, not learned from, so that it does not only learn to
-beat itself as it is.
+beat itself as it is. With --spread, in that share one team attacks by rules, for the
+defence; with --only, only one of the three kinds of choice learns (--only defence: the
+defenders learn to stop the attackers as they are).
 
 Printed per iteration: points ended and scored, throws and completions, the time. Every
 --report iterations the team is kept
@@ -26,9 +28,10 @@ team on the processor (as scripts/train_spots.py), and the benchmark one (script
 set as the recorded teams play), while learning goes on; and, as a
 ladder, as many points against the team of --ladder iterations before (each) and the
 team the run started from: whether self-play makes it better than it was. The best team
-against the benchmark so far is named in <run>/best.json; with --revert, a team that does
-that many points worse against it than the best goes back to the best (its learning
-afresh), so that a bad stretch does not lose a good team.
+against the benchmark so far (over three checks: one alone is too noisy) is named in
+<run>/best.json; with --revert, a team that does that many points worse against it than
+the best goes back to the best (its learning afresh), so that a bad stretch does not
+lose a good team.
 
     python scripts/train_spots_gpu.py --points 2048 --iterations 500 --marking 1
 """
@@ -62,6 +65,7 @@ from ultimate_analysis.simulation.spots import (  # noqa: E402
 
 GAMMA, LAMBDA = train_spots.GAMMA, train_spots.LAMBDA
 CLIP, ENTROPY = train_spots.CLIP, train_spots.ENTROPY
+CHECKS_WEIGHED = 3  # Checks against scripted 2 whose mean says how good a team is
 P, PLAYERS = batch.P, batch.PLAYERS
 
 
@@ -158,6 +162,7 @@ def learn(
     batch_size,
     values_only,
     share=1.0,
+    only=None,
 ):
     dev = advantage.device
     prior = batch.throw_prior(dev)
@@ -181,21 +186,26 @@ def learn(
                 value_optimisers[value_side].zero_grad()
                 value_loss.backward()
                 value_optimisers[value_side].step()
-                if values_only:
-                    continue
+                if values_only or (only is not None and only != ("throw" if kind == 2 else side)):
+                    continue  # The values learn; this side's choices stay as they are
                 view = {name: kept["view"][name][rows] for name in sf.VIEW_FIELDS}
                 if kind == 2:
-                    scores = network(sf.throw_choices(view))[..., 0] + prior
+                    leans = prior.expand(len(rows), -1)
+                    scores = network(sf.throw_choices(view))[..., 0] + leans
                 else:
                     parts = sf.spot_parts(view)
-                    scores = sf.spot_scores(network, parts) + sf.spot_leans(view, parts["allowed"])
+                    leans = sf.spot_leans(view, parts["allowed"])
+                    scores = sf.spot_scores(network, parts) + leans
                 log_chances = torch.log_softmax(scores, -1)
                 new = log_chances.gather(1, kept["chosen"][rows][:, None])[:, 0]
                 ratio = torch.exp(new - kept["log_chance"][rows])
                 adv = normalised[rows]
                 loss = -torch.min(ratio * adv, ratio.clamp(1 - CLIP, 1 + CLIP) * adv).mean()
-                entropy = -(log_chances.exp() * log_chances).sum(-1).mean()
-                loss = loss - ENTROPY * entropy
+                # Kept trying other choices as it does at first (the leans), not all alike:
+                # drawn towards all alike, it unlearns going on and marking for nothing
+                at_first = torch.log_softmax(leans, -1)
+                apart = (log_chances.exp() * (log_chances - at_first)).sum(-1).mean()
+                loss = loss + ENTROPY * apart
                 optimisers[side].zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(network.parameters(), 1.0)
@@ -231,6 +241,19 @@ def main() -> None:
         default=0.0,
         help="Share of points where one team defends by rules, man to man (0: self-play)",
     )
+    parser.add_argument(
+        "--only",
+        choices=("offence", "defence", "throw"),
+        default=None,
+        help="Only these choices learn (where attackers run, where defenders run, or the "
+        "throws); the rest play as they are",
+    )
+    parser.add_argument(
+        "--fresh",
+        choices=("offence", "defence"),
+        default=None,
+        help="With --start: this side's network for where to run begins anew",
+    )
     parser.add_argument("--credit", type=float, default=1.0)
     parser.add_argument("--gamma", type=float, default=GAMMA)
     parser.add_argument("--stall-reward", type=float, default=STALL_REWARD)
@@ -259,9 +282,9 @@ def main() -> None:
     parser.add_argument(
         "--revert",
         type=int,
-        default=16,
-        help="Back to the best team when one does this many points worse (of the margin) "
-        "against scripted 2 (0: never)",
+        default=24,
+        help="Back to the best team when the last checks are this many points worse (of the "
+        "margin, their mean) against scripted 2 than its were (0: never)",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output", type=Path, default=Path("data/models/movement"))
@@ -270,7 +293,10 @@ def main() -> None:
     dev = "cuda"
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
-    brains = (load_spot_brains(args.start) if args.start else SpotBrains()).to(dev)
+    brains = load_spot_brains(args.start) if args.start else SpotBrains()
+    if args.fresh:
+        brains.spots[args.fresh].load_state_dict(SpotBrains().spots[args.fresh].state_dict())
+    brains = brains.to(dev)
     optimisers = {
         "offence": torch.optim.Adam(brains.spots["offence"].parameters(), lr=args.rate),
         "defence": torch.optim.Adam(brains.spots["defence"].parameters(), lr=args.rate),
@@ -297,7 +323,8 @@ def main() -> None:
 
     say(f"Written to {run}")
     checking = None
-    best = None  # (margin against scripted 2, iteration)
+    best = None  # (margin against scripted 2 over the last checks, iteration)
+    margins = []  # Of the last checks: one check alone is too noisy to go back on
     ladder = [int(n) for n in args.ladder.split(",") if n.strip()]
     start_state = brains.state() if args.start else None  # The team the run started from
 
@@ -327,6 +354,7 @@ def main() -> None:
                 args.batch,
                 iteration <= args.warmup,
                 args.learn_share,
+                args.only,
             )
             torch.cuda.synchronize()
             tally = {k: v - before.get(k, 0) for k, v in game.tally.items()}
@@ -350,7 +378,9 @@ def main() -> None:
                     say(
                         f"  against {name} (iteration {at}): scored {scored}, conceded "
                         f"{conceded} of {len(found)}; completed "
-                        f"{sum(p['catches'] for p in found)}/{sum(p['throws'] for p in found)}",
+                        f"{sum(p['catches'] for p in found)}/{sum(p['throws'] for p in found)}"
+                        f"; they completed {sum(p['their_catches'] for p in found)}/"
+                        f"{sum(p['their_throws'] for p in found)}",
                         flush=True,
                     )
                 (run / f"iter_{at:04d}" / "against_scripted.json").write_text(
@@ -360,18 +390,30 @@ def main() -> None:
                 checking = None
                 bench = results["scripted 2"]
                 margin = bench["scored"] - bench["conceded"]
-                if best is None or margin > best[0]:
+                margins = [*margins, margin][-CHECKS_WEIGHED:]
+                margin = round(sum(margins) / len(margins))
+                if len(margins) < CHECKS_WEIGHED:
+                    pass  # Too few checks yet to say how good this team is
+                elif best is None or margin > best[0]:
                     best = (margin, at)
                     (run / "best.json").write_text(
-                        json.dumps({"iteration": at, "margin against scripted 2": margin})
+                        json.dumps(
+                            {
+                                "iteration": at,
+                                "margin against scripted 2": margin,
+                                "over checks": CHECKS_WEIGHED,
+                            }
+                        )
                     )
                 elif args.revert and margin <= best[0] - args.revert:
+                    margins = []  # Weighed afresh from the team gone back to
                     kept_best = run / f"iter_{best[1]:04d}" / "spots.pt"
                     brains.load(torch.load(kept_best, map_location="cpu", weights_only=True))
                     for optimiser in [*optimisers.values(), *value_optimisers.values()]:
                         optimiser.state.clear()
                     say(
-                        f"  {margin:+d} against scripted 2, the best {best[0]:+d} (iteration "
+                        f"  {margin:+d} against scripted 2 over {CHECKS_WEIGHED} checks, the best "
+                        f"{best[0]:+d} (iteration "
                         f"{best[1]}): back to that team",
                         flush=True,
                     )

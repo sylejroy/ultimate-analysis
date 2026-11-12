@@ -60,7 +60,7 @@ from ultimate_analysis.simulation.spots import (  # noqa: E402
 GAMMA, LAMBDA = 0.998, 0.95
 CLIP = 0.2
 EPOCHS, BATCH = 3, 1024
-ENTROPY = 0.01  # Keeps them trying other choices
+ENTROPY = 0.01  # Keeps them trying other choices: near how they choose at first
 
 # ---------------------------------------------------------------------- playing (workers)
 
@@ -109,6 +109,9 @@ def play(job) -> list:
                 "conceded": int(point.scored == 1 - side),
                 "throws": sum(e.kind == "throw" for e in kinds),
                 "catches": sum(e.kind == "catch" for e in kinds),
+                # The other team's passes: how well this one defends
+                "their_throws": sum(e.kind == "throw" and e.team != side for e in point.events),
+                "their_catches": sum(e.kind == "catch" and e.team != side for e in point.events),
             }
         )
     return found
@@ -186,8 +189,10 @@ def learn(brains, choices, optimisers, value_optimisers, values_only=False, devi
                 ratio = torch.exp(new - old[batch])
                 a = advantage[batch]
                 loss = -torch.min(ratio * a, torch.clamp(ratio, 1 - CLIP, 1 + CLIP) * a).mean()
-                entropy = -(log_chances.exp() * log_chances).sum(1).mean()
-                loss = loss - ENTROPY * entropy
+                # Kept trying other choices as it does at first (the leans), not all alike
+                at_first = torch.log_softmax(prior[batch], dim=1)
+                apart = (log_chances.exp() * (log_chances - at_first)).sum(1).mean()
+                loss = loss + ENTROPY * apart
                 optimisers[side].zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(network.parameters(), 1.0)

@@ -132,7 +132,6 @@ from .scripted import (
 from .spots import (
     COMMIT,
     DECIDE_EVERY,
-    REACT_STEPS,
     SHORTEST_HOLD,
     THROW_EVERY,
     THROW_PRIOR,
@@ -335,6 +334,7 @@ class BatchGame:
         self.places[idx] = places
         self.velocities[idx] = 0.0
         self.offence[idx], self.holder[idx] = receiving, -1
+        self._match_up(idx)  # Whom each guards is picked on the line, before the pull
         self.loose[idx], self.air[idx] = False, True
         self.seconds[idx], self.held_since[idx], self.stall[idx] = 0.0, 0.0, 0.0
         self.scored[idx] = -1
@@ -1170,8 +1170,6 @@ class BatchPlayers:
         self.rival = torch.full((B,), -1, dtype=torch.long, device=dev)  # Which rival
         self.rival_team = torch.full((B,), -1, dtype=torch.long, device=dev)
         self._draw_markers(torch.ones(B, dtype=torch.bool, device=dev))
-        # Where each team's players saw the opponents in the last steps, oldest first
-        self.before = ([], [])
         self.kind = torch.full((B, P), -1, dtype=torch.long, device=dev)
         self.player = torch.full((B, P), -1, dtype=torch.long, device=dev)
         self.param = torch.zeros(B, P, 2, device=dev)
@@ -1289,19 +1287,14 @@ class BatchPlayers:
 
     def _spots(self, v, rows):
         """(B, 7, 2): where the spot each player of a team chose last is now, as the team
-        sees the field (a spot beside a player follows them, an opponent a moment late); their own place without
+        sees the field (a spot beside a player follows them as they are seen); their own place without
         one."""
         ks = torch.arange(PLAYERS, device=self.game.device)
         place = v["ours"][:, ks, ks, :2]
         kind = self.kind[:, rows]
         who = self.player[:, rows].clamp(min=0)
         at = who[..., None, None].expand(-1, -1, 1, 2)
-        # An opponent is followed REACT_STEPS late (as they are now in a point just begun)
-        theirs = v["theirs"][..., :2]
-        before = self.before[rows.start // PLAYERS]
-        if len(before) > REACT_STEPS:
-            theirs = torch.where(before[0].isnan(), theirs, before[0])
-        opponent = theirs.gather(2, at)[:, :, 0]
+        opponent = v["theirs"][..., :2].gather(2, at)[:, :, 0]
         mate = v["ours"][..., :2].gather(2, at)[:, :, 0]
         param = self.param[:, rows]
         return torch.where(
@@ -1317,9 +1310,6 @@ class BatchPlayers:
     def forget(self, mask):
         """New points where `mask`: no plans."""
         self._draw_markers(mask)
-        for before in self.before:
-            for seen in before:
-                seen[mask] = float("nan")
         self.kind[mask] = -1
         self.decided_at[mask] = -float("inf")
         self.key[mask] = -9
@@ -1347,8 +1337,6 @@ class BatchPlayers:
             first = team * PLAYERS
             rows = slice(first, first + PLAYERS)
             v = game.look(team)
-            self.before[team].append(v["theirs"][..., :2].clone())
-            del self.before[team][: -(REACT_STEPS + 1)]
             v["plan_kind"], v["plan_player"], v["plan_param"] = (
                 self.kind[:, rows],
                 self.player[:, rows],

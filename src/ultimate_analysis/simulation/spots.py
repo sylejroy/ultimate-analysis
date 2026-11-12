@@ -4,7 +4,8 @@ Players do not steer: each chooses where to run, and runs there as the game lets
 (game.py: top speed, backpedalling, turning). The choices: staying; going on to where
 they were going; a cut from where they are, eight ways round them and three lengths; a
 place around the disc; a step behind, ahead, left or right of any other player, a spot
-that follows them (an opponent REACT_STEPS late: reacting takes time). An attacker runs to where they chose, and every
+that follows them as the player sees them (opponents a moment late: perception.REACTION).
+An attacker runs to where they chose, and every
 COMMIT seconds may break the run off for another; a defender chooses again every DECIDE_EVERY;
 everyone at once when the disc changes hands, is thrown or comes down. The holder
 chooses every few tenths of a second between holding on, throwing to a spot of a grid
@@ -20,7 +21,6 @@ shaped (curve, height, angle) is as scripted.py has it, and players go for a dis
 the air or on the ground by reflex (learned.reflexes), as before.
 """
 
-from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -40,9 +40,6 @@ DECIDE_EVERY = 0.5  # Seconds between a player's choices of where to run, at lea
 # An attacker chooses again once there (spot_features.REACHED), or every COMMIT seconds
 # on the way: they may break a cut off, and mostly go on at first (spot_leans)
 COMMIT = 1.0
-# A spot beside an opponent follows where they were this many steps ago (0.3 s): the
-# time it takes to react, which a change of direction gains on whoever follows
-REACT_STEPS = 3
 THROW_EVERY = 0.3  # Seconds between the holder's choices (hold on, or throw where)
 SHORTEST_HOLD = 0.3  # Seconds before a holder may throw
 HOLD_AT_FIRST = 0.9  # The chance of holding on, at first, each time the holder chooses
@@ -175,8 +172,6 @@ class SpotTeam:
         self.greedy = greedy
         self.choices: List[Choice] = []
         self.plans = [_Plan() for _ in range(PLAYERS)]
-        # Where each player saw the opponents in the last steps, oldest first
-        self.before: deque = deque(maxlen=REACT_STEPS + 1)
         self.thrown_at = -np.inf
         self.step = 0
         self.game: Optional[GameState] = None
@@ -238,8 +233,6 @@ class SpotTeam:
         throw_to = None
         shape = (0.0, None, None)
         seen = value = None
-        self.before.append([view.theirs[:, :2].copy() for view in views])
-        late = self.before[0]
         disc_now = (views[0].holder, views[0].lands_in is not None, views[0].disc is None)
         reflex = reflexes(views) if views[0].disc is not None and views[0].holder is None else {}
         deciding = []
@@ -270,7 +263,7 @@ class SpotTeam:
             due = elapsed >= DECIDE_EVERY - 1e-9
             if due and attacking and plan.choice is not None and elapsed < COMMIT - 1e-9:
                 # An attacker runs their cut out before choosing again
-                left = _spot_of(view, plan.choice, late[k]) - view.ours[k, :2]
+                left = _spot_of(view, plan.choice) - view.ours[k, :2]
                 due = float(np.hypot(*left)) <= REACHED
             if due or plan.seen != disc_now or plan.choice is None:
                 deciding.append(k)
@@ -307,19 +300,18 @@ class SpotTeam:
             if k in reflex:
                 velocities[k] = reflex[k]
             else:
-                spot = _spot_of(view, self.plans[k].choice, late[k])
+                spot = _spot_of(view, self.plans[k].choice)
                 velocities[k] = towards(view.ours[k, :2], spot)
         self.step += 1
         return Decision(velocities, throw_to, np.zeros((PLAYERS, MESSAGE_SIZE)), *shape)
 
 
-def _spot_of(view: PlayerView, choice: tuple, late: Optional[np.ndarray] = None) -> np.ndarray:
-    """Where a choice is now: a place, a step from a teammate as they are now, or a step
-    from an opponent where they were a moment ago (`late`: the opponents' places then;
-    None: as they are now)."""
+def _spot_of(view: PlayerView, choice: tuple) -> np.ndarray:
+    """Where a choice is now: a place, or a step from a player as the chooser sees them
+    now (an opponent a moment late, as everything of theirs is seen)."""
     kind, player, where = choice
     if kind == OPPONENT:
-        return (view.theirs if late is None else late)[player, :2] + where
+        return view.theirs[player, :2] + where
     if kind == TEAMMATE:
         return view.ours[player, :2] + where
     return np.asarray(where, dtype=float)

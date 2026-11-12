@@ -261,6 +261,9 @@ def pull_start(
         state.places[puller], target, 0.0, puller, rng.normal(0, 3.0), PULL_HEIGHT, state.wind, 0.0
     )
     state.throw.pull = True
+    # Teams pick whom they guard on the line, before the pull: the defenders know whom to
+    # run down to
+    state.pairs = match_up(state.places, state.offence)
     return state
 
 

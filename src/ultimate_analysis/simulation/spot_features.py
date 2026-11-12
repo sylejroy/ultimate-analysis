@@ -73,9 +73,13 @@ LANE_FROM = 3.0  # Yards from the disc: a defender nearer (the mark) is not coun
 NEVER = 99.0  # Seconds: no one known gets there
 UNAVAILABLE = -1e9  # The score of a choice that may not be drawn
 REACHED = 1.0  # Yards: a player this near the spot they chose is there
-# An attacker choosing again before they are there goes on this often at first (or no
-# long cut would ever be run out before a team has learned anything)
+# An attacker choosing again before they are there, and a defender with somewhere to go
+# on to, goes on this often at first (or no long cut would ever be run out, and no
+# attacker stayed with, before a team has learned anything)
 GO_ON_AT_FIRST = 0.8
+# A defender choosing afresh takes a spot beside the attacker they guard this often at
+# first: a team that has learned nothing defends man to man, and learns from there
+MARK_AT_FIRST = 0.8
 EVERYONE = (MATES + OPPONENTS) * PER_PLAYER
 SPOT_FEATURES = 5 + CHOICE_KINDS + EVERYONE + 9 + 3 + 3 + 7 + 7 + 5
 THROW_FEATURES = 1 + 5 + 3 + 3 + EVERYONE + 3 + 2 + 1
@@ -452,19 +456,37 @@ def plan_spots(v):
 
 
 def spot_leans(v, allowed):
-    """(B, SPOT_CHOICES), to add to the scores of spot_choices: a choice not `allowed` is
-    never drawn, and an attacker still on their way goes on GO_ON_AT_FIRST of the time
-    while the network scores every choice alike (it learns when to break a cut off)."""
+    """(B, SPOT_CHOICES), to add to the scores of spot_choices: how likely each choice is
+    while the network scores them all alike (their log chances). A choice not `allowed`
+    is never drawn. An attacker still on their way, and a defender with somewhere to go
+    on to, goes on GO_ON_AT_FIRST of the time; a defender takes one of the spots beside
+    the attacker they guard MARK_AT_FIRST of the rest; all else is as likely as each
+    other. The network learns from there when to break a cut off, leave an attacker,
+    stand elsewhere."""
     import torch
 
-    b = torch.arange(len(v["me"]), device=v["me"].device)
+    device = allowed.device
+    b = torch.arange(len(v["me"]), device=device)
     going_to, may_go_on = plan_spots(v)
     away = torch.linalg.norm(going_to - v["ours"][b, v["me"], :2], dim=-1) > REACHED
-    others = (allowed.sum(-1) - 1).clamp(min=1).float()
-    lean = torch.log(GO_ON_AT_FIRST / (1.0 - GO_ON_AT_FIRST) * others)
-    leans = torch.zeros(allowed.shape, device=allowed.device)
-    leans[:, KEEP] = torch.where(v["attacking"] & may_go_on & away, lean, 0.0)
-    return leans.masked_fill(~allowed, UNAVAILABLE)
+    goes_on = may_go_on & (away | ~v["attacking"])
+    # The spots beside the attacker this defender guards
+    partner = torch.where(v["attacking"], -1, v["partner"][b, v["me"]])
+    choice = torch.arange(allowed.shape[1], device=device)[None]
+    slot = torch.div(choice - FIRST_OPPONENT, len(BESIDE), rounding_mode="floor")
+    guarded = allowed & (choice >= FIRST_OPPONENT) & (slot == partner[:, None])
+    keeps = (choice == KEEP) & goes_on[:, None]
+    others = allowed & ~guarded & ~keeps
+    kept = GO_ON_AT_FIRST * goes_on.float()
+    marks = MARK_AT_FIRST * guarded.any(-1).float()
+    rest = 1.0 - kept
+    chances = torch.where(
+        guarded,
+        (rest * marks / guarded.sum(-1).clamp(min=1))[:, None],
+        (rest * (1.0 - marks) / others.sum(-1).clamp(min=1))[:, None] * others,
+    )
+    chances = torch.where(keeps, kept[:, None], chances)
+    return torch.log(chances.clamp(min=1e-30)).masked_fill(~allowed, UNAVAILABLE)
 
 
 def spot_parts(v) -> dict:

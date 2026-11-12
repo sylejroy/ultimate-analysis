@@ -96,6 +96,28 @@ class ChoicesTest(unittest.TestCase):
             np.testing.assert_allclose(quick.numpy(), written.numpy(), atol=2e-5)
             np.testing.assert_allclose(fewer.numpy(), written[some].numpy(), atol=2e-5)
 
+    def test_a_defender_marks_their_attacker_and_stays_with_them_at_first(self):
+        state, _ = first_views()
+        state.pairs = game.match_up(state.places, state.offence)
+        view = perception.Senses(1, np.random.default_rng(0)).look(state)[2]
+        guarded = int(view.partner[view.me])
+        first = sf.FIRST_OPPONENT + guarded * len(sf.BESIDE)
+        mine = slice(first, first + len(sf.BESIDE))
+        seeing = sf.views_of([view])
+        allowed = sf.spot_choices(seeing)[4]
+        chances = torch.softmax(sf.spot_leans(seeing, allowed)[0], 0)
+        self.assertAlmostEqual(float(chances[mine].sum()), sf.MARK_AT_FIRST, places=4)
+        self.assertAlmostEqual(float(chances.sum()), 1.0, places=4)
+        # ... and once beside them, mostly stays
+        plan = (sf.OPPONENT, guarded, sf.BESIDE[0])
+        seeing = sf.views_of([view], [plan], ages=[0.5])
+        allowed = sf.spot_choices(seeing)[4]
+        chances = torch.softmax(sf.spot_leans(seeing, allowed)[0], 0)
+        self.assertAlmostEqual(float(chances[sf.KEEP]), sf.GO_ON_AT_FIRST, places=4)
+        left = (1.0 - sf.GO_ON_AT_FIRST) * sf.MARK_AT_FIRST
+        self.assertAlmostEqual(float(chances[mine].sum()), left, places=4)
+        self.assertEqual(float(chances[~allowed[0]].sum()), 0.0)
+
     def test_a_defender_may_stand_beside_any_attacker_who_is_followed(self):
         state, _ = first_views()
         state.pairs = game.match_up(state.places, state.offence)
@@ -114,11 +136,6 @@ class ChoicesTest(unittest.TestCase):
         choice = (sf.OPPONENT, guarded, params[0, first].numpy())
         np.testing.assert_allclose(
             spots._spot_of(view, choice), view.theirs[guarded, :2] + choice[2]
-        )
-        # ... a moment late: where the attacker was, not where they are
-        late = view.theirs[:, :2] - np.array([0.0, 2.0])
-        np.testing.assert_allclose(
-            spots._spot_of(view, choice, late), view.theirs[guarded, :2] + choice[2] - [0, 2]
         )
         # Going on to that spot is theirs to choose again
         going = sf.spot_choices(sf.views_of([view], [choice], ages=[0.2]))[4]
