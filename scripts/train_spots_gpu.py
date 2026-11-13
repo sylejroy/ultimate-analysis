@@ -56,7 +56,7 @@ import train_spots  # noqa: E402
 
 from ultimate_analysis.simulation import batch  # noqa: E402
 from ultimate_analysis.simulation import spot_features as sf  # noqa: E402
-from ultimate_analysis.simulation.ppo import STALL_REWARD  # noqa: E402
+from ultimate_analysis.simulation.ppo import STALL_REWARD, THEIRS_CAUGHT  # noqa: E402
 from ultimate_analysis.simulation.spots import (  # noqa: E402
     SpotBrains,
     load_spot_brains,
@@ -258,6 +258,13 @@ def main() -> None:
     parser.add_argument("--gamma", type=float, default=GAMMA)
     parser.add_argument("--stall-reward", type=float, default=STALL_REWARD)
     parser.add_argument("--stalled", type=float, default=3.0)
+    parser.add_argument(
+        "--theirs-caught",
+        type=float,
+        default=THEIRS_CAUGHT,
+        help="To a defender when the attacker they guard catches a pass (0: nothing of their "
+        "own, so that leaving them to cover a more dangerous place may pay)",
+    )
     parser.add_argument("--report", type=int, default=20)
     parser.add_argument("--check", type=int, default=192, help="Points against the scripted team")
     parser.add_argument("--workers", type=int, default=12, help="For the checks, on the processor")
@@ -307,7 +314,13 @@ def main() -> None:
         for side in ("offence", "defence")
     }
     game = batch.BatchGame(
-        args.points, dev, args.seed, args.point_seconds, args.stalled, args.stall_reward
+        args.points,
+        dev,
+        args.seed,
+        args.point_seconds,
+        args.stalled,
+        args.stall_reward,
+        args.theirs_caught,
     )
     players = batch.BatchPlayers(game, brains, args.marking, args.league, args.spread)
     run = args.output / f"{datetime.now():%Y%m%d_%H%M%S}_spots_gpu"

@@ -256,8 +256,18 @@ class BatchGame:
     """B points at once: the game, what each team sees of it, and the rewards."""
 
     def __init__(
-        self, B, device="cuda", seed=0, point_seconds=70.0, stalled=3.0, stall_reward=STALL_REWARD
+        self,
+        B,
+        device="cuda",
+        seed=0,
+        point_seconds=70.0,
+        stalled=3.0,
+        stall_reward=STALL_REWARD,
+        theirs_caught=THEIRS_CAUGHT,
     ):
+        # What a defender gets when the attacker they guard catches a pass (ppo.THEIRS_CAUGHT;
+        # 0: only the team's loss, so that leaving them for a more dangerous place may pay)
+        self.theirs_caught = theirs_caught
         self.B, self.device = B, device
         self.gen = torch.Generator(device=device).manual_seed(seed)
         self.point_seconds, self.stalled, self.stall_reward = point_seconds, stalled, stall_reward
@@ -658,7 +668,7 @@ class BatchGame:
         if len(idx) == 0:
             return
         # The defender matched with the receiver, whose player got it (ppo.THEIRS_CAUGHT)
-        self._give_own(idx, self.pairs[idx, player], THEIRS_CAUGHT)
+        self._give_own(idx, self.pairs[idx, player], self.theirs_caught)
         self.air[idx] = False
         attack = self.attack_of(self.offence[idx])
         along = _turn(place, attack)[:, 1]

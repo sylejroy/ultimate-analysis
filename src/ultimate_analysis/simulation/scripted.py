@@ -200,6 +200,7 @@ class ScriptedTeam:
     huck_from, huck_open = np.inf, 1.0  # Throws this long only to a teammate this open
     length_cost = 0.0  # Per yard: a longer throw is liked less by exp(-this * length)
     goal_side, force_side, deep_goal_side = GOAL_SIDE, FORCE_SIDE, 0.0
+    late_from, last_resort = LATE_IN_THE_STALL, LAST_RESORT  # Seconds of the stall
 
     def __init__(self, seed: Optional[int] = None, plays: bool = True) -> None:
         self.rng = np.random.default_rng(seed)
@@ -320,16 +321,16 @@ class ScriptedTeam:
             lead = np.array([lead_x, lead_y])
             if np.hypot(*(lead - thrower)) >= self.huck_from and chance < self.huck_open:
                 continue  # A long throw only to someone well clear
-            forward = gain > 0 or late >= LATE_IN_THE_STALL
+            forward = gain > 0 or late >= self.late_from
             score = chance * (1.0 + 4.0 * gain) if forward else -np.inf
             score *= np.exp(-self.length_cost * np.hypot(*(lead - thrower)))
             # Open: a step clear of the nearest defender, unless the stall is late
-            covered = clear < self.clear_of and late < LATE_IN_THE_STALL
+            covered = clear < self.clear_of and late < self.late_from
             if chance >= self.open_enough and score > best_score and not covered:
                 best, best_score = lead, score
             if chance > best_open:
                 best_open, last_resort = chance, lead
-        if best is None and late >= LAST_RESORT and best_open > 0:
+        if best is None and late >= self.last_resort and best_open > 0:
             best = last_resort
         if best is None:
             return None
