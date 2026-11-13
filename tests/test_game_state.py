@@ -160,6 +160,56 @@ class GameStateTest(unittest.TestCase):
         m = self.module
         self.assertEqual(self.see(4.0, self.mixed()), m.BETWEEN_POINTS)
 
+    def test_a_point_seen_again_after_a_seek_back_is_not_counted_twice(self):
+        def point():
+            self.see(1.5, self.lined_up(), disc_state="held", holder=3)
+            self.see(
+                1.5, lambda t: self.lined_up(moved=6 * t), disc_state="air", flight_seconds=1.0
+            )
+            self.see(1.5, lambda t: self.mixed(4 * t), disc_state="held", holder=11)
+            self.see(3.0, lambda t: self.mixed(6 + 4 * t))
+
+            def catch(t):
+                players = self.mixed(18)
+                players[2] = self.player(2, 0, 20, 100)
+                return players
+
+            self.see(1.0, catch, disc_state="held", holder=2)
+
+        point()
+        events = [(event.kind, event.team) for event in self.tracker.events]
+        self.assertEqual(events, [("pull", None), ("score", 0)])
+        self.tracker.cut()
+        self.time = 0.0
+        point()
+        self.assertEqual([(event.kind, event.team) for event in self.tracker.events], events)
+
+    def live_without_a_line_up(self):
+        """Back on a game in full swing after a cut: which end a team attacks not known."""
+        self.tracker.cut()
+        self.see(3.0, lambda t: self.mixed(5 * t), disc_state="held", holder=4)
+        self.assertEqual(self.tracker.state, self.module.LIVE)
+        self.assertEqual(self.tracker.attacks, {})
+
+    def in_the_far_end_zone(self, t):
+        """Play stops; player 2 of team 0 stands in the far end zone."""
+        players = self.mixed(30)
+        players[2] = self.player(2, 0, 20, 100)
+        return players
+
+    def test_without_a_line_up_a_disc_picked_up_in_an_end_zone_is_no_score(self):
+        self.live_without_a_line_up()
+        state = self.see(3.5, self.in_the_far_end_zone, disc_state="held", holder=2)
+        self.assertEqual(state, self.module.LIVE)
+        self.assertNotIn("score", [event.kind for event in self.tracker.events])
+
+    def test_without_a_line_up_a_catch_in_an_end_zone_as_play_stops_is_a_score(self):
+        self.live_without_a_line_up()
+        self.see(0.6, self.in_the_far_end_zone, disc_state="air", flight_seconds=0.6)
+        state = self.see(3.5, self.in_the_far_end_zone, disc_state="held", holder=2)
+        self.assertEqual(state, self.module.SCORE)
+        self.assertEqual([(e.kind, e.team) for e in self.tracker.events], [("score", 0)])
+
 
 if __name__ == "__main__":
     unittest.main()

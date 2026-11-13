@@ -220,6 +220,24 @@ class PlayerIdentityTests(unittest.TestCase):
         self.identities.merge(first[1], first[1] + 100)
         self.assertEqual(self.see(1.0, (1, RED_TALL, 100)), first)
 
+    def test_a_merge_takes_the_earlier_players_lost_track_from_them(self):
+        first = self.see(0.0, (1, RED_TALL, 100))
+        # Track 1 is lost but the tracker still has it; a new track appears
+        later = self.see(1.0, (5, BLUE, 900), alive={1, 5})
+        self.identities.merge(later[5], first[1])
+        # Track 1 is found again beside track 5: they are not both that player
+        both = self.see(2.0, (1, RED_TALL, 100), (5, BLUE, 900))
+        self.assertEqual(both[5], first[1])
+        self.assertNotEqual(both[1], both[5])
+
+    def test_after_a_merge_the_old_track_found_again_alone_is_still_that_player(self):
+        """The merged track may end first: the earlier player's own track, found again,
+        is then the player, not somebody new."""
+        first = self.see(0.0, (1, RED_TALL, 100))
+        later = self.see(1.0, (5, BLUE, 900), alive={1, 5})
+        self.identities.merge(later[5], first[1])
+        self.assertEqual(self.see(2.0, (1, RED_TALL, 100), alive={1})[1], first[1])
+
 
 if __name__ == "__main__":
     unittest.main()

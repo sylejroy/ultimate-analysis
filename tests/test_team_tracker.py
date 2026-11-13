@@ -53,6 +53,16 @@ class TeamTrackerTests(unittest.TestCase):
         teams = [track.team for track in self.tracker.tracked_stracks]
         self.assertEqual(sorted(teams), [0, 0, 1, 1])
 
+    def test_a_while_with_one_team_in_view_keeps_the_teams_as_they_were_numbered(self):
+        """Refitted on shirts of one team alone, the colours known stay: dropped, the next
+        fit could number the teams the other way round."""
+        self.learn_the_teams()
+        known = self.tracker.team_colours.copy()
+        samples = self.tracker._shirt_samples
+        self.tracker._shirt_samples = [samples[0]] * len(samples)  # One team's shirts only
+        self.tracker._learn_team_colours()
+        np.testing.assert_allclose(self.tracker.team_colours, known)
+
     def test_tracks_are_given_the_shirt_colour_of_their_team(self):
         ids = self.learn_the_teams()
         teams, colours = self.tracker.teams_of_tracks(), self.tracker.shirt_colours()

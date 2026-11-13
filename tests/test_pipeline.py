@@ -461,6 +461,10 @@ class PipelineTests(unittest.TestCase):
 
     def test_the_top_down_view_is_drawn_once_the_field_is_found(self):
         options = self.module.PipelineOptions(tracking=False)
+        # The camera's motion known: in a frame without it the field is not either
+        patcher = patch.object(self.pipeline, "_camera_motion_of", return_value=np.eye(3))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         result = self.pipeline.process(self.frame, 0, options)
         self.assertIsNone(result.top_down_view)
         self.assertEqual(result.top_down_message, "The field has not been found in this view yet")
@@ -476,11 +480,30 @@ class PipelineTests(unittest.TestCase):
         result = self.pipeline.process(self.frame, 2, without)
         self.assertEqual(result.top_down_message, "The top-down view needs field segmentation")
 
+    def test_a_frame_whose_camera_motion_is_not_known_forgets_where_the_field_was(self):
+        """Through a swing too blurred to follow, a mapping kept would be as far off as
+        the camera moved."""
+        options = self.module.PipelineOptions(tracking=False)
+        motions = [np.eye(3), None]
+        patcher = patch.object(
+            self.pipeline, "_camera_motion_of", side_effect=lambda *a: motions.pop(0)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.pipeline._field.follower.image_to_field = np.eye(3)
+        self.pipeline.process(self.frame, 1, options)
+        self.assertIsNotNone(self.pipeline._field.follower.image_to_field)
+        self.pipeline.process(self.frame, 2, options)
+        self.assertIsNone(self.pipeline._field.follower.image_to_field)
+
     def test_a_top_down_view_that_fails_is_said_on_its_frame(self):
         """It is drawn on another thread while the camera view is drawn; its failure
         must be among this frame's problems, not land after they were read."""
         options = self.module.PipelineOptions(tracking=False)
         self.pipeline._field.follower.image_to_field = np.eye(3)
+        patcher = patch.object(self.pipeline, "_camera_motion_of", return_value=np.eye(3))
+        patcher.start()
+        self.addCleanup(patcher.stop)
         with patch.object(self.views, "draw_field_diagram", side_effect=RuntimeError("no")):
             result = self.pipeline.process(self.frame, 1, options)
         self.assertIsNone(result.top_down_view)

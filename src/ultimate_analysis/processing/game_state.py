@@ -37,6 +37,8 @@ UNKNOWN, BETWEEN_POINTS, LINED_UP, PULL, LIVE, SCORE = (
     "live",
     "score",
 )
+# Phases in which the disc is out of play: tossed about, it is no pass
+DEAD_BALL = (BETWEEN_POINTS, LINED_UP, SCORE)
 
 # A team is at an end of the field if this many of its players, and this share of them,
 # stand no further than this beyond the goal line (field units; places are rough)
@@ -66,6 +68,9 @@ SLOW_SCORE_SECONDS = 2.5
 # A throw: the disc flew at least this long and a different player has it. The holder
 # also changes with no flight, between players standing close, and that says nothing
 MIN_THROW_SECONDS = 0.3
+# An event this near in the video to one of its kind recorded already is that one, seen
+# again after a seek back: not counted twice
+SAME_EVENT_SECONDS = 10.0
 
 
 @dataclass
@@ -121,6 +126,8 @@ class GameStateTracker:
         self._lost, self._playing, self._walking = _Seen(), _Seen(), _Seen()
         self._held_by: Optional[int] = None
         self._flown = 0.0  # How long the disc has flown since it was last held
+        self._pulled: Optional[GameEvent] = None  # The pull this line-up's break added
+        self._caught: Optional[int] = None  # The holder, if they caught it from a throw
 
     def reset(self) -> None:
         """Start again (new video, seek); the events so far are forgotten."""
@@ -226,22 +233,33 @@ class GameStateTracker:
         thrown = False
         if holder is not None:
             thrown = self._held_by not in (None, holder) and self._flown >= MIN_THROW_SECONDS
+            if thrown:
+                self._caught = holder
+            elif holder != self._held_by:
+                self._caught = None  # Picked up, or taken over with no flight seen
             self._held_by, self._flown = holder, 0.0
 
         # A score: the holder stands in the end zone their team attacks
         end = self._in_end_zone(holding.y) if holding is not None else 0
         attacked = self.attacks.get(holding.team) if holding is not None else None
         scoring_for = self._scoring.update(end != 0 and attacked == end, seconds)
+        # Which end a team attacks not known (no line-up seen since the last cut): a
+        # catch in an end zone with everyone slowing down. A catch, not any holder: a
+        # handler with the disc in the end zone they defend is no score
         slow_for = self._slow_in_end_zone.update(
-            end != 0 and attacked is None and typical_speed < WALKING, seconds
+            end != 0
+            and attacked is None
+            and holding.player == self._caught
+            and typical_speed < WALKING,
+            seconds,
         )
 
         if self.state != LINED_UP and lined_for >= LINE_UP_SECONDS:
             # Seen from live play: the point ended without the score being seen. Seen a
             # moment after a pull: there was none, someone only stepped off the line.
-            pulled = self.events[-1] if self.events and self.events[-1].kind == "pull" else None
-            if pulled is not None and seconds - pulled.seconds <= FALSE_START_SECONDS:
-                self.events.pop()
+            pulled, self._pulled = self._pulled, None
+            if pulled in self.events and seconds - pulled.seconds <= FALSE_START_SECONDS:
+                self.events.remove(pulled)
             self.attacks = dict(lined_up)
             self._enter(LINED_UP, seconds)
         elif self.state == LINED_UP:
@@ -249,7 +267,7 @@ class GameStateTracker:
                 self.attacks = dict(lined_up)
             if broken_for >= LINE_BROKEN_SECONDS:
                 self._enter(PULL, seconds)
-                self.events.append(GameEvent(seconds, "pull"))
+                self._pulled = self._add(GameEvent(seconds, "pull"))
         elif self.state == PULL:
             lasted = seconds - self.since
             if (holding is not None and lasted >= MIN_PULL_SECONDS) or lasted >= MAX_PULL_SECONDS:
@@ -257,7 +275,7 @@ class GameStateTracker:
         elif self.state == LIVE:
             if scoring_for >= SCORE_SECONDS or slow_for >= SLOW_SCORE_SECONDS:
                 self._enter(SCORE, seconds)
-                self.events.append(GameEvent(seconds, "score", holding.team))
+                self._add(GameEvent(seconds, "score", holding.team))
         elif self.state == SCORE:
             if seconds - self.since >= SCORE_SHOWN_SECONDS:
                 self._enter(BETWEEN_POINTS, seconds)
@@ -272,6 +290,15 @@ class GameStateTracker:
             elif self.state == UNKNOWN and walking_for >= 3.0:
                 self._enter(BETWEEN_POINTS, seconds)
         return self.state
+
+    def _add(self, event: GameEvent) -> Optional[GameEvent]:
+        """Record an event, unless it is one recorded already, seen again after a seek
+        back; returns it if it was recorded."""
+        for known in self.events:
+            if known.kind == event.kind and abs(known.seconds - event.seconds) < SAME_EVENT_SECONDS:
+                return None
+        self.events.append(event)
+        return event
 
     def _enter(self, state: str, seconds: float) -> None:
         self.state, self.since = state, seconds

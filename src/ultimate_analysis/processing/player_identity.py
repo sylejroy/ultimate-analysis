@@ -115,6 +115,7 @@ class PlayerIdentities:
                     self._player_of_track[observation.track_id] = player_id
                     self._profiles[player_id] = Profile(None, observation.position, 0.0, time_s)
 
+        self._part_doubles(observations, time_s)
         for observation in observations:
             self._update(
                 self._profiles[self._player_of_track[observation.track_id]], observation, time_s
@@ -123,6 +124,24 @@ class PlayerIdentities:
         observed = {obs.track_id for obs in observations}
         self._forget(observed if alive_tracks is None else observed | set(alive_tracks))
         return {obs.track_id: self._player_of_track[obs.track_id] for obs in observations}
+
+    def _part_doubles(self, observations: List[Observation], time_s: float) -> None:
+        """Two tracks in one frame are two players. After a merge the earlier player's
+        track, lost then but still alive, may be found again beside the merged one: the
+        newer track keeps the player (as a new track that takes a player over does), the
+        other is somebody new. Not undone at the merge itself: the merged track may end
+        first, and the old one found again is then the player."""
+        by_player: Dict[int, List[Observation]] = {}
+        for observation in observations:
+            by_player.setdefault(self._player_of_track[observation.track_id], []).append(
+                observation
+            )
+        for both in by_player.values():
+            for observation in sorted(both, key=lambda o: o.track_id)[:-1]:
+                player_id = self._next_player_id
+                self._next_player_id += 1
+                self._player_of_track[observation.track_id] = player_id
+                self._profiles[player_id] = Profile(None, observation.position, 0.0, time_s)
 
     def _match(
         self,

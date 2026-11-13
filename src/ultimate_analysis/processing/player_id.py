@@ -361,9 +361,17 @@ def _record_reading(
         )
 
     if jersey_number and jersey_number != "Unknown" and details:
-        # Where across the crop the number was read (0 = left edge, 1 = right edge)
+        # Where across the crop the number was read (0 = left edge, 1 = right edge): where
+        # the reading that gave it was, not the others of the crop (a neighbour's number,
+        # read surer, would make an off-centre number of theirs look centred)
+        readings = details.get("ocr_results") or []
+        chosen = [
+            reading
+            for reading in readings
+            if len(reading) >= 2 and "".join(filter(str.isdigit, str(reading[1]))) == jersey_number
+        ]
         centres = []
-        for reading in details.get("ocr_results") or []:
+        for reading in chosen or readings:
             box = reading[0] if len(reading) >= 2 else None
             if not isinstance(box, (list, tuple)) or len(box) < 4:
                 continue

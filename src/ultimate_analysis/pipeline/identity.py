@@ -159,9 +159,11 @@ class IdentityStage:
         holder_id: Optional[int],
         places_on_field: Dict[int, np.ndarray],
         places: Dict[int, Tuple[float, float]],
+        in_play: bool = True,
     ) -> None:
         """Look at the players: name the ones whose number is not read by their looks,
-        join tracks that turn out to be one player, and settle crossings."""
+        join tracks that turn out to be one player, and settle crossings. `in_play`:
+        False between points, lined up or after a score (no passes counted then)."""
         self.numbers_by_looks = self.looks.update(
             frame,
             tracks,
@@ -170,6 +172,7 @@ class IdentityStage:
             holder_id,
             places_on_field,
             places,
+            in_play,
         )
         self._join_looking_back(tracks, frame_index)
         self._settle_crossings(tracks, frame_index)
@@ -208,7 +211,10 @@ class IdentityStage:
         a player the tracker still remembers and does not see.
         """
         every = float(get_setting("models.reid.join_looking_back_seconds", 1.0))
-        if every <= 0 or frame_index - self._joined_at < every * self.frame_rate:
+        # A frame before the last joining is a seek back: joined at once, not only once
+        # playback is past where it was. (Not reset at a cut: joining at once after a
+        # cut joins on too little, measured on Chicago v San Francisco)
+        if every <= 0 or 0 <= frame_index - self._joined_at < every * self.frame_rate:
             return
         self._joined_at = frame_index
         players = {t.track_id: t for t in _players(tracks)}

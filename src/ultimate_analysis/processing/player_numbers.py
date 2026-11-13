@@ -179,7 +179,9 @@ class PlayerNumbers:
         for player_id in self._tracker.missing_players(present):
             number, certainty = get_best_jersey_number(player_id)
             if number and certainty >= certainty_needed and _read_often(player_id, number):
-                missing.setdefault(number, player_id)
+                # By team and number: both teams may have a missing #7
+                team = self._tracker.team_of_player(player_id)
+                missing.setdefault((team, number), player_id)
 
         renamed = []
         for track in tracks:
@@ -187,7 +189,8 @@ class PlayerNumbers:
             if track.class_name != "player" or not missing:
                 continue
             number, certainty = get_best_jersey_number(player_id)
-            earlier = missing.get(number) if number and certainty >= certainty_needed else None
+            key = (self._tracker.team_of_player(player_id), number)
+            earlier = missing.get(key) if number and certainty >= certainty_needed else None
             if earlier is None or not _read_often(player_id, number):
                 continue
             if self.could_be is not None and not self.could_be(player_id, earlier):
@@ -201,7 +204,7 @@ class PlayerNumbers:
 
             self.join(track, earlier)
             renamed.append((player_id, earlier))
-            del missing[number]
+            del missing[key]
             logger.info(f"Player {player_id} is player {earlier} again (number {number})")
         return renamed
 

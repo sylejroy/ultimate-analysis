@@ -197,6 +197,32 @@ def fit_field(
     def unpack(values: np.ndarray) -> np.ndarray:
         return np.append(values, 1.0).reshape(3, 3)
 
+    def slopes(values: np.ndarray) -> np.ndarray:
+        """How each misfit changes with each of the eight numbers of the mapping (the
+        ninth is 1): worked out, where differences would ask for the misfits eight
+        times over. Rows in the order of `elements`."""
+        mapping = unpack(values)
+        # A line misfit r = n . p, n = m / |m[:2]|, m = l H: dr/dH[k, j] = l[k] / s *
+        # (p[j] - r n[j]), the last term for j < 2 only
+        drawn = field_lines @ mapping
+        size = np.maximum(np.hypot(drawn[:, 0], drawn[:, 1]), 1e-12)
+        unit = drawn / size[:, None]
+        misfit = np.einsum("ij,ij->i", unit, line_pixels)
+        along = line_pixels - misfit[:, None] * unit * np.array([1.0, 1.0, 0.0])
+        of_lines = (field_lines / size[:, None])[:, :, None] * along[:, None, :]
+        # A mark x = g[:2] / g[2], g = G q, G = H^-1: dx[a]/dH[k, j] = -g[j] / g[2] *
+        # (G[a, k] - x[a] G[2, k])
+        inverse = np.linalg.inv(mapping)
+        mapped = mark_places @ inverse.T
+        nowhere = np.abs(mapped[:, 2]) < 1e-12
+        depth = np.where(nowhere, 1.0, mapped[:, 2])
+        drawn_at = mapped[:, :2] / depth[:, None]
+        across = inverse[None, :2, :] - drawn_at[:, :, None] * inverse[None, 2:3, :]
+        of_marks = -(across[:, :, :, None] * (mapped / depth[:, None])[:, None, None, :])
+        of_marks[nowhere] = 0.0
+        both = np.concatenate([of_lines.reshape(-1, 9), of_marks.reshape(-1, 9)])
+        return both[:, :8]
+
     if abs(image_to_field[2, 2]) > 1e-12 and len(rows) > MIN_STATEMENTS:
         from scipy.optimize import least_squares
 
@@ -204,6 +230,7 @@ def fit_field(
             refined = least_squares(
                 lambda values: misfits(unpack(values)),
                 image_to_field.ravel()[:8],
+                jac=slopes,
                 x_scale="jac",
                 max_nfev=50,
             )

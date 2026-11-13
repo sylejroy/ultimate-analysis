@@ -178,6 +178,31 @@ class PlayerIdConfigTests(unittest.TestCase):
             module._record_reading(track, "17", details, 0, None, 5, set(), 0.9, False)
         self.assertEqual(recorded[0][3], 0.5)
 
+    def test_where_a_number_was_read_is_where_the_reading_that_gave_it_was(self):
+        """Not the middle of every reading of the crop: a neighbour's number read at the
+        other edge would make an off-centre one look centred."""
+        module = load_module("processing.player_id")
+        recorded = []
+        details = {
+            "confidence": 0.92,
+            "ocr_results": [
+                ([[0, 0], [16, 0], [16, 20], [0, 20]], "23", 0.92),  # At the left edge
+                ([[64, 0], [80, 0], [80, 20], [64, 20]], "7", 0.5),  # A neighbour's
+            ],
+            "crop_width": 80,
+        }
+        track = {"track_id": 3, "bbox": (0, 0, 80, 160), "crop_width": 80}
+        with (
+            patch.object(
+                module, "add_jersey_measurement", side_effect=lambda *a: recorded.append(a)
+            ),
+            patch.object(module, "get_jersey_probabilities", return_value=[]),
+            patch.object(module, "get_best_jersey_number", return_value=("23", 0.5)),
+            patch.object(module, "get_setting", side_effect=lambda key, d=None: d),
+        ):
+            module._record_reading(track, "23", details, 0, None, 5, set(), 0.9, False)
+        self.assertEqual(recorded[0][3], 0.1)
+
     def test_unknown_or_unavailable_reader_falls_back_to_easyocr(self):
         module = load_module("processing.player_id")
         with self.assertRaises(ValueError):

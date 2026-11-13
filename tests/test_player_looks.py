@@ -257,6 +257,70 @@ class PlayerLooksTest(unittest.TestCase):
         self.assertEqual(self.looks.roster.number_of(9), "17")
         self.assertIsNone(self.looks.roster.number_of(1))
 
+    def test_a_stretch_seen_again_after_a_seek_back_is_not_counted_again(self):
+        self.looks.frame_rate = 10.0
+        tracks = [player(1, self.boxes["anna"]), player(2, self.boxes["ben"])]
+        enough = self.roster_module.MIN_LOOKS + 2
+
+        def anna():
+            (row,) = [row for row in self.looks.roster.table() if row["number"] == "17"]
+            return row
+
+        self.watch(tracks, {1: "17"}, enough)
+        self.watch(tracks, {1: "17"}, 20, start=enough, holder=1)
+        counted = anna()["seconds_with_disc"], anna()["seconds_seen"]
+        self.looks.cut()  # A seek back: the same frames again
+        self.watch(tracks, {1: "17"}, 20, start=enough, holder=1)
+        self.assertEqual((anna()["seconds_with_disc"], anna()["seconds_seen"]), counted)
+        # ... and on beyond them, counted as before
+        self.watch(tracks, {1: "17"}, 10, start=enough + 20, holder=1)
+        self.assertAlmostEqual(anna()["seconds_with_disc"], counted[0] + 1.0, places=5)
+
+    def passing(self):
+        """Anna (17) and Ben (4) of one team, known to the roster; Anna has the disc."""
+        self.looks.frame_rate = 10.0
+        anna, ben = player(1, self.boxes["anna"]), player(2, self.boxes["ben"])
+        anna.team = ben.team = 0
+        places = {1: (10.0, 20.0), 2: (10.0, 50.0)}
+        enough = self.roster_module.MIN_LOOKS + 2
+        for frame_index in range(enough):
+            self.looks.update(self.frame, [anna, ben], frame_index, {1: "17", 2: "4"}, 1, places)
+        return anna, ben, places, enough
+
+    def passes(self):
+        rows = {row["number"]: row for row in self.looks.roster.table()}
+        return rows["17"].get("passes_thrown", 0.0), rows["4"].get("catches", 0.0)
+
+    def test_the_disc_tossed_about_out_of_play_is_no_pass(self):
+        anna, ben, places, enough = self.passing()
+        self.looks.update(self.frame, [anna, ben], enough + 5, {}, 2, places, in_play=False)
+        self.assertEqual(self.passes(), (0.0, 0.0))
+
+    def test_a_thrower_out_of_the_tracks_as_they_let_go_still_throws_a_pass(self):
+        anna, ben, places, enough = self.passing()
+        # Behind the mark in the last frame they hold it: their team is not seen then
+        self.looks.update(self.frame, [ben], enough, {}, 1, places)
+        self.looks.update(self.frame, [anna, ben], enough + 5, {}, 2, places)
+        self.assertEqual(self.passes(), (1.0, 1.0))
+
+    def test_a_pass_to_a_player_the_roster_does_not_know_counts_for_neither(self):
+        anna, ben, places, enough = self.passing()
+        newcomer = player(9, (150, 10, 180, 60))
+        newcomer.team = 0
+        self.looks.update(self.frame, [anna, ben, newcomer], enough + 5, {}, 9, places)
+        self.assertEqual(self.passes(), (0.0, 0.0))
+
+    def test_the_disc_taken_back_by_one_player_under_a_new_track_is_no_pass(self):
+        anna, ben, places, enough = self.passing()
+        # Anna's track is lost and begun again, and the new one is known by her looks:
+        # one player, two tracks, one entry
+        again = player(5, self.boxes["anna"])
+        again.team = 0
+        roster = self.looks.roster
+        roster._tracks[5] = type(roster._tracks[1])(team=0, entry=roster.entry_of(1))
+        self.looks.update(self.frame, [again, ben], enough + 5, {}, 5, places)
+        self.assertEqual(self.passes(), (0.0, 0.0))
+
 
 if __name__ == "__main__":
     unittest.main()

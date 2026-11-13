@@ -249,6 +249,9 @@ class PossessionTracker:
         self._turned_over = False  # The disc has lain on the ground since someone last held it
         self._known_tracks: set = set()  # Every player track seen so far
         self._disc_seen: Optional[int] = None  # The frame the disc was last seen in
+        # The frame the holder was last backed in: the disc seen at them, or the holder
+        # network sure of them
+        self._backed: Optional[int] = None
         self._holder_teams = [0, 0]  # Frames the present holder was seen as of each team
         # The last sighting of the disc (frame, pixel), and whether what is being seen
         # is the disc of the game: followed from a player's hands without a break
@@ -609,6 +612,11 @@ class PossessionTracker:
             self._frame = frame_index
         else:
             self._frame = 0 if previous is None else previous + 1
+        if previous is None:
+            # Nothing before this frame is known: a disc seen flying now has flown since
+            # here at least, not since the start of the video
+            self.since = self._frame
+        self._expire_holder()
         # A jump back or far ahead is a seek, after which the caller resets anyway
         skipped = 1 if previous is None else self._frame - previous
         self._step = min(max(1, skipped), max(1, round(self.frame_rate / 4)))
@@ -661,6 +669,21 @@ class PossessionTracker:
         self._watch_ground(centre if at_disc is None else None, tracks)
         return self._count(at_disc, tracks)
 
+    def _expire_holder(self) -> None:
+        """A holder nothing has backed for long (models.possession.unseen_holder_seconds,
+        0: never) holds the disc no more: it was thrown without being seen, or is lost.
+        Else they would go on holding it until the disc is seen elsewhere, and the disc
+        is not seen in half the frames."""
+        unseen = float(get_setting("models.possession.unseen_holder_seconds", 0.0))
+        if unseen <= 0 or self.holder_id is None or self._backed is None:
+            return
+        if self._frame - self._backed > self._frames(unseen):
+            self.holder_id = None
+            self.since = self._backed
+            self._holder_box = None
+            self._seen_at.clear()
+            self._first_seen.clear()
+
     def _seen_by_looks(
         self, holder_scores: Optional[Dict[int, float]], tracks: List[Any]
     ) -> Optional[int]:
@@ -700,6 +723,7 @@ class PossessionTracker:
                     del self._seen_at[place]
                     del self._first_seen[place]
         if at_holder:
+            self._backed = self._frame
             return self.holder_id
         self._seen_at[at_disc] = self._seen_at.get(at_disc, 0.0) + step
         self._first_seen.setdefault(at_disc, self._frame)
@@ -715,6 +739,7 @@ class PossessionTracker:
                 # their reach
                 self.since = min(self.since, self._out_of_box_since)
             self.holder_id = at_disc
+            self._backed = self._frame
             self._holder_teams = [0, 0]
             self._seen_at.clear()
             self._first_seen.clear()

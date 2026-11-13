@@ -76,6 +76,26 @@ class PlayerRoster:
         self._tracks: Dict[int, _Track] = {}
         self._team_colours: List[np.ndarray] = []  # Of the roster's teams 0 and 1
         self._next_entry = 1
+        # The stretches of the video, first and last frame, whose doings are in the stats:
+        # a stretch analysed again (a seek back, the video opened again) is not counted
+        # twice
+        self.counted: List[List[int]] = []
+
+    # ------------------------------------------------------------------ what is counted
+
+    def was_counted(self, frame_index: int) -> bool:
+        """Whether what happened up to this frame is in the stats already."""
+        return any(start <= frame_index <= end for start, end in self.counted)
+
+    def mark_counted(self, start: int, end: int) -> None:
+        """The frames from `start` to `end` (both in) are in the stats."""
+        merged: List[List[int]] = []
+        for low, high in sorted([*self.counted, [int(start), int(end)]]):
+            if merged and low <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], high)
+            else:
+                merged.append([low, high])
+        self.counted = merged
 
     # ------------------------------------------------------------------ what is seen
 
@@ -229,6 +249,11 @@ class PlayerRoster:
             if t in self._tracks and self._tracks[t].entry is not None
         }
 
+    def entry_of(self, track_id: int) -> Optional[int]:
+        """The entry a track is matched to, if it is."""
+        track = self._tracks.get(track_id)
+        return None if track is None else track.entry
+
     def number_of(self, track_id: int) -> Optional[str]:
         """The jersey number of a track's player as far as the roster knows it."""
         track = self._tracks.get(track_id)
@@ -300,6 +325,7 @@ class PlayerRoster:
         content = {
             "team_colours": [colour.tolist() for colour in self._team_colours],
             "next_entry": self._next_entry,
+            "counted": self.counted,
             "entries": [
                 {
                     "entry": entry.entry,
@@ -322,6 +348,10 @@ class PlayerRoster:
         roster = cls()
         roster._team_colours = [np.array(colour) for colour in content["team_colours"]]
         roster._next_entry = content["next_entry"]
+        # A roster written before the stretches were kept: which frames its stats are of
+        # is not known, so they are counted anew rather than twice
+        known = "counted" in content
+        roster.counted = [[int(start), int(end)] for start, end in content.get("counted", [])]
         for saved in content["entries"]:
             roster.entries[saved["entry"]] = Entry(
                 saved["entry"],
@@ -329,7 +359,7 @@ class PlayerRoster:
                 np.array(saved["vector"]),
                 saved["looks"],
                 Counter(saved["numbers"]),
-                dict(saved["stats"]),
+                dict(saved["stats"]) if known else {},
             )
         return roster
 

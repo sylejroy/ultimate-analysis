@@ -8,6 +8,7 @@ same kit. Kit colour separates the two teams better than that network did, and c
 almost nothing.
 """
 
+from functools import lru_cache
 from typing import List, Optional, Sequence
 
 import cv2
@@ -35,18 +36,24 @@ def encode(frame: np.ndarray, boxes: Sequence[Sequence[float]]) -> List[Optional
         for a box that is too small.
     """
     frame_h, frame_w = frame.shape[:2]
-    signatures: List[Optional[np.ndarray]] = []
-    for x1, y1, x2, y2 in boxes:
+    smalls, which = [], []
+    for index, (x1, y1, x2, y2) in enumerate(boxes):
         x1, y1 = max(0, int(x1)), max(0, int(y1))
         x2, y2 = min(frame_w, int(x2)), min(frame_h, int(y2))
         if x2 - x1 < MIN_BOX_SIZE[0] or y2 - y1 < MIN_BOX_SIZE[1]:
-            signatures.append(None)
             continue
-        small = cv2.resize(frame[y1:y2, x1:x2], SIGNATURE_SIZE, interpolation=cv2.INTER_AREA)
-        lab = cv2.cvtColor(small, cv2.COLOR_BGR2LAB).astype(np.float32)
-        shirt = lab[SHIRT_ROWS, MIDDLE_COLUMNS].reshape(-1, 3).mean(axis=0)
-        shorts = lab[SHORTS_ROWS, MIDDLE_COLUMNS].reshape(-1, 3).mean(axis=0)
-        signatures.append(np.concatenate((shirt, shorts)))
+        smalls.append(cv2.resize(frame[y1:y2, x1:x2], SIGNATURE_SIZE, interpolation=cv2.INTER_AREA))
+        which.append(index)
+    signatures: List[Optional[np.ndarray]] = [None] * len(boxes)
+    if not smalls:
+        return signatures
+    # All boxes' colours turned in one call: the turn is pixel by pixel, the same
+    lab = cv2.cvtColor(np.concatenate(smalls), cv2.COLOR_BGR2LAB).astype(np.float32)
+    lab = lab.reshape(len(smalls), SIGNATURE_SIZE[1], SIGNATURE_SIZE[0], 3)
+    shirts = lab[:, SHIRT_ROWS, MIDDLE_COLUMNS].reshape(len(smalls), -1, 3).mean(axis=1)
+    shorts = lab[:, SHORTS_ROWS, MIDDLE_COLUMNS].reshape(len(smalls), -1, 3).mean(axis=1)
+    for index, shirt, short in zip(which, shirts, shorts):
+        signatures[index] = np.concatenate((shirt, short))
     return signatures
 
 
@@ -82,6 +89,13 @@ LIGHT_FROM = 110.0
 def shirt_kind(colour: Sequence[float]) -> str:
     """Whether a shirt colour (BGR) is "light", "dark" or "coloured"."""
     pixel = np.clip(np.asarray(colour, dtype=np.float64), 0, 255).astype(np.uint8)
+    return _kind_of(*(int(value) for value in pixel))
+
+
+@lru_cache(maxsize=256)
+def _kind_of(blue: int, green: int, red: int) -> str:
+    """`shirt_kind` of a colour: asked for several times a frame, and a game has two."""
+    pixel = np.array([blue, green, red], dtype=np.uint8)
     lightness, a, b = (
         float(v) for v in cv2.cvtColor(pixel.reshape(1, 1, 3), cv2.COLOR_BGR2LAB)[0, 0]
     )

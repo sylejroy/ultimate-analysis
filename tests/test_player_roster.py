@@ -153,6 +153,45 @@ class PlayerRosterTest(unittest.TestCase):
         again.match([9])
         self.assertEqual(again.number_of(9), "23")
 
+    def test_stretches_counted_join_up_and_are_kept_with_the_roster(self):
+        roster = self.roster
+        for start, end in ((0, 10), (10, 20), (40, 45), (5, 12)):
+            roster.mark_counted(start, end)
+        self.assertEqual(roster.counted, [[0, 20], [40, 45]])
+        self.assertTrue(roster.was_counted(15))
+        self.assertFalse(roster.was_counted(30))
+        self.see(1, ANNA)
+        roster.match([1])
+        roster.count(1, "catches", 2.0)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "game.json"
+            roster.save(path)
+            loaded = self.module.PlayerRoster.load(path)
+        self.assertEqual(loaded.counted, [[0, 20], [40, 45]])
+        self.assertEqual([entry.stats for entry in loaded.entries.values()], [{"catches": 2.0}])
+
+    def test_stats_of_a_roster_that_does_not_say_which_frames_are_counted_anew(self):
+        content = {
+            "team_colours": [list(WHITE)],
+            "next_entry": 2,
+            "entries": [
+                {
+                    "entry": 1,
+                    "team": 0,
+                    "looks": 15,
+                    "numbers": {"7": 1},
+                    "stats": {"catches": 5.0},
+                    "vector": list(ANNA),
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "game.json"
+            path.write_text(__import__("json").dumps(content))
+            loaded = self.module.PlayerRoster.load(path)
+        (entry,) = loaded.entries.values()
+        self.assertEqual((entry.stats, entry.number), ({}, "7"))
+
 
 if __name__ == "__main__":
     unittest.main()

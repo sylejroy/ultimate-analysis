@@ -28,7 +28,7 @@ from ..processing.disc_fusion import is_enabled as fusion_enabled
 from ..processing.disc_heatmap import peaks_of
 from ..processing.field_registration import OffFieldWatcher
 from ..processing.field_segmentation import reset_segmentation_cache
-from ..processing.game_state import GameStateTracker, Player
+from ..processing.game_state import DEAD_BALL, GameStateTracker, Player
 from ..processing.inference import DETECTOR_STAGES, reset_inference_state
 from ..processing.model_lock import GPU_SETUP_LOCK
 from ..processing.open_space import SpaceMap
@@ -370,7 +370,11 @@ class AnalysisPipeline:
             if asked:
                 crops = [crop_around(frame, t.to_ltrb(), BOX_ALONE)[0] for t in asked.values()]
                 scores = dict(zip(asked, self._holding(crops)))
-            if self.show_holder_guess:
+            if self.show_holder_guess and scores and set(scores) >= {t.track_id for t in players}:
+                # Everybody was asked for possession already: the guess shown is that,
+                # of this frame, and the network is not asked about them all again
+                self.holder_guess, self._guess_job = dict(scores), None
+            elif self.show_holder_guess:
                 job = self._guess_job
                 if job is not None and job[1].done():
                     self.holder_guess, self._guess_job = dict(zip(job[0], job[1].result())), None
@@ -680,20 +684,23 @@ class AnalysisPipeline:
             shirt = self._identity.team_colours().get(event.team) if event.kind == "score" else None
             if shirt is not None:
                 colour = team_display_colour(shirt)
-                for entry in self._score:
-                    if np.linalg.norm(np.subtract(entry[0], colour)) < SAME_TEAM_COLOUR:
-                        entry[1] += 1
-                        break
+                gaps = [float(np.linalg.norm(np.subtract(e[0], colour))) for e in self._score]
+                # Two teams play: once both are in the score, a colour is the nearer of the
+                # two (light changes a kit's colour, and two kits may be alike)
+                if gaps and (min(gaps) < SAME_TEAM_COLOUR or len(self._score) >= 2):
+                    self._score[int(np.argmin(gaps))][1] += 1
                 else:
                     self._score.append([colour, 1])
         self._events_counted = len(self._game.events)
 
     def _point_seconds(self, frame_index: int) -> Optional[float]:
         """How long the point under way has been played, None if none is."""
-        pulls = [event for event in self._game.events if event.kind == "pull"]
+        # The last pull before this frame: after a seek back, later ones are recorded too
+        now = frame_index / self._possession.frame_rate
+        pulls = [e.seconds for e in self._game.events if e.kind == "pull" and e.seconds <= now]
         if not pulls or self._game.state not in ("pull", "live"):
             return None
-        return max(0.0, frame_index / self._possession.frame_rate - pulls[-1].seconds)
+        return max(0.0, now - max(pulls))
 
     def _trails(self) -> Dict[int, np.ndarray]:
         """The trails of the tracks in this frame: both views draw them."""
@@ -1007,6 +1014,7 @@ class AnalysisPipeline:
                 self._possession.holder_id,
                 self._places_on_field(),
                 self.places,
+                in_play=self._game.state not in DEAD_BALL,
             )
             self._record("Player ID - Looks", start)
 

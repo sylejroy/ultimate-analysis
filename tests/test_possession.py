@@ -84,6 +84,7 @@ class PossessionTests(unittest.TestCase):
             "models.possession.confirm_seconds": CONFIRM_FRAMES / FRAME_RATE,
             "models.possession.beside_holder_seconds": BESIDE_FRAMES / FRAME_RATE,
             "models.possession.holder_memory_seconds": MEMORY_FRAMES / FRAME_RATE,
+            "models.possession.unseen_holder_seconds": 0.0,
             "models.possession.ground_seconds": GROUND_FRAMES / FRAME_RATE,
             "models.possession.other_team_seconds": OTHER_TEAM_FRAMES / FRAME_RATE,
             "models.possession.reach": 1.0,
@@ -133,6 +134,13 @@ class PossessionTests(unittest.TestCase):
 
         self.assertIsNone(self.see(disc(630, 150), frames=CONFIRM_FRAMES - 1))
         self.assertEqual(self.see(disc(630, 150)), 2)
+
+    def test_a_disc_first_seen_in_the_air_has_flown_since_the_first_frame_taken(self):
+        """Not since the start of the video: a seek to frame 3000 is no 300 s flight."""
+        for frame in range(3000, 3005):
+            self.tracker.update([disc(400, 150)], self.tracks, frame)
+        self.assertEqual(self.tracker.disc_state, "air")
+        self.assertAlmostEqual(self.tracker.flight_seconds, 0.4)
 
     def test_frames_without_a_disc_change_nothing(self):
         self.see(disc(130, 150), frames=CONFIRM_FRAMES)

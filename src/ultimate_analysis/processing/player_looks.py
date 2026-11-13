@@ -146,6 +146,9 @@ class PlayerLooks:
         self._ran_from: Dict[int, Tuple[int, np.ndarray]] = {}
         # Who held the disc last: track, team, place on the field (if known), frame
         self._last_held: Optional[Tuple[int, Optional[int], Optional[np.ndarray], int]] = None
+        # Whether what happens in this frame goes into the stats: not in a stretch of the
+        # video whose doings are in them already (roster.counted)
+        self._counting = True
 
     # ------------------------------------------------------------------ the video
 
@@ -292,6 +295,7 @@ class PlayerLooks:
         holder_id: Optional[int] = None,
         places: Optional[Dict[int, Sequence[float]]] = None,
         steady_places: Optional[Dict[int, Sequence[float]]] = None,
+        in_play: bool = True,
     ) -> Dict[int, str]:
         """Take in a frame.
 
@@ -307,6 +311,8 @@ class PlayerLooks:
             steady_places: The same held steady over the frames (steady_places.py), if
                 the caller has that: how far players ran and threw is measured by these,
                 since the places from the boxes alone wobble by a yard at the far end
+            in_play: False between points, lined up or after a score (game_state.py):
+                the disc tossed about then is no pass
 
         Returns:
             Track -> jersey number, for the tracks without a number of their own whose
@@ -342,13 +348,20 @@ class PlayerLooks:
         if looked:
             self.roster.match(present)
 
+        # What happens is counted once: a stretch of the video seen again (a seek back,
+        # the video opened again) is followed as before, but not counted again
+        before = self._frame
+        self._counting = not self.roster.was_counted(frame_index)
         self._count_time(present, holder_id, frame_index)
         if steady_places is not None:
             places = {
                 track: np.asarray(place, dtype=float) for track, place in steady_places.items()
             }
         self._count_running(frame_index, places)
-        self._count_passes(frame_index, holder_id, players, places)
+        self._count_passes(frame_index, holder_id, players, places, in_play)
+        joined = before is not None and 0 < frame_index - before
+        joined = joined and frame_index - before <= MAX_FRAME_SECONDS * self.frame_rate
+        self.roster.mark_counted(before if joined else frame_index, frame_index)
         self._forget_old(frame_index)
 
         return {
@@ -438,6 +451,11 @@ class PlayerLooks:
         if profile is not None:
             profile.learn(vector)
 
+    def _count(self, track_id: int, what: str, amount: float = 1.0) -> None:
+        """Add to what a track's player did, unless this frame is counted already."""
+        if self._counting:
+            self.roster.count(track_id, what, amount)
+
     def _count_time(
         self, present: Sequence[int], holder_id: Optional[int], frame_index: int
     ) -> None:
@@ -445,9 +463,9 @@ class PlayerLooks:
         if self._frame is not None and 0 < frame_index - self._frame:
             seconds = min((frame_index - self._frame) / self.frame_rate, MAX_FRAME_SECONDS)
             for track_id in present:
-                self.roster.count(track_id, "seconds_seen", seconds)
+                self._count(track_id, "seconds_seen", seconds)
             if holder_id in present:
-                self.roster.count(holder_id, "seconds_with_disc", seconds)
+                self._count(holder_id, "seconds_with_disc", seconds)
         self._frame = frame_index
 
     def _forget_old(self, frame_index: int) -> None:
@@ -551,7 +569,7 @@ class PlayerLooks:
             # A player not seen for a while ran somewhere in between: counted as the
             # straight way, if that can be run in the time
             if distance <= MAX_RUN_SPEED * seconds:
-                self.roster.count(track_id, "distance_run", distance)
+                self._count(track_id, "distance_run", distance)
             self._ran_from[track_id] = (frame_index, place)
 
     def _count_passes(
@@ -560,9 +578,14 @@ class PlayerLooks:
         holder_id: Optional[int],
         players: Sequence[Any],
         places: Dict[int, np.ndarray],
+        in_play: bool = True,
     ) -> None:
         """Count a disc taken, and a pass from the teammate who held it before: how far
-        it went, for the thrower and for the receiver."""
+        it went, for the thrower and for the receiver.
+
+        A pass is between two players of one team, two of the roster (two tracks of one
+        entry are one player whose track began again), both known to the roster (counted
+        for both or for neither), in play."""
         if holder_id is None:
             return
         team = next(
@@ -570,21 +593,30 @@ class PlayerLooks:
         )
         place = places.get(holder_id)
         before = self._last_held
+        if team is None and before is not None and before[0] == holder_id:
+            team = before[1]  # The holder out of the tracks for a moment (behind the mark)
         if before is None or before[0] != holder_id:
-            self.roster.count(holder_id, "times_with_disc", 1.0)
+            self._count(holder_id, "times_with_disc", 1.0)
+            thrower, receiver = (
+                self.roster.entry_of(before[0]) if before is not None else None,
+                self.roster.entry_of(holder_id),
+            )
             if (
-                before is not None
+                in_play
+                and before is not None
                 and team is not None
                 and before[1] == team
+                and None not in (thrower, receiver)
+                and thrower != receiver
                 and (frame_index - before[3]) <= MAX_PASS_SECONDS * self.frame_rate
             ):
-                self.roster.count(before[0], "passes_thrown", 1.0)
-                self.roster.count(holder_id, "catches", 1.0)
+                self._count(before[0], "passes_thrown", 1.0)
+                self._count(holder_id, "catches", 1.0)
                 if place is not None and before[2] is not None:
                     distance = float(np.linalg.norm(place - before[2]))
                     if distance <= MAX_PASS_DISTANCE:
-                        self.roster.count(before[0], "distance_thrown", distance)
-                        self.roster.count(holder_id, "distance_received", distance)
+                        self._count(before[0], "distance_thrown", distance)
+                        self._count(holder_id, "distance_received", distance)
         elif place is None:
             place = before[2]  # Where they were last known to stand with it
         self._last_held = (holder_id, team, place, frame_index)

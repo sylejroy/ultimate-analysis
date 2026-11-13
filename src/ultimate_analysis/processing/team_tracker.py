@@ -290,7 +290,9 @@ class TeamTracker(BYTETracker):
         del self._shirt_samples[:-MAX_SAMPLES]
         colours = team_colours_of(self._shirt_samples)
         if colours is None:
-            self.team_colours = None
+            # The shirts of late are of one team (the other out of the picture, or behind
+            # their markers): the colours known stay. Dropped, the next fit could number
+            # the teams the other way round, while the tracks count by these numbers
             return
         # Team 0 stays team 0: the tracks have counted their sightings by these numbers
         if self.team_colours is not None and np.linalg.norm(

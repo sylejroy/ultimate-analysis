@@ -76,6 +76,18 @@ class PlayerNumbersTests(unittest.TestCase):
         shown = self.show([player(1, team=None), player(2)], {1: ["12"] * 2, 2: ["12"] * 2})
         self.assertEqual(shown, {1: "12", 2: "12"})
 
+    def test_two_missing_players_with_one_number_are_each_found_again_by_their_team(self):
+        tracker = self.numbers._tracker
+        tracker.missing_players.return_value = [20, 21]
+        teams = {20: 0, 21: 1, 5: 1}
+        tracker.team_of_player.side_effect = teams.get
+        tracker.kit_distance.return_value = 10.0
+        for player_id in (20, 21, 5):
+            for _ in range(self.module.MIN_READS_TO_JOIN):
+                self.votes.add_jersey_measurement(player_id, "7", 0.9)
+        newcomer = player(5, team=1)
+        self.assertEqual(self.numbers._merge_by_number([newcomer]), [(5, 21)])
+
 
 if __name__ == "__main__":
     unittest.main()

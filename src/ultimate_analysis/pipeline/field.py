@@ -126,6 +126,11 @@ class FieldStage:
             self._job["since"] = None if motion is None or before is None else motion @ before
         if motion is not None:
             self.follower.move(motion)
+        else:
+            # Where the camera went is not known, so neither is where the field is now:
+            # the next estimate is taken as it comes. (Rare: none in 3500 frames of two
+            # games, 1 in 80 of a broadcast, never more than two frames running)
+            self.follower.reset()
 
     def update(
         self,
